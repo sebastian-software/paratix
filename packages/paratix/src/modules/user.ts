@@ -279,13 +279,20 @@ async function passwdAttributesMatch(
     }
   }
   const entry = passwdResult.stdout.trim()
-  // R-0000776: a passwd line has exactly 7 colon-separated fields
-  // (name:passwd:uid:gid:gecos:home:shell). Fewer fields means truncation
-  // and the parsed values cannot be trusted.
-  if (entry.split(":").length < PASSWD_ENTRY_FIELD_COUNT) {
+  // R-0000776 / R-0000823: a passwd line has *exactly* 7 colon-separated
+  // fields (name:passwd:uid:gid:gecos:home:shell). The original check
+  // only refused truncated entries (`< 7`); a NSS backend that emitted
+  // *more* fields (mis-quoted gecos containing a literal colon,
+  // malformed line continuation, etc.) was silently accepted and the
+  // surplus fields landed in the parsed `shell`. Treat any
+  // field-count drift as a malformed entry so the apply phase can
+  // surface the inconsistency instead of comparing against the wrong
+  // slot.
+  const fieldCount = entry.split(":").length
+  if (fieldCount !== PASSWD_ENTRY_FIELD_COUNT) {
     return {
       failure: failed(
-        `[user.present: ${name}] getent passwd returned a malformed entry with fewer than 7 fields`
+        `[user.present: ${name}] getent passwd returned a malformed entry with ${String(fieldCount)} fields (expected ${String(PASSWD_ENTRY_FIELD_COUNT)})`
       ),
       kind: TOOLCHAIN_ERROR,
     }
