@@ -352,6 +352,17 @@ async function snapshotPersistenceFile(
   conn: SshConnection,
   configPath: string
 ): Promise<PersistenceFileSnapshot> {
+  // R-0000770: probe for a symlink before the existence/read pair. A
+  // persistence path that resolves to a symlink cannot be safely captured
+  // — `test -f` follows the link and `readFile` would snapshot the link
+  // target, so a subsequent rollback would write back foreign content into
+  // the original location. Treat the symlink case as an uncertain
+  // snapshot so `applyAbsentState` aborts before the rm. Mirrors the
+  // `classifySwapFilePath` symlink probe (R-0000648).
+  const symlinkProbe = await conn.exec(`[ -L ${shellQuote(configPath)} ]`, EXEC_OPTS)
+  if (symlinkProbe.code === 0) {
+    return { kind: "failed", reason: `${configPath} is a symbolic link` }
+  }
   const exists = await conn.exec(`test -f ${shellQuote(configPath)}`, EXEC_OPTS)
   if (exists.code !== 0) return { kind: "missing" }
   try {
