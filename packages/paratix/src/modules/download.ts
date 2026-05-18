@@ -1248,6 +1248,20 @@ export const download = {
     const { flagName, flagPrefix } = buildLargeDownloadFlagInfo(downloadParameters)
 
     return {
+      // R-0000708: when `performDownload` returns `"ok"` the content + metadata
+      // probes vouched for the destination, so the on-disk artefact matches
+      // the configured URL/headers/sha256. Skipping `setVersionedFlag` whenever
+      // the flag is already present spares the flag-dir a redundant write
+      // (and the prefix scan it performs) on every reapply of a converged
+      // download. The flag rewrite is *only* skipped when `hasFlag` confirms
+      // the flag still exists; if the marker is missing (operator wiped
+      // `/var/lib/paratix/flags`, partial restore, downgraded apply path)
+      // the flag is still rewritten so a subsequent `check` cannot mistake
+      // the converged state for "needs apply". Reapply risk: if a future
+      // change adds new flag-prefix semantics that must execute on every
+      // converged run (e.g. metadata embedded in the flag content or a
+      // freshness timestamp), this fast-path must be revisited so it does
+      // not silently keep a stale flag in place.
       async apply(conn: null | SshConnection): Promise<ModuleResult> {
         if (!conn) return failed(`[download.large: ${destination}] SSH connection is required`)
 
@@ -1257,6 +1271,17 @@ export const download = {
 
             if (result.status === "failed") return result
 
+            // R-0000708: avoid rewriting the versioned flag when the
+            // download was already converged (`result.status === "ok"`) and
+            // the flag file is still in place. The flag content does not
+            // depend on the run, only on the URL/headers/destination, so a
+            // redundant rewrite would just churn the flag directory and
+            // re-run setVersionedFlag's prefix scan for no observable
+            // change. When the flag is missing we still call
+            // setVersionedFlag so the next `check` sees the marker.
+            if (result.status === "ok" && (await hasFlag(conn, flagName))) {
+              return result
+            }
             // R-0000273: setVersionedFlag returns a typed `ModuleResult |
             // null` instead of throwing on EROFS/EPERM/ENOSPC. Surface the
             // failed result on the standard failure path so the runner can
