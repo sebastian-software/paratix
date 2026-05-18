@@ -102,8 +102,21 @@ async function initializeSwapTemporaryFile(
 ): Promise<ModuleResult | true> {
   const ddBlockCount = Math.ceil(parameters.sizeBytes / MEBI)
   const quotedTemporaryPath = shellQuote(temporaryPath)
+  // R-0000826: harden the dd+truncate fallback.
+  //   1. `dd ... conv=fsync` flushes the buffered writes through the
+  //      page cache so a backing-store ENOSPC or quota error surfaces as
+  //      a non-zero exit from `dd` itself, instead of silently leaving
+  //      a short file that later `swapon` would refuse with a confusing
+  //      "Invalid argument".
+  //   2. Add an explicit `rm -f` cleanup inside the `||` block so a
+  //      partial `dd` write followed by a `truncate` failure does not
+  //      leave a partly-written temp file behind. The outer
+  //      `createFileResult.code !== 0` branch below also calls
+  //      `cleanupSwapTemporaryPath`, but the inner cleanup keeps the
+  //      shell statement self-contained and ensures the temp file is
+  //      gone even if the outer cleanup is later restructured.
   const createFileResult = await parameters.ssh.exec(
-    `fallocate -l ${shellQuote(parameters.size)} ${quotedTemporaryPath} || { dd if=/dev/zero of=${quotedTemporaryPath} bs=1M count=${String(ddBlockCount)} status=none && truncate -s ${String(parameters.sizeBytes)} ${quotedTemporaryPath}; }`,
+    `fallocate -l ${shellQuote(parameters.size)} ${quotedTemporaryPath} || { dd if=/dev/zero of=${quotedTemporaryPath} bs=1M count=${String(ddBlockCount)} conv=fsync status=none && truncate -s ${String(parameters.sizeBytes)} ${quotedTemporaryPath} || { rm -f -- ${quotedTemporaryPath}; false; }; }`,
     EXEC_OPTS
   )
   if (createFileResult.code !== 0) {
