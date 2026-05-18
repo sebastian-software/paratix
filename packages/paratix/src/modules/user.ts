@@ -192,6 +192,14 @@ function groupsContain(actual: Set<string>, desired: string[]): boolean {
   return desired.every((g) => actual.has(g))
 }
 
+// R-0000776 / R-0000777: the structured comparison helpers share the
+// `AttributesMatchOutcome` discriminator with `shadowHashMatches` /
+// `attributesMatch`. `mismatch` keeps the old "needs-apply" verdict, `match`
+// keeps the old "ok" verdict, and `toolchain-error` surfaces a getent/id
+// failure as a structured ModuleResult instead of falsely returning a
+// mismatch (which would loop the apply on a host where the lookup itself is
+// broken).
+
 async function supplementaryGroupsMatch(
   ssh: SshConnection,
   name: string,
@@ -212,12 +220,40 @@ async function passwdAttributesMatch(
   ssh: SshConnection,
   name: string,
   options: UserOptions
-): Promise<boolean> {
-  const parsed = parsePasswdEntry(await ssh.output(`getent passwd ${shellQuote(name)}`))
-  if (options.uid != null && parsed.uid !== String(options.uid)) return false
-  if (options.home != null && parsed.home !== options.home) return false
-  if (options.shell != null && parsed.shell !== options.shell) return false
-  return true
+): Promise<AttributesMatchOutcome> {
+  // R-0000776: route the passwd lookup through `ssh.exec` with
+  // `ignoreExitCode` so a non-zero `getent passwd` (NSS misconfiguration,
+  // missing user mid-comparison, sudoers restriction) does not surface as an
+  // unstructured SSH error. Inspect the field count too: a truncated entry
+  // with fewer than 7 fields means the line is malformed and the comparison
+  // can no longer trust the parsed values.
+  const passwdResult = await ssh.exec(`getent passwd ${shellQuote(name)}`, {
+    ignoreExitCode: true,
+    silent: true,
+  })
+  if (passwdResult.code !== 0) {
+    return {
+      failure: failedCommand(
+        `[user.present: ${name}] getent passwd failed during attribute comparison`,
+        passwdResult
+      ),
+      kind: TOOLCHAIN_ERROR,
+    }
+  }
+  const entry = passwdResult.stdout.trim()
+  if (entry.split(":").length < 7) {
+    return {
+      failure: failed(
+        `[user.present: ${name}] getent passwd returned a malformed entry with fewer than 7 fields`
+      ),
+      kind: TOOLCHAIN_ERROR,
+    }
+  }
+  const parsed = parsePasswdEntry(entry)
+  if (options.uid != null && parsed.uid !== String(options.uid)) return { kind: "mismatch" }
+  if (options.home != null && parsed.home !== options.home) return { kind: "mismatch" }
+  if (options.shell != null && parsed.shell !== options.shell) return { kind: "mismatch" }
+  return { kind: "match" }
 }
 
 // R-0000657: result of the server-side shadow-hash comparison. `cmp` reports
@@ -360,7 +396,8 @@ async function attributesMatch(
 ): Promise<AttributesMatchOutcome> {
   const passwordOutcome = await passwordHashOutcome(ssh, name, options)
   if (passwordOutcome != null) return passwordOutcome
-  if (!(await passwdAndGroupsMatch(ssh, name, options))) return { kind: "mismatch" }
+  const passwdGroupsOutcome = await passwdAndGroupsMatch(ssh, name, options)
+  if (passwdGroupsOutcome.kind !== "match") return passwdGroupsOutcome
   // R-0000656: when a home directory is being managed, the mode on disk
   // must also match the (default or explicit) homeMode; otherwise an
   // earlier apply that ran on a host with HOME_MODE=0755 in
@@ -388,13 +425,16 @@ async function passwdAndGroupsMatch(
   ssh: SshConnection,
   name: string,
   options: UserOptions
-): Promise<boolean> {
+): Promise<AttributesMatchOutcome> {
   const needsPasswdCheck = options.uid != null || options.shell != null || options.home != null
-  if (needsPasswdCheck && !(await passwdAttributesMatch(ssh, name, options))) return false
-  if (options.groups != null && !(await supplementaryGroupsMatch(ssh, name, options.groups))) {
-    return false
+  if (needsPasswdCheck) {
+    const passwdOutcome = await passwdAttributesMatch(ssh, name, options)
+    if (passwdOutcome.kind !== "match") return passwdOutcome
   }
-  return true
+  if (options.groups != null && !(await supplementaryGroupsMatch(ssh, name, options.groups))) {
+    return { kind: "mismatch" }
+  }
+  return { kind: "match" }
 }
 
 async function managedHomeModeMatches(ssh: SshConnection, options: UserOptions): Promise<boolean> {
