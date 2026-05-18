@@ -150,7 +150,12 @@ async function rollbackRepositoryAfterUpdateFailure(
   parameters: RepositoryRollbackParameters
 ): Promise<ModuleResult> {
   const { appliedContent, filePath, name, previousRepository, ssh, updateResult } = parameters
-  const rollback = await restoreAptRepository(ssh, filePath, previousRepository, appliedContent)
+  const rollback = await restoreAptRepository({
+    appliedContent,
+    filePath,
+    snapshot: previousRepository,
+    ssh,
+  })
   if (rollback !== "ok") {
     // R-0000753: when the rollback is refused (drift detected, or
     // restoreAptRepository surfaced a structured failure), combine the
@@ -290,12 +295,13 @@ async function ensureAptRepositorySnapshotStillCurrent(parameters: {
  */
 type AptRepositoryAppliedContent = null | string
 
-async function restoreAptRepository(
-  ssh: SshConnection,
-  filePath: string,
-  snapshot: AptRepositorySnapshot,
+async function restoreAptRepository(parameters: {
   appliedContent: AptRepositoryAppliedContent
-): Promise<"ok" | ModuleResult> {
+  filePath: string
+  snapshot: AptRepositorySnapshot
+  ssh: SshConnection
+}): Promise<"ok" | ModuleResult> {
+  const { appliedContent, filePath, snapshot, ssh } = parameters
   if (snapshot.exists) {
     // R-0000235: defense in depth — refuse to restore through a symlink that
     // may have appeared between the snapshot and the rollback. The apply
@@ -680,8 +686,8 @@ function validateRepositorySourceLine(sourceLine: string): string {
  * against a future caller that passes user-controlled text directly.
  *
  * @param keyPath - The candidate signed-by path.
- * @throws If `keyPath` is not absolute or contains bracket / whitespace
- *   characters that would corrupt the apt source line.
+ * @throws {Error} If `keyPath` is not absolute or contains bracket /
+ *   whitespace characters that would corrupt the apt source line.
  */
 function assertSafeSignedByKeyPath(keyPath: string): void {
   if (!keyPath.startsWith("/")) {

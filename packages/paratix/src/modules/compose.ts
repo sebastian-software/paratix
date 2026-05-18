@@ -261,18 +261,21 @@ async function resolveDesiredComposeContent(options: {
 }
 
 /**
- * R-0000756: per-module memoiser for the desired compose content. The runner
- * calls `check()` and then `apply()` sequentially on the same Module instance,
- * but both used to re-read `options.src` from disk independently. A local
- * file that changes between those two reads would otherwise let check observe
- * one revision (and pass/fail accordingly) while apply uploads or writes a
- * different revision — analogous to file.template's `cachedContent` pattern.
+ * R-0000756: per-module cache helper for the desired compose content. The
+ * runner calls `check()` and then `apply()` sequentially on the same Module
+ * instance, but both used to re-read `options.src` from disk independently.
+ * A local file that changes between those two reads would otherwise let
+ * check observe one revision (and pass/fail accordingly) while apply
+ * uploads or writes a different revision — analogous to file.template's
+ * `cachedContent` pattern.
  *
- * The memoiser returns the cached value on every subsequent call and resolves
- * to `null` only when neither `src` nor `content` were provided.
+ * The returned function caches its result on the first invocation and
+ * resolves to `null` only when neither `src` nor `content` were provided.
  *
  * @param options - The compose-config source / content options.
- * @returns A nullary loader that resolves to the cached desired content.
+ * @param options.content - Inline string content to use as the desired bytes.
+ * @param options.src - Local file path whose content becomes the desired bytes.
+ * @returns A zero-argument loader that resolves to the cached desired content.
  */
 function createCachedComposeContentResolver(options: {
   content?: string
@@ -961,7 +964,10 @@ function generateSystemdUnit(
  * - the remote mode has drifted from {@link COMPOSE_CONFIG_MODE}
  *
  * @param remotePath - Path to the remote `compose.yml`.
- * @param options - The compose-config options (only `src` and `content` matter here).
+ * @param loadDesiredContent - Memoised loader for the desired compose
+ *   content (R-0000756). Shared with apply so a local src change between
+ *   check and apply cannot produce a check verdict that disagrees with
+ *   the apply payload.
  * @returns A `check` callback for the module's `Module` object.
  */
 function createComposeConfigCheck(
@@ -999,15 +1005,13 @@ function createComposeConfigCheck(
 
 /**
  * Write the new compose.yml content to a staging path, leaving the active
- * `compose.yml` untouched until validation succeeds. Either `options.src`
- * (uploaded) or `options.content` (string) is used; the caller has already
- * verified that exactly one is provided.
+ * `compose.yml` untouched until validation succeeds.
  *
  * @param ssh - The SSH connection to the remote host.
  * @param stagingPath - Temporary destination for the new compose content.
- * @param options - Source/content options identical to {@link compose.config}.
- * @param options.content - Inline string content to write.
- * @param options.src - Local file path to upload.
+ * @param desiredContent - R-0000756 cached desired content shared between
+ *   check and apply so the staging file always carries the bytes that
+ *   check inspected.
  */
 async function writeComposeStagingFile(
   ssh: SshConnection,

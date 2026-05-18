@@ -76,6 +76,37 @@ async function absentPathExists(ssh: SshConnection, remotePath: string): Promise
   return ssh.test(`[ -e ${quotedPath} ] || [ -L ${quotedPath} ]`)
 }
 
+/**
+ * R-0000761: create a missing target file with the appended line. The
+ * caller must have already verified the file does not exist; this helper
+ * performs a second `[ -e ]` probe immediately before the write and
+ * refuses to overwrite when the file materialised between the two
+ * probes. The recheck narrows the TOCTOU window from "between check and
+ * apply" to "between this recheck and the next `mv -T`", which is the
+ * best we can do without an explicit O_EXCL primitive on
+ * `ssh.writeFile`.
+ *
+ * @param input - The append-create input.
+ * @param input.line - The line to write as the sole content of the new file.
+ * @param input.remotePath - The remote target path that must still be missing.
+ * @param input.ssh - The active SSH connection.
+ * @returns A `failed` ModuleResult when the file materialised in the race
+ *   window, or a `changed` ModuleResult after a successful write.
+ */
+async function applyLineCreate(input: {
+  line: string
+  remotePath: string
+  ssh: SshConnection
+}): Promise<ModuleResult> {
+  if (await input.ssh.exists(input.remotePath)) {
+    return failed(
+      `[file.line: ${input.remotePath}] refuses to overwrite file created concurrently between existence probe and create`
+    )
+  }
+  await input.ssh.writeFile(input.remotePath, `${input.line}\n`, { mode: "0644" })
+  return { status: "changed" }
+}
+
 async function applyLineAppend(input: {
   line: string
   remotePath: string
@@ -97,24 +128,9 @@ async function applyLineAppend(input: {
     // test and the actual rename. The TOCTOU window is therefore closed at
     // the SSH layer rather than by an additional round-trip here.
     //
-    // R-0000761: the symlink/dir guard alone is not enough — a concurrent
-    // process could create the regular file between the `exists` probe and
-    // the writeFile, and writeFile's `mv -T` would happily overwrite the
-    // concurrently-created file. Re-run the `[ -e ]` probe immediately
-    // before the create and refuse when the file materialised in the
-    // window. The recheck does not fully close the TOCTOU race (the OS
-    // does not expose O_CREAT|O_EXCL through `ssh.writeFile`), but it
-    // narrows the window from "between check and apply" to "between this
-    // recheck and the next `mv -T`", which is the same shape `guarded­WriteFile`
-    // uses for content-update races and is the best we can do without
-    // teaching the SSH layer an explicit O_EXCL primitive.
-    if (await input.ssh.exists(input.remotePath)) {
-      return failed(
-        `[file.line: ${input.remotePath}] refuses to overwrite file created concurrently between existence probe and create`
-      )
-    }
-    await input.ssh.writeFile(input.remotePath, `${input.line}\n`, { mode: "0644" })
-    return { status: "changed" }
+    // R-0000761: the symlink/dir guard alone is not enough — see
+    // `applyLineCreate` for the recheck-before-create defence.
+    return applyLineCreate(input)
   }
   if (!(await isRegularFileWithoutSymlink(input.ssh, input.remotePath))) {
     return failed(`[file.line: ${input.remotePath}] path must be a regular file and not a symlink`)
@@ -305,13 +321,10 @@ export const file = {
           // ownership of an unrelated file. The guarded command performs the
           // symlink probe in the same shell as the chown so the check and
           // mutation cannot interleave with a TOCTOU swap.
-          const chownResult = await ssh.exec(
-            renderGuardedChownCommand(options.owner, remotePath),
-            {
-              ignoreExitCode: true,
-              silent: true,
-            }
-          )
+          const chownResult = await ssh.exec(renderGuardedChownCommand(options.owner, remotePath), {
+            ignoreExitCode: true,
+            silent: true,
+          })
           if (chownResult.code !== 0) {
             return failedCommand(`[file.copy: ${remotePath}] chown failed`, chownResult)
           }

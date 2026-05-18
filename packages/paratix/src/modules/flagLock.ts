@@ -251,10 +251,11 @@ export async function releaseFlagLock(
   // like "no match" and skip the rm/rmdir branch — leaving the lock
   // dangling. Capturing `awk_status=$?` lets the comparison short-circuit
   // when awk failed, so the release attempt fails closed.
+  const expectedToken = `x${holderToken}`
   const command =
     `awk_token=$(awk 'NR==1{print $1}' -- ${markerPath} 2>/dev/null); awk_status=$?; ` +
     `[ "$awk_status" = 0 ] && ` +
-    `[ "x$awk_token" = ${shellQuote(`x${holderToken}`)} ] && ` +
+    `[ "x$awk_token" = ${shellQuote(expectedToken)} ] && ` +
     `rm -f -- ${markerPath} && ` +
     `rmdir -- ${lock}`
   await ssh.exec(command, { ignoreExitCode: true, silent: true })

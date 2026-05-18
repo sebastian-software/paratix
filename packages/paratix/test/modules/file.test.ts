@@ -1040,12 +1040,10 @@ describe("file.copy", () => {
       expect(ssh.calls).not.toContain("chmod '0600' '/remote/file.txt'")
       // R-0000750: chown now runs through a shell-guarded command that
       // re-checks for a symlink immediately before the chown line.
-      const guardedChownCall = ssh.calls.find(
-        (call) =>
-          call.includes("path='/remote/file.txt'") &&
-          /\nchown -- 'www-data' "\$path"$/v.test(call)
-      )
-      expect(guardedChownCall).toBeDefined()
+      const guardedChownCalls = ssh.calls
+        .filter((call) => call.endsWith(`\nchown -- 'www-data' "$path"`))
+        .filter((call) => call.includes("path='/remote/file.txt'"))
+      expect(guardedChownCalls).toHaveLength(1)
     } finally {
       rmSync(dir, { recursive: true })
     }
@@ -1064,17 +1062,20 @@ describe("file.copy", () => {
       // R-0000750: chown after upload now runs through a shell-guarded
       // command that re-checks for a symlink immediately before the chown
       // line, so the stub matches the multi-line guarded form.
-      const ssh = createMockSsh({}, {
-        responseStubs: [
-          {
-            command: /\nchown -- 'www-data' "\$path"$/v,
-            result: {
-              code: 1,
-              stderr: "chown: invalid user: 'www-data'",
+      const ssh = createMockSsh(
+        {},
+        {
+          responseStubs: [
+            {
+              command: /\nchown -- 'w{3}-data' "\$path"$/v,
+              result: {
+                code: 1,
+                stderr: "chown: invalid user: 'www-data'",
+              },
             },
-          },
-        ],
-      })
+          ],
+        }
+      )
       vi.spyOn(ssh, "uploadFile").mockResolvedValue()
 
       const mod = file.copy("/remote/file.txt", localPath, { owner: "www-data" })
@@ -1457,11 +1458,12 @@ describe("file.line — apply without options.match", () => {
   it("R-0000761: refuses to overwrite a file created concurrently between probe and create", async () => {
     let existsCallIndex = 0
     const ssh = createMockSsh()
-    ssh.exists = async (path: string) => {
+    ssh.exists = async (_path: string) => {
       await Promise.resolve()
       existsCallIndex += 1
       // First exists probe (file.line initial `ssh.exists`): not there.
       // Second exists probe (R-0000761 recheck): it appeared.
+      // oxlint-disable-next-line no-conditional-in-test -- the two-probe sequence is exactly the TOCTOU scenario under test
       return existsCallIndex >= 2
     }
     // `[ -L ]` symlink probe still returns false so we reach the create branch.

@@ -1085,6 +1085,7 @@ describe("apt.repository (standard form)", () => {
     ssh.sha256 = async () => {
       await Promise.resolve()
       shaCallIndex += 1
+      // oxlint-disable-next-line no-conditional-in-test -- sequential read returning different values for pre-write integrity vs rollback drift is exactly the scenario under test
       return shaCallIndex === 1 ? previousContentSha : appliedContentSha
     }
     const mod = apt.repository("docker", source)
@@ -1128,6 +1129,7 @@ describe("apt.repository (standard form)", () => {
     ssh.sha256 = async () => {
       await Promise.resolve()
       shaCallIndex += 1
+      // oxlint-disable-next-line no-conditional-in-test -- sequential read returning different values for pre-write integrity vs rollback drift is exactly the scenario under test
       return shaCallIndex === 1 ? previousContentSha : appliedContentSha
     }
     // Override apt-get update so the first invocation (with the new repo)
@@ -1177,6 +1179,7 @@ describe("apt.repository (standard form)", () => {
     ssh.sha256 = async () => {
       await Promise.resolve()
       shaCallIndex += 1
+      // oxlint-disable-next-line no-conditional-in-test -- sequential read returning different values for pre-write integrity vs rollback drift is exactly the scenario under test
       return shaCallIndex === 1 ? previousContentSha : driftedSha
     }
     const mod = apt.repository("docker", source)
@@ -1220,6 +1223,7 @@ describe("apt.repository (standard form)", () => {
     ssh.sha256 = async () => {
       await Promise.resolve()
       shaCallIndex += 1
+      // oxlint-disable-next-line no-conditional-in-test -- sequential read returning different values for pre-write integrity vs rollback drift is exactly the scenario under test
       return shaCallIndex === 1 ? previousContentSha : appliedContentSha
     }
     const mod = apt.repository("docker", source)

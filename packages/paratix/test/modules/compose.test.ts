@@ -686,16 +686,17 @@ describe("compose.config — check", () => {
     vi.mocked(readFile).mockImplementation(async () => {
       await Promise.resolve()
       readCount += 1
+      // oxlint-disable-next-line no-conditional-in-test -- the two-revision sequence is exactly the TOCTOU scenario under test
       return readCount === 1 ? initialContent : driftedContent
     })
 
     const mockSsh = createComposeMockSsh({
       [`[ -e '${remotePath}' ]`]: { code: 0 },
-      [`cat '${remotePath}'`]: { code: 0, stdout: initialContent },
-      [`stat -c '%a' '${remotePath}'`]: { code: 0, stdout: "600" },
       [`${composeCmd("podman")} -f '${stagingPath}' config --quiet`]: { code: 0 },
+      [`cat '${remotePath}'`]: { code: 0, stdout: initialContent },
       [`mv -T '${stagingPath}' '${remotePath}'`]: { code: 0 },
       [`rm -f -- '${stagingPath}'`]: { code: 0 },
+      [`stat -c '%a' '${remotePath}'`]: { code: 0, stdout: "600" },
     })
 
     const mod = compose.config({ projectDirectory, src: "/local/compose.yml" })
@@ -835,11 +836,13 @@ describe("compose.config — apply", () => {
     const mod = compose.config({ projectDirectory, src: "/local/compose.yml" })
     const result = await mod.apply(mockSsh, emptyEnv)
     expect(result.status).toBe("changed")
-    expect(mockSsh.writeFileCalls).toHaveLength(1)
-    const stagingWrite = mockSsh.writeFileCalls[0]
-    expect(stagingWrite?.remotePath).toBe(stagingPath)
-    expect(stagingWrite?.content).toBe(localContent)
-    expect(stagingWrite?.options).toStrictEqual({ mode: "0600" })
+    expect(mockSsh.writeFileCalls).toStrictEqual([
+      {
+        content: localContent,
+        options: { mode: "0600" },
+        remotePath: stagingPath,
+      },
+    ])
     expect(mockSsh.uploadFileCalls).toHaveLength(0)
     expect(mockSsh.calls).toContain(`${composeCmd("podman")} -f '${stagingPath}' config --quiet`)
     vi.mocked(readFile).mockRestore()

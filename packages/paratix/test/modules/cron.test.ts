@@ -941,9 +941,7 @@ describe("cron.job", () => {
   })
 
   it("throws when user starts with a hyphen", () => {
-    expect(() => cron.job("-alice", "backup", { job: "0 3 * * * /backup.sh" })).toThrow(
-      "user name"
-    )
+    expect(() => cron.job("-alice", "backup", { job: "0 3 * * * /backup.sh" })).toThrow("user name")
   })
 })
 

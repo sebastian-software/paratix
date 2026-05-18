@@ -185,17 +185,36 @@ function hasMarkedJob(lines: string[], name: string, cronJob: string): boolean {
  * @param markerIndex - The index of the active marker, or `-1` when no marker exists.
  * @returns The index of the orphan duplicate, or `-1` when none is present.
  */
-function findOrphanDuplicateIndex(
-  lines: string[],
-  cronJob: string,
-  markerIndex: number
-): number {
+function findOrphanDuplicateIndex(lines: string[], cronJob: string, markerIndex: number): number {
   const managedJobIndex = markerIndex === -1 ? -1 : markerIndex + 1
-  for (let index = 0; index < lines.length; index += 1) {
-    if (index === managedJobIndex) continue
-    if (lines[index] === cronJob) return index
-  }
-  return -1
+  return lines.findIndex((line, index) => index !== managedJobIndex && line === cronJob)
+}
+
+/**
+ * R-0000760: compute the `check()` verdict for `cron.job(state="present")`.
+ * Reports `needs-apply` when the marker is missing, predates the hash tag,
+ * or when an orphan-job duplicate sits outside the managed pair.
+ *
+ * @param parameters - The check inputs.
+ * @param parameters.lines - The current crontab lines.
+ * @param parameters.markerIndex - The index of the active marker, or `-1`.
+ * @param parameters.cronJob - The desired job line.
+ * @param parameters.marker - The hash-tagged marker comment.
+ * @param parameters.found - Whether `hasMarkedJob` returned true.
+ * @returns `"ok"` when the crontab matches, otherwise `"needs-apply"`.
+ */
+function computeCronJobPresentVerdict(parameters: {
+  cronJob: string
+  found: boolean
+  lines: string[]
+  marker: string
+  markerIndex: number
+}): "needs-apply" | "ok" {
+  const { cronJob, found, lines, marker, markerIndex } = parameters
+  if (!found) return NEEDS_APPLY
+  if (markerIndex === -1) return NEEDS_APPLY
+  if (lines[markerIndex] !== marker) return NEEDS_APPLY
+  return findOrphanDuplicateIndex(lines, cronJob, markerIndex) === -1 ? "ok" : NEEDS_APPLY
 }
 
 /** Options for `cron.job`. */
@@ -552,21 +571,12 @@ export const cron = {
         if (state === "present") {
           // R-0000168: also re-apply when the marker exists but predates
           // the hash tag, so the upgraded marker lands on disk.
-          if (!found) return NEEDS_APPLY
-          if (markerIndex === -1) return NEEDS_APPLY
-          if (lines[markerIndex] !== marker) return NEEDS_APPLY
           // R-0000760: detect orphan-job duplicates that sit outside the
-          // marker pair. The managed pair occupies `markerIndex` and
-          // `markerIndex + 1`; any *other* line that exactly matches
-          // `cronJob` is an unmanaged duplicate that would run a second
-          // copy of the job until apply cleans it up. The
-          // `computePresentMutation` mutation now consolidates the
-          // duplicate by splicing the marker in front of the existing
-          // line, so reporting NEEDS_APPLY here guarantees the runner
-          // schedules that consolidation.
-          const orphanIndex = findOrphanDuplicateIndex(lines, cronJob, markerIndex)
-          if (orphanIndex !== -1) return NEEDS_APPLY
-          return "ok"
+          // marker pair so the consolidation in `computePresentMutation`
+          // is scheduled. The full verdict matrix lives in
+          // `computeCronJobPresentVerdict` to keep this function's
+          // cognitive complexity in check.
+          return computeCronJobPresentVerdict({ cronJob, found, lines, marker, markerIndex })
         }
 
         // state === "absent": ok when marker is not found

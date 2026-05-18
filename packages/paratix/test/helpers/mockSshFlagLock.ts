@@ -124,12 +124,12 @@ function escapeRegex(value: string): string {
 export function makeIsVerifiedReleaseCall(lockName: string): (call: string) => boolean {
   const markerPath = `/var/lib/paratix/flags/'${lockName}'/holder`
   const lockPath = `/var/lib/paratix/flags/'${lockName}'`
-  // eslint-disable-next-line security/detect-non-literal-regexp -- markerPath and lockPath are derived from a validated lockName and shell-escaped above
   // R-0000749: production code now emits the `--` separator before path
   // arguments in awk / rm / rmdir invocations.
   // R-0000758: release captures the awk readback in `$awk_token` and uses
   // the POSIX `x`-prefix comparison so unusual awk output cannot collide
   // with `[` operator syntax.
+  // eslint-disable-next-line security/detect-non-literal-regexp -- markerPath and lockPath are derived from a validated lockName and shell-escaped above
   const pattern = new RegExp(
     `^awk_token=\\$\\(awk 'NR==1\\{print \\$1\\}' -- ${escapeRegex(markerPath)} 2>/dev/null\\); awk_status=\\$\\?; \\[ "\\$awk_status" = 0 \\] && \\[ "x\\$awk_token" = 'x[^']*' \\] && rm -f -- ${escapeRegex(markerPath)} && rmdir -- ${escapeRegex(lockPath)}$`,
     "v"
