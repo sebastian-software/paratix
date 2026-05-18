@@ -589,9 +589,6 @@ describe("buildHostVerifier", () => {
     appendFileMock = vi.mocked(fsp.appendFile)
     mkdirMock = vi.mocked(fsp.mkdir)
     statMock = vi.mocked(fsp.stat)
-    readFileMock.mockImplementation((...args: unknown[]) =>
-      Promise.resolve(synchronousReadFileMock(...args))
-    )
     appendFileMock.mockResolvedValue(null)
     mkdirMock.mockResolvedValue(null)
     statMock.mockResolvedValue({ size: 0 })

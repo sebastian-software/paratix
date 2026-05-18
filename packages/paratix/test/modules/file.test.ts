@@ -345,9 +345,9 @@ describe("file.directory", () => {
       "[ -L '/var' ]": { code: 1 },
       "[ -L '/var/app' ]": { code: 1 },
       "[ -L '/var/app/data' ]": { code: 1 },
-      [guardedVarCommand]: { code: 0 },
       [guardedAppCommand]: { code: 0 },
       [guardedDataCommand]: { code: 0 },
+      [guardedVarCommand]: { code: 0 },
     })
     const mod = file.directory("/var/app/data")
     const result = await mod.apply(ssh, emptyEnv)

@@ -1,6 +1,13 @@
+/* eslint-disable max-lines -- systemd unit, masking, and rollback helpers stay co-located */
 import { failed, failedCommand } from "../moduleFailure.js"
 import { shellQuote } from "../ssh.js"
-import { type ExecResult, type Module, type ModuleResult, NEEDS_APPLY, type SshConnection } from "../types.js"
+import {
+  type ExecResult,
+  type Module,
+  type ModuleResult,
+  NEEDS_APPLY,
+  type SshConnection,
+} from "../types.js"
 import { sha256String } from "./fileHelpers.js"
 import { hasFlag, setVersionedFlag } from "./moduleHelpers.js"
 import {
