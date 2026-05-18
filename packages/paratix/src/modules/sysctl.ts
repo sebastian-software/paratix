@@ -394,6 +394,16 @@ async function restorePersistenceFile(
     // uncertain snapshot.
     return `persistence-file snapshot was uncertain: ${snapshot.reason}`
   }
+  // R-0000769: refuse to write back through a symlink that materialized at
+  // `configPath` between the rm and this rollback. Without the `[ ! -L ]`
+  // probe an attacker who plants a symlink between the two steps would
+  // redirect the `writeFile` to its target. Mirrors the `moveSwapToBackup`
+  // / `restoreSwapBackup` guards (R-0000624 / R-0000647) and the
+  // `restoreUnitFileSnapshot` check (R-0000683).
+  const symlinkProbe = await conn.exec(`[ -L ${shellQuote(configPath)} ]`, EXEC_OPTS)
+  if (symlinkProbe.code === 0) {
+    return `persistence file restore refused: ${configPath} is a symbolic link`
+  }
   try {
     await conn.writeFile(configPath, snapshot.content, { mode: SYSCTL_CONFIG_MODE })
     return "persistence file restored from snapshot"
@@ -433,7 +443,18 @@ async function applyAbsentState(
       `[sysctl.set: ${key}] persistence-file snapshot failed; refusing to remove ${configPath}: ${snapshot.reason}`
     )
   }
-  const removeResult = await conn.exec(`rm -f ${shellQuote(configPath)}`, EXEC_OPTS)
+  // R-0000769: refuse to `rm -f` a configPath that is currently a symlink.
+  // Without the guard, a symlink planted between the snapshot capture and
+  // the rm would let `rm -f` unlink the link itself; the subsequent
+  // rollback would `writeFile` through the dangling path. Combine the
+  // `[ ! -L ]` probe with the `rm -f` in a single shell statement so the
+  // kernel evaluates both atomically — mirrors the swap backup guards
+  // (R-0000649).
+  const quotedConfigPath = shellQuote(configPath)
+  const removeResult = await conn.exec(
+    `[ ! -L ${quotedConfigPath} ] || { echo 'sysctl persistence file must not be a symlink' >&2; exit 1; }; rm -f ${quotedConfigPath}`,
+    EXEC_OPTS
+  )
   if (removeResult.code !== 0) {
     return failedCommand(`[sysctl.set: ${key}] failed to remove config file`, removeResult)
   }
