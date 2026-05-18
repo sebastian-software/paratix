@@ -417,6 +417,21 @@ export async function appendHostKey(host: string, port: number, keyBuffer: Buffe
   await withKnownHostsLock(async () => {
     // eslint-disable-next-line security/detect-non-literal-fs-filename
     await mkdir(sshDirectory, { mode: 0o700, recursive: true })
+    // R-0000838: load existing entries while holding the lock and skip the
+    // append when an identical (hostPattern, algorithm, key) triple is
+    // already present. Without this guard, repeated TOFU acceptances over
+    // the lifetime of a process append duplicate lines to known_hosts which
+    // bloat the file and dilute later trust audits.
+    const existingEntries = loadKnownHostEntries()
+    const alreadyTrusted = existingEntries.some(
+      (entry) =>
+        entry.marker == null &&
+        entry.algo === algo &&
+        matchesKnownHostEntry(entry, hostLabel) &&
+        entry.key.length === keyBuffer.length &&
+        timingSafeEqual(entry.key, keyBuffer)
+    )
+    if (alreadyTrusted) return
     // R-0000793: create the file with restrictive 0600 permissions. The
     // historical 0644 mode mirrored the OpenSSH default that lets other
     // local users read the file, but Paratix pins host keys on behalf of
