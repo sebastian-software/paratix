@@ -492,7 +492,11 @@ async function rollbackInterfaceConfig(
     return null
   }
 
-  const result = await conn.exec(`rm -f ${shellQuote(snapshot.path)}`, EXEC_OPTS)
+  // R-0000759: pass `--` so `rm -f` cannot parse a snapshot path that starts
+  // with `-` as an option. The path comes from the configured interface
+  // config snapshot, but defending the boundary makes the rollback safe
+  // against any future caller that supplies an attacker-influenced path.
+  const result = await conn.exec(`rm -f -- ${shellQuote(snapshot.path)}`, EXEC_OPTS)
   return result.code === 0
     ? null
     : failedCommand(`[net.interface] rollback removal failed for ${snapshot.path}`, result)
@@ -1189,7 +1193,9 @@ async function removeRouteDropinIfExpected(
 ): Promise<RouteApplyOutcome> {
   if (!(await routeDropinMatchesExpected(conn, parameters)))
     return { changed: false, failure: null }
-  const removeResult = await conn.exec(`rm -f ${shellQuote(parameters.dropinPath)}`, EXEC_OPTS)
+  // R-0000759: terminate options with `--` so a future caller cannot smuggle
+  // an option-like drop-in path into `rm -f`.
+  const removeResult = await conn.exec(`rm -f -- ${shellQuote(parameters.dropinPath)}`, EXEC_OPTS)
   return removeResult.code === 0
     ? { changed: true, failure: null }
     : {
@@ -1208,8 +1214,10 @@ async function removeLegacyRouteDropinIfExpected(
   if (!(await legacyRouteDropinMatchesExpected(conn, parameters))) {
     return { changed: false, failure: null }
   }
+  // R-0000759: terminate options with `--` so a future caller cannot smuggle
+  // an option-like legacy drop-in path into `rm -f`.
   const removeResult = await conn.exec(
-    `rm -f ${shellQuote(parameters.legacyDropinPath)}`,
+    `rm -f -- ${shellQuote(parameters.legacyDropinPath)}`,
     EXEC_OPTS
   )
   return removeResult.code === 0

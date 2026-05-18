@@ -79,11 +79,11 @@ const SUCCESSFUL_ROUTE_APPLY_OPTIONS = {
     },
     {
       command:
-        /^rm -f '\/etc\/systemd\/network\/60-paratix-[^\/]+\.network\.d\/50-paratix-route-[^']+\.conf'$/v,
+        /^rm -f -- '\/etc\/systemd\/network\/60-paratix-[^\/]+\.network\.d\/50-paratix-route-[^']+\.conf'$/v,
       result: { code: 0 },
     },
     {
-      command: /^rm -f '\/etc\/systemd\/network\/50-paratix-route-[^']+\.network'$/v,
+      command: /^rm -f -- '\/etc\/systemd\/network\/50-paratix-route-[^']+\.network'$/v,
       result: { code: 0 },
     },
     { command: "networkctl reload", result: { code: 0 } },
@@ -110,11 +110,11 @@ const APPLY_TO_NEW_FILE_OPTIONS = {
     { command: "netplan apply", result: { code: 0 } },
     { command: "networkctl reload", result: { code: 0 } },
     {
-      command: /^rm -f '\/etc\/netplan\/60-paratix-[^']+\.yaml'$/v,
+      command: /^rm -f -- '\/etc\/netplan\/60-paratix-[^']+\.yaml'$/v,
       result: { code: 0 },
     },
     {
-      command: /^rm -f '\/etc\/systemd\/network\/60-paratix-[^']+\.network'$/v,
+      command: /^rm -f -- '\/etc\/systemd\/network\/60-paratix-[^']+\.network'$/v,
       result: { code: 0 },
     },
   ],
@@ -404,7 +404,7 @@ describe("net.route — apply", () => {
 
     expect(result.status).toBe("changed")
     expect(mockSsh.calls.some((call) => call.startsWith("ip route del "))).toBe(false)
-    expect(mockSsh.calls).toContain(`rm -f '${dropinPath}'`)
+    expect(mockSsh.calls).toContain(`rm -f -- '${dropinPath}'`)
     expect(mockSsh.calls).toContain("networkctl reload")
   })
 
@@ -413,7 +413,7 @@ describe("net.route — apply", () => {
     const mockSsh = createMockSsh({}, SUCCESSFUL_ROUTE_APPLY_OPTIONS)
     const mod = net.route("10.0.0.0/24", "192.168.1.1", { device: "eth0", state: "absent" })
     await mod.apply(mockSsh, emptyEnv)
-    expect(mockSsh.calls).toContain(`rm -f '${dropinPath}'`)
+    expect(mockSsh.calls).toContain(`rm -f -- '${dropinPath}'`)
   })
 
   it("leaves a foreign drop-in with the same destination in place", async () => {
@@ -428,7 +428,7 @@ describe("net.route — apply", () => {
     )
     const mod = net.route("10.0.0.0/24", "192.168.1.1", { device: "eth0", state: "absent" })
     await mod.apply(mockSsh, emptyEnv)
-    expect(mockSsh.calls).not.toContain(`rm -f '${dropinPath}'`)
+    expect(mockSsh.calls).not.toContain(`rm -f -- '${dropinPath}'`)
   })
 
   it("returns failed when drop-in removal fails (state: absent)", async () => {
@@ -436,7 +436,7 @@ describe("net.route — apply", () => {
     const expectedDropin = `[Route]\nDestination=10.0.0.0/24\nGateway=192.168.1.1\n`
     const mockSsh = createMockSsh({
       [`cat '${dropinPath}'`]: { stdout: expectedDropin },
-      [`rm -f '${dropinPath}'`]: { code: 1, stderr: "permission denied" },
+      [`rm -f -- '${dropinPath}'`]: { code: 1, stderr: "permission denied" },
       [`test -f '${dropinPath}'`]: { code: 0 },
       [routeShowCommand]: { code: 0, stdout: "" },
     })
@@ -453,7 +453,7 @@ describe("net.route — apply", () => {
     const mockSsh = createMockSsh(
       {
         [`cat '${dropinPath}'`]: { stdout: expectedDropin },
-        [`rm -f '${dropinPath}'`]: { code: 1, stderr: "permission denied" },
+        [`rm -f -- '${dropinPath}'`]: { code: 1, stderr: "permission denied" },
         [`test -f '${dropinPath}'`]: { code: 0 },
         "ip route replace '10.0.0.0/24' 'via' '192.168.1.1' 'dev' 'eth0'": { code: 0 },
         [routeShowCommand]: { code: 0, stdout: liveRouteOutput },
@@ -512,7 +512,7 @@ describe("net.route — apply", () => {
     expect(result.status).toBe("ok")
     expect(mockSsh.calls).not.toContain("networkctl reload")
     expect(mockSsh.calls.some((call) => call.startsWith("ip route del "))).toBe(false)
-    expect(mockSsh.calls).not.toContain(`rm -f '${dropinPath}'`)
+    expect(mockSsh.calls).not.toContain(`rm -f -- '${dropinPath}'`)
   })
 
   it("sanitizes destination with colons for drop-in filename", async () => {
@@ -532,7 +532,7 @@ describe("net.route — apply", () => {
     const mod = net.route("fd00::/64", "fe80::1", { device: "eth0", state: "absent" })
     await mod.apply(mockSsh, emptyEnv)
     // drop-in path uses sanitized destination
-    expect(mockSsh.calls).toContain(`rm -f '${dropinPath}'`)
+    expect(mockSsh.calls).toContain(`rm -f -- '${dropinPath}'`)
   })
 })
 

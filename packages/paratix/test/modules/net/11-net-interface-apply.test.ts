@@ -51,7 +51,7 @@ const SUCCESSFUL_ROUTE_APPLY_OPTIONS = {
     { command: /^ip route del '[^']+' via '[^']+'$/v, result: { code: 0 } },
     { command: /^ip route del '[^']+' via '[^']+' dev '[^']+'$/v, result: { code: 0 } },
     {
-      command: /^rm -f '\/etc\/systemd\/network\/50-paratix-route-[^']+\.network'$/v,
+      command: /^rm -f -- '\/etc\/systemd\/network\/50-paratix-route-[^']+\.network'$/v,
       result: { code: 0 },
     },
     { command: "networkctl reload", result: { code: 0 } },
@@ -74,11 +74,11 @@ const APPLY_TO_NEW_FILE_OPTIONS = {
     { command: "netplan apply", result: { code: 0 } },
     { command: "networkctl reload", result: { code: 0 } },
     {
-      command: /^rm -f '\/etc\/netplan\/60-paratix-[^']+\.yaml'$/v,
+      command: /^rm -f -- '\/etc\/netplan\/60-paratix-[^']+\.yaml'$/v,
       result: { code: 0 },
     },
     {
-      command: /^rm -f '\/etc\/systemd\/network\/60-paratix-[^']+\.network'$/v,
+      command: /^rm -f -- '\/etc\/systemd\/network\/60-paratix-[^']+\.network'$/v,
       result: { code: 0 },
     },
   ],
@@ -289,14 +289,14 @@ describe("net.interface — apply", () => {
     const result = await mod.apply(mockSsh, emptyEnv)
 
     expect(result.status).toBe("failed")
-    expect(mockSsh.calls).toContain(`rm -f '${netplanPath}'`)
+    expect(mockSsh.calls).toContain(`rm -f -- '${netplanPath}'`)
   })
 
   it("returns failed when removing a newly-created Netplan config fails during rollback", async () => {
     const netplanPath = "/etc/netplan/60-paratix-eth0.yaml"
     const mockSsh = createMockSsh(
       {
-        [`rm -f '${netplanPath}'`]: { code: 1, stderr: "permission denied" },
+        [`rm -f -- '${netplanPath}'`]: { code: 1, stderr: "permission denied" },
         [`test -f '${netplanPath}'`]: { code: 1 },
         "netplan apply": { code: 1, stderr: "bad netplan" },
         "test -d '/etc/netplan'": { code: 0 },
