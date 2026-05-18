@@ -1,10 +1,31 @@
-import { describe, expect, it } from "vitest"
+import { describe, expect, it, vi } from "vitest"
+
+import type { SshConnection } from "../../src/types.js"
 
 import { user } from "../../src/modules/user.js"
 import { CommandError } from "../../src/sshHelpers.js"
 import { createMockSsh } from "../helpers/mockSsh.js"
 
 const emptyEnv = {}
+type ExecLike = SshConnection["exec"]
+
+function buildSequentialHomeIdentityExec(input: {
+  identityCommand: string
+  onIdentityProbe: () => void
+  originalExec: ExecLike
+}): ExecLike {
+  const identityResults = [
+    { code: 0, stderr: "", stdout: "2049:1001\n" },
+    { code: 0, stderr: "", stdout: "2049:2002\n" },
+  ]
+  return async (command, options) => {
+    if (command === input.identityCommand) {
+      input.onIdentityProbe()
+      return identityResults.shift() ?? { code: 0, stderr: "", stdout: "2049:2002\n" }
+    }
+    return input.originalExec(command, options)
+  }
+}
 
 describe("user.present check", () => {
   it("returns needs-apply when the user does not exist", async () => {
@@ -875,5 +896,40 @@ describe("user.present home migration and mode (R-0000656)", () => {
     const result = await mod.apply(ssh, emptyEnv)
     expect(result.status).toBe("failed")
     expect(result.error?.message).toContain("chmod home failed")
+  })
+
+  it("returns failed when the home directory inode changes during chmod", async () => {
+    const identityCommand =
+      "[ ! -L '/home/alice' ] && [ -d '/home/alice' ] && stat -c '%d:%i' '/home/alice'"
+    const ssh = createMockSsh({
+      "[ ! -L '/home/alice' ] && [ -d '/home/alice' ] && chmod '0700' '/home/alice'": {
+        code: 0,
+      },
+      "[ ! -L '/home/alice' ] && [ -d '/home/alice' ] && stat -c '%a' '/home/alice'": {
+        code: 0,
+        stdout: "755",
+      },
+      "id 'alice'": { code: 0 },
+      "usermod --home '/home/alice' --move-home 'alice'": { code: 0 },
+    })
+    const originalExec = ssh.exec
+    let identityProbeCount = 0
+    vi.spyOn(ssh, "exec").mockImplementation(
+      buildSequentialHomeIdentityExec({
+        identityCommand,
+        onIdentityProbe() {
+          identityProbeCount += 1
+        },
+        originalExec,
+      })
+    )
+    const mod = user.present("alice", { home: "/home/alice" })
+    const result = await mod.apply(ssh, emptyEnv)
+
+    expect(result.status).toBe("failed")
+    expect(result.error?.message).toContain("home directory inode changed during chmod")
+    expect(result.error?.message).toContain("pre=2049:1001")
+    expect(result.error?.message).toContain("post=2049:2002")
+    expect(identityProbeCount).toBe(2)
   })
 })
