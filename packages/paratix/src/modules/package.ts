@@ -46,7 +46,7 @@ function splitPackagesAndOptions(values: ReadonlyArray<string | UpgradeOptions>)
 // uses the `--` argument terminator. A leading `+` is also disallowed:
 // while `apt` does not treat it as an option, some downstream tooling
 // does, so we keep the allowlist tight.
-const PACKAGE_NAME_PATTERN = /^[a-z0-9][a-z0-9+._-]*[a-z0-9.]$/v
+const PACKAGE_NAME_PATTERN = /^[a-z0-9][a-z0-9+._\-]*[a-z0-9.]$/v
 
 function validatePackageNames(moduleName: string, packages: readonly string[]): void {
   if (packages.length === 0) {

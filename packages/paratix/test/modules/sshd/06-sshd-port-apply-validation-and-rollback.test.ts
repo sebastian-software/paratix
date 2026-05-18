@@ -1056,7 +1056,8 @@ describe("sshd.port — apply: validation and rollback", () => {
 
     expect(result.status).toBe("failed")
     expect(result.error?.message).toContain("no listener on port 2222")
-    expect(result.error?.message).toContain("rolled back")
+    expect(result.error?.message).toContain("rollback also failed")
+    expect(result.error?.message).toContain("ssh service restart failed")
     expect(result.error?.message).toContain("live sshd port probe failed")
     expect(result.error?.message).toContain("skipping rollback restart")
     // Only the initial `restartSshdOnNewPort` restart must have happened — the

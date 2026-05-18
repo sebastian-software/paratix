@@ -4,6 +4,7 @@
   "import": ["@cspell/dict-de-de/cspell-ext.json"],
   "words": [
     "alice",
+    "alnum",
     "artefact",
     "artefacts",
     "autoremove",
@@ -100,6 +101,7 @@
     "nodistro",
     "nsswitch",
     "ondrej",
+    "openat",
     "nofail",
     "oneshot",
     "OPENPGP",
