@@ -43,6 +43,25 @@ export function renderChownSymlinkCommand(ownerSpec: string, remotePath: string)
   return `chown -h -- ${shellQuote(ownerSpec)} ${shellQuote(remotePath)}`
 }
 
+/**
+ * R-0000750: shell-guarded chown that refuses to operate when `remotePath`
+ * has become a symlink between the caller's pre-check and the actual chown.
+ *
+ * Used by `file.copy.apply` after `uploadFile` finishes — there is a TOCTOU
+ * window between the pre-upload `isSymlink` probe and the post-upload chown
+ * where an attacker could swap the regular file out for a symlink so chown
+ * would follow it and rewrite the ownership of an unrelated target. The
+ * guarded command performs the symlink probe and the chown in a single shell
+ * invocation so the two cannot interleave with a swap.
+ *
+ * @param ownerSpec - The chown owner spec, e.g. `"user:group"`.
+ * @param remotePath - The validated remote target path.
+ * @returns A shell command string that refuses to chown a symlink target.
+ */
+export function renderGuardedChownCommand(ownerSpec: string, remotePath: string): string {
+  return renderGuardedMetadataCommand("chown", remotePath, ownerSpec)
+}
+
 function renderGuardedMetadataCommand(
   kind: "chmod" | "chown",
   remotePath: string,

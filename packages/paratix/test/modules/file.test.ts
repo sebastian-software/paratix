@@ -1038,7 +1038,14 @@ describe("file.copy", () => {
       ])
       // file.copy no longer issues a separate chmod after uploadFile.
       expect(ssh.calls).not.toContain("chmod '0600' '/remote/file.txt'")
-      expect(ssh.calls).toContain("chown -- 'www-data' '/remote/file.txt'")
+      // R-0000750: chown now runs through a shell-guarded command that
+      // re-checks for a symlink immediately before the chown line.
+      const guardedChownCall = ssh.calls.find(
+        (call) =>
+          call.includes("path='/remote/file.txt'") &&
+          /\nchown -- 'www-data' "\$path"$/v.test(call)
+      )
+      expect(guardedChownCall).toBeDefined()
     } finally {
       rmSync(dir, { recursive: true })
     }
@@ -1054,11 +1061,19 @@ describe("file.copy", () => {
       const localPath = join(dir, "source.txt")
       writeFileSync(localPath, "hello world")
 
-      const ssh = createMockSsh({
-        "chown -- 'www-data' '/remote/file.txt'": {
-          code: 1,
-          stderr: "chown: invalid user: 'www-data'",
-        },
+      // R-0000750: chown after upload now runs through a shell-guarded
+      // command that re-checks for a symlink immediately before the chown
+      // line, so the stub matches the multi-line guarded form.
+      const ssh = createMockSsh({}, {
+        responseStubs: [
+          {
+            command: /\nchown -- 'www-data' "\$path"$/v,
+            result: {
+              code: 1,
+              stderr: "chown: invalid user: 'www-data'",
+            },
+          },
+        ],
       })
       vi.spyOn(ssh, "uploadFile").mockResolvedValue()
 
@@ -1068,6 +1083,33 @@ describe("file.copy", () => {
       expect(result.status).toBe("failed")
       expect(String(result.error)).toContain("chown failed")
       expect(ssh.uploadFile).toHaveBeenCalledOnce()
+    } finally {
+      rmSync(dir, { recursive: true })
+    }
+  })
+
+  // R-0000750: the post-upload chown is now wrapped in a shell-guarded
+  // command that performs the `[ -L "$path" ]` symlink check in the same
+  // shell as the chown. Verify that the emitted shell text includes the
+  // symlink probe so a future refactor cannot silently revert to the
+  // TOCTOU-prone unguarded `chown -- owner path` invocation.
+  it("R-0000750: post-upload chown runs through a guarded symlink re-check", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "paratix-test-"))
+    try {
+      const localPath = join(dir, "source.txt")
+      writeFileSync(localPath, "hello world")
+
+      const ssh = createMockSsh()
+      vi.spyOn(ssh, "uploadFile").mockResolvedValue()
+
+      const mod = file.copy("/remote/file.txt", localPath, { owner: "www-data" })
+      const result = await mod.apply(ssh, emptyEnv)
+
+      expect(result.status).toBe("changed")
+      const chownCall = ssh.calls.find((call) => call.includes(`chown -- 'www-data' "$path"`))
+      expect(chownCall).toBeDefined()
+      expect(chownCall).toContain(`path='/remote/file.txt'`)
+      expect(chownCall).toContain(`if [ -L "$path" ]; then`)
     } finally {
       rmSync(dir, { recursive: true })
     }

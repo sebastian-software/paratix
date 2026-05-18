@@ -22,7 +22,7 @@ import {
   normalizeMode,
   ownershipMatches,
   readOwnership,
-  renderChownCommand,
+  renderGuardedChownCommand,
   resolveWriteMode,
 } from "./fileMetadataHelpers.js"
 import { isRegularFileWithoutSymlink, isSymlink } from "./remoteFileChecks.js"
@@ -280,10 +280,21 @@ export const file = {
           // R-0000271: chown errors after a successful upload (NSS lookup
           // failure, EPERM, missing user/group) must surface as a maskable
           // failedCommand result instead of an unguarded CommandError.
-          const chownResult = await ssh.exec(renderChownCommand(options.owner, remotePath), {
-            ignoreExitCode: true,
-            silent: true,
-          })
+          // R-0000750: re-check that `remotePath` is not a symlink immediately
+          // before chown runs. The pre-upload `isSymlink` probe closes the
+          // initial replacement window, but an adversary could swap the file
+          // for a symlink between `uploadFile` and `chown`; without `-h` or a
+          // guarded re-check, chown would follow that symlink and rewrite the
+          // ownership of an unrelated file. The guarded command performs the
+          // symlink probe in the same shell as the chown so the check and
+          // mutation cannot interleave with a TOCTOU swap.
+          const chownResult = await ssh.exec(
+            renderGuardedChownCommand(options.owner, remotePath),
+            {
+              ignoreExitCode: true,
+              silent: true,
+            }
+          )
           if (chownResult.code !== 0) {
             return failedCommand(`[file.copy: ${remotePath}] chown failed`, chownResult)
           }
