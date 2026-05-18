@@ -118,6 +118,12 @@ async function writeFlagLockHolderMarker(
     .catch(() => "")
   const lock = flagPath(lockName)
   const markerPath = `${lock}/${HOLDER_MARKER_NAME}`
+  // R-0000803: `flagLockDisplayPath(lockName)` returns the un-shellQuoted
+  // version of the same `${FLAGS_DIRECTORY}/${lockName}/${HOLDER_MARKER_NAME}`
+  // path that `markerPath` represents. Use it as the input to `shellQuote`
+  // so the awk argument is a single quoted token, defending against future
+  // relaxations of `validateFlagName` that could allow shell metacharacters.
+  const quotedMarker = shellQuote(`${flagLockDisplayPath(lockName)}/${HOLDER_MARKER_NAME}`)
   const printfResult = await ssh.exec(
     `printf '%s@%s %s\\n' "$$" ${shellQuote(hostname)} "$(date +%s)" > ${markerPath}`,
     { ignoreExitCode: true, silent: true }
@@ -145,7 +151,7 @@ async function writeFlagLockHolderMarker(
   // mis-parsed as an awk option, matching the `--` convention applied to
   // rm / rmdir below.
   const holderToken = await ssh
-    .output(`awk 'NR==1{print $1}' -- ${markerPath}`)
+    .output(`awk 'NR==1{print $1}' -- ${quotedMarker}`)
     .then((token) => token.trim())
     .catch(() => "")
   if (holderToken.length === 0) {
@@ -233,6 +239,10 @@ export async function releaseFlagLock(
   }
   const lock = flagPath(lockName)
   const markerPath = `${lock}/${HOLDER_MARKER_NAME}`
+  // R-0000803: re-shellQuote the marker path as a single token for awk
+  // rather than relying on `flagPath`'s embedded quotes propagating cleanly
+  // through interpolation.
+  const quotedMarker = shellQuote(`${flagLockDisplayPath(lockName)}/${HOLDER_MARKER_NAME}`)
   // Single atomic shell statement so the ownership check, marker removal
   // and `rmdir` cannot interleave with a stale-lock reclaim that already
   // handed the lock to another acquirer.
@@ -253,7 +263,7 @@ export async function releaseFlagLock(
   // when awk failed, so the release attempt fails closed.
   const expectedToken = `x${holderToken}`
   const command =
-    `awk_token=$(awk 'NR==1{print $1}' -- ${markerPath} 2>/dev/null); awk_status=$?; ` +
+    `awk_token=$(awk 'NR==1{print $1}' -- ${quotedMarker} 2>/dev/null); awk_status=$?; ` +
     `[ "$awk_status" = 0 ] && ` +
     `[ "x$awk_token" = ${shellQuote(expectedToken)} ] && ` +
     `rm -f -- ${markerPath} && ` +
@@ -292,6 +302,10 @@ export async function tryReclaimStaleFlagLock(
 ): Promise<boolean> {
   const lock = flagPath(lockName)
   const markerPath = `${lock}/${HOLDER_MARKER_NAME}`
+  // R-0000803: defensively re-shellQuote the marker path for awk so any
+  // future change to `validateFlagName` cannot leak shell metacharacters
+  // through the partially-quoted `${markerPath}` interpolation.
+  const quotedMarker = shellQuote(`${flagLockDisplayPath(lockName)}/${HOLDER_MARKER_NAME}`)
   // Use `find -mmin` to detect a marker older than the threshold, falling
   // back to the lock directory mtime when the marker is missing entirely.
   const staleMinutes = Math.max(1, Math.ceil(staleSeconds / SECONDS_PER_MINUTE))
@@ -323,9 +337,9 @@ export async function tryReclaimStaleFlagLock(
   const command =
     `if [ -d ${lock} ]; then ` +
     `if [ -f ${markerPath} ]; then ` +
-    `STALE_TOKEN="$(awk 'NR==1{print $1}' -- ${markerPath} 2>/dev/null)"; ` +
+    `STALE_TOKEN="$(awk 'NR==1{print $1}' -- ${quotedMarker} 2>/dev/null)"; ` +
     `if find ${markerPath} -maxdepth 0 -mmin +${mminThreshold} -print -quit | grep -q .; then ` +
-    `[ "$(awk 'NR==1{print $1}' -- ${markerPath} 2>/dev/null)" = "$STALE_TOKEN" ] && ` +
+    `[ "$(awk 'NR==1{print $1}' -- ${quotedMarker} 2>/dev/null)" = "$STALE_TOKEN" ] && ` +
     `rm -f -- ${markerPath} && rmdir -- ${lock}; ` +
     `else exit 1; fi; ` +
     `else ` +

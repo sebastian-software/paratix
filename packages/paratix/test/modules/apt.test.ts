@@ -23,6 +23,8 @@ const DIST_UPGRADE_FLAG = "apt-dist-upgrade-2024-01-15"
 function distUpgradeApplyLockResponses(): Record<string, { code?: number; stdout?: string }> {
   const markerPath = `/var/lib/paratix/flags/'${DIST_UPGRADE_FLAG}.lock'/holder`
   const lockPath = `/var/lib/paratix/flags/'${DIST_UPGRADE_FLAG}.lock'`
+  // R-0000803: awk now receives the marker as a single shell-quoted token.
+  const awkMarkerPath = `'/var/lib/paratix/flags/${DIST_UPGRADE_FLAG}.lock/holder'`
   // R-0000634: acquire reads the marker token back via `ssh.output`; release
   // is now a single shell statement that verifies ownership before removing
   // the marker and lock directory.
@@ -31,14 +33,14 @@ function distUpgradeApplyLockResponses(): Record<string, { code?: number; stdout
   // R-0000758: release captures the awk readback in `$awk_token` and uses
   // the POSIX `x`-prefix comparison.
   const verifiedReleaseCommand =
-    `awk_token=$(awk 'NR==1{print $1}' -- ${markerPath} 2>/dev/null); awk_status=$?; ` +
+    `awk_token=$(awk 'NR==1{print $1}' -- ${awkMarkerPath} 2>/dev/null); awk_status=$?; ` +
     `[ "$awk_status" = 0 ] && ` +
     `[ "x$awk_token" = 'x${MOCK_FLAG_LOCK_HOLDER_TOKEN}' ] && ` +
     `rm -f -- ${markerPath} && ` +
     `rmdir -- ${lockPath}`
   return {
     [`[ -f /var/lib/paratix/flags/'${DIST_UPGRADE_FLAG}' ]`]: { code: 1 },
-    [`awk 'NR==1{print $1}' -- ${markerPath}`]: {
+    [`awk 'NR==1{print $1}' -- ${awkMarkerPath}`]: {
       code: 0,
       stdout: MOCK_FLAG_LOCK_HOLDER_TOKEN,
     },

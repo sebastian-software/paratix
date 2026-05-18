@@ -25,7 +25,10 @@ const FLAG_LOCK_INTERNAL_SUCCESS_PATTERNS: RegExp[] = [
   // R-0000758: release captures the awk readback into `$awk_token` so the
   // awk exit code can be inspected; the comparison uses the POSIX
   // `x`-prefix idiom on both sides of `=`.
-  /^awk_token=\$\(awk 'NR==1\{print \$1\}' -- \S+\/holder 2>\/dev\/null\); awk_status=\$\?; \[ "\$awk_status" = 0 \] && \[ "x\$awk_token" = 'x[^']*' \] && rm -f -- \S+\/holder && rmdir -- \S+$/v,
+  // R-0000803: the awk path is now quoted as a single token (`'…/holder'`),
+  // while rm/rmdir still use the partially-quoted `${markerPath}`/`${lock}`
+  // form. Allow the optional trailing `'` for the awk path only.
+  /^awk_token=\$\(awk 'NR==1\{print \$1\}' -- \S+\/holder'? 2>\/dev\/null\); awk_status=\$\?; \[ "\$awk_status" = 0 \] && \[ "x\$awk_token" = 'x[^']*' \] && rm -f -- \S+\/holder && rmdir -- \S+$/v,
   // Mutex-lock acquire and release commands target lock directories whose
   // last path segment ends in the `-mutex` suffix.
   /^mkdir \/var\/lib\/paratix\/flags\/'[\w.\-]*-mutex'$/v,
@@ -39,7 +42,9 @@ const FLAG_LOCK_INTERNAL_SUCCESS_PATTERNS: RegExp[] = [
  * `releaseFlagLock` can verify ownership.
  */
 // R-0000749: awk now receives the path after a `--` separator.
-const FLAG_LOCK_HOLDER_READBACK_PATTERN = /^awk 'NR==1\{print \$1\}' -- \S+\/holder$/v
+// R-0000803: the awk path is shell-quoted as a single token, so the trailing
+// `'` after `/holder` is permitted.
+const FLAG_LOCK_HOLDER_READBACK_PATTERN = /^awk 'NR==1\{print \$1\}' -- \S+\/holder'?$/v
 
 /**
  * Pattern matched by the mutex-lock release wait loop.
@@ -56,8 +61,10 @@ const MUTEX_LOCK_WAIT_PATTERN =
  */
 // R-0000749: awk now emits the `--` separator before its path argument.
 const FLAG_LOCK_RECLAIM_PATTERN =
+  // R-0000803: the awk path is now shell-quoted as a single token, so allow
+  // the optional trailing `'` after `/holder` in the STALE_TOKEN capture.
   // eslint-disable-next-line security/detect-unsafe-regex -- mock-only pattern, anchored prefix bounds backtracking on test-controlled input
-  /^if \[ -d \S+ \]; then if \[ -f \S+\/holder \]; then (?:STALE_TOKEN="\$\(awk 'NR==1\{print \$1\}' -- \S+\/holder 2>\/dev\/null\)"; )?if find \S+\/holder -maxdepth 0 -mmin /v
+  /^if \[ -d \S+ \]; then if \[ -f \S+\/holder \]; then (?:STALE_TOKEN="\$\(awk 'NR==1\{print \$1\}' -- \S+\/holder'? 2>\/dev\/null\)"; )?if find \S+\/holder -maxdepth 0 -mmin /v
 
 /**
  * @param command - The command intercepted by the mock.
@@ -124,6 +131,8 @@ function escapeRegex(value: string): string {
 export function makeIsVerifiedReleaseCall(lockName: string): (call: string) => boolean {
   const markerPath = `/var/lib/paratix/flags/'${lockName}'/holder`
   const lockPath = `/var/lib/paratix/flags/'${lockName}'`
+  // R-0000803: awk now receives the marker as a single shell-quoted token.
+  const quotedMarkerPath = `'/var/lib/paratix/flags/${lockName}/holder'`
   // R-0000749: production code now emits the `--` separator before path
   // arguments in awk / rm / rmdir invocations.
   // R-0000758: release captures the awk readback in `$awk_token` and uses
@@ -131,7 +140,7 @@ export function makeIsVerifiedReleaseCall(lockName: string): (call: string) => b
   // with `[` operator syntax.
   // eslint-disable-next-line security/detect-non-literal-regexp -- markerPath and lockPath are derived from a validated lockName and shell-escaped above
   const pattern = new RegExp(
-    `^awk_token=\\$\\(awk 'NR==1\\{print \\$1\\}' -- ${escapeRegex(markerPath)} 2>/dev/null\\); awk_status=\\$\\?; \\[ "\\$awk_status" = 0 \\] && \\[ "x\\$awk_token" = 'x[^']*' \\] && rm -f -- ${escapeRegex(markerPath)} && rmdir -- ${escapeRegex(lockPath)}$`,
+    `^awk_token=\\$\\(awk 'NR==1\\{print \\$1\\}' -- ${escapeRegex(quotedMarkerPath)} 2>/dev/null\\); awk_status=\\$\\?; \\[ "\\$awk_status" = 0 \\] && \\[ "x\\$awk_token" = 'x[^']*' \\] && rm -f -- ${escapeRegex(markerPath)} && rmdir -- ${escapeRegex(lockPath)}$`,
     "v"
   )
   return (call) => pattern.test(call)
