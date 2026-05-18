@@ -24,21 +24,58 @@ function resolveGitShortHash(cwd: string): string {
 const gitShortHash = resolveGitShortHash(import.meta.dirname)
 const displayVersion = gitShortHash === "" ? version : `${version}-${gitShortHash}`
 
-export default defineConfig({
-  banner: { js: "#!/usr/bin/env node" },
-  clean: true,
-  define: {
-    PACKAGE_DISPLAY_VERSION: JSON.stringify(displayVersion),
-    PACKAGE_VERSION: JSON.stringify(version),
+const sharedDefine = {
+  PACKAGE_DISPLAY_VERSION: JSON.stringify(displayVersion),
+  PACKAGE_VERSION: JSON.stringify(version),
+}
+
+// R-0000729: split the previous single-build config into two passes so the
+// `#!/usr/bin/env node` shebang only lands on the CLI bundle. The original
+// single-build configuration applied the banner globally and enabled
+// `splitting: true` for ESM. Two consequences broke the postbuild dist
+// tests:
+//
+// 1) Every library entry (`dist/index.js`, `dist/modules/index.js`) gained
+//    a stray shebang. Node tolerates it on the executable, but a downstream
+//    consumer importing the package via `import "paratix"` ended up with an
+//    unusual first line that some bundlers and TS analyzers flagged.
+// 2) `splitting: true` shared chunks between the CLI and the library
+//    entries. Because `cli.ts` performs a top-level
+//    `await program.parseAsync()` inside an `isDirectCliExecution` guard,
+//    splitting let that side-effect surface anywhere the shared chunk was
+//    imported — including the library entry under tests. Top-level await in
+//    a chunk that the library re-imports also delayed dynamic import in the
+//    consumer-pack test.
+//
+// The fix below builds the CLI as a single self-contained bundle (no
+// splitting, banner applied) and emits the library entries in a second
+// pass without the banner. This keeps the CLI executable as a plain
+// `#!/usr/bin/env node` script and turns the library output back into
+// clean ESM that consumers can dynamic-import without dragging the CLI
+// lifecycle along.
+export default defineConfig([
+  {
+    banner: { js: "#!/usr/bin/env node" },
+    clean: true,
+    define: sharedDefine,
+    dts: false,
+    entry: { cli: "src/cli.ts" },
+    format: ["esm"],
+    sourcemap: true,
+    splitting: false,
+    target: "node24",
   },
-  dts: true,
-  entry: {
-    cli: "src/cli.ts",
-    index: "src/index.ts",
-    "modules/index": "src/modules/index.ts",
+  {
+    clean: false,
+    define: sharedDefine,
+    dts: true,
+    entry: {
+      index: "src/index.ts",
+      "modules/index": "src/modules/index.ts",
+    },
+    format: ["esm"],
+    sourcemap: true,
+    splitting: true,
+    target: "node24",
   },
-  format: ["esm"],
-  sourcemap: true,
-  splitting: true,
-  target: "node24",
-})
+])
