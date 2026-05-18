@@ -271,9 +271,16 @@ describe("systemd.unit", () => {
   })
 
   it("apply returns failed when daemon-reload exits with non-zero code", async () => {
+    // R-0000779: restoreUnitFileSnapshot now guards the rm with a
+    // `[ ! -L ] && [ -f ]` check so a symlink planted between the
+    // snapshot capture (which reported `exists: false`) and the rollback
+    // cannot be silently unlinked. The rollback path also probes `[ -L ]`
+    // via `isSymlink` before reading the current content.
+    const guardedRmCommand = `[ ! -L '${filePath}' ] && [ -f '${filePath}' ] && rm -f '${filePath}' || [ ! -e '${filePath}' ]`
     const ssh = createMockSsh({
+      [`[ -L '${filePath}' ]`]: { code: 1 },
       [`[ -e '${filePath}' ]`]: { code: 1 },
-      [`rm -f '${filePath}'`]: { code: 0 },
+      [guardedRmCommand]: { code: 0 },
       "systemctl daemon-reload": { code: 1 },
     })
     vi.spyOn(ssh, "exists").mockResolvedValueOnce(false).mockResolvedValueOnce(true)
@@ -282,7 +289,7 @@ describe("systemd.unit", () => {
     const result = await mod.apply(ssh, emptyEnv)
     expect(result.status).toBe("failed")
     expect(ssh.calls).not.toContain(reloadFlagSet)
-    expect(ssh.calls).toContain(`rm -f '${filePath}'`)
+    expect(ssh.calls).toContain(guardedRmCommand)
   })
 
   it("restores an existing unit file when daemon-reload fails", async () => {
@@ -424,6 +431,11 @@ describe("systemd.unit", () => {
   it("does not delete a concurrently created unit file when daemon-reload flag persistence fails", async () => {
     const concurrentContent = "[Unit]\nDescription=Concurrent\n"
     const ssh = createMockSsh({
+      // R-0000779: the rollback path now probes `[ -L ]` before reading
+      // the current content to refuse a symlink that materialized at the
+      // unit path. Default to "not a symlink" so the existing skipped
+      // branch (content mismatch) keeps running.
+      [`[ -L '${filePath}' ]`]: { code: 1 },
       "mkdir -p /var/lib/paratix/flags": { code: 0 },
       [reloadFlagSet]: {
         code: 1,
@@ -502,10 +514,14 @@ describe("systemd.unit", () => {
 
   // R-0000211: when the file did not exist before, the snapshot is "absent"
   // and the rollback path removes the freshly-written file via `rm -f`.
+  // R-0000779: the rollback `rm -f` is now wrapped in a `[ ! -L ] && [ -f ]`
+  // guard so a symlink planted between the snapshot capture and the
+  // rollback cannot be silently unlinked.
   it("R-0000211: removes a freshly-written unit file when writeFile throws and snapshot is absent", async () => {
+    const guardedRmCommand = `[ ! -L '${filePath}' ] && [ -f '${filePath}' ] && rm -f '${filePath}' || [ ! -e '${filePath}' ]`
     const ssh = createMockSsh({
       [`[ -e '${filePath}' ]`]: { code: 1 },
-      [`rm -f '${filePath}'`]: { code: 0 },
+      [guardedRmCommand]: { code: 0 },
     })
     const writeFile = vi
       .spyOn(ssh, "writeFile")
@@ -515,7 +531,7 @@ describe("systemd.unit", () => {
     expect(result.status).toBe("failed")
     expect(String(result.error)).toContain("failed to write unit file")
     expect(writeFile).toHaveBeenCalledTimes(1)
-    expect(ssh.calls).toContain(`rm -f '${filePath}'`)
+    expect(ssh.calls).toContain(guardedRmCommand)
     expect(ssh.calls).not.toContain("systemctl daemon-reload")
   })
 
@@ -620,10 +636,44 @@ describe("systemd.unit", () => {
     expect(ssh.calls).not.toContain("systemctl daemon-reload")
   })
 
-  // R-0000683: the restore path must refuse to follow a planted symlink at
-  // the unit file path. Without the leading `[ -L ]` probe a swap between
-  // the snapshot read and the rollback would let `ssh.writeFile` follow the
-  // link to its target (potentially overwriting an unrelated system file).
+  // R-0000779: when the snapshot reported `exists: false` and the
+  // rollback path tries to remove the freshly-written unit file, the
+  // `rm -f` must be wrapped in a `[ ! -L ] && [ -f ]` guard so a
+  // symlink that materialized at the destination between the snapshot
+  // and the rollback cannot be silently unlinked. The unit-file path
+  // belongs to systemd, so a planted symlink that points at an
+  // unrelated file must NOT be followed by the rollback's `rm`.
+  it("R-0000779: rm-rollback refuses to unlink through a symlinked unit path", async () => {
+    const guardedRmCommand = `[ ! -L '${filePath}' ] && [ -f '${filePath}' ] && rm -f '${filePath}' || [ ! -e '${filePath}' ]`
+    const ssh = createMockSsh({
+      [`[ -e '${filePath}' ]`]: { code: 1 },
+      // The combined guard exits non-zero when the destination is a
+      // symlink: `[ ! -L ]` fails and the trailing `[ ! -e ]` fallback
+      // is also false because the path exists (as a symlink).
+      [guardedRmCommand]: { code: 1, stderr: "symlink guard tripped" },
+    })
+    const writeFile = vi
+      .spyOn(ssh, "writeFile")
+      .mockRejectedValueOnce(new Error("SFTP write failed: connection reset"))
+    const mod = systemd.unit(unitName, unitContent)
+    const result = await mod.apply(ssh, emptyEnv)
+    expect(result.status).toBe("failed")
+    expect(String(result.error)).toContain("failed to write unit file")
+    // The guarded rm was issued exactly once. Without R-0000779 the
+    // legacy unconditional `rm -f` would have removed the planted
+    // symlink instead of refusing the rollback.
+    expect(writeFile).toHaveBeenCalledTimes(1)
+    expect(ssh.calls.filter((call) => call === guardedRmCommand)).toHaveLength(1)
+  })
+
+  // R-0000683 / R-0000779: the restore path must refuse to follow a
+  // planted symlink at the unit file path. Without the leading `[ -L ]`
+  // probe a swap between the snapshot read and the rollback would let
+  // `ssh.writeFile` follow the link to its target (potentially
+  // overwriting an unrelated system file). With R-0000779 the rollback
+  // probes `[ -L ]` before reading the live content, so the failure
+  // surfaces structurally via `restoreUnitFileSnapshotIfCurrentMatches`
+  // and the message names the symlinked path.
   it("R-0000683: refuses to restore through a symlink", async () => {
     const previousContent = "[Unit]\nDescription=Previous\n"
     const ssh = createMockSsh({
@@ -642,8 +692,9 @@ describe("systemd.unit", () => {
     const result = await mod.apply(ssh, emptyEnv)
 
     expect(result.status).toBe("failed")
-    expect(String(result.error)).toContain("rollback failed")
-    expect(String(result.error)).toContain("refusing to restore through symlink")
+    expect(String(result.error)).toContain("rollback")
+    expect(String(result.error)).toContain("symbolic link")
+    expect(String(result.error)).toContain(filePath)
     // The first writeFile attempted the new content; the second (rollback)
     // writeFile must NOT have been issued.
     expect(writeFile).toHaveBeenCalledTimes(1)

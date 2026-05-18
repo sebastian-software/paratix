@@ -104,7 +104,18 @@ export async function restoreUnitFileSnapshot(
     await ssh.writeFile(filePath, snapshot.content, { mode: snapshot.mode })
     return
   }
-  await ssh.exec(`rm -f ${shellQuote(filePath)}`, SILENT_EXEC_OPTS)
+  // R-0000779: refuse to `rm -f` through a symlink. The legacy
+  // unconditional `rm -f` would unlink a symlink that materialized at
+  // `filePath` between the snapshot capture and the rollback, even
+  // though the captured snapshot reported `exists: false`. Combine the
+  // `[ ! -L ]` probe with the existence check in a single shell
+  // statement so the kernel evaluates both atomically — mirrors the
+  // swap backup guards (R-0000649) and the sysctl rm guard (R-0000769).
+  const quotedPath = shellQuote(filePath)
+  await ssh.exec(
+    `[ ! -L ${quotedPath} ] && [ -f ${quotedPath} ] && rm -f ${quotedPath} || [ ! -e ${quotedPath} ]`,
+    SILENT_EXEC_OPTS
+  )
 }
 
 /**
@@ -148,6 +159,18 @@ export async function restoreUnitFileSnapshotIfCurrentMatches(parameters: {
 }): Promise<RestoreUnitFileIfCurrentMatchesResult> {
   const { expectedCurrentContent, filePath, snapshot, ssh } = parameters
   if (!(await ssh.exists(filePath))) return { kind: "skipped" }
+  // R-0000779: probe for a symlink before reading the live content. A
+  // symlink planted at `filePath` between the snapshot capture and this
+  // conditional restore would let `ssh.readFile` follow the link to its
+  // target, the `currentContent !== expectedCurrentContent` check would
+  // then either spuriously divert into `skipped` (when the link target
+  // happens to differ) or accept the link target's content as the
+  // expected live content. Surface a structured failure instead so the
+  // caller can chain it with the original failure that triggered the
+  // rollback — mirrors the snapshot-capture symlink probe (R-0000770).
+  if (await isSymlink(ssh, filePath)) {
+    return { kind: "failed", reason: `${filePath} is a symbolic link` }
+  }
   // R-0000721: `ssh.readFile` throws on transient SFTP errors or after a
   // permission denial. Without this catch the rollback path would bubble
   // an unstructured exception out of the module and the original failure
