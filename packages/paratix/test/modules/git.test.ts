@@ -148,9 +148,7 @@ describe("git.clone — validation", () => {
   })
 
   it("rejects a destination starting with '-'", () => {
-    expect(() => git.clone(repo, "-rf")).toThrow(
-      "destination must not start with '-'"
-    )
+    expect(() => git.clone(repo, "-rf")).toThrow("destination must not start with '-'")
   })
 
   it("rejects a non-normalised destination with '..' components", () => {

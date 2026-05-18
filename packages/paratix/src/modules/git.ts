@@ -13,7 +13,7 @@ const EXEC_OPTS = { ignoreExitCode: true, silent: true } as const
 // that resolves unexpectedly, a leading "-" that Git would interpret as an
 // option, or whitespace-padded input that bypasses later checks. The pattern
 // mirrors `validateAbsentPath` in file.ts: trim, reject empty, require
-// absolute and normalised POSIX paths, refuse "/" outright, and reject leading
+// absolute and normalized POSIX paths, refuse "/" outright, and reject leading
 // dashes. Validation runs synchronously in the module constructor so the
 // invariant is established before any async exec / rm -rf path can execute.
 function validateCloneDestination(destination: string): void {
@@ -23,9 +23,7 @@ function validateCloneDestination(destination: string): void {
   }
 
   if (trimmedDestination !== destination) {
-    throw new Error(
-      `git.clone: destination must not start or end with whitespace: ${destination}`
-    )
+    throw new Error(`git.clone: destination must not start or end with whitespace: ${destination}`)
   }
 
   if (trimmedDestination.startsWith("-")) {

@@ -192,11 +192,14 @@ function parseOsRelease(content: string): Partial<Record<string, string>> {
 // prefix check (the literal string starts with "10."). Validate each octet
 // is ≤ 255 before reporting the IP so downstream consumers (env vars, meta
 // entries) cannot see a syntactically invalid address.
+const IPV4_OCTET_MAX_LENGTH = 3
+const IPV4_OCTET_MAX_VALUE = 255
+
 function isValidIpv4Octets(ip: string): boolean {
   return ip.split(".").every((octet) => {
-    if (octet.length === 0 || octet.length > 3) return false
+    if (octet.length === 0 || octet.length > IPV4_OCTET_MAX_LENGTH) return false
     const numeric = Number(octet)
-    return Number.isInteger(numeric) && numeric >= 0 && numeric <= 255
+    return Number.isInteger(numeric) && numeric >= 0 && numeric <= IPV4_OCTET_MAX_VALUE
   })
 }
 

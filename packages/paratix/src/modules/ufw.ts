@@ -243,7 +243,7 @@ export const ufw = {
         // before enable.
         return withMutexLock(ssh, {
           lockName: UFW_ENABLE_LOCK_NAME,
-          section: async () => {
+          async section() {
             const allowResult = await allowCurrentSshPort(ssh)
             if (allowResult !== null) return allowResult
             // R-0000653: a concurrent process could insert a `deny` rule for

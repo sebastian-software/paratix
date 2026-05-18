@@ -180,6 +180,11 @@ async function setPassword(
   }
 }
 
+// R-0000776: getent passwd entries are colon-separated with exactly 7
+// fields (name:passwd:uid:gid:gecos:home:shell). The constant is shared
+// between the parser and the truncation guard so both sites stay in sync.
+const PASSWD_ENTRY_FIELD_COUNT = 7
+
 function parsePasswdEntry(entry: string): { home: string; shell: string; uid: string } {
   const fields = entry.split(":")
   return { home: fields[5] ?? "", shell: fields[6] ?? "", uid: fields[2] ?? "" }
@@ -274,7 +279,10 @@ async function passwdAttributesMatch(
     }
   }
   const entry = passwdResult.stdout.trim()
-  if (entry.split(":").length < 7) {
+  // R-0000776: a passwd line has exactly 7 colon-separated fields
+  // (name:passwd:uid:gid:gecos:home:shell). Fewer fields means truncation
+  // and the parsed values cannot be trusted.
+  if (entry.split(":").length < PASSWD_ENTRY_FIELD_COUNT) {
     return {
       failure: failed(
         `[user.present: ${name}] getent passwd returned a malformed entry with fewer than 7 fields`
