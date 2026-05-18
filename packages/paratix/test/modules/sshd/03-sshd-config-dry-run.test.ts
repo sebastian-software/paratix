@@ -10,7 +10,7 @@ const createMockSsh: typeof createBaseMockSsh = (responses, options) =>
     ...options,
     allowWrites: [
       // R-0000587: dry-run tempfiles carry restrictive 0600 permissions.
-      { options: { mode: "0600" }, remotePath: /^\/tmp\/paratix-sshd-dry-run-/v },
+      { options: { mode: "0600" }, remotePath: /^\/tmp\/paratix-sshd-dry-run\./v },
       ...(options?.allowWrites ?? []),
     ],
     responseStubs: [
@@ -28,7 +28,7 @@ const createMockSsh: typeof createBaseMockSsh = (responses, options) =>
       { command: "systemctl disable --now ssh.socket", result: { code: 0 } },
       { command: "systemctl enable --now ssh.socket", result: { code: 0 } },
       { command: "systemctl restart sshd", result: { code: 0 } },
-      { command: /^rm -f '\/tmp\/paratix-sshd-dry-run-.+\.conf'$/v, result: { code: 0 } },
+      { command: /^rm -f '\/tmp\/paratix-sshd-dry-run\..+'$/v, result: { code: 0 } },
       ...(options?.responseStubs ?? []),
     ],
   })
@@ -51,27 +51,35 @@ function trackWriteFile(
   return writtenFiles
 }
 
+// R-0000766: route the dry-run mktemp call to a fixed stub path so the
+// validateProspectiveSshdConfig pipeline can proceed without the helper
+// having to anticipate the exact call order.
+const SSHD_DRY_RUN_MKTEMP = "mktemp -p /tmp -- 'paratix-sshd-dry-run.XXXXXX'"
+const SSHD_DRY_RUN_TEMP_PATH = "/tmp/paratix-sshd-dry-run.ABCDEF"
+
 function mockSshdDryRunExecSuccess(mockSsh: ReturnType<typeof createMockSsh>) {
   return vi.spyOn(mockSsh, "exec").mockImplementation(async (command) => {
     mockSsh.calls.push(command)
     await Promise.resolve()
+    if (command === SSHD_DRY_RUN_MKTEMP) {
+      return { code: 0, stderr: "", stdout: SSHD_DRY_RUN_TEMP_PATH }
+    }
     return { code: 0, stderr: "", stdout: "" }
   })
 }
 
 function mockSshdDryRunExecValidationFailure(mockSsh: ReturnType<typeof createMockSsh>) {
-  return vi
-    .spyOn(mockSsh, "exec")
-    .mockImplementationOnce(async (command) => {
-      mockSsh.calls.push(command)
-      await Promise.resolve()
-      return { code: 0, stderr: "", stdout: "" }
-    })
-    .mockImplementationOnce(async (command) => {
-      mockSsh.calls.push(command)
-      await Promise.resolve()
+  return vi.spyOn(mockSsh, "exec").mockImplementation(async (command) => {
+    mockSsh.calls.push(command)
+    await Promise.resolve()
+    if (command === SSHD_DRY_RUN_MKTEMP) {
+      return { code: 0, stderr: "", stdout: SSHD_DRY_RUN_TEMP_PATH }
+    }
+    if (command.startsWith("sshd -t -f ")) {
       return { code: 1, stderr: "Bad configuration option", stdout: "" }
-    })
+    }
+    return { code: 0, stderr: "", stdout: "" }
+  })
 }
 
 // ─── sshd.config — apply ──────────────────────────────────────────────────────
@@ -92,7 +100,7 @@ describe("sshd.config — dry-run", () => {
       status: "changed",
     })
     expect(writtenFiles).toHaveLength(1)
-    expect(writtenFiles[0]?.path).toMatch(/paratix-sshd-dry-run-.+\.conf$/v)
+    expect(writtenFiles[0]?.path).toMatch(/paratix-sshd-dry-run\..+$/v)
     expect(writtenFiles[0]?.content).toContain("PasswordAuthentication no")
     const execCommands = execSpy.mock.calls.map((args) => args[0])
     expect(execCommands.some((command) => command.startsWith("sshd -t -f "))).toBe(true)

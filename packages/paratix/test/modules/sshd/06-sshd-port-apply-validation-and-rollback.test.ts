@@ -21,7 +21,7 @@ const createMockSsh: typeof createBaseMockSsh = (responses, options) => {
       allowFlagLockInternalDefaults: true,
       allowWrites: [
         // R-0000587: dry-run tempfiles carry restrictive 0600 permissions.
-        { options: { mode: "0600" }, remotePath: /^\/tmp\/paratix-sshd-dry-run-/v },
+        { options: { mode: "0600" }, remotePath: /^\/tmp\/paratix-sshd-dry-run\./v },
         ...(options?.allowWrites ?? []),
       ],
       responseStubs: [
@@ -35,11 +35,17 @@ const createMockSsh: typeof createBaseMockSsh = (responses, options) => {
         { command: "ufw status", result: { stdout: "Status: inactive" } },
         { command: "mkdir -p '/run/sshd'", result: { code: 0 } },
         { command: "sshd -t", result: { code: 0 } },
+        // R-0000766: allocateProspectiveSshdConfigPath now allocates the
+        // dry-run path via `mktemp -p /tmp -- paratix-sshd-dry-run.XXXXXX`.
+        {
+          command: "mktemp -p /tmp -- 'paratix-sshd-dry-run.XXXXXX'",
+          result: { code: 0, stdout: "/tmp/paratix-sshd-dry-run.ABCDEF" },
+        },
         // R-0000539: validateProspectiveSshdConfig writes a temp file and
         // validates it with `sshd -t -f <UUID>.conf` before overwriting the
         // live config.
         {
-          command: /^sshd -t -f '\/tmp\/paratix-sshd-dry-run-[^']+\.conf'$/v,
+          command: /^sshd -t -f '\/tmp\/paratix-sshd-dry-run\.[^']+'$/v,
           result: { code: 0 },
         },
         { command: SYSTEMCTL_CAT_SSHD, result: { code: 0 } },
@@ -75,7 +81,7 @@ const createMockSsh: typeof createBaseMockSsh = (responses, options) => {
         { command: "systemctl enable --now ssh.socket", result: { code: 0 } },
         { command: "systemctl enable --now sshd.socket", result: { code: 0 } },
         { command: "systemctl restart sshd", result: { code: 0 } },
-        { command: /^rm -f '\/tmp\/paratix-sshd-dry-run-.+\.conf'$/v, result: { code: 0 } },
+        { command: /^rm -f '\/tmp\/paratix-sshd-dry-run\..+'$/v, result: { code: 0 } },
         // R-0000283: default the post-restart live verify to "listener
         // present" so existing fixtures keep passing. Tests that exercise the
         // missing listener path stub `ss` explicitly with a non-zero exit.
@@ -132,6 +138,12 @@ function mockExecResolvedValue(
 ) {
   execSpy.mockImplementation(async (command) => {
     await Promise.resolve()
+    // R-0000766: the dry-run mktemp call must always return a valid path even
+    // when the bulk mock pins every other exec to a failure result, otherwise
+    // validateProspectiveSshdConfig fails before it ever runs `sshd -t -f`.
+    if (command === "mktemp -p /tmp -- 'paratix-sshd-dry-run.XXXXXX'") {
+      return { code: 0, stderr: "", stdout: "/tmp/paratix-sshd-dry-run.ABCDEF" }
+    }
     if (SS_PROBE_PATTERN.test(command) && result.code === 0) {
       return { code: 0, stderr: "", stdout: SS_PROBE_LISTENING_STDOUT }
     }
@@ -200,6 +212,12 @@ function buildMutexAwareExecSequence(
       await Promise.resolve()
       return { code: 0, stderr: "", stdout: "" }
     }
+    // R-0000766: route the dry-run mktemp call to a fixed stub path so the
+    // step cursor only advances over production-domain calls.
+    if (command === "mktemp -p /tmp -- 'paratix-sshd-dry-run.XXXXXX'") {
+      await Promise.resolve()
+      return { code: 0, stderr: "", stdout: "/tmp/paratix-sshd-dry-run.ABCDEF" }
+    }
     const step = steps[cursor] ?? { code: 0, stderr: "", stdout: "" }
     cursor += 1
     if ("kind" in step) {
@@ -227,10 +245,18 @@ function buildSequencedSsProbeExec(
   }
 }
 
+// R-0000766: route the dry-run mktemp call to a fixed stub path so the
+// validateProspectiveSshdConfig pipeline can proceed.
+const SSHD_DRY_RUN_MKTEMP_06 = "mktemp -p /tmp -- 'paratix-sshd-dry-run.XXXXXX'"
+const SSHD_DRY_RUN_TEMP_PATH_06 = "/tmp/paratix-sshd-dry-run.ABCDEF"
+
 function mockSshdDryRunExecSuccess(mockSsh: ReturnType<typeof createMockSsh>) {
   return vi.spyOn(mockSsh, "exec").mockImplementation(async (command) => {
     mockSsh.calls.push(command)
     await Promise.resolve()
+    if (command === SSHD_DRY_RUN_MKTEMP_06) {
+      return { code: 0, stderr: "", stdout: SSHD_DRY_RUN_TEMP_PATH_06 }
+    }
     if (SS_PROBE_PATTERN.test(command)) {
       return { code: 0, stderr: "", stdout: SS_PROBE_LISTENING_STDOUT }
     }
@@ -239,18 +265,17 @@ function mockSshdDryRunExecSuccess(mockSsh: ReturnType<typeof createMockSsh>) {
 }
 
 function mockSshdDryRunExecValidationFailure(mockSsh: ReturnType<typeof createMockSsh>) {
-  return vi
-    .spyOn(mockSsh, "exec")
-    .mockImplementationOnce(async (command) => {
-      mockSsh.calls.push(command)
-      await Promise.resolve()
-      return { code: 0, stderr: "", stdout: "" }
-    })
-    .mockImplementationOnce(async (command) => {
-      mockSsh.calls.push(command)
-      await Promise.resolve()
+  return vi.spyOn(mockSsh, "exec").mockImplementation(async (command) => {
+    mockSsh.calls.push(command)
+    await Promise.resolve()
+    if (command === SSHD_DRY_RUN_MKTEMP_06) {
+      return { code: 0, stderr: "", stdout: SSHD_DRY_RUN_TEMP_PATH_06 }
+    }
+    if (command.startsWith("sshd -t -f ")) {
       return { code: 1, stderr: "Bad configuration option", stdout: "" }
-    })
+    }
+    return { code: 0, stderr: "", stdout: "" }
+  })
 }
 
 // ─── sshd.config — apply ──────────────────────────────────────────────────────
@@ -602,11 +627,18 @@ describe("sshd.port — apply: validation and rollback", () => {
     // mkdir -p '/run/sshd' must run immediately before `sshd -t -f`.
     // R-0000613: filter mutex bookkeeping commands so the ordering assertion
     // sees only the domain calls.
-    const firstDomainCommand = execCommands.find((cmd) => !isMutexBookkeepingCommand(cmd))
+    // R-0000766: the dry-run mktemp call now precedes mkdir; treat it as
+    // setup noise (analogous to the mutex bookkeeping filter) so the
+    // ordering assertion still sees `mkdir -p '/run/sshd'` first.
+    const isDryRunMktemp = (cmd: string): boolean =>
+      cmd === "mktemp -p /tmp -- 'paratix-sshd-dry-run.XXXXXX'"
+    const firstDomainCommand = execCommands.find(
+      (cmd) => !isMutexBookkeepingCommand(cmd) && !isDryRunMktemp(cmd)
+    )
     expect(firstDomainCommand).toBe("mkdir -p '/run/sshd'")
     const mkdirIndex = execCommands.indexOf("mkdir -p '/run/sshd'")
     const dryRunIndex = execCommands.findIndex((cmd) =>
-      cmd.startsWith("sshd -t -f '/tmp/paratix-sshd-dry-run-")
+      cmd.startsWith("sshd -t -f '/tmp/paratix-sshd-dry-run.")
     )
     expect(mkdirIndex).toBeGreaterThanOrEqual(0)
     expect(dryRunIndex).toBeGreaterThan(mkdirIndex)

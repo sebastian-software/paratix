@@ -19,7 +19,7 @@ const createMockSsh: typeof createBaseMockSsh = (responses, options) =>
       allowFlagLockInternalDefaults: true,
       allowWrites: [
         // R-0000587: dry-run tempfiles carry restrictive 0600 permissions.
-        { options: { mode: "0600" }, remotePath: /^\/tmp\/paratix-sshd-dry-run-/v },
+        { options: { mode: "0600" }, remotePath: /^\/tmp\/paratix-sshd-dry-run\./v },
         ...(options?.allowWrites ?? []),
       ],
       responseStubs: [
@@ -31,11 +31,18 @@ const createMockSsh: typeof createBaseMockSsh = (responses, options) =>
         },
         { command: "mkdir -p '/run/sshd'", result: { code: 0 } },
         { command: "sshd -t", result: { code: 0 } },
+        // R-0000766: allocateProspectiveSshdConfigPath now allocates the
+        // dry-run path via `mktemp -p /tmp -- paratix-sshd-dry-run.XXXXXX`
+        // so the kernel — not Node's PRNG — owns name-collision avoidance.
+        {
+          command: "mktemp -p /tmp -- 'paratix-sshd-dry-run.XXXXXX'",
+          result: { code: 0, stdout: "/tmp/paratix-sshd-dry-run.ABCDEF" },
+        },
         // R-0000: validateProspectiveSshdConfig writes a temp file and
         // validates it with `sshd -t -f <UUID>.conf` before overwriting the
         // live config.
         {
-          command: /^sshd -t -f '\/tmp\/paratix-sshd-dry-run-[^']+\.conf'$/v,
+          command: /^sshd -t -f '\/tmp\/paratix-sshd-dry-run\.[^']+'$/v,
           result: { code: 0 },
         },
         {
@@ -86,7 +93,7 @@ const createMockSsh: typeof createBaseMockSsh = (responses, options) =>
         { command: "systemctl enable --now ssh.socket", result: { code: 0 } },
         { command: "systemctl enable --now sshd.socket", result: { code: 0 } },
         { command: "systemctl restart sshd", result: { code: 0 } },
-        { command: /^rm -f '\/tmp\/paratix-sshd-dry-run-.+\.conf'$/v, result: { code: 0 } },
+        { command: /^rm -f '\/tmp\/paratix-sshd-dry-run\..+'$/v, result: { code: 0 } },
         ...(options?.responseStubs ?? []),
       ],
     }

@@ -1,10 +1,9 @@
 /* eslint-disable max-lines -- sshd module keeps tightly coupled validation/restart helpers together */
-import { randomUUID } from "node:crypto"
-
 import { sshdPortMeta } from "../meta.js"
 import { failed, failedCommand } from "../moduleFailure.js"
 import { isValidTcpPort } from "../serverDefinitionValidation.js"
 import { CommandError, shellQuote } from "../sshHelpers.js"
+import { validateMktempPath } from "../ssh.js"
 import {
   type ExecResult,
   guardedWriteFile,
@@ -1127,11 +1126,53 @@ async function probeAlreadyOnOriginalPortBestEffort(
 // guardedWriteFile callers.
 const SSHD_DRY_RUN_TEMP_MODE = "0600"
 
+// R-0000766: allocate the prospective sshd_config dry-run path through
+// `mktemp -p /tmp -- paratix-sshd-dry-run.XXXXXX` (with the trailing `--`
+// guarding against template values being interpreted as options) and route
+// the result through `validateMktempPath` so the kernel — not Node's PRNG —
+// owns name collision avoidance and a hostile `mktemp` cannot smuggle an
+// unexpected path back. Mirrors the pattern in `allocateRemoteScriptPath`
+// in `modules/script.ts` and supersedes the legacy
+// `/tmp/paratix-sshd-dry-run-${randomUUID()}.conf` scheme that relied on
+// `ssh.writeFile` racing against any prior occupant of the path.
+const SSHD_DRY_RUN_TEMP_PREFIX = "paratix-sshd-dry-run"
+const SSHD_DRY_RUN_TEMP_DIRECTORY = "/tmp"
+
+async function allocateProspectiveSshdConfigPath(
+  ssh: SshConnection
+): Promise<ModuleResult | string> {
+  const template = `${SSHD_DRY_RUN_TEMP_PREFIX}.XXXXXX`
+  // R-0000565: the trailing `--` separates the template from any future
+  // `mktemp` options. R-0000766: matches `allocateRemoteScriptPath`.
+  const mktempResult = await ssh.exec(
+    `mktemp -p ${SSHD_DRY_RUN_TEMP_DIRECTORY} -- ${shellQuote(template)}`,
+    {
+      ignoreExitCode: true,
+      silent: true,
+    }
+  )
+  if (mktempResult.code !== 0) {
+    return failedCommand("[sshd dry-run] mktemp failed", mktempResult)
+  }
+  const remotePath = mktempResult.stdout.trim()
+  if (remotePath.length === 0) {
+    return failed("[sshd dry-run] mktemp returned an empty path")
+  }
+  try {
+    return validateMktempPath(SSHD_DRY_RUN_TEMP_DIRECTORY, remotePath, SSHD_DRY_RUN_TEMP_PREFIX)
+  } catch (error) {
+    const reason = error instanceof Error ? error.message : String(error)
+    return failed(`[sshd dry-run] mktemp returned an unsafe path: ${reason}`)
+  }
+}
+
 async function validateProspectiveSshdConfig(
   ssh: SshConnection,
   content: string
 ): Promise<ModuleResult | undefined> {
-  const temporaryConfigPath = `/tmp/paratix-sshd-dry-run-${randomUUID()}.conf`
+  const allocation = await allocateProspectiveSshdConfigPath(ssh)
+  if (typeof allocation !== "string") return allocation
+  const temporaryConfigPath = allocation
   try {
     await ssh.writeFile(temporaryConfigPath, content, { mode: SSHD_DRY_RUN_TEMP_MODE })
     await ensurePrivilegeSeparationDirectory(ssh)
@@ -1180,7 +1221,10 @@ async function validateProspectiveSshdConfigForDryRun(
       status: "skipped",
     }
   }
-  const temporaryConfigPath = `/tmp/paratix-sshd-dry-run-${randomUUID()}.conf`
+  // R-0000766: same mktemp-based allocation as `validateProspectiveSshdConfig`.
+  const allocation = await allocateProspectiveSshdConfigPath(ssh)
+  if (typeof allocation !== "string") return allocation
+  const temporaryConfigPath = allocation
   try {
     // R-0000587: same `0600` restriction as `validateProspectiveSshdConfig`.
     await ssh.writeFile(temporaryConfigPath, content, { mode: SSHD_DRY_RUN_TEMP_MODE })

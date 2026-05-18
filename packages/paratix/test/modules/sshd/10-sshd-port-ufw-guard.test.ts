@@ -111,18 +111,24 @@ const createMockSsh: typeof createBaseMockSsh = (responses, options) => {
     allowFlagLockInternalDefaults: true,
     allowWrites: [
       // R-0000587: dry-run tempfiles carry restrictive 0600 permissions.
-      { options: { mode: "0600" }, remotePath: /^\/tmp\/paratix-sshd-dry-run-/v },
+      { options: { mode: "0600" }, remotePath: /^\/tmp\/paratix-sshd-dry-run\./v },
       ...(options?.allowWrites ?? []),
     ],
     responseStubs: [
       { command: "mkdir -p '/run/sshd'", result: { code: 0 } },
       { command: "sshd -t", result: { code: 0 } },
+      // R-0000766: allocateProspectiveSshdConfigPath allocates the dry-run
+      // path via `mktemp -p /tmp -- paratix-sshd-dry-run.XXXXXX`.
+      {
+        command: "mktemp -p /tmp -- 'paratix-sshd-dry-run.XXXXXX'",
+        result: { code: 0, stdout: "/tmp/paratix-sshd-dry-run.ABCDEF" },
+      },
       { command: SYSTEMCTL_CAT_SSHD, result: { code: 0 } },
       { command: SYSTEMCTL_CAT_SSH, result: { code: 1 } },
       { command: "systemctl is-enabled --quiet sshd.service", result: { code: 0 } },
       { command: "systemctl cat ssh.socket >/dev/null 2>&1", result: { code: 1 } },
       { command: "systemctl restart sshd", result: { code: 0 } },
-      { command: /^rm -f '\/tmp\/paratix-sshd-dry-run-.+\.conf'$/v, result: { code: 0 } },
+      { command: /^rm -f '\/tmp\/paratix-sshd-dry-run\..+'$/v, result: { code: 0 } },
       // R-0000283: post-restart live verify defaults to "listener present" so
       // the existing fixtures keep proceeding past the new verify step.
       {
@@ -159,9 +165,16 @@ function trackWriteFile(
 const SS_PROBE_PATTERN = /^ss -H -ltnp 'sport = :\d+'$/v
 const SS_PROBE_LISTENING_STDOUT = 'LISTEN 0 128 0.0.0.0:0 users:(("sshd",pid=1,fd=3))\n'
 
+// R-0000766: route the dry-run mktemp call to a fixed stub path.
+const SSHD_DRY_RUN_MKTEMP_10 = "mktemp -p /tmp -- 'paratix-sshd-dry-run.XXXXXX'"
+const SSHD_DRY_RUN_TEMP_PATH_10 = "/tmp/paratix-sshd-dry-run.ABCDEF"
+
 function spyExecSuccessAcceptingSsProbe(mockSsh: ReturnType<typeof createMockSsh>) {
   return vi.spyOn(mockSsh, "exec").mockImplementation(async (command) => {
     await Promise.resolve()
+    if (command === SSHD_DRY_RUN_MKTEMP_10) {
+      return { code: 0, stderr: "", stdout: SSHD_DRY_RUN_TEMP_PATH_10 }
+    }
     if (SS_PROBE_PATTERN.test(command)) {
       return { code: 0, stderr: "", stdout: SS_PROBE_LISTENING_STDOUT }
     }
