@@ -13,7 +13,11 @@ import {
   hasSensitiveQueryParameters,
   validateHeaderPair,
 } from "./curlHelpers.js"
-import { renderChownCommand } from "./fileMetadataHelpers.js"
+import {
+  renderChownCommand,
+  renderGuardedChmodCommand,
+  renderGuardedChownCommand,
+} from "./fileMetadataHelpers.js"
 import { applyWithFlagLock, hasFlag, setVersionedFlag } from "./moduleHelpers.js"
 import { validateHttpUrl } from "./netHelpers.js"
 
@@ -655,7 +659,7 @@ async function healModeDrift(
   }
   validateMode(parameters.mode)
   const result = await conn.exec(
-    `chmod ${shellQuote(parameters.mode)} ${shellQuote(parameters.destination)}`,
+    renderGuardedChmodCommand(parameters.mode, parameters.destination),
     { ignoreExitCode: true, secrets: parameters.secrets, silent: true }
   )
   if (result.code !== 0) {
@@ -678,7 +682,7 @@ async function healOwnerDrift(
 ): Promise<DriftHealOutcome> {
   if (!downloadOwnerDrifted(current, parameters)) return { changed: false }
   const ownerSpec = `${parameters.owner ?? ""}:${parameters.group ?? ""}`
-  const result = await conn.exec(renderChownCommand(ownerSpec, parameters.destination), {
+  const result = await conn.exec(renderGuardedChownCommand(ownerSpec, parameters.destination), {
     ignoreExitCode: true,
     secrets: parameters.secrets,
     silent: true,

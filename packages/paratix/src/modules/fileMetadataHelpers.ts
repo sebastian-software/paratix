@@ -62,6 +62,11 @@ export function renderGuardedChownCommand(ownerSpec: string, remotePath: string)
   return renderGuardedMetadataCommand("chown", remotePath, ownerSpec)
 }
 
+export function renderGuardedChmodCommand(mode: string, remotePath: string): string {
+  validateMode(mode)
+  return renderGuardedMetadataCommand("chmod", remotePath, mode)
+}
+
 function renderGuardedMetadataCommand(
   kind: "chmod" | "chown",
   remotePath: string,

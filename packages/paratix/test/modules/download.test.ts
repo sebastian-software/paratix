@@ -66,6 +66,12 @@ const defaultCurlTimeoutFlags = "--connect-timeout '10' --max-time '300'"
 const httpsOnlyCurlProtocolFlags = `${defaultCurlTimeoutFlags} --proto '=https' --proto-redir '=https'`
 const insecureHttpCurlProtocolFlags = `${defaultCurlTimeoutFlags} --proto '=http,https' --proto-redir '=http,https'`
 
+function findGuardedMetadataCall(calls: string[], operation: string): string | undefined {
+  return calls.find(
+    (call) => call.includes("before=$(stat -c '%d:%i:%F' -- \"$path\")") && call.includes(operation)
+  )
+}
+
 function buildSafeDownloadApplyStubs(): NonNullable<
   NonNullable<Parameters<typeof createBaseMockSsh>[1]>["responseStubs"]
 > {
@@ -79,6 +85,12 @@ function buildSafeDownloadApplyStubs(): NonNullable<
     {
       // eslint-disable-next-line security/detect-unsafe-regex -- bounded mock command regex, not user input
       command: /^chmod '[0-7]{3,4}' '\/(?:opt|tmp|usr|var)(?:\/[^\/']+)*'$/v,
+      result: { code: 0 },
+    },
+    {
+      command:
+        // eslint-disable-next-line security/detect-unsafe-regex -- bounded mock command regex, not user input
+        /^path='\/(?:opt|tmp|usr|var)(?:\/[^\/']+)*'\nbefore=\$\(stat -c '%d:%i:%F' -- "\$path"\)/v,
       result: { code: 0 },
     },
     {
@@ -1224,7 +1236,9 @@ describe("download.url", () => {
         const result = await mod.apply(mockSsh, emptyEnv)
         expect(result.status).toBe("changed")
         expect(mockSsh.calls).not.toContain(`chmod '0755' '${destination}'`)
-        expect(mockSsh.calls).toContain(`chown -- 'deploy:staff' '${destination}'`)
+        expect(findGuardedMetadataCall(mockSsh.calls, "chown -- 'deploy:staff'")).toContain(
+          `[ -L "$path" ]`
+        )
         expect(mockSsh.calls.every((c) => !c.startsWith("curl"))).toBe(true)
       })
 
@@ -1263,10 +1277,45 @@ describe("download.url", () => {
         const mod = download.url(destination, url, { mode: "0755", sha256 })
         const result = await mod.apply(mockSsh, emptyEnv)
         expect(result.status).toBe("changed")
-        expect(mockSsh.calls).toContain(`chmod '0755' '${destination}'`)
+        expect(findGuardedMetadataCall(mockSsh.calls, "chmod -- '0755'")).toContain(
+          `[ -L "$path" ]`
+        )
         expect(mockSsh.calls.every((c) => !c.startsWith("curl"))).toBe(true)
         expect(mockSsh.calls.every((c) => !c.startsWith("mktemp"))).toBe(true)
         expect(mockSsh.calls.every((c) => !c.startsWith("mv "))).toBe(true)
+      })
+
+      it("fails metadata heal when guarded chmod detects a swapped target", async () => {
+        const guardedChmodCommand = [
+          `path='${destination}'`,
+          `before=$(stat -c '%d:%i:%F' -- "$path") || exit $?`,
+          `if [ -L "$path" ]; then`,
+          `  printf '%s\\n' 'refuses to operate through symlink' >&2`,
+          `  exit 1`,
+          `fi`,
+          `after=$(stat -c '%d:%i:%F' -- "$path") || exit $?`,
+          `if [ "$before" != "$after" ]; then`,
+          `  printf '%s\\n' 'metadata target changed before chmod' >&2`,
+          `  exit 1`,
+          `fi`,
+          `chmod -- '0755' "$path"`,
+        ].join("\n")
+        const mockSsh = createMockSsh({
+          [`[ -e '${destination}' ]`]: { code: 0 },
+          [`[ -f '${destination}' ]`]: { code: 0 },
+          [`sha256sum '${destination}'`]: { stdout: `${sha256}  ${destination}` },
+          [guardedChmodCommand]: {
+            code: 1,
+            stderr: "metadata target changed before chmod\n",
+          },
+        })
+        const mod = download.url(destination, url, { mode: "0755", sha256 })
+        const result = await mod.apply(mockSsh, emptyEnv)
+
+        expect(result.status).toBe("failed")
+        expect(result.error?.message).toContain(`[download] chmod failed for ${destination}`)
+        expect(mockSsh.calls).toContain(guardedChmodCommand)
+        expect(mockSsh.calls).not.toContain(`chmod '0755' '${destination}'`)
       })
 
       it("heals owner drift via chown only when sha256 matches and destination exists", async () => {
@@ -1280,7 +1329,9 @@ describe("download.url", () => {
         const mod = download.url(destination, url, { owner: "deploy", sha256 })
         const result = await mod.apply(mockSsh, emptyEnv)
         expect(result.status).toBe("changed")
-        expect(mockSsh.calls).toContain(`chown -- 'deploy:' '${destination}'`)
+        expect(findGuardedMetadataCall(mockSsh.calls, "chown -- 'deploy:'")).toContain(
+          `[ -L "$path" ]`
+        )
         expect(mockSsh.calls.every((c) => !c.startsWith("curl"))).toBe(true)
         expect(mockSsh.calls.every((c) => !c.startsWith("mktemp"))).toBe(true)
       })
@@ -1371,7 +1422,9 @@ describe("download.url", () => {
         const result = await mod.apply(mockSsh, emptyEnv)
         expect(result.status).toBe("changed")
         expect(mockSsh.calls.every((c) => !c.startsWith("curl"))).toBe(true)
-        expect(mockSsh.calls).toContain(`chmod '0755' '${destination}'`)
+        expect(findGuardedMetadataCall(mockSsh.calls, "chmod -- '0755'")).toContain(
+          `[ -L "$path" ]`
+        )
       })
     })
   })
@@ -2295,7 +2348,7 @@ describe("download.large", () => {
       const mod = download.large(destination, url, { mode: "0755", sha256 })
       const result = await mod.apply(mockSsh, emptyEnv)
       expect(result.status).toBe("changed")
-      expect(mockSsh.calls).toContain(`chmod '0755' '${destination}'`)
+      expect(findGuardedMetadataCall(mockSsh.calls, "chmod -- '0755'")).toContain(`[ -L "$path" ]`)
       expect(mockSsh.calls).toContain(
         buildLargeDownloadVersionedFlagCommand({ destination, flagName })
       )
@@ -2477,7 +2530,7 @@ describe("download.large", () => {
       const mod = download.large(destination, url, { mode: "0755", sha256 })
       const result = await mod.apply(mockSsh, emptyEnv)
       expect(result.status).toBe("changed")
-      expect(mockSsh.calls).toContain(`chmod '0755' '${destination}'`)
+      expect(findGuardedMetadataCall(mockSsh.calls, "chmod -- '0755'")).toContain(`[ -L "$path" ]`)
       expect(mockSsh.calls).toContain(
         buildLargeDownloadVersionedFlagCommand({ destination, flagName })
       )
