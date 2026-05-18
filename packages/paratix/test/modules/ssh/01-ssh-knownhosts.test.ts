@@ -391,6 +391,30 @@ describe("ssh.knownHosts", () => {
     })
   })
 
+  // R-0000713: defense-in-depth — the module constructor rejects
+  // state="present" without a trust anchor, but if a future refactor or
+  // option mutation lets the check phase observe an anchor-less options
+  // object, the bare `ssh-keygen -F` fallback must not silently report
+  // "ok" against a pre-existing TOFU acceptance. The check must fail
+  // closed (NEEDS_APPLY) so apply re-runs the verification path. We
+  // simulate the bypass by mutating the captured options after the module
+  // was constructed.
+  it("R-0000713: check returns needs-apply when state=present sees no trust anchor at runtime", async () => {
+    const mockSsh = createMockSsh({
+      [`ssh-keygen -F 'github.com' -f '${knownHostsPath}'`]: {
+        code: 0,
+        stdout: `${scannedLine}\n`,
+      },
+    })
+    const options: { expectedFingerprint?: string } = { expectedFingerprint: hostFingerprint }
+    const mod = ssh.knownHosts("github.com", options)
+    // Drop the trust anchor after construction. The constructor already
+    // accepted the module because the anchor was present at that point.
+    delete options.expectedFingerprint
+    const result = await mod.check(mockSsh, emptyEnv)
+    expect(result).toBe("needs-apply")
+  })
+
   it("check returns needs-apply when ssh is null", async () => {
     const mod = ssh.knownHosts("github.com", { expectedFingerprint: hostFingerprint })
     const result = await mod.check(null, emptyEnv)

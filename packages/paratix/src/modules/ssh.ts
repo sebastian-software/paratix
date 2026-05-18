@@ -939,16 +939,20 @@ export const ssh = {
             : NEEDS_APPLY
         }
 
-        const hostKnown =
-          state === "absent"
-            ? await hasKnownHostEntry(conn, { host, knownHostsPath, options })
-            : await conn.test(
-                `ssh-keygen -F ${shellQuote(knownHostsLookupTarget(host, options))} -f ${shellQuote(knownHostsPath)}`
-              )
-
+        // R-0000713: defense-in-depth — `state === "present"` is rejected at
+        // module construction when no trust anchor is configured (see
+        // `hasKnownHostsTrustAnchor` guard above the returned module). If a
+        // future refactor or option mutation lets execution reach here with
+        // state="present" and no anchor, the bare `ssh-keygen -F` fallback
+        // below would happily report "ok" for any pre-existing entry —
+        // including a stale TOFU acceptance — without verifying the captured
+        // host key against the configured anchor. Fail closed by returning
+        // NEEDS_APPLY so apply re-runs the verification path.
         if (state === "present") {
-          return hostKnown ? "ok" : NEEDS_APPLY
+          return NEEDS_APPLY
         }
+
+        const hostKnown = await hasKnownHostEntry(conn, { host, knownHostsPath, options })
         return hostKnown ? NEEDS_APPLY : "ok"
       },
       name: `ssh.knownHosts: ${host} (${state})`,
