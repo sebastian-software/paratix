@@ -53,7 +53,18 @@ function isPrintableAsciiByte(byte: number): boolean {
   return byte >= PRINTABLE_ASCII_MIN && byte <= PRINTABLE_ASCII_MAX
 }
 
-function extractHostKeyAlgorithm(keyBuffer: Buffer): string {
+// R-0000733: extractHostKeyAlgorithm now returns both the parsed
+// algorithm string and the wire offset that follows the algorithm
+// field. Threading that nextOffset through to validateHostKeyBlob keeps
+// the wire-position computation in a single place — the consumer no
+// longer has to recompute `4 + Buffer.byteLength(algorithm, "ascii")`
+// and risk drifting from the bytes the wire actually contains.
+type HostKeyAlgorithmExtractionResult = {
+  algorithm: string
+  nextOffset: number
+}
+
+function extractHostKeyAlgorithm(keyBuffer: Buffer): HostKeyAlgorithmExtractionResult {
   if (keyBuffer.length < SSH_KEY_ALGO_LENGTH_FIELD_BYTES) {
     throw new Error("Invalid SSH host key buffer: too short to contain an algorithm length field")
   }
@@ -70,19 +81,22 @@ function extractHostKeyAlgorithm(keyBuffer: Buffer): string {
       throw new Error("Invalid SSH host key buffer: algorithm field contains non-printable bytes")
     }
   }
-  return algorithmBytes.toString("ascii")
+  return {
+    algorithm: algorithmBytes.toString("ascii"),
+    nextOffset: SSH_KEY_ALGO_LENGTH_FIELD_BYTES + algoLength,
+  }
 }
 
-function assertSupportedHostKeyAlgorithm(keyBuffer: Buffer): string {
-  const algorithm = extractHostKeyAlgorithm(keyBuffer)
-  if (!ACCEPTED_HOST_KEY_ALGORITHMS.has(algorithm)) {
+function assertSupportedHostKeyAlgorithm(keyBuffer: Buffer): HostKeyAlgorithmExtractionResult {
+  const extraction = extractHostKeyAlgorithm(keyBuffer)
+  if (!ACCEPTED_HOST_KEY_ALGORITHMS.has(extraction.algorithm)) {
     throw new Error(
-      `Refusing to capture host fingerprint: unsupported SSH host key algorithm "${algorithm}". ` +
+      `Refusing to capture host fingerprint: unsupported SSH host key algorithm "${extraction.algorithm}". ` +
         `This may indicate a man-in-the-middle attack. ` +
         `Expected one of: ${[...ACCEPTED_HOST_KEY_ALGORITHMS].sort().join(", ")}.`
     )
   }
-  return algorithm
+  return extraction
 }
 
 function computeFingerprint(key: Buffer): string {
@@ -110,12 +124,16 @@ function createConnectionConfig(parameters: {
       try {
         // R-0000123: capture the algorithm name alongside the fingerprint so
         // the interactive prompt can show both values to the operator.
-        const algorithm = assertSupportedHostKeyAlgorithm(buffer)
+        // R-0000733: extractHostKeyAlgorithm also returns the wire offset
+        // that follows the algorithm field, so validateHostKeyBlob can
+        // consume the authoritative position instead of recomputing it
+        // from the algorithm string length.
+        const { algorithm, nextOffset } = assertSupportedHostKeyAlgorithm(buffer)
         // R-0000128: an algorithm label alone proves nothing — a MITM can
         // ship arbitrary bytes after the label. Reject malformed wire
         // payloads (truncated, wrong curve, point off-curve) before we
         // pin a fingerprint computed over them.
-        validateHostKeyBlob(buffer, algorithm)
+        validateHostKeyBlob(buffer, algorithm, nextOffset)
         captureScanResult({ algorithm, fingerprint: computeFingerprint(buffer) })
       } catch (error) {
         captureHostVerifierError(error)

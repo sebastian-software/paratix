@@ -184,7 +184,11 @@ function validateEcdsaHostKeyBlob(keyBuffer: Buffer, offset: number, algorithm: 
  * @param algorithm - Algorithm label already validated against the allowlist.
  * @throws {Error} When the blob does not match the algorithm's expected structure.
  */
-export function validateHostKeyBlob(keyBuffer: Buffer, algorithm: string): void {
+export function validateHostKeyBlob(
+  keyBuffer: Buffer,
+  algorithm: string,
+  payloadOffsetHint?: number
+): void {
   // R-0000732: derive the payload offset from the wire format itself
   // rather than re-deriving it from the algorithm string. The previous
   // implementation computed `payloadOffset = 4 + Buffer.byteLength(algorithm)`
@@ -195,6 +199,13 @@ export function validateHostKeyBlob(keyBuffer: Buffer, algorithm: string): void 
   // Parsing the leading wire string here and comparing it byte-for-byte
   // against the expected algorithm closes that gap and gives us the
   // authoritative offset for the remainder of the payload.
+  //
+  // R-0000733: when the caller already parsed the algorithm wire field
+  // (extractHostKeyAlgorithm in hostFingerprintBootstrap), it threads
+  // the resulting nextOffset in via payloadOffsetHint. We still parse
+  // the algorithm field locally to guarantee fail-closed behaviour for
+  // direct callers, and assert that the hint matches the parsed
+  // offset so the two callsites cannot drift.
   const algorithmField = readWireString(keyBuffer, 0)
   if (algorithmField == null) {
     throwInvalidHostKeyBlob(algorithm, "missing or truncated algorithm field")
@@ -207,6 +218,12 @@ export function validateHostKeyBlob(keyBuffer: Buffer, algorithm: string): void 
     )
   }
   const payloadOffset = algorithmField.nextOffset
+  if (payloadOffsetHint !== undefined && payloadOffsetHint !== payloadOffset) {
+    throwInvalidHostKeyBlob(
+      algorithm,
+      `payload offset hint ${String(payloadOffsetHint)} does not match parsed offset ${String(payloadOffset)}`
+    )
+  }
 
   if (algorithm === "ssh-ed25519") {
     validateEd25519HostKeyBlob(keyBuffer, payloadOffset, algorithm)
