@@ -1,3 +1,7 @@
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs"
+import { tmpdir } from "node:os"
+import { join } from "node:path"
+
 import { describe, expect, it } from "vitest"
 
 import { script } from "../../src/index.js"
@@ -7,6 +11,23 @@ import { createStrictMockSsh } from "../helpers/mockSsh.js"
 const emptyEnv = {}
 
 const FLAGS_DIRECTORY = "/var/lib/paratix/flags"
+
+// R-0000717: script.once now validates that `localPath` resolves to a
+// regular file at module-construction time. Tests use a real fixture in a
+// temp directory so the validation accepts the path. The fixture is
+// created eagerly at module load (synchronous) so it is available for all
+// top-level `script.once(...)` calls inside the various `describe` blocks
+// below. Cleanup runs via Vitest's process-level `afterAll`-style hook
+// using `process.on("beforeExit")`, which keeps the cleanup out of any
+// individual `describe` block (so a sibling describe does not prematurely
+// remove the fixture between tests) while still satisfying
+// `eslint-plugin-vitest(require-top-level-describe)`.
+const LOCAL_SCRIPT_DIRECTORY = mkdtempSync(join(tmpdir(), "paratix-script-test-"))
+const LOCAL_SCRIPT_PATH = join(LOCAL_SCRIPT_DIRECTORY, "setup.sh")
+writeFileSync(LOCAL_SCRIPT_PATH, "#!/bin/sh\nexit 0\n", { mode: 0o755 })
+process.once("beforeExit", () => {
+  rmSync(LOCAL_SCRIPT_DIRECTORY, { force: true, recursive: true })
+})
 
 /**
  * Build the deterministic stdout that the mock returns for the per-run
@@ -60,7 +81,7 @@ function createScriptMockSsh(options?: {
       allowFlagLockInternalDefaults: true,
       allowUploads: [
         {
-          localPath: "/local/setup.sh",
+          localPath: LOCAL_SCRIPT_PATH,
           options: undefined,
           remotePath: /^\/tmp\/paratix-script-[^.]+\.[^.]+$/v,
         },
@@ -78,7 +99,7 @@ describe("script.once — check", () => {
     const mockSsh = createStrictMockSsh({
       [`[ -f ${FLAGS_DIRECTORY}/'script-setup-1' ]`]: { code: 1 },
     })
-    const mod = script.once("setup", "/local/setup.sh")
+    const mod = script.once("setup", LOCAL_SCRIPT_PATH)
     const result = await mod.check(mockSsh, emptyEnv)
     expect(result).toBe("needs-apply")
   })
@@ -87,13 +108,13 @@ describe("script.once — check", () => {
     const mockSsh = createStrictMockSsh({
       [`[ -f ${FLAGS_DIRECTORY}/'script-setup-1' ]`]: { code: 0 },
     })
-    const mod = script.once("setup", "/local/setup.sh")
+    const mod = script.once("setup", LOCAL_SCRIPT_PATH)
     const result = await mod.check(mockSsh, emptyEnv)
     expect(result).toBe("ok")
   })
 
   it("returns needs-apply when ssh is null", async () => {
-    const mod = script.once("setup", "/local/setup.sh")
+    const mod = script.once("setup", LOCAL_SCRIPT_PATH)
     const result = await mod.check(null, emptyEnv)
     expect(result).toBe("needs-apply")
   })
@@ -102,7 +123,7 @@ describe("script.once — check", () => {
     const mockSsh = createStrictMockSsh({
       [`[ -f ${FLAGS_DIRECTORY}/'script-setup-2' ]`]: { code: 0 },
     })
-    const mod = script.once("setup", "/local/setup.sh", { version: "2" })
+    const mod = script.once("setup", LOCAL_SCRIPT_PATH, { version: "2" })
     const result = await mod.check(mockSsh, emptyEnv)
     expect(result).toBe("ok")
     expect(mockSsh.calls).toContain(`[ -f ${FLAGS_DIRECTORY}/'script-setup-2' ]`)
@@ -117,7 +138,7 @@ describe("script.once — apply", () => {
   it("uploads script, makes it executable, runs it, cleans up, and sets flag", async () => {
     const mockSsh = createScriptMockSsh()
     const remotePath = makeRemoteScriptPath("setup")
-    const mod = script.once("setup", "/local/setup.sh")
+    const mod = script.once("setup", LOCAL_SCRIPT_PATH)
     const result = await mod.apply(mockSsh, emptyEnv)
 
     expect(result.status).toBe("changed")
@@ -143,7 +164,7 @@ describe("script.once — apply", () => {
   it("executes calls in correct order", async () => {
     const mockSsh = createScriptMockSsh()
     const remotePath = makeRemoteScriptPath("setup")
-    const mod = script.once("setup", "/local/setup.sh")
+    const mod = script.once("setup", LOCAL_SCRIPT_PATH)
     await mod.apply(mockSsh, emptyEnv)
 
     const mkdirIdx = mockSsh.calls.indexOf(`mkdir -p ${FLAGS_DIRECTORY}`)
@@ -162,7 +183,7 @@ describe("script.once — apply", () => {
   })
 
   it("returns failed when ssh is null", async () => {
-    const mod = script.once("setup", "/local/setup.sh")
+    const mod = script.once("setup", LOCAL_SCRIPT_PATH)
     // eslint-disable-next-line prefer-spread
     const result = await mod.apply(null, emptyEnv)
     expect(result.status).toBe("failed")
@@ -176,7 +197,7 @@ describe("script.once — apply", () => {
         [`'${remotePath}'`]: { code: 1, stderr: "boom" },
       },
     })
-    const mod = script.once("setup", "/local/setup.sh")
+    const mod = script.once("setup", LOCAL_SCRIPT_PATH)
     const result = await mod.apply(mockSsh, emptyEnv)
     expect(result.status).toBe("failed")
     expect(result.error).toBeInstanceOf(Error)
@@ -191,7 +212,7 @@ describe("script.once — apply", () => {
         [`'${remotePath}'`]: { code: 1 },
       },
     })
-    const mod = script.once("setup", "/local/setup.sh")
+    const mod = script.once("setup", LOCAL_SCRIPT_PATH)
     await mod.apply(mockSsh, emptyEnv)
     expect(mockSsh.calls).toContain(`rm -f -- '${remotePath}'`)
   })
@@ -204,7 +225,7 @@ describe("script.once — apply", () => {
       await Promise.resolve()
       throw new Error("upload failed")
     }
-    const mod = script.once("setup", "/local/setup.sh")
+    const mod = script.once("setup", LOCAL_SCRIPT_PATH)
 
     const result = await mod.apply(mockSsh, emptyEnv)
 
@@ -225,7 +246,7 @@ describe("script.once — apply", () => {
         [`'${remotePath}'`]: { code: 1 },
       },
     })
-    const mod = script.once("setup", "/local/setup.sh")
+    const mod = script.once("setup", LOCAL_SCRIPT_PATH)
     await mod.apply(mockSsh, emptyEnv)
     const flagCall = mockSsh.calls.find((c) => c.includes("touch"))
     expect(flagCall).toBeUndefined()
@@ -241,7 +262,7 @@ describe("script.once — apply", () => {
         [`chmod +x '${remotePath}'`]: { code: 1, stderr: "chmod: Read-only file system" },
       },
     })
-    const mod = script.once("setup", "/local/setup.sh")
+    const mod = script.once("setup", LOCAL_SCRIPT_PATH)
     const result = await mod.apply(mockSsh, emptyEnv)
     expect(result.status).toBe("failed")
     expect(String(result.error)).toContain("[script.once: setup] chmod failed")
@@ -260,7 +281,7 @@ describe("script.once — apply", () => {
         [`rm -f -- '${remotePath}'`]: { code: 1, stderr: "rm: read-only file system" },
       },
     })
-    const mod = script.once("setup", "/local/setup.sh")
+    const mod = script.once("setup", LOCAL_SCRIPT_PATH)
     const result = await mod.apply(mockSsh, emptyEnv)
 
     // The rm cleanup ran with ignoreExitCode, so the successful run is preserved.
@@ -275,7 +296,7 @@ describe("script.once — apply", () => {
     const mockSsh = createStrictMockSsh({
       [`[ -f ${FLAGS_DIRECTORY}/'script-setup-1' ]`]: { code: 0 },
     })
-    const mod = script.once("setup", "/local/setup.sh")
+    const mod = script.once("setup", LOCAL_SCRIPT_PATH)
     const result = await mod.apply(mockSsh, emptyEnv)
 
     expect(result).toStrictEqual({ status: "ok" })
@@ -287,7 +308,7 @@ describe("script.once — apply", () => {
   it("passes shell-quoted arguments to script", async () => {
     const remotePath = makeRemoteScriptPath("setup")
     const mockSsh = createScriptMockSsh({ args: ["--env", "production"] })
-    const mod = script.once("setup", "/local/setup.sh", { args: ["--env", "production"] })
+    const mod = script.once("setup", LOCAL_SCRIPT_PATH, { args: ["--env", "production"] })
     await mod.apply(mockSsh, emptyEnv)
     expect(mockSsh.calls).toContain(`'${remotePath}' '--env' 'production'`)
   })
@@ -296,7 +317,7 @@ describe("script.once — apply", () => {
     const remotePath = makeRemoteScriptPath("setup")
     const args = ["a'b", String.raw`x\y`, "$(id)"]
     const mockSsh = createScriptMockSsh({ args })
-    const mod = script.once("setup", "/local/setup.sh", { args })
+    const mod = script.once("setup", LOCAL_SCRIPT_PATH, { args })
 
     await mod.apply(mockSsh, emptyEnv)
 
@@ -308,7 +329,7 @@ describe("script.once — apply", () => {
   it("does not append arguments when args is an empty array", async () => {
     const remotePath = makeRemoteScriptPath("setup")
     const mockSsh = createScriptMockSsh()
-    const mod = script.once("setup", "/local/setup.sh", { args: [] })
+    const mod = script.once("setup", LOCAL_SCRIPT_PATH, { args: [] })
     await mod.apply(mockSsh, emptyEnv)
     expect(mockSsh.calls).toContain(`'${remotePath}'`)
   })
@@ -322,8 +343,8 @@ describe("script.once — apply", () => {
     const mockSshA = createScriptMockSsh({ remoteSuffix: "AAAAAA" })
     const mockSshB = createScriptMockSsh({ remoteSuffix: "BBBBBB" })
 
-    const modA = script.once("setup", "/local/setup.sh")
-    const modB = script.once("setup", "/local/setup.sh")
+    const modA = script.once("setup", LOCAL_SCRIPT_PATH)
+    const modB = script.once("setup", LOCAL_SCRIPT_PATH)
 
     const [resultA, resultB] = await Promise.all([
       modA.apply(mockSshA, emptyEnv),
@@ -342,7 +363,7 @@ describe("script.once — apply", () => {
 
   it("creates the remote path via mktemp -p /tmp paratix-script-<name>.XXXXXX", async () => {
     const mockSsh = createScriptMockSsh()
-    const mod = script.once("setup", "/local/setup.sh")
+    const mod = script.once("setup", LOCAL_SCRIPT_PATH)
     await mod.apply(mockSsh, emptyEnv)
     expect(mockSsh.calls).toContain("mktemp -p /tmp -- 'paratix-script-setup.XXXXXX'")
   })
@@ -359,7 +380,7 @@ describe("script.once — apply", () => {
         "mktemp -p /tmp -- 'paratix-script-setup.XXXXXX'": { code: 0, stdout },
       },
     })
-    const mod = script.once("setup", "/local/setup.sh")
+    const mod = script.once("setup", LOCAL_SCRIPT_PATH)
 
     const result = await mod.apply(mockSsh, emptyEnv)
 
@@ -374,7 +395,7 @@ describe("script.once — apply", () => {
 
   it("uses correct flag name with custom version", async () => {
     const mockSsh = createScriptMockSsh({ version: "2" })
-    const mod = script.once("setup", "/local/setup.sh", { version: "2" })
+    const mod = script.once("setup", LOCAL_SCRIPT_PATH, { version: "2" })
     await mod.apply(mockSsh, emptyEnv)
     expect(mockSsh.calls).toContain(
       `find ${FLAGS_DIRECTORY} -maxdepth 1 -name 'script-setup-*' ! -name '*.lock' -delete && touch ${FLAGS_DIRECTORY}/'script-setup-2'`
@@ -383,7 +404,7 @@ describe("script.once — apply", () => {
 
   it("removes old version flags before setting new flag", async () => {
     const mockSsh = createScriptMockSsh({ version: "3" })
-    const mod = script.once("setup", "/local/setup.sh", { version: "3" })
+    const mod = script.once("setup", LOCAL_SCRIPT_PATH, { version: "3" })
     await mod.apply(mockSsh, emptyEnv)
     const flagCall = mockSsh.calls.find((c) => c.includes("touch"))
     expect(flagCall).toContain(
@@ -399,17 +420,17 @@ describe("script.once — apply", () => {
 
 describe("script.once — name", () => {
   it("has correct name format: script.once: <name> (v<version>)", () => {
-    const mod = script.once("setup", "/local/setup.sh")
+    const mod = script.once("setup", LOCAL_SCRIPT_PATH)
     expect(mod.name).toBe("script.once: setup (v1)")
   })
 
   it("uses default version 1 in name", () => {
-    const mod = script.once("setup", "/local/setup.sh")
+    const mod = script.once("setup", LOCAL_SCRIPT_PATH)
     expect(mod.name).toBe("script.once: setup (v1)")
   })
 
   it("uses custom version in name", () => {
-    const mod = script.once("setup", "/local/setup.sh", { version: "2" })
+    const mod = script.once("setup", LOCAL_SCRIPT_PATH, { version: "2" })
     expect(mod.name).toBe("script.once: setup (v2)")
   })
 })
@@ -421,7 +442,7 @@ describe("script.once — name", () => {
 describe("script.once — flagPrefix is shell-quoted to prevent injection", () => {
   it("find command uses shellQuote on flagPrefix to prevent command injection", async () => {
     const mockSsh = createScriptMockSsh({ name: "my-script" })
-    const mod = script.once("my-script", "/local/setup.sh")
+    const mod = script.once("my-script", LOCAL_SCRIPT_PATH)
     await mod.apply(mockSsh, emptyEnv)
 
     // The find command that clears old version flags must shell-quote the prefix
@@ -439,14 +460,53 @@ describe("script.once — flagPrefix is shell-quoted to prevent injection", () =
 
 describe("script.once — input validation", () => {
   it("throws when name contains spaces", () => {
-    expect(() => script.once("my setup", "/local/setup.sh")).toThrow(/name must match/v)
+    expect(() => script.once("my setup", LOCAL_SCRIPT_PATH)).toThrow(/name must match/v)
   })
 
   it("throws when name contains shell metacharacters", () => {
-    expect(() => script.once("setup;rm", "/local/setup.sh")).toThrow(/name must match/v)
+    expect(() => script.once("setup;rm", LOCAL_SCRIPT_PATH)).toThrow(/name must match/v)
   })
 
   it("allows alphanumeric names with dots, hyphens, and underscores", () => {
-    expect(() => script.once("my-setup_v1.0", "/local/setup.sh")).not.toThrow()
+    expect(() => script.once("my-setup_v1.0", LOCAL_SCRIPT_PATH)).not.toThrow()
+  })
+
+  // R-0000717: localPath must point to a regular file. Misconfigured
+  // playbooks (wrong path, accidentally pointing at a directory, dangling
+  // symlink) must fail at module-construction time, not mid-apply.
+  it("R-0000717: throws when localPath does not exist", () => {
+    expect(() => script.once("setup", join(LOCAL_SCRIPT_DIRECTORY, "missing.sh"))).toThrow(
+      /cannot read local script/v
+    )
+  })
+
+  it("R-0000717: throws when localPath is a directory", () => {
+    expect(() => script.once("setup", LOCAL_SCRIPT_DIRECTORY)).toThrow(
+      /expected a regular file/v
+    )
+  })
+
+  // R-0000717: cap the number of CLI arguments forwarded to the remote
+  // process so command lines cannot silently exceed the kernel `ARG_MAX`
+  // at execution time.
+  it("R-0000717: throws when args length exceeds the documented cap", () => {
+    const tooManyArgs = Array.from({ length: 1025 }, (_, index) => `arg-${String(index)}`)
+    expect(() => script.once("setup", LOCAL_SCRIPT_PATH, { args: tooManyArgs })).toThrow(
+      /args must contain at most 1024 entries/v
+    )
+  })
+
+  it("R-0000717: throws when a single arg exceeds the per-argument length cap", () => {
+    const longArg = "x".repeat(4097)
+    expect(() => script.once("setup", LOCAL_SCRIPT_PATH, { args: [longArg] })).toThrow(
+      /args\[0\] exceeds maximum length of 4096 characters/v
+    )
+  })
+
+  it("R-0000717: accepts args at the maximum boundary", () => {
+    const maxArgs = Array.from({ length: 1024 }, (_, index) => `arg-${String(index)}`)
+    expect(() => script.once("setup", LOCAL_SCRIPT_PATH, { args: maxArgs })).not.toThrow()
+    const maxLengthArg = "x".repeat(4096)
+    expect(() => script.once("setup", LOCAL_SCRIPT_PATH, { args: [maxLengthArg] })).not.toThrow()
   })
 })

@@ -1,3 +1,5 @@
+import { statSync } from "node:fs"
+
 import { failed, failedCommand } from "../moduleFailure.js"
 import { shellQuote, validateMktempPath } from "../ssh.js"
 import { type Module, type ModuleResult, NEEDS_APPLY, type SshConnection } from "../types.js"
@@ -5,6 +7,17 @@ import { applyWithFlagLock, hasFlag, setVersionedFlag } from "./moduleHelpers.js
 
 const EXEC_OPTS = { ignoreExitCode: true, silent: true } as const
 const NAME_PATTERN = /^[\w.\-]+$/iv
+
+// R-0000717: cap the number of CLI arguments and the length of any single
+// argument that `script.once` forwards to the remote process. The remote
+// command line is built by joining `shellQuote`-d arguments with spaces,
+// so unbounded counts or sizes would let a misconfigured playbook produce
+// command lines that exceed kernel `ARG_MAX` on the target host and fail
+// with a confusing "Argument list too long" error at execution time. Reject
+// such inputs at module-construction time so the playbook author sees the
+// problem up-front instead of mid-apply.
+const SCRIPT_ARGS_MAX_COUNT = 1024
+const SCRIPT_ARG_MAX_LENGTH = 4096
 
 /**
  * Allocate a per-run remote path under `/tmp` via `mktemp` so two parallel
@@ -150,6 +163,71 @@ async function runScriptOnceBody(parameters: {
 }
 
 /**
+ * R-0000717: verify that `localPath` resolves to a regular file at module
+ * construction time. The upload itself happens during apply via SFTP and
+ * would surface a stat/open error from the remote side; surfacing the
+ * problem at construction time gives the playbook author a clearer signal
+ * (wrong path, accidentally pointing at a directory, dangling symlink, …)
+ * before any host is touched.
+ *
+ * Symlinks are followed deliberately: the resolved target is what would be
+ * uploaded by `uploadFile`. Symlinks dangling or pointing at a non-file are
+ * rejected because `statSync` either throws (ENOENT/ELOOP) or returns a
+ * stat without `isFile() === true`.
+ *
+ * @param name - The script name; embedded in the error message.
+ * @param localPath - The local path that must point at a regular file.
+ * @throws {Error} when the path does not exist or is not a regular file.
+ */
+function assertScriptLocalPathIsFile(name: string, localPath: string): void {
+  let stats
+  try {
+    // eslint-disable-next-line security/detect-non-literal-fs-filename -- playbook-controlled path; validated to refer to a regular file before upload
+    stats = statSync(localPath)
+  } catch (error) {
+    const reason = error instanceof Error ? error.message : String(error)
+    throw new Error(
+      `script.once: ${name} cannot read local script ${JSON.stringify(localPath)}: ${reason}`,
+      { cause: error }
+    )
+  }
+  if (!stats.isFile()) {
+    throw new Error(
+      `script.once: ${name} expected a regular file at ${JSON.stringify(localPath)}, got a non-file entry`
+    )
+  }
+}
+
+/**
+ * R-0000717: enforce a bounded list of CLI arguments. Both the count and
+ * the per-argument length are capped so the assembled command line cannot
+ * be silently inflated to a size that exceeds the kernel's `ARG_MAX`.
+ *
+ * @param name - The script name; embedded in the error message.
+ * @param scriptArguments - The optional `args` array from the caller.
+ * @throws {Error} when the array is too long or a single argument exceeds
+ *   the per-argument byte cap.
+ */
+function assertScriptArgumentsWithinLimits(
+  name: string,
+  scriptArguments: string[] | undefined
+): void {
+  if (scriptArguments == null) return
+  if (scriptArguments.length > SCRIPT_ARGS_MAX_COUNT) {
+    throw new Error(
+      `script.once: ${name} args must contain at most ${String(SCRIPT_ARGS_MAX_COUNT)} entries, got ${String(scriptArguments.length)}`
+    )
+  }
+  for (const [index, argument] of scriptArguments.entries()) {
+    if (argument.length > SCRIPT_ARG_MAX_LENGTH) {
+      throw new Error(
+        `script.once: ${name} args[${String(index)}] exceeds maximum length of ${String(SCRIPT_ARG_MAX_LENGTH)} characters, got ${String(argument.length)}`
+      )
+    }
+  }
+}
+
+/**
  * Modules for executing scripts on the remote host.
  */
 export const script = {
@@ -169,6 +247,13 @@ export const script = {
     if (!NAME_PATTERN.test(name)) {
       throw new Error(`script.once: name must match ${String(NAME_PATTERN)}, got: ${name}`)
     }
+
+    // R-0000717: validate the local script path and the argument list at
+    // construction time so misconfigured playbooks fail fast instead of
+    // failing mid-apply with opaque upload or "Argument list too long"
+    // errors from the remote shell.
+    assertScriptLocalPathIsFile(name, localPath)
+    assertScriptArgumentsWithinLimits(name, options?.args)
 
     const version = options?.version ?? "1"
     const scriptArguments = options?.args
