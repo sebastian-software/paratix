@@ -1203,11 +1203,12 @@ function composeSystemdRecoveryResponses(
 
 function buildComposeSystemdShellFallbackCommand(
   filePath: string,
-  content: string,
+  _content: string,
   temporaryPath = systemdUnitFallbackTempPath
 ): string {
-  const encodedContent = Buffer.from(content, "utf8").toString("base64")
-  return `{ printf '%s' '${encodedContent}' | base64 -d > '${temporaryPath}' && chmod '0644' '${temporaryPath}' && chown 'root:root' '${temporaryPath}' && if [ -L '${filePath}' ]; then rm -f -- '${temporaryPath}'; exit 73; fi && mv -f -T '${temporaryPath}' '${filePath}'; } || { status=$?; rm -f -- '${temporaryPath}'; exit "$status"; }`
+  // R-0000806: the encoded unit content is delivered via stdin, so it no
+  // longer appears in the rendered shell command.
+  return `{ base64 -d > '${temporaryPath}' && chmod '0644' '${temporaryPath}' && chown 'root:root' '${temporaryPath}' && if [ -L '${filePath}' ]; then rm -f -- '${temporaryPath}'; exit 73; fi && mv -f -T '${temporaryPath}' '${filePath}'; } || { status=$?; rm -f -- '${temporaryPath}'; exit "$status"; }`
 }
 
 describe("compose.systemd — check", () => {

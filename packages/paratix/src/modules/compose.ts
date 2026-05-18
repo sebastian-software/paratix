@@ -493,9 +493,14 @@ async function rewriteComposeSystemdUnitViaShell(parameters: {
   // directory should rely on filesystem-level protections
   // (`/etc/systemd/system` owned by root, restrictive parent-directory
   // permissions) rather than this in-shell check alone.
+  // R-0000806: pipe the base64-encoded unit content via stdin instead of
+  // interpolating it into argv. The encoded payload can be many kilobytes;
+  // moving it out of the rendered shell command avoids hitting the host's
+  // ARG_MAX, keeps the command line readable in logs, and mirrors the
+  // pattern apt.ts uses for `debconf-set-selections` (see apt.ts L770-775).
   const result = await parameters.connection.exec(
-    `{ printf '%s' ${shellQuote(encodedContent)} | base64 -d > ${shellQuote(temporaryPath)} && chmod ${shellQuote(SYSTEMD_UNIT_MODE)} ${shellQuote(temporaryPath)} && chown ${shellQuote("root:root")} ${shellQuote(temporaryPath)} && if [ -L ${shellQuote(parameters.filePath)} ]; then rm -f -- ${shellQuote(temporaryPath)}; exit 73; fi && mv -f -T ${shellQuote(temporaryPath)} ${shellQuote(parameters.filePath)}; } || { status=$?; rm -f -- ${shellQuote(temporaryPath)}; exit "$status"; }`,
-    EXEC_OPTS
+    `{ base64 -d > ${shellQuote(temporaryPath)} && chmod ${shellQuote(SYSTEMD_UNIT_MODE)} ${shellQuote(temporaryPath)} && chown ${shellQuote("root:root")} ${shellQuote(temporaryPath)} && if [ -L ${shellQuote(parameters.filePath)} ]; then rm -f -- ${shellQuote(temporaryPath)}; exit 73; fi && mv -f -T ${shellQuote(temporaryPath)} ${shellQuote(parameters.filePath)}; } || { status=$?; rm -f -- ${shellQuote(temporaryPath)}; exit "$status"; }`,
+    { ...EXEC_OPTS, input: encodedContent }
   )
   if (result.code !== 0) {
     await cleanupComposeSystemdTemporaryPath({ connection: parameters.connection, temporaryPath })
