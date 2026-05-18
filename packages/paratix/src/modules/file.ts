@@ -1,3 +1,4 @@
+/* eslint-disable max-lines -- R-0000674 adds shared regex-compile safeguards to file.line; splitting file.ts is out of scope for this finding */
 import { readFile } from "node:fs/promises"
 import { posix } from "node:path"
 
@@ -14,7 +15,7 @@ import {
 } from "../types.js"
 import { applyDirectoryState } from "./fileDirectoryHelpers.js"
 import { assemble, block, properties, replace, stat } from "./fileExtra.js"
-import { hexHashesEqual, localSha256, sha256String } from "./fileHelpers.js"
+import { compileUserRegex, hexHashesEqual, localSha256, sha256String } from "./fileHelpers.js"
 import {
   applyFileMetadata,
   createMetadataModule,
@@ -114,6 +115,35 @@ async function applyLineAppend(input: {
   return { status: "changed" }
 }
 
+function joinLinesPreservingTrailingNewline(parameters: {
+  hasTrailingNewline: boolean
+  lines: string[]
+}): string {
+  const joined = parameters.lines.join("\n")
+  return parameters.hasTrailingNewline ? `${joined}\n` : joined
+}
+
+// R-0000674: the regex-compile guard plus match lookup is shared between
+// `file.line({match}).check` and `applyLineReplace`. Keeping it in its own
+// helper lets `check` stay below the cognitive-complexity ceiling enforced by
+// sonarjs.
+function lineMatchesPattern(parameters: {
+  line: string
+  lines: string[]
+  match: string
+  remotePath: string
+}): "needs-apply" | "ok" {
+  const compiledPattern = compileUserRegex(
+    `[file.line: ${parameters.remotePath}]`,
+    parameters.match,
+    "mu"
+  )
+  if (!(compiledPattern instanceof RegExp)) return NEEDS_APPLY
+  const matchedLineIndex = findFirstMatchingLineIndex(parameters.lines, compiledPattern)
+  const matchedLine = matchedLineIndex === -1 ? undefined : parameters.lines[matchedLineIndex]
+  return matchedLine === parameters.line ? "ok" : NEEDS_APPLY
+}
+
 async function applyLineReplace(input: {
   line: string
   match: string
@@ -124,11 +154,16 @@ async function applyLineReplace(input: {
   if (!(await isRegularFileWithoutSymlink(input.ssh, input.remotePath))) {
     return failed(`[file.line: ${input.remotePath}] path must be a regular file and not a symlink`)
   }
+  // R-0000674: cap pattern length and wrap `new RegExp` in try/catch via the
+  // shared helper so `file.line({match})` matches the safeguards `file.replace`
+  // already enforces. A pathological `match` would otherwise either block the
+  // event loop during compilation or leak a SyntaxError past the ModuleResult
+  // contract.
+  const compiledPattern = compileUserRegex(`[file.line: ${input.remotePath}]`, input.match, "mu")
+  if (!(compiledPattern instanceof RegExp)) return compiledPattern
   const content = await input.ssh.readFile(input.remotePath)
   const { hasTrailingNewline, lines } = splitLinesPreservingTrailingNewline(content)
-  // eslint-disable-next-line security/detect-non-literal-regexp
-  const pattern = new RegExp(input.match, "mu")
-  const matchingLineIndex = findFirstMatchingLineIndex(lines, pattern)
+  const matchingLineIndex = findFirstMatchingLineIndex(lines, compiledPattern)
   if (matchingLineIndex === -1) {
     return failed(
       `[file.line: ${input.remotePath}] No line matching ${input.match} found for replacement`
@@ -136,8 +171,7 @@ async function applyLineReplace(input: {
   }
   if (lines[matchingLineIndex] === input.line) return { status: "ok" }
   lines[matchingLineIndex] = input.line
-  let newContent = lines.join("\n")
-  if (hasTrailingNewline) newContent += "\n"
+  const newContent = joinLinesPreservingTrailingNewline({ hasTrailingNewline, lines })
   const ownership = await readOwnership(input.ssh, input.remotePath)
   await guardedWriteFile(input.ssh, {
     mode: normalizeMode(ownership.mode),
@@ -342,11 +376,11 @@ export const file = {
         const lines = splitLines(content)
 
         if (options?.match != null) {
-          // eslint-disable-next-line security/detect-non-literal-regexp
-          const matchPattern = new RegExp(options.match, "mu")
-          const matchedLineIndex = findFirstMatchingLineIndex(lines, matchPattern)
-          const matchedLine = matchedLineIndex === -1 ? undefined : lines[matchedLineIndex]
-          return matchedLine === line ? "ok" : NEEDS_APPLY
+          // R-0000674: the same length cap and try/catch wrapper applied to
+          // `applyLineReplace`. When the pattern is invalid the check reports
+          // `needs-apply` so the runner invokes apply, where the structured
+          // failure surfaces — mirroring the file.replace contract.
+          return lineMatchesPattern({ line, lines, match: options.match, remotePath })
         }
 
         return lines.includes(line) ? "ok" : NEEDS_APPLY

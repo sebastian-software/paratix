@@ -1578,6 +1578,44 @@ describe("file.line — clientseitiges Matching (check with options.match)", () 
     const result = await mod.check(ssh, emptyEnv)
     expect(result).toBe("needs-apply")
   })
+
+  // R-0000674: `file.line({match})` reuses the shared `compileUserRegex`
+  // helper so a syntactically invalid pattern surfaces as a structured
+  // ModuleResult failure (apply) or `needs-apply` (check), matching the
+  // safeguards `file.replace` already enforces.
+  it("R-0000674: apply returns failed without remote IO when the pattern is invalid", async () => {
+    const ssh = createMockSsh({
+      "[ -f '/etc/config' ] && [ ! -L '/etc/config' ]": { code: 0 },
+    })
+    const mod = file.line("/etc/config", "KEY=value", { match: "[unterminated" })
+    const result = await mod.apply(ssh, emptyEnv)
+    expect(result.status).toBe("failed")
+    expect(result.error?.message).toContain("invalid regex pattern")
+    expect(ssh.calls).not.toContain(`cat '/etc/config'`)
+  })
+
+  it("R-0000674: check returns needs-apply when the pattern is invalid", async () => {
+    const ssh = createMockSsh({
+      "[ -e '/etc/config' ]": { code: 0 },
+      "[ -f '/etc/config' ] && [ ! -L '/etc/config' ]": { code: 0 },
+      "cat '/etc/config'": { stdout: "KEY=value\n" },
+    })
+    const mod = file.line("/etc/config", "KEY=value", { match: "[unterminated" })
+    const result = await mod.check(ssh, emptyEnv)
+    expect(result).toBe("needs-apply")
+  })
+
+  it("R-0000674: apply returns failed when the pattern exceeds the maximum length", async () => {
+    const ssh = createMockSsh({
+      "[ -f '/etc/config' ] && [ ! -L '/etc/config' ]": { code: 0 },
+    })
+    const oversizedPattern = "a".repeat(1025)
+    const mod = file.line("/etc/config", "KEY=value", { match: oversizedPattern })
+    const result = await mod.apply(ssh, emptyEnv)
+    expect(result.status).toBe("failed")
+    expect(result.error?.message).toContain("pattern exceeds maximum length")
+    expect(ssh.calls).not.toContain(`cat '/etc/config'`)
+  })
 })
 
 describe("file.template", () => {
