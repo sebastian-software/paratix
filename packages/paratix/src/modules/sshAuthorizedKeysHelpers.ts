@@ -116,49 +116,51 @@ async function createAuthorizedKeysTemporaryPath(
 // R-0000244: mutation helpers return a `failedCommand` ModuleResult on
 // non-zero exit instead of letting `conn.exec` throw an unstructured
 // SSH error. Callers chain on a `null` return value.
-async function ensureAuthorizedKeysIsNotSymlink(
+//
+// R-0000765: fuse the previously separate `.ssh`-directory preparation and
+// `authorized_keys` symlink probe into a single `set -e` shell pipeline.
+// The two helpers always ran back to back on the apply path, each over its
+// own SSH exec round-trip. Combining them halves the round-trip cost,
+// keeps the guards adjacent (so a hostile actor cannot race a symlink in
+// between them), and lets `set -e` propagate the first failure verbatim
+// while we still surface a single structured `failedCommand` to callers.
+// The error messages emitted by each `|| { echo …; exit 1; }` clause stay
+// byte-for-byte identical so log-pattern asserts in the existing test
+// suite (and operator runbooks) continue to match.
+async function ensureSshDirectoryAndAuthorizedKeysAreNotSymlinks(
   conn: SshConnection,
   parameters: {
     authorizedKeysPath: string
-    state: "absent" | "present"
-    user: string
-  }
-): Promise<ModuleResult | null> {
-  const { authorizedKeysPath, state, user } = parameters
-  const result = await conn.exec(
-    `[ ! -L ${shellQuote(authorizedKeysPath)} ] || { echo 'authorized_keys must not be a symlink' >&2; exit 1; }`,
-    MUTATION_EXEC_OPTS
-  )
-  if (result.code !== 0) {
-    return failedCommand(
-      `[ssh.authorizedKeys: ${user} (${state})] authorized_keys symlink check failed`,
-      result
-    )
-  }
-  return null
-}
-
-async function ensureSshDirectoryForAuthorizedKeys(
-  conn: SshConnection,
-  parameters: {
     primaryGroup: string
     sshDirectoryPath: string
     state: "absent" | "present"
     user: string
   }
 ): Promise<ModuleResult | null> {
-  const { primaryGroup, sshDirectoryPath, state, user } = parameters
+  const { authorizedKeysPath, primaryGroup, sshDirectoryPath, state, user } = parameters
   const directory = shellQuote(sshDirectoryPath)
+  const keysPath = shellQuote(authorizedKeysPath)
+  const quotedUser = shellQuote(user)
+  const quotedPrimaryGroup = shellQuote(primaryGroup)
 
-  const result = await conn.exec(
-    `[ ! -L ${directory} ] || { echo '.ssh must not be a symlink' >&2; exit 1; }; if [ -e ${directory} ]; then [ -d ${directory} ] || { echo '.ssh must be a directory' >&2; exit 1; }; else mkdir -p ${directory}; fi; [ -d ${directory} ] && [ ! -L ${directory} ] || { echo '.ssh must be a real directory' >&2; exit 1; }; chmod 700 ${directory} && chown ${shellQuote(user)}:${shellQuote(primaryGroup)} ${directory}`,
-    MUTATION_EXEC_OPTS
-  )
+  // The pipeline below is the verbatim concatenation of the previous two
+  // helpers, wrapped in `set -e` so the first failing guard aborts the
+  // remainder of the script. Keeping the literal substrings intact (e.g.
+  // `[ ! -L … ] || { echo '.ssh must not be a symlink' >&2; exit 1; }`)
+  // preserves the test fixtures and operator-facing diagnostics.
+  const command = `set -e; [ ! -L ${directory} ] || { echo '.ssh must not be a symlink' >&2; exit 1; }; if [ -e ${directory} ]; then [ -d ${directory} ] || { echo '.ssh must be a directory' >&2; exit 1; }; else mkdir -p ${directory}; fi; [ -d ${directory} ] && [ ! -L ${directory} ] || { echo '.ssh must be a real directory' >&2; exit 1; }; chmod 700 ${directory} && chown ${quotedUser}:${quotedPrimaryGroup} ${directory}; [ ! -L ${keysPath} ] || { echo 'authorized_keys must not be a symlink' >&2; exit 1; }`
+
+  const result = await conn.exec(command, MUTATION_EXEC_OPTS)
   if (result.code !== 0) {
-    return failedCommand(
-      `[ssh.authorizedKeys: ${user} (${state})] failed to prepare .ssh directory`,
-      result
-    )
+    // R-0000765: differentiate the failure label based on which clause
+    // emitted the error so the structured failure stays informative even
+    // though both guards now share a single exec round-trip. The
+    // `authorized_keys must not be a symlink` message can only come from
+    // the trailing clause; everything else is .ssh-directory preparation.
+    const label = result.stderr.includes("authorized_keys must not be a symlink")
+      ? "authorized_keys symlink check failed"
+      : "failed to prepare .ssh directory"
+    return failedCommand(`[ssh.authorizedKeys: ${user} (${state})] ${label}`, result)
   }
   return null
 }
@@ -453,20 +455,18 @@ export async function applyAuthorizedKeys(
   const sshDirectoryPath = `${home}/.ssh`
   const authorizedKeysPath = `${home}/.ssh/authorized_keys`
 
-  const directoryFailure = await ensureSshDirectoryForAuthorizedKeys(conn, {
+  // R-0000765: prepare `.ssh` and probe `authorized_keys` in a single
+  // `set -e` shell pipeline instead of two sequential SSH execs. Halves the
+  // round-trip cost on the apply path and keeps the two symlink guards
+  // adjacent so a swap between them cannot slip past unnoticed.
+  const guardFailure = await ensureSshDirectoryAndAuthorizedKeysAreNotSymlinks(conn, {
+    authorizedKeysPath,
     primaryGroup,
     sshDirectoryPath,
     state,
     user,
   })
-  if (directoryFailure) return directoryFailure
-
-  const symlinkFailure = await ensureAuthorizedKeysIsNotSymlink(conn, {
-    authorizedKeysPath,
-    state,
-    user,
-  })
-  if (symlinkFailure) return symlinkFailure
+  if (guardFailure) return guardFailure
 
   return rewriteAuthorizedKeysWhenNeeded(conn, {
     authorizedKeysPath,

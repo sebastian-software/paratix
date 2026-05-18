@@ -21,13 +21,11 @@ const successfulSshApplyOptions: MockSshOptions = {
       result: { code: 0 },
     },
     {
+      // R-0000765: .ssh directory preparation and authorized_keys symlink
+      // probe now run in a single `set -e` pipeline. The previous two
+      // separate stub entries are replaced by the fused pattern below.
       command:
-        /^\[ ! -L '[^']+\/\.ssh' \] \|\| \{ echo '\.ssh must not be a symlink' >&2; exit 1; \}; if \[ -e '[^']+\/\.ssh' \]; then \[ -d '[^']+\/\.ssh' \] \|\| \{ echo '\.ssh must be a directory' >&2; exit 1; \}; else mkdir -p '[^']+\/\.ssh'; fi; \[ -d '[^']+\/\.ssh' \] && \[ ! -L '[^']+\/\.ssh' \] \|\| \{ echo '\.ssh must be a real directory' >&2; exit 1; \}; chmod 700 '[^']+\/\.ssh' && chown '[^']+':'[^']+' '[^']+\/\.ssh'$/v,
-      result: { code: 0 },
-    },
-    {
-      command:
-        /^\[ ! -L '[^']+\/\.ssh\/authorized_keys' \] \|\| \{ echo 'authorized_keys must not be a symlink' >&2; exit 1; \}$/v,
+        /^set -e; \[ ! -L '[^']+\/\.ssh' \] \|\| \{ echo '\.ssh must not be a symlink' >&2; exit 1; \}; if \[ -e '[^']+\/\.ssh' \]; then \[ -d '[^']+\/\.ssh' \] \|\| \{ echo '\.ssh must be a directory' >&2; exit 1; \}; else mkdir -p '[^']+\/\.ssh'; fi; \[ -d '[^']+\/\.ssh' \] && \[ ! -L '[^']+\/\.ssh' \] \|\| \{ echo '\.ssh must be a real directory' >&2; exit 1; \}; chmod 700 '[^']+\/\.ssh' && chown '[^']+':'[^']+' '[^']+\/\.ssh'; \[ ! -L '[^']+\/\.ssh\/authorized_keys' \] \|\| \{ echo 'authorized_keys must not be a symlink' >&2; exit 1; \}$/v,
       result: { code: 0 },
     },
     {
@@ -195,8 +193,10 @@ describe("ssh.authorizedKeys", () => {
   // so `mv -T` is atomic (single rename(2)) and avoids cross-FS copies.
   const aliceMktempPattern = "mktemp -p '/home/alice/.ssh' -- '.paratix-authorized-keys.XXXXXX'"
   const tempPath = "/home/alice/.ssh/.paratix-authorized-keys.ABCDEF"
+  // R-0000765: the apply pipeline runs the .ssh-directory preparation and
+  // the authorized_keys symlink probe in a single `set -e` shell exec.
   const aliceSshDirectoryGuard =
-    "[ ! -L '/home/alice/.ssh' ] || { echo '.ssh must not be a symlink' >&2; exit 1; }; if [ -e '/home/alice/.ssh' ]; then [ -d '/home/alice/.ssh' ] || { echo '.ssh must be a directory' >&2; exit 1; }; else mkdir -p '/home/alice/.ssh'; fi; [ -d '/home/alice/.ssh' ] && [ ! -L '/home/alice/.ssh' ] || { echo '.ssh must be a real directory' >&2; exit 1; }; chmod 700 '/home/alice/.ssh' && chown 'alice':'alice' '/home/alice/.ssh'"
+    "set -e; [ ! -L '/home/alice/.ssh' ] || { echo '.ssh must not be a symlink' >&2; exit 1; }; if [ -e '/home/alice/.ssh' ]; then [ -d '/home/alice/.ssh' ] || { echo '.ssh must be a directory' >&2; exit 1; }; else mkdir -p '/home/alice/.ssh'; fi; [ -d '/home/alice/.ssh' ] && [ ! -L '/home/alice/.ssh' ] || { echo '.ssh must be a real directory' >&2; exit 1; }; chmod 700 '/home/alice/.ssh' && chown 'alice':'alice' '/home/alice/.ssh'; [ ! -L '/home/alice/.ssh/authorized_keys' ] || { echo 'authorized_keys must not be a symlink' >&2; exit 1; }"
   const aliceFinalReplaceCommand = authorizedKeysFinalReplaceCommand({
     authorizedKeysPath: aliceKeys,
     expectedSshDirectoryState: "700 alice alice directory",
@@ -453,8 +453,12 @@ describe("ssh.authorizedKeys", () => {
     const mod = ssh.authorizedKeys("alice", testKey)
     const result = await mod.apply(mockSsh, emptyEnv)
     expect(result.status).toBe("changed")
+    // R-0000765: the .ssh-directory preparation and the authorized_keys
+    // symlink probe are now part of the same fused `set -e` exec; assert
+    // the fused command directly and on the embedded symlink clause as a
+    // substring instead of expecting a separate exec call.
     expect(mockSsh.calls).toContain(aliceSshDirectoryGuard)
-    expect(mockSsh.calls).toContain(
+    expect(aliceSshDirectoryGuard).toContain(
       `[ ! -L ${aliceKeys} ] || { echo 'authorized_keys must not be a symlink' >&2; exit 1; }`
     )
     expect(mockSsh.calls).toContain(aliceMktempPattern)
@@ -724,13 +728,15 @@ describe("ssh.authorizedKeys", () => {
   it("returns failed when authorized_keys is a symlink", async () => {
     // R-0000244: mutation failures surface as a structured `failed`
     // ModuleResult instead of an unstructured exception.
+    // R-0000765: the symlink probe is now embedded into the fused .ssh
+    // directory preparation exec, so the stub keys off the combined
+    // command instead of the previously-separate symlink check.
     const mockSsh = createMockSsh(
       aliceResponses({
-        [`[ ! -L ${aliceKeys} ] || { echo 'authorized_keys must not be a symlink' >&2; exit 1; }`]:
-          {
-            code: 1,
-            stderr: "authorized_keys must not be a symlink",
-          },
+        [aliceSshDirectoryGuard]: {
+          code: 1,
+          stderr: "authorized_keys must not be a symlink",
+        },
       }),
       successfulSshApplyOptions
     )
@@ -1017,9 +1023,10 @@ describe("ssh.authorizedKeys", () => {
     const mod = ssh.authorizedKeys("alice", testKey)
     const result = await mod.apply(mockSsh, emptyEnv)
     expect(result.status).toBe("changed")
-    // Directory creation must quote the space-containing path
+    // Directory creation must quote the space-containing path.
+    // R-0000765: includes the fused authorized_keys symlink probe.
     expect(mockSsh.calls).toContain(
-      `[ ! -L '/home/my user/.ssh' ] || { echo '.ssh must not be a symlink' >&2; exit 1; }; if [ -e '/home/my user/.ssh' ]; then [ -d '/home/my user/.ssh' ] || { echo '.ssh must be a directory' >&2; exit 1; }; else mkdir -p '/home/my user/.ssh'; fi; [ -d '/home/my user/.ssh' ] && [ ! -L '/home/my user/.ssh' ] || { echo '.ssh must be a real directory' >&2; exit 1; }; chmod 700 '/home/my user/.ssh' && chown 'alice':'alice' '/home/my user/.ssh'`
+      `set -e; [ ! -L '/home/my user/.ssh' ] || { echo '.ssh must not be a symlink' >&2; exit 1; }; if [ -e '/home/my user/.ssh' ]; then [ -d '/home/my user/.ssh' ] || { echo '.ssh must be a directory' >&2; exit 1; }; else mkdir -p '/home/my user/.ssh'; fi; [ -d '/home/my user/.ssh' ] && [ ! -L '/home/my user/.ssh' ] || { echo '.ssh must be a real directory' >&2; exit 1; }; chmod 700 '/home/my user/.ssh' && chown 'alice':'alice' '/home/my user/.ssh'; [ ! -L '/home/my user/.ssh/authorized_keys' ] || { echo 'authorized_keys must not be a symlink' >&2; exit 1; }`
     )
     // R-0000181: mktemp must operate inside <home>/.ssh on the destination filesystem.
     expect(mockSsh.calls).toContain(spaceyMktemp)
@@ -1064,8 +1071,9 @@ describe("ssh.authorizedKeys", () => {
 
     expect(result.status).toBe("changed")
     // Directory chown uses the resolved primary group, not the username.
+    // R-0000765: includes the fused authorized_keys symlink probe.
     expect(mockSsh.calls).toContain(
-      `[ ! -L '/home/deploy/.ssh' ] || { echo '.ssh must not be a symlink' >&2; exit 1; }; if [ -e '/home/deploy/.ssh' ]; then [ -d '/home/deploy/.ssh' ] || { echo '.ssh must be a directory' >&2; exit 1; }; else mkdir -p '/home/deploy/.ssh'; fi; [ -d '/home/deploy/.ssh' ] && [ ! -L '/home/deploy/.ssh' ] || { echo '.ssh must be a real directory' >&2; exit 1; }; chmod 700 '/home/deploy/.ssh' && chown 'deploy':'users' '/home/deploy/.ssh'`
+      `set -e; [ ! -L '/home/deploy/.ssh' ] || { echo '.ssh must not be a symlink' >&2; exit 1; }; if [ -e '/home/deploy/.ssh' ]; then [ -d '/home/deploy/.ssh' ] || { echo '.ssh must be a directory' >&2; exit 1; }; else mkdir -p '/home/deploy/.ssh'; fi; [ -d '/home/deploy/.ssh' ] && [ ! -L '/home/deploy/.ssh' ] || { echo '.ssh must be a real directory' >&2; exit 1; }; chmod 700 '/home/deploy/.ssh' && chown 'deploy':'users' '/home/deploy/.ssh'; [ ! -L '/home/deploy/.ssh/authorized_keys' ] || { echo 'authorized_keys must not be a symlink' >&2; exit 1; }`
     )
     // The authorized_keys chown must also use the resolved primary group.
     expect(mockSsh.calls).toContain(
