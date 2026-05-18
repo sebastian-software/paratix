@@ -20,9 +20,19 @@ import {
 type PromptFunction = (question: string) => Promise<string>
 
 const NOOP = (): void => undefined
-const INTERACTIVE_SELECTION_UNAVAILABLE = "Interactive selection is unavailable."
+// R-0000860: the fallback select handler is reached when a caller
+// supplies a custom `prompt` but no `select` implementation, so the
+// terminal-select helper cannot be constructed. The original handler
+// threw a plain `Error`, which the CLI entry point would surface as an
+// uncaught stack trace instead of a clean shell exit. Surface a
+// `CliExitError` here so the failure mode matches the other prompt
+// paths (e.g. `enforceInteractivePromptTty` and the prompt-session
+// constructor), which already exit with code 1 and a structured
+// message.
+const INTERACTIVE_SELECTION_UNAVAILABLE =
+  "Interactive selection is unavailable. Pass --initial-user <root|name> to skip the prompt."
 const UNAVAILABLE_SELECT = (() => {
-  throw new Error(INTERACTIVE_SELECTION_UNAVAILABLE)
+  throw new CliExitError(INTERACTIVE_SELECTION_UNAVAILABLE, 1)
 }) as SelectFunction<"admin" | "root">
 
 // R-0000664: refuse to run any prompt that drives `createTerminalSelect()`
