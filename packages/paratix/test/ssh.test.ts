@@ -2393,14 +2393,14 @@ describe("SshConnectionImpl", () => {
       it("places env vars INSIDE the bash -c argument for non-root user without sudo password (passwordless sudo)", async () => {
         // Same regression test for the passwordless-sudo branch (no cachedSudoPassword).
         // The correct form is:
-        //   sudo bash -c 'MY_VAR='\''val'\'' whoami'
+        //   sudo -n bash -c 'MY_VAR='\''val'\'' whoami'
         const execSpy = vi.fn().mockImplementation((_command: string, callback: ExecCallback) => {
           const stream = makeStream()
           callback(undefined, stream)
           stream.emit("close", 0)
         })
         const client = makeClientWithExecSpy(execSpy)
-        // No sudoPassword — triggers the `sudo bash -c` branch
+        // No sudoPassword — triggers the noninteractive sudo branch
         const ssh = makeConnectedSsh(client, { sudoPassword: null, user: "deploy" })
 
         await ssh.exec("whoami", { env: { MY_VAR: "val" } })
@@ -2408,10 +2408,10 @@ describe("SshConnectionImpl", () => {
         const [executedCommand] = execSpy.mock.calls.at(-1) as [string, ...unknown[]]
 
         // The outer command must NOT start with env vars — sudo must come first
-        expect(executedCommand).toMatch(/^sudo bash -c /v)
+        expect(executedCommand).toMatch(/^sudo -n bash -c /v)
 
         // MY_VAR must appear inside the quoted bash -c argument
-        const bashCArgument = executedCommand.replace(/^sudo bash -c /v, "")
+        const bashCArgument = executedCommand.replace(/^sudo -n bash -c /v, "")
         expect(bashCArgument).toContain("MY_VAR=")
       })
     })
@@ -2623,7 +2623,7 @@ describe("SshConnectionImpl", () => {
       expect(executedCommands[2]).toContain(tempPath)
       expect(executedCommands[3]).toContain("realpath -m --")
       expect(executedCommands[3]).toContain("/etc/my-app")
-      expect(executedCommands[4]).toMatch(/^sudo bash -c /v)
+      expect(executedCommands[4]).toMatch(/^sudo -n bash -c /v)
       expect(executedCommands[4]).toContain(tempPath)
       expect(executedCommands[4]).toContain("target_temp=$(mktemp")
       // R-0000565: directory and template are now passed via `mktemp -p <dir> -- <template>`,
@@ -3242,7 +3242,7 @@ describe("SshConnectionImpl", () => {
 
       const client = makeClientWithExecSpy(execSpy)
       const ssh = makeConnectedSsh(client, { user: "deploy" })
-      // Allow the privileged finalize step to run as `sudo bash -c …` without
+      // Allow the privileged finalize step to run as `sudo -n bash -c …` without
       // tripping the probe path; the focus of this test is the stat call,
       // which must remain raw regardless of sudo state.
       const internals = ssh as unknown as Record<string, unknown>
@@ -3256,14 +3256,14 @@ describe("SshConnectionImpl", () => {
       // Must reference the user-owned staged temp path.
       expect(executedCommands[statIndex]).toContain(tempPath)
       // Must NOT be wrapped in sudo (raw exec via outputWithoutSudo).
-      // A sudo-wrapped form would prefix `sudo bash -c` or set `SUDO_PROMPT`.
+      // A sudo-wrapped form would prefix `sudo -n bash -c` or set `SUDO_PROMPT`.
       expect(executedCommands[statIndex]).not.toMatch(/^sudo /v)
       expect(executedCommands[statIndex]).not.toMatch(/^SUDO_PROMPT=/v)
       // The privileged finalize (mv) step must still be wrapped in sudo, to
       // prove the test exercises the non-root code path.
       const mvIndex = executedCommands.findIndex((cmd) => cmd.includes("mv -T"))
       expect(mvIndex).toBeGreaterThan(-1)
-      expect(executedCommands[mvIndex]).toMatch(/^sudo bash -c /v)
+      expect(executedCommands[mvIndex]).toMatch(/^sudo -n bash -c /v)
     })
   })
 
@@ -3297,7 +3297,7 @@ describe("SshConnectionImpl", () => {
       expect(executedCommands[2]).toContain(tempPath)
       expect(executedCommands[3]).toContain("realpath -m --")
       expect(executedCommands[3]).toContain("/etc/systemd/system")
-      expect(executedCommands[4]).toMatch(/^sudo bash -c /v)
+      expect(executedCommands[4]).toMatch(/^sudo -n bash -c /v)
       expect(executedCommands[4]).toContain(tempPath)
       expect(executedCommands[4]).toContain("target_temp=$(mktemp")
       // R-0000565: directory and template are now passed via `mktemp -p <dir> -- <template>`.
@@ -3489,7 +3489,7 @@ describe("SshConnectionImpl", () => {
       expect(executedCommands[3]).toContain(destinationDirectory)
       expect(executedCommands[6]).toContain("realpath -m --")
       expect(executedCommands[6]).toContain(destinationDirectory)
-      expect(executedCommands[7]).toMatch(/^sudo bash -c /v)
+      expect(executedCommands[7]).toMatch(/^sudo -n bash -c /v)
       // R-0000565: the privileged mktemp is now `mktemp -p <dir> -- <template>`,
       // so directory and template are separate segments instead of a joined
       // path. Assert both are present in the sudo-bash command.
@@ -3887,9 +3887,124 @@ describe("SshConnectionImpl", () => {
       expect(execSpy).toHaveBeenNthCalledWith(2, "sudo -n true", expect.any(Function))
       expect(execSpy).toHaveBeenNthCalledWith(
         3,
-        expect.stringContaining("sudo bash -c"),
+        expect.stringContaining("sudo -n bash -c"),
         expect.any(Function)
       )
+      expect(promptTerminal).not.toHaveBeenCalled()
+    })
+
+    it("invalidates stale passwordless sudo state when the noninteractive command reports a sudo auth error", async () => {
+      vi.mocked(promptTerminal).mockResolvedValueOnce("entered-sudo-password")
+
+      const execSpy = vi
+        .fn()
+        // Initial probe: sudo exists.
+        .mockImplementationOnce((_command: string, callback: ExecCallback) => {
+          const stream = makeStream()
+          callback(undefined, stream)
+          stream.emit("close", 0)
+        })
+        // Initial probe: `sudo -n true` succeeds only because a remote sudo
+        // timestamp is still fresh.
+        .mockImplementationOnce((_command: string, callback: ExecCallback) => {
+          const stream = makeStream()
+          callback(undefined, stream)
+          stream.emit("close", 0)
+        })
+        // Later privileged command: the timestamp has expired, so `sudo -n`
+        // fails fast instead of hanging on a prompt.
+        .mockImplementationOnce((_command: string, callback: ExecCallback) => {
+          const stream = makeStream()
+          callback(undefined, stream)
+          stream.stderr.emit("data", Buffer.from("sudo: a password is required\n"))
+          stream.emit("close", 1)
+        })
+        // Re-probe after invalidation: sudo still exists.
+        .mockImplementationOnce((_command: string, callback: ExecCallback) => {
+          const stream = makeStream()
+          callback(undefined, stream)
+          stream.emit("close", 0)
+        })
+        // Re-probe after invalidation: no passwordless sudo.
+        .mockImplementationOnce((_command: string, callback: ExecCallback) => {
+          const stream = makeStream()
+          callback(undefined, stream)
+          stream.emit("close", 1)
+        })
+        // Interactive validation with the prompted password succeeds.
+        .mockImplementationOnce((_command: string, callback: ExecCallback) => {
+          const stream = makeStream()
+          callback(undefined, stream)
+          stream.emit("close", 0)
+        })
+        // The retried caller command now uses the password-backed sudo path.
+        .mockImplementationOnce((_command: string, callback: ExecCallback) => {
+          const stream = makeStream()
+          callback(undefined, stream)
+          stream.emit("data", Buffer.from("recovered\n"))
+          stream.emit("close", 0)
+        })
+
+      const client = makeClientWithExecSpy(execSpy)
+      const ssh = makeConnectedSsh(client, { sudoPassword: null, user: "deploy" })
+
+      await expect(ssh.exec("touch /root/file", { silent: true })).rejects.toThrow(
+        "sudo: a password is required"
+      )
+
+      const internals = ssh as unknown as Record<string, unknown>
+      expect(internals.sudoReady).toBe(false)
+      expect(internals.passwordlessSudo).toBe(false)
+      expect(internals.credentialCachePrimed).toBe(false)
+
+      await expect(ssh.exec("echo recovered", { silent: true })).resolves.toMatchObject({
+        code: 0,
+        stdout: "recovered\n",
+      })
+
+      expect(execSpy).toHaveBeenNthCalledWith(
+        3,
+        expect.stringContaining("sudo -n bash -c"),
+        expect.any(Function)
+      )
+      expect(execSpy).toHaveBeenNthCalledWith(4, "command -v sudo", expect.any(Function))
+      expect(execSpy).toHaveBeenNthCalledWith(5, "sudo -n true", expect.any(Function))
+      expect(execSpy).toHaveBeenNthCalledWith(
+        7,
+        expect.stringContaining("SUDO_PROMPT='' sudo -S bash -c"),
+        expect.any(Function)
+      )
+      expect(promptTerminal).toHaveBeenCalledOnce()
+    })
+
+    it("keeps sudo readiness when a noninteractive sudo command fails for a normal command error", async () => {
+      const execSpy = vi
+        .fn()
+        .mockImplementationOnce((_command: string, callback: ExecCallback) => {
+          const stream = makeStream()
+          callback(undefined, stream)
+          stream.emit("close", 0)
+        })
+        .mockImplementationOnce((_command: string, callback: ExecCallback) => {
+          const stream = makeStream()
+          callback(undefined, stream)
+          stream.emit("close", 0)
+        })
+        .mockImplementationOnce((_command: string, callback: ExecCallback) => {
+          const stream = makeStream()
+          callback(undefined, stream)
+          stream.stderr.emit("data", Buffer.from("application failed\n"))
+          stream.emit("close", 2)
+        })
+
+      const client = makeClientWithExecSpy(execSpy)
+      const ssh = makeConnectedSsh(client, { sudoPassword: null, user: "deploy" })
+
+      await expect(ssh.exec("false", { silent: true })).rejects.toThrow("application failed")
+
+      const internals = ssh as unknown as Record<string, unknown>
+      expect(internals.sudoReady).toBe(true)
+      expect(internals.passwordlessSudo).toBe(true)
       expect(promptTerminal).not.toHaveBeenCalled()
     })
 

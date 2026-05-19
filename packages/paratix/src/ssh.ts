@@ -31,6 +31,7 @@ import {
   CAPTURE_TRUNCATION_MARKER,
   cleanupFailedSshClient,
   collectStreamOutput,
+  CommandError,
   DEFAULT_MAX_OUTPUT_BYTES,
   maskPreparedSecrets,
   maskSecrets,
@@ -167,6 +168,8 @@ const RAW_OUTPUT_ERROR_SNIPPET_LENGTH = 500
 
 type AuthMethod = "agent" | "password" | "privateKey" | null
 type PromptOptions = { abortSignal?: AbortSignal }
+type SudoCommandMode = "none" | "noninteractive" | "password"
+type SudoCommandResult = { command: string; mode: SudoCommandMode; needsPassword: boolean }
 type ConnectOptions = { reconnectDeadline?: number } & PromptOptions
 type TryConnectOnPortsOptions = {
   agent?: string
@@ -1403,60 +1406,61 @@ export class SshConnectionImpl implements SshConnection {
   private async execPrepared(command: string, options: ExecOptions = {}): Promise<ExecResult> {
     const client = this.ensureClient()
     const environmentPrefix = this.buildEnvPrefix(options.env)
-    const { command: cmd, needsPassword } = this.sudoCommand(
-      command,
-      environmentPrefix,
-      options.input != null
-    )
+    const sudo = this.sudoCommand(command, environmentPrefix, options.input != null)
     const secrets = prepareSecrets(this.buildSecrets(options.secrets))
-    return new Promise((resolve, reject) => {
-      const { isSettled, wrappedReject, wrappedResolve } = this.createSettledCallbacks<ExecResult>(
-        resolve,
-        reject
-      )
-      const timeout = options.timeout ?? COMMAND_TIMEOUT
-      let activeStream: ClientChannel | null = null
-      const timer = setTimeout(() => {
-        activeStream?.close()
-        wrappedReject(
-          new Error(
-            `Command timed out after ${timeout}ms: ${maskPreparedSecrets(command, secrets)}`
+    try {
+      return await new Promise((resolve, reject) => {
+        const { isSettled, wrappedReject, wrappedResolve } =
+          this.createSettledCallbacks<ExecResult>(resolve, reject)
+        const timeout = options.timeout ?? COMMAND_TIMEOUT
+        let activeStream: ClientChannel | null = null
+        const timer = setTimeout(() => {
+          activeStream?.close()
+          wrappedReject(
+            new Error(
+              `Command timed out after ${timeout}ms: ${maskPreparedSecrets(command, secrets)}`
+            )
           )
-        )
-      }, timeout)
-      try {
-        client.exec(cmd, (error: Error | undefined, stream: ClientChannel) => {
-          if (error) {
-            clearTimeout(timer)
-            wrappedReject(error)
-            return
-          }
-          // If the timer already fired (or the promise was otherwise settled) before
-          // ssh2 invoked this callback, we must not attach listeners that can never
-          // resolve the already-rejected promise. Close the stream immediately so
-          // ssh2 releases the channel and discards any buffered data.
-          if (isSettled()) {
-            stream.close()
-            return
-          }
-          activeStream = stream
-          collectStreamOutput({
-            command,
-            options,
-            reject: wrappedReject,
-            resolve: wrappedResolve,
-            secrets,
-            stream,
-            timer,
+        }, timeout)
+        try {
+          client.exec(sudo.command, (error: Error | undefined, stream: ClientChannel) => {
+            if (error) {
+              clearTimeout(timer)
+              wrappedReject(error)
+              return
+            }
+            // If the timer already fired (or the promise was otherwise settled) before
+            // ssh2 invoked this callback, we must not attach listeners that can never
+            // resolve the already-rejected promise. Close the stream immediately so
+            // ssh2 releases the channel and discards any buffered data.
+            if (isSettled()) {
+              stream.close()
+              return
+            }
+            activeStream = stream
+            collectStreamOutput({
+              command,
+              options,
+              reject: wrappedReject,
+              resolve: wrappedResolve,
+              secrets,
+              stream,
+              timer,
+            })
+            this.writeStreamInput(stream, sudo.needsPassword, options.input)
           })
-          this.writeStreamInput(stream, needsPassword, options.input)
-        })
-      } catch (error) {
-        clearTimeout(timer)
-        closeClientChannel(activeStream)
-        wrappedReject(toError(error))
+        } catch (error) {
+          clearTimeout(timer)
+          closeClientChannel(activeStream)
+          wrappedReject(toError(error))
+        }
+      })
+    } catch (error) {
+      if (sudo.mode === "noninteractive" && this.isNoninteractiveSudoAuthError(error)) {
+        this.invalidateSudoReadiness()
       }
-    })
+      throw error
+    }
   }
 
   /**
@@ -1696,6 +1700,19 @@ trap - EXIT
     }
   }
 
+  private invalidateSudoReadiness(): void {
+    this.sudoReady = false
+    this.credentialCachePrimed = false
+    this.passwordlessSudo = false
+  }
+
+  private isNoninteractiveSudoAuthError(error: unknown): boolean {
+    if (!(error instanceof CommandError)) return false
+    return /sudo: (?:a password is required|a terminal is required|no tty present)/iv.test(
+      error.fullStderr
+    )
+  }
+
   private isSudoReadyWithoutProbe(): boolean {
     return this.config.user === "root" || this.cachedSudoPassword != null
   }
@@ -1928,9 +1945,9 @@ trap - EXIT
     command: string,
     environmentPrefix = "",
     hasInput = false
-  ): { command: string; needsPassword: boolean } {
+  ): SudoCommandResult {
     if (this.config.user === "root") {
-      return { command: `${environmentPrefix}${command}`, needsPassword: false }
+      return { command: `${environmentPrefix}${command}`, mode: "none", needsPassword: false }
     }
     const quoted = shellQuote(`${environmentPrefix}${command}`)
     if (this.cachedSudoPassword != null && hasInput) {
@@ -1950,12 +1967,16 @@ trap - EXIT
             "configure passwordless sudo for the connecting user or remove the input payload"
         )
       }
-      return { command: `sudo -n bash -c ${quoted}`, needsPassword: false }
+      return { command: `sudo -n bash -c ${quoted}`, mode: "noninteractive", needsPassword: false }
     }
     if (this.cachedSudoPassword != null) {
-      return { command: `SUDO_PROMPT='' sudo -S bash -c ${quoted}`, needsPassword: true }
+      return {
+        command: `SUDO_PROMPT='' sudo -S bash -c ${quoted}`,
+        mode: "password",
+        needsPassword: true,
+      }
     }
-    return { command: `sudo bash -c ${quoted}`, needsPassword: false }
+    return { command: `sudo -n bash -c ${quoted}`, mode: "noninteractive", needsPassword: false }
   }
 
   private tearDownClient(closing: Client): void {
