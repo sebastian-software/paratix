@@ -1036,7 +1036,13 @@ async function runDebianAptPipelineAfterSourcesRewrite(parameters: {
   ssh: SshConnection
 }): Promise<ModuleResult> {
   const { options, snapshots, ssh } = parameters
-  const pipelineFailure = await runDebianUpgradePipeline(ssh, options)
+  let pipelineFailure: ModuleResult | null
+  try {
+    pipelineFailure = await runDebianUpgradePipeline(ssh, options)
+  } catch (error) {
+    const reason = error instanceof Error ? error.message : String(error)
+    pipelineFailure = failed(`[releaseUpgrade.upgrade] apt pipeline failed: ${reason}`)
+  }
   if (pipelineFailure != null) {
     return handleDebianPipelineFailure({ options, pipelineFailure, snapshots, ssh })
   }

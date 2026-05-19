@@ -1037,6 +1037,29 @@ describe("releaseUpgrade.upgrade — apply (Debian)", () => {
       expect(sourcesWrites.at(-1)?.content).toBe(originalSources)
     })
 
+    it("apt pipeline throws after sources rewrite → restores the original sources content", async () => {
+      const originalSources = "deb http://deb.debian.org/debian bookworm main\n"
+      const ssh = createMockSsh(debianApplyResponses("bookworm", "trixie"))
+      const writes = captureWriteFile(ssh)
+      const originalExec = ssh.exec.bind(ssh)
+      ssh.exec = async (command, execOptions) => {
+        // oxlint-disable-next-line no-conditional-in-test -- mock dispatcher injects the thrown pipeline failure after sources rewrite
+        if (command === "DEBIAN_FRONTEND=noninteractive apt-get full-upgrade -y") {
+          throw new Error("connection lost")
+        }
+        return originalExec(command, execOptions)
+      }
+
+      const mod = releaseUpgrade.upgrade()
+      const result = await mod.apply(ssh, emptyEnv)
+
+      expect(result.status).toBe("failed")
+      expect(result.error?.message).toContain("[releaseUpgrade.upgrade] apt pipeline failed")
+      expect(result.error?.message).toContain("connection lost")
+      const sourcesWrites = writes.filter((w) => w.path === "/etc/apt/sources.list")
+      expect(sourcesWrites.at(-1)?.content).toBe(originalSources)
+    })
+
     it("apt-get autoremove fails → restores the original sources content", async () => {
       const originalSources = "deb http://deb.debian.org/debian bookworm main\n"
       const ssh = createMockSsh(
