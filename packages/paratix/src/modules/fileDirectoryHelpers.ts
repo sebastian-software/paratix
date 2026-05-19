@@ -125,6 +125,33 @@ function directoryPathWithAncestors(remotePath: string): string[] {
   return directories
 }
 
+function renderFinalDirectoryValidationLines(quotedDirectory: string): string[] {
+  return [
+    `if [ ! -L ${quotedDirectory} ] && [ -d ${quotedDirectory} ]; then`,
+    `  :`,
+    `else`,
+    `  printf '%s\\n' 'directory path failed final validation' >&2`,
+    `  exit 1`,
+    `fi`,
+  ]
+}
+
+function renderFinalDirectoryValidationCommand(directory: string): string {
+  return renderFinalDirectoryValidationLines(shellQuote(directory)).join("\n")
+}
+
+async function assertFinalDirectoryTarget(input: {
+  remotePath: string
+  ssh: SshConnection
+}): Promise<ModuleResult | null> {
+  const result = await input.ssh.exec(
+    renderFinalDirectoryValidationCommand(input.remotePath),
+    EXEC_OPTS
+  )
+  if (result.code === 0) return null
+  return failedCommand(`[file.directory: ${input.remotePath}] final validation failed`, result)
+}
+
 function renderGuardedMkdirCommand(directory: string): string {
   const quotedDirectory = shellQuote(directory)
   return [
@@ -139,7 +166,23 @@ function renderGuardedMkdirCommand(directory: string): string {
     `if [ ! -d ${quotedDirectory} ]; then`,
     `  mkdir -- ${quotedDirectory}`,
     `fi`,
+    ...renderFinalDirectoryValidationLines(quotedDirectory),
   ].join("\n")
+}
+async function ensureDirectoryPathNotSymlinked(input: {
+  remotePath: string
+  ssh: SshConnection
+}): Promise<ModuleResult | null> {
+  const symlinkProbe = await findSymlinkInAncestorWalk(input.ssh, input.remotePath)
+  if (symlinkProbe?.kind === "leaf") {
+    return failed(`[file.directory: ${input.remotePath}] path must not be a symlink`)
+  }
+  if (symlinkProbe?.kind === "ancestor") {
+    return failed(
+      `[file.directory: ${input.remotePath}] ancestor must not be a symlink: ${symlinkProbe.path}`
+    )
+  }
+  return null
 }
 
 async function applyDirectoryMetadataDrift(input: {
@@ -198,15 +241,12 @@ export async function applyDirectoryState(input: {
   // target underneath an attacker-controlled tree. Mirrors the ancestor walks
   // performed by `ensureComposeProjectDirectoryNotSymlinked` (compose.ts) and
   // `ensureDownloadDestinationNotSymlinked` (download.ts).
-  const symlinkProbe = await findSymlinkInAncestorWalk(input.ssh, input.remotePath)
-  if (symlinkProbe?.kind === "leaf") {
-    return failed(`[file.directory: ${input.remotePath}] path must not be a symlink`)
-  }
-  if (symlinkProbe?.kind === "ancestor") {
-    return failed(
-      `[file.directory: ${input.remotePath}] ancestor must not be a symlink: ${symlinkProbe.path}`
-    )
-  }
+  const symlinkFailure = await ensureDirectoryPathNotSymlinked({
+    remotePath: input.remotePath,
+    ssh: input.ssh,
+  })
+  if (symlinkFailure != null) return symlinkFailure
+
   const exists = await input.ssh.test(`[ -d ${shellQuote(input.remotePath)} ]`)
   const mkdirResult = await ensureDirectoryExists({
     exists,
@@ -214,6 +254,12 @@ export async function applyDirectoryState(input: {
     ssh: input.ssh,
   })
   if (isDirectoryFailure(mkdirResult)) return mkdirResult
+
+  const finalValidation = await assertFinalDirectoryTarget({
+    remotePath: input.remotePath,
+    ssh: input.ssh,
+  })
+  if (finalValidation != null) return finalValidation
 
   const ownership = exists ? await readOwnership(input.ssh, input.remotePath) : undefined
   const metadataResult = await applyDirectoryMetadataDrift({

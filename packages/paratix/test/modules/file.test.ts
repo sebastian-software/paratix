@@ -53,6 +53,12 @@ const createMockSsh: typeof createBaseMockSsh = (responses, options) =>
           /^if \[ -L '\/(?:remote|var)(?:\/[^']*)?' \];/v,
         result: { code: 0 },
       },
+      {
+        command:
+          // eslint-disable-next-line security/detect-unsafe-regex -- bounded mock command regex, not user input
+          /^if \[ ! -L '\/(?:remote|var)(?:\/[^']*)?' \] && \[ -d '\/(?:remote|var)(?:\/[^']*)?' \];/v,
+        result: { code: 0 },
+      },
       { command: /^chmod '[0-7]+' '\/(?:remote|var)\//v, result: { code: 0 } },
       { command: /^chmod -- '[0-7]+' '\/(?:remote|var)\//v, result: { code: 0 } },
       { command: /\nchmod -- '[0-7]+' \/proc\/self\/fd\/9/v, result: { code: 0 } },
@@ -81,6 +87,34 @@ function findGuardedMkdirCall(calls: string[], directory: string): string | unde
   return calls.find(
     (call) => call.includes(`if [ -L '${directory}' ];`) && call.includes(`mkdir -- '${directory}'`)
   )
+}
+
+function finalDirectoryValidationLines(directory: string): string[] {
+  return [
+    `if [ ! -L '${directory}' ] && [ -d '${directory}' ]; then`,
+    `  :`,
+    `else`,
+    `  printf '%s\\n' 'directory path failed final validation' >&2`,
+    `  exit 1`,
+    `fi`,
+  ]
+}
+
+function guardedMkdirCommand(directory: string): string {
+  return [
+    `if [ -L '${directory}' ]; then`,
+    `  printf '%s\\n' 'directory path is a symlink' >&2`,
+    `  exit 1`,
+    `fi`,
+    `if [ -e '${directory}' ] && [ ! -d '${directory}' ]; then`,
+    `  printf '%s\\n' 'directory path exists and is not a directory' >&2`,
+    `  exit 1`,
+    `fi`,
+    `if [ ! -d '${directory}' ]; then`,
+    `  mkdir -- '${directory}'`,
+    `fi`,
+    ...finalDirectoryValidationLines(directory),
+  ].join("\n")
 }
 
 describe("file.directory", () => {
@@ -272,24 +306,12 @@ describe("file.directory", () => {
   })
 
   it("fails when the inline mkdir guard sees a symlink after the precheck", async () => {
-    const guardedMkdirCommand = [
-      "if [ -L '/var/app' ]; then",
-      "  printf '%s\\n' 'directory path is a symlink' >&2",
-      "  exit 1",
-      "fi",
-      "if [ -e '/var/app' ] && [ ! -d '/var/app' ]; then",
-      "  printf '%s\\n' 'directory path exists and is not a directory' >&2",
-      "  exit 1",
-      "fi",
-      "if [ ! -d '/var/app' ]; then",
-      "  mkdir -- '/var/app'",
-      "fi",
-    ].join("\n")
+    const guardedAppMkdirCommand = guardedMkdirCommand("/var/app")
     const ssh = createMockSsh({
       "[ -d '/var/app' ]": { code: 1 },
       "[ -L '/var' ]": { code: 1 },
       "[ -L '/var/app' ]": { code: 1 },
-      [guardedMkdirCommand]: {
+      [guardedAppMkdirCommand]: {
         code: 1,
         stderr: "directory path is a symlink\n",
       },
@@ -299,50 +321,59 @@ describe("file.directory", () => {
 
     expect(result.status).toBe("failed")
     expect(String(result.error)).toContain("mkdir failed")
-    expect(ssh.calls).toContain(guardedMkdirCommand)
+    expect(ssh.calls).toContain(guardedAppMkdirCommand)
     expect(ssh.calls).not.toContain("mkdir -p '/var/app'")
   })
 
+  it("fails when an existing directory path becomes a symlink before final validation", async () => {
+    const finalValidationCommand = finalDirectoryValidationLines("/var/app").join("\n")
+    const ssh = createMockSsh({
+      "[ -d '/var/app' ]": { code: 0 },
+      "[ -L '/var' ]": { code: 1 },
+      "[ -L '/var/app' ]": { code: 1 },
+      [finalValidationCommand]: {
+        code: 1,
+        stderr: "directory path failed final validation\n",
+      },
+    })
+    const mod = file.directory("/var/app", { mode: "0755", owner: "www-data:www-data" })
+    const result = await mod.apply(ssh, emptyEnv)
+
+    expect(result.status).toBe("failed")
+    expect(String(result.error)).toContain("final validation failed")
+    expect(ssh.calls).toContain(finalValidationCommand)
+    expect(ssh.calls).not.toContain("stat -c '%a %U %G' '/var/app'")
+    expect(ssh.calls).not.toContain("chown -- 'www-data:www-data' '/var/app'")
+  })
+
+  it("fails when a nested component becomes a symlink after mkdir", async () => {
+    const guardedVarCommand = guardedMkdirCommand("/var")
+    const guardedAppCommand = guardedMkdirCommand("/var/app")
+    const guardedDataCommand = guardedMkdirCommand("/var/app/data")
+    const ssh = createMockSsh({
+      "[ -d '/var/app/data' ]": { code: 1 },
+      "[ -L '/var' ]": { code: 1 },
+      "[ -L '/var/app' ]": { code: 1 },
+      "[ -L '/var/app/data' ]": { code: 1 },
+      [guardedAppCommand]: {
+        code: 1,
+        stderr: "directory path failed final validation\n",
+      },
+      [guardedVarCommand]: { code: 0 },
+    })
+    const mod = file.directory("/var/app/data")
+    const result = await mod.apply(ssh, emptyEnv)
+
+    expect(result.status).toBe("failed")
+    expect(String(result.error)).toContain("mkdir failed")
+    expect(ssh.calls).toContain(guardedAppCommand)
+    expect(ssh.calls).not.toContain(guardedDataCommand)
+  })
+
   it("creates nested directories through guarded component steps instead of plain mkdir -p", async () => {
-    const guardedVarCommand = [
-      "if [ -L '/var' ]; then",
-      "  printf '%s\\n' 'directory path is a symlink' >&2",
-      "  exit 1",
-      "fi",
-      "if [ -e '/var' ] && [ ! -d '/var' ]; then",
-      "  printf '%s\\n' 'directory path exists and is not a directory' >&2",
-      "  exit 1",
-      "fi",
-      "if [ ! -d '/var' ]; then",
-      "  mkdir -- '/var'",
-      "fi",
-    ].join("\n")
-    const guardedAppCommand = [
-      "if [ -L '/var/app' ]; then",
-      "  printf '%s\\n' 'directory path is a symlink' >&2",
-      "  exit 1",
-      "fi",
-      "if [ -e '/var/app' ] && [ ! -d '/var/app' ]; then",
-      "  printf '%s\\n' 'directory path exists and is not a directory' >&2",
-      "  exit 1",
-      "fi",
-      "if [ ! -d '/var/app' ]; then",
-      "  mkdir -- '/var/app'",
-      "fi",
-    ].join("\n")
-    const guardedDataCommand = [
-      "if [ -L '/var/app/data' ]; then",
-      "  printf '%s\\n' 'directory path is a symlink' >&2",
-      "  exit 1",
-      "fi",
-      "if [ -e '/var/app/data' ] && [ ! -d '/var/app/data' ]; then",
-      "  printf '%s\\n' 'directory path exists and is not a directory' >&2",
-      "  exit 1",
-      "fi",
-      "if [ ! -d '/var/app/data' ]; then",
-      "  mkdir -- '/var/app/data'",
-      "fi",
-    ].join("\n")
+    const guardedVarCommand = guardedMkdirCommand("/var")
+    const guardedAppCommand = guardedMkdirCommand("/var/app")
+    const guardedDataCommand = guardedMkdirCommand("/var/app/data")
     const ssh = createMockSsh({
       "[ -d '/var/app/data' ]": { code: 1 },
       "[ -L '/var' ]": { code: 1 },
@@ -370,19 +401,7 @@ describe("file.directory", () => {
       "[ -d '/var/app' ]": { code: 1 },
       "[ -L '/var' ]": { code: 1 },
       "[ -L '/var/app' ]": { code: 1 },
-      [[
-        "if [ -L '/var/app' ]; then",
-        "  printf '%s\\n' 'directory path is a symlink' >&2",
-        "  exit 1",
-        "fi",
-        "if [ -e '/var/app' ] && [ ! -d '/var/app' ]; then",
-        "  printf '%s\\n' 'directory path exists and is not a directory' >&2",
-        "  exit 1",
-        "fi",
-        "if [ ! -d '/var/app' ]; then",
-        "  mkdir -- '/var/app'",
-        "fi",
-      ].join("\n")]: {
+      [guardedMkdirCommand("/var/app")]: {
         code: 1,
         stderr: "mkdir: cannot create directory '/var/app': Read-only file system",
       },
