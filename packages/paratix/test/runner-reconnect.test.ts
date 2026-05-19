@@ -882,6 +882,43 @@ describe("runPlaybook handleReboot grace period (R-0000153)", () => {
     expect(elapsed).toBeGreaterThanOrEqual(40)
   })
 
+  it("keeps the reboot grace timer refed until reconnect can run", async () => {
+    const capturedConfigs: unknown[] = []
+    const reconnect = vi.fn().mockResolvedValue(null)
+    const realSetTimeout = globalThis.setTimeout
+    const setTimeoutSpy = vi.spyOn(globalThis, "setTimeout")
+    const unrefSpies: Array<ReturnType<typeof vi.fn>> = []
+
+    setTimeoutSpy.mockImplementation((handler, timeout, ...args) => {
+      const timer = realSetTimeout(handler, timeout, ...args)
+      const unref = vi.fn()
+      timer.unref = unref
+      unrefSpies.push(unref)
+      return timer
+    })
+
+    vi.doMock("../src/ssh.js", () => ({
+      shellQuote: (s: string) => `'${s}'`,
+      SshConnectionImpl: makeMockSshClass(capturedConfigs, { lifecycle: "permissive", reconnect }),
+    }))
+
+    const { runPlaybook } = await import("../src/runner.js")
+    const moduleWithReboot = makeModuleWithMeta([meta.systemReboot()])
+
+    const definition: ServerDefinition = {
+      host: "1.2.3.4",
+      name: "test-server",
+      run: [moduleWithReboot],
+      ssh: { ports: [22], privateKey: "~/.ssh/id", user: "root" },
+    }
+
+    await runPlaybook(definition, { rebootGraceSeconds: 0.01 })
+
+    expect(reconnect).toHaveBeenCalledTimes(1)
+    expect(unrefSpies).toHaveLength(1)
+    expect(unrefSpies[0]).not.toHaveBeenCalled()
+  })
+
   it("skips the grace wait entirely when rebootGraceSeconds is 0", async () => {
     const capturedConfigs: unknown[] = []
     const reconnect = vi.fn().mockResolvedValue(null)

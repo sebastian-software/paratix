@@ -203,6 +203,11 @@ type RebootGraceContext = {
   shutdownSignal: () => NodeJS.Signals | null
 }
 
+type SleepRespectingShutdownOptions = {
+  abortSignal: AbortSignal
+  keepAlive?: boolean
+}
+
 function createRebootGraceContext(
   options: RunOptions,
   shutdownSignal: () => NodeJS.Signals | null,
@@ -228,16 +233,20 @@ function createRebootGraceContext(
  *
  * @param durationMs - The maximum sleep duration in milliseconds.
  * @param shutdownSignal - Getter that returns the active shutdown signal, or `null`.
- * @param abortSignal - `AbortSignal` that ends the sleep early. Required so
+ * @param options - Additional sleep controls.
+ * @param options.abortSignal - `AbortSignal` that ends the sleep early. Required so
  *   every caller threads a shutdown-aware abort source through; a plain
  *   `setTimeout`-style sleep that ignores Ctrl-C is intentionally not
  *   supported here.
+ * @param options.keepAlive - When `true`, keeps the timer referenced so the
+ *   process stays alive until the wait completes.
  */
 async function sleepRespectingShutdown(
   durationMs: number,
   shutdownSignal: () => NodeJS.Signals | null,
-  abortSignal: AbortSignal
+  options: SleepRespectingShutdownOptions
 ): Promise<void> {
+  const { abortSignal, keepAlive = false } = options
   if (durationMs <= 0) return
   if (shutdownSignal() != null) return
   if (abortSignal.aborted) return
@@ -254,8 +263,9 @@ async function sleepRespectingShutdown(
       cleanup()
       resolve()
     }, durationMs)
-    // Avoid keeping the event loop alive solely for this sleep.
-    if (typeof timer.unref === "function") timer.unref()
+    // Avoid keeping the event loop alive solely for cooperative waits unless
+    // the caller explicitly needs the timer to hold the runner open.
+    if (!keepAlive && typeof timer.unref === "function") timer.unref()
     abortSignal.addEventListener("abort", handleAbort, { once: true })
   })
 }
@@ -470,11 +480,10 @@ async function handleReboot(
   // wait short-circuits when a shutdown signal arrives — both via the
   // synchronous shutdown getter (already set when this is reached) and via
   // the AbortSignal that fires on a fresh SIGINT/SIGTERM mid-sleep.
-  await sleepRespectingShutdown(
-    rebootGrace.graceMs,
-    rebootGrace.shutdownSignal,
-    rebootGrace.abortSignal
-  )
+  await sleepRespectingShutdown(rebootGrace.graceMs, rebootGrace.shutdownSignal, {
+    abortSignal: rebootGrace.abortSignal,
+    keepAlive: true,
+  })
 
   try {
     await ssh.reconnect()
