@@ -161,14 +161,13 @@ function isMissingPackageVersion(error) {
   return output.includes("E404") || output.includes("No match found for version")
 }
 
-async function isPublished(packageName, version, commandRunner) {
+async function isPublished({ commandRunner, packageName, repositoryRoot, version }) {
   try {
-    const { stdout } = await commandRunner.execFile("npm", [
-      "view",
-      `${packageName}@${version}`,
-      "version",
-      "--json",
-    ])
+    const { stdout } = await commandRunner.execFile(
+      "npm",
+      ["view", `${packageName}@${version}`, "version", "--json"],
+      { cwd: repositoryRoot }
+    )
     return normalizeNpmViewVersion(stdout) === version
   } catch (error) {
     if (isMissingPackageVersion(error)) return false
@@ -177,11 +176,11 @@ async function isPublished(packageName, version, commandRunner) {
 }
 
 async function waitForPublishedPackage(parameters, attempt = 1) {
-  const { commandRunner, packageName, version } = parameters
+  const { commandRunner, packageName, repositoryRoot, version } = parameters
   const retries = parameters.retries ?? DEFAULT_AVAILABILITY_RETRIES
   const delayMilliseconds = parameters.delayMilliseconds ?? DEFAULT_AVAILABILITY_DELAY_MS
 
-  if (await isPublished(packageName, version, commandRunner)) return
+  if (await isPublished({ commandRunner, packageName, repositoryRoot, version })) return
 
   if (attempt >= retries) {
     throw new Error(
@@ -469,7 +468,14 @@ async function publishPackage({
   packageInfo,
   repositoryRoot,
 }) {
-  if (await isPublished(packageInfo.name, packageInfo.version, commandRunner)) {
+  if (
+    await isPublished({
+      commandRunner,
+      packageName: packageInfo.name,
+      repositoryRoot,
+      version: packageInfo.version,
+    })
+  ) {
     console.log(
       `${packageInfo.name}@${packageInfo.version} is already published; skipping publish.`
     )
@@ -503,6 +509,7 @@ async function publishPackage({
     commandRunner,
     delayMilliseconds: availabilityDelayMilliseconds,
     packageName: packageInfo.name,
+    repositoryRoot,
     retries: availabilityRetries,
     version: packageInfo.version,
   })
@@ -516,16 +523,18 @@ async function recoverCreateParatixPackage({
   paratixPackage,
   repositoryRoot,
 }) {
-  const paratixPublished = await isPublished(
-    paratixPackage.name,
-    paratixPackage.version,
-    commandRunner
-  )
-  const createParatixPublished = await isPublished(
-    createParatixPackage.name,
-    createParatixPackage.version,
-    commandRunner
-  )
+  const paratixPublished = await isPublished({
+    commandRunner,
+    packageName: paratixPackage.name,
+    repositoryRoot,
+    version: paratixPackage.version,
+  })
+  const createParatixPublished = await isPublished({
+    commandRunner,
+    packageName: createParatixPackage.name,
+    repositoryRoot,
+    version: createParatixPackage.version,
+  })
 
   if (!paratixPublished) {
     throw new Error(
@@ -544,6 +553,7 @@ async function recoverCreateParatixPackage({
     commandRunner,
     delayMilliseconds: availabilityDelayMilliseconds,
     packageName: paratixPackage.name,
+    repositoryRoot,
     retries: availabilityRetries,
     version: paratixPackage.version,
   })
@@ -629,8 +639,18 @@ export async function publishWorkspacePackages(options) {
   await verifyDistributionArtefacts(createParatixPackage, filesystem)
 
   if (
-    (await isPublished(createParatixPackage.name, createParatixPackage.version, commandRunner)) &&
-    !(await isPublished(paratixPackage.name, paratixPackage.version, commandRunner))
+    (await isPublished({
+      commandRunner,
+      packageName: createParatixPackage.name,
+      repositoryRoot: REPOSITORY_ROOT,
+      version: createParatixPackage.version,
+    })) &&
+    !(await isPublished({
+      commandRunner,
+      packageName: paratixPackage.name,
+      repositoryRoot: REPOSITORY_ROOT,
+      version: paratixPackage.version,
+    }))
   ) {
     throw new Error(
       `${createParatixPackage.name}@${createParatixPackage.version} is already published, but ` +

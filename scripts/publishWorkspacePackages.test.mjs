@@ -179,12 +179,14 @@ function createCommandRunner(initiallyPublished, publishedVersions) {
   const published = new Set(initiallyPublished ?? [])
   const publishedVersionOverrides = publishedVersions ?? {}
   const calls = []
+  const execFileOptions = []
   const spawnOptions = []
 
   return {
     calls,
-    async execFile(command, commandArguments) {
+    async execFile(command, commandArguments, options) {
       calls.push([command, ...commandArguments])
+      execFileOptions.push(options)
 
       const packageSpecifier = commandArguments[1]
       if (published.has(packageSpecifier)) {
@@ -194,6 +196,7 @@ function createCommandRunner(initiallyPublished, publishedVersions) {
 
       throw createMissingPackageError()
     },
+    execFileOptions,
     async spawn(command, commandArguments, options) {
       calls.push([command, ...commandArguments])
       spawnOptions.push(options)
@@ -227,6 +230,10 @@ function hasCommandCall(calls, command) {
 
 function publishDirectories(calls) {
   return calls.filter((call) => call[0] === "pnpm").map((call) => call[2])
+}
+
+function npmViewOptions(commandRunner) {
+  return commandRunner.execFileOptions
 }
 
 function areAllFilesystemCallsRepositoryAnchored(calls) {
@@ -327,6 +334,13 @@ describe("publishWorkspacePackages", () => {
       ABSOLUTE_CREATE_PARATIX_DIRECTORY,
     ])
     assert.deepEqual(commandRunner.spawnOptions, [
+      { cwd: REPOSITORY_ROOT },
+      { cwd: REPOSITORY_ROOT },
+    ])
+    assert.deepEqual(npmViewOptions(commandRunner), [
+      { cwd: REPOSITORY_ROOT },
+      { cwd: REPOSITORY_ROOT },
+      { cwd: REPOSITORY_ROOT },
       { cwd: REPOSITORY_ROOT },
       { cwd: REPOSITORY_ROOT },
     ])
