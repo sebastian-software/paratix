@@ -366,6 +366,11 @@ type UnmountIfNeededResult = {
   previousLive: LiveMount | null
 }
 
+type LiveMountProbe =
+  | { kind: "failed"; failure: ModuleResult }
+  | { kind: "mounted"; live: LiveMount }
+  | { kind: "not-mounted" }
+
 function buildMountCommand(parameters: {
   fstype: string
   opts: string
@@ -490,9 +495,10 @@ async function ensureLiveMount(
   parameters: EnsureLiveMountParameters
 ): Promise<EnsureLiveMountResult | ModuleResult> {
   const { fstype, opts, path, src } = parameters
-  const live = await readLiveMount(ssh, path)
+  const liveProbe = await probeLiveMount(ssh, MOUNT_PRESENT, path)
+  if (liveProbe.kind === "failed") return liveProbe.failure
 
-  if (live == null) {
+  if (liveProbe.kind === "not-mounted") {
     const mountResult = await ssh.exec(buildMountCommand({ fstype, opts, path, src }), EXEC_OPTS)
     if (mountResult.code !== 0) {
       return failedCommand(`[mount.present: ${path}] mount failed`, mountResult)
@@ -500,6 +506,7 @@ async function ensureLiveMount(
     return { changed: true, previousLive: null }
   }
 
+  const { live } = liveProbe
   if (liveMountMatchesDesired(live, { fstype, opts, src })) {
     return { changed: false, previousLive: live }
   }
@@ -515,16 +522,11 @@ async function unmountIfNeeded(
   path: string,
   snapshotLiveMount: boolean
 ): Promise<ModuleResult | UnmountIfNeededResult> {
-  const isMounted = await ssh.test(`findmnt --noheadings ${shellQuote(path)}`)
-  if (!isMounted) return { changed: false, previousLive: null }
+  const liveProbe = await probeLiveMount(ssh, MOUNT_ABSENT, path)
+  if (liveProbe.kind === "failed") return liveProbe.failure
+  if (liveProbe.kind === "not-mounted") return { changed: false, previousLive: null }
 
-  let previousLive: LiveMount | null = null
-  if (snapshotLiveMount) {
-    previousLive = await readLiveMount(ssh, path)
-    if (previousLive == null) {
-      return failed(`[${MOUNT_ABSENT}: ${path}] failed to snapshot live mount before unmount`)
-    }
-  }
+  const previousLive = snapshotLiveMount ? liveProbe.live : null
 
   const umountResult = await ssh.exec(`umount ${shellQuote(path)}`, EXEC_OPTS)
   if (umountResult.code !== 0) {
@@ -574,13 +576,13 @@ async function ensureFstabEntry(
 }
 
 /**
- * Read the live mount attributes for a mountpoint via
- * `findmnt --noheadings --output SOURCE,FSTYPE,OPTIONS`.
+ * Probe the live mount attributes for a mountpoint via
+ * `findmnt --noheadings --output SOURCE,FSTYPE,OPTIONS`, distinguishing a
+ * genuinely absent mount from a failed probe.
  *
  * @param ssh - Active SSH connection to the remote host.
  * @param path - The mountpoint to inspect.
- * @returns The live attributes when the path is mounted, or `null` when it
- *   is not mounted (findmnt exits non-zero).
+ * @returns A structured probe result for mounted, not-mounted, or failed.
  */
 // findmnt --output SOURCE,FSTYPE,OPTIONS prints exactly three columns; the
 // helper below uses this constant when validating that the parsed output
@@ -597,15 +599,37 @@ function parseLiveMount(stdout: string): LiveMount | null {
   }
 }
 
-async function readLiveMount(ssh: SshConnection, path: string): Promise<LiveMount | null> {
+async function probeLiveMount(
+  ssh: SshConnection,
+  moduleName: string,
+  path: string
+): Promise<LiveMountProbe> {
   const findmntResult = await ssh.exec(
     `findmnt --noheadings --output SOURCE,FSTYPE,OPTIONS ${shellQuote(path)}`,
     EXEC_OPTS
   )
-  if (findmntResult.code !== 0) return null
+  if (findmntResult.code === 1) return { kind: "not-mounted" }
+  if (findmntResult.code !== 0) {
+    return {
+      failure: failedCommand(
+        `[${moduleName}: ${path}] findmnt failed while probing live mount state`,
+        findmntResult
+      ),
+      kind: "failed",
+    }
+  }
 
   // findmnt prints SOURCE FSTYPE OPTIONS separated by whitespace.
-  return parseLiveMount(findmntResult.stdout)
+  const live = parseLiveMount(findmntResult.stdout)
+  if (live == null) {
+    return {
+      failure: failed(
+        `[${moduleName}: ${path}] findmnt returned malformed output while probing live mount state`
+      ),
+      kind: "failed",
+    }
+  }
+  return { kind: "mounted", live }
 }
 
 /**
@@ -679,8 +703,8 @@ export const mount = {
 
         const symlinkGuard = await ssh.exec(buildMountPathSymlinkGuard(path), EXEC_OPTS)
         if (symlinkGuard.code !== 0) return NEEDS_APPLY
-        const isMounted = await ssh.test(`findmnt --noheadings ${shellQuote(path)}`)
-        if (isMounted) return NEEDS_APPLY
+        const liveProbe = await probeLiveMount(ssh, MOUNT_ABSENT, path)
+        if (liveProbe.kind !== "not-mounted") return NEEDS_APPLY
 
         if (persist) {
           const fstabContent = await ssh.readFile(FSTAB_PATH)
@@ -756,10 +780,11 @@ export const mount = {
 
         const symlinkGuard = await ssh.exec(buildMountPathSymlinkGuard(path), EXEC_OPTS)
         if (symlinkGuard.code !== 0) return NEEDS_APPLY
-        const live = await readLiveMount(ssh, path)
-        if (live == null) return NEEDS_APPLY
+        const liveProbe = await probeLiveMount(ssh, MOUNT_PRESENT, path)
+        if (liveProbe.kind !== "mounted") return NEEDS_APPLY
         // R-0000049: compare the live source / fstype / options against
         // the desired values so a drifted mount triggers needs-apply.
+        const { live } = liveProbe
         if (!liveMountMatchesDesired(live, { fstype, opts, src })) return NEEDS_APPLY
 
         if (persist) {

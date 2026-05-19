@@ -39,7 +39,6 @@ const expandedDefaultMountOpts = "rw,relatime"
 const fstabLine = `${mountSrc} ${mountPath} ${mountFstype} ${mountOpts} 0 0`
 
 const findmntCheckCmd = `findmnt --noheadings --output SOURCE,FSTYPE,OPTIONS '${mountPath}'`
-const findmntTestCmd = `findmnt --noheadings '${mountPath}'`
 const mountCmd = `mount -t '${mountFstype}' -o '${mountOpts}' -- '${mountSrc}' '${mountPath}'`
 const umountCmd = `umount '${mountPath}'`
 // R-0000755: mount.present now walks each path component with a
@@ -240,6 +239,20 @@ describe("mount.present — check", () => {
   it("returns needs-apply when mountpoint is not mounted (findmnt fails)", async () => {
     const mockSsh = createMockSsh({
       [findmntCheckCmd]: { code: 1 },
+    })
+    const mod = mount.present({
+      fstype: mountFstype,
+      opts: mountOpts,
+      path: mountPath,
+      src: mountSrc,
+    })
+    const result = await mod.check(mockSsh, emptyEnv)
+    expect(result).toBe("needs-apply")
+  })
+
+  it("returns needs-apply when the live mount probe fails unexpectedly", async () => {
+    const mockSsh = createMockSsh({
+      [findmntCheckCmd]: { code: 127, stderr: "findmnt: not found" },
     })
     const mod = mount.present({
       fstype: mountFstype,
@@ -702,6 +715,62 @@ describe("mount.present — apply", () => {
     expect(mockSsh.calls).not.toContain("cat '/etc/fstab'")
     expect(mockSsh.calls).not.toContain(findmntCheckCmd)
     expect(mockSsh.calls).not.toContain(mountCmd)
+    expect(writtenFiles).toStrictEqual([])
+  })
+
+  it("returns failed and skips mount and fstab when findmnt is unavailable", async () => {
+    const writtenFiles: Array<{ content: string; path: string }> = []
+    const mockSsh = createMountApplyMockSsh({
+      "cat '/etc/fstab'": { stdout: "# /etc/fstab\n" },
+      [findmntCheckCmd]: { code: 127, stderr: "findmnt: not found" },
+      [mountCmd]: { code: 0 },
+    })
+    // eslint-disable-next-line @typescript-eslint/require-await -- Mock implementation
+    mockSsh.writeFile = async (path: string, content: string): Promise<void> => {
+      writtenFiles.push({ content, path })
+    }
+    const mod = mount.present({
+      fstype: mountFstype,
+      opts: mountOpts,
+      path: mountPath,
+      src: mountSrc,
+    })
+    const result = await mod.apply(mockSsh, emptyEnv)
+
+    expect(result.status).toBe("failed")
+    expect(result.error?.message).toContain(
+      "[mount.present: /mnt/data] findmnt failed while probing live mount state"
+    )
+    expect(mockSsh.calls).not.toContain(mountCmd)
+    expect(mockSsh.calls).not.toContain("cat '/etc/fstab'")
+    expect(writtenFiles).toStrictEqual([])
+  })
+
+  it("returns failed and skips mount and fstab when findmnt returns an unexpected code", async () => {
+    const writtenFiles: Array<{ content: string; path: string }> = []
+    const mockSsh = createMountApplyMockSsh({
+      "cat '/etc/fstab'": { stdout: "# /etc/fstab\n" },
+      [findmntCheckCmd]: { code: 2, stderr: "findmnt failed" },
+      [mountCmd]: { code: 0 },
+    })
+    // eslint-disable-next-line @typescript-eslint/require-await -- Mock implementation
+    mockSsh.writeFile = async (path: string, content: string): Promise<void> => {
+      writtenFiles.push({ content, path })
+    }
+    const mod = mount.present({
+      fstype: mountFstype,
+      opts: mountOpts,
+      path: mountPath,
+      src: mountSrc,
+    })
+    const result = await mod.apply(mockSsh, emptyEnv)
+
+    expect(result.status).toBe("failed")
+    expect(result.error?.message).toContain(
+      "[mount.present: /mnt/data] findmnt failed while probing live mount state"
+    )
+    expect(mockSsh.calls).not.toContain(mountCmd)
+    expect(mockSsh.calls).not.toContain("cat '/etc/fstab'")
     expect(writtenFiles).toStrictEqual([])
   })
 
@@ -1232,12 +1301,21 @@ describe("mount.absent — check", () => {
 
   it("returns needs-apply when mountpoint is mounted", async () => {
     const mockSsh = createMockSsh({
-      [findmntTestCmd]: { code: 0 },
+      [findmntCheckCmd]: { code: 0, stdout: liveMountStdout },
     })
     const mod = mount.absent({ path: mountPath })
     const result = await mod.check(mockSsh, emptyEnv)
     expect(result).toBe("needs-apply")
-    expect(mockSsh.calls).toContain(findmntTestCmd)
+    expect(mockSsh.calls).toContain(findmntCheckCmd)
+  })
+
+  it("returns needs-apply when the live mount probe fails unexpectedly", async () => {
+    const mockSsh = createMockSsh({
+      [findmntCheckCmd]: { code: 127, stderr: "findmnt: not found" },
+    })
+    const mod = mount.absent({ path: mountPath })
+    const result = await mod.check(mockSsh, emptyEnv)
+    expect(result).toBe("needs-apply")
   })
 
   it("returns needs-apply when mount path contains a symlink", async () => {
@@ -1247,13 +1325,13 @@ describe("mount.absent — check", () => {
     const mod = mount.absent({ path: mountPath })
     const result = await mod.check(mockSsh, emptyEnv)
     expect(result).toBe("needs-apply")
-    expect(mockSsh.calls).not.toContain(findmntTestCmd)
+    expect(mockSsh.calls).not.toContain(findmntCheckCmd)
   })
 
   it("returns ok when not mounted and no fstab entry (persist: true)", async () => {
     const mockSsh = createMockSsh({
       "cat '/etc/fstab'": { stdout: "# /etc/fstab\n" },
-      [findmntTestCmd]: { code: 1 },
+      [findmntCheckCmd]: { code: 1 },
     })
     const mod = mount.absent({ path: mountPath })
     const result = await mod.check(mockSsh, emptyEnv)
@@ -1263,7 +1341,7 @@ describe("mount.absent — check", () => {
   it("returns needs-apply when not mounted but fstab entry exists", async () => {
     const mockSsh = createMockSsh({
       "cat '/etc/fstab'": { stdout: `${fstabLine}\n` },
-      [findmntTestCmd]: { code: 1 },
+      [findmntCheckCmd]: { code: 1 },
     })
     const mod = mount.absent({ path: mountPath })
     const result = await mod.check(mockSsh, emptyEnv)
@@ -1272,7 +1350,7 @@ describe("mount.absent — check", () => {
 
   it("returns ok when not mounted (persist: false)", async () => {
     const mockSsh = createMockSsh({
-      [findmntTestCmd]: { code: 1 },
+      [findmntCheckCmd]: { code: 1 },
     })
     const mod = mount.absent({ path: mountPath, persist: false })
     const result = await mod.check(mockSsh, emptyEnv)
@@ -1293,12 +1371,11 @@ describe("mount.absent — apply", () => {
     const mockSsh = createMountApplyMockSsh({
       "cat '/etc/fstab'": { stdout: "# /etc/fstab\n" },
       [findmntCheckCmd]: { code: 0, stdout: liveMountStdout },
-      [findmntTestCmd]: { code: 0 },
       [umountCmd]: { code: 0 },
     })
     const mod = mount.absent({ path: mountPath })
     await mod.apply(mockSsh, emptyEnv)
-    expect(mockSsh.calls.indexOf(findmntTestCmd)).toBeLessThan(mockSsh.calls.indexOf(umountCmd))
+    expect(mockSsh.calls.indexOf(findmntCheckCmd)).toBeLessThan(mockSsh.calls.indexOf(umountCmd))
     expect(mockSsh.calls).toContain(umountCmd)
   })
 
@@ -1312,7 +1389,7 @@ describe("mount.absent — apply", () => {
     expect(result.error?.message).toContain(
       "[mount.absent: /mnt/data] mount path symlink check failed"
     )
-    expect(mockSsh.calls).not.toContain(findmntTestCmd)
+    expect(mockSsh.calls).not.toContain(findmntCheckCmd)
     expect(mockSsh.calls).not.toContain(umountCmd)
   })
 
@@ -1330,7 +1407,7 @@ describe("mount.absent — apply", () => {
     expect(mockSsh.calls.indexOf(mountPathSymlinkGuardCmd)).toBeLessThan(
       mockSsh.calls.indexOf(mountPathRealpathCmd)
     )
-    expect(mockSsh.calls).not.toContain(findmntTestCmd)
+    expect(mockSsh.calls).not.toContain(findmntCheckCmd)
     expect(mockSsh.calls).not.toContain(umountCmd)
     expect(mockSsh.calls).not.toContain("cat '/etc/fstab'")
     expect(mockSsh.writeFileCalls).toHaveLength(0)
@@ -1339,7 +1416,6 @@ describe("mount.absent — apply", () => {
   it("returns failed when umount fails", async () => {
     const mockSsh = createMountApplyMockSsh({
       [findmntCheckCmd]: { code: 0, stdout: liveMountStdout },
-      [findmntTestCmd]: { code: 0 },
       [umountCmd]: { code: 1, stderr: "umount failed" },
     })
     const mod = mount.absent({ path: mountPath })
@@ -1349,11 +1425,34 @@ describe("mount.absent — apply", () => {
     expect(result.error?.message).toContain("[mount.absent: /mnt/data] umount failed")
   })
 
+  it("returns failed and skips umount and fstab when findmnt is unavailable", async () => {
+    const writtenFiles: Array<{ content: string; path: string }> = []
+    const mockSsh = createMountApplyMockSsh({
+      "cat '/etc/fstab'": { stdout: `${fstabLine}\n` },
+      [findmntCheckCmd]: { code: 127, stderr: "findmnt: not found" },
+      [umountCmd]: { code: 0 },
+    })
+    // eslint-disable-next-line @typescript-eslint/require-await -- Mock implementation
+    mockSsh.writeFile = async (path: string, content: string): Promise<void> => {
+      writtenFiles.push({ content, path })
+    }
+    const mod = mount.absent({ path: mountPath })
+    const result = await mod.apply(mockSsh, emptyEnv)
+
+    expect(result.status).toBe("failed")
+    expect(result.error?.message).toContain(
+      "[mount.absent: /mnt/data] findmnt failed while probing live mount state"
+    )
+    expect(mockSsh.calls).not.toContain(umountCmd)
+    expect(mockSsh.calls).not.toContain("cat '/etc/fstab'")
+    expect(writtenFiles).toStrictEqual([])
+  })
+
   it("removes fstab entry when persist is true", async () => {
     const writtenFiles: Array<{ content: string; path: string }> = []
     const mockSsh = createMountApplyMockSsh({
       "cat '/etc/fstab'": { stdout: `${fstabLine}\n` },
-      [findmntTestCmd]: { code: 1 },
+      [findmntCheckCmd]: { code: 1 },
     })
     // eslint-disable-next-line @typescript-eslint/require-await -- Mock implementation
     mockSsh.writeFile = async (path: string, content: string): Promise<void> => {
@@ -1369,7 +1468,7 @@ describe("mount.absent — apply", () => {
   it("returns failed instead of rejecting when the fstab mutex lock cannot be acquired", async () => {
     const mockSsh = createMountApplyMockSsh({
       "cat '/etc/fstab'": { stdout: `${fstabLine}\n` },
-      [findmntTestCmd]: { code: 1 },
+      [findmntCheckCmd]: { code: 1 },
       [flagsDirectoryCreateCmd]: { code: 1, stderr: "read-only filesystem" },
     })
     const mod = mount.absent({ path: mountPath })
@@ -1383,7 +1482,6 @@ describe("mount.absent — apply", () => {
     const mockSsh = createMountApplyMockSsh({
       "cat '/etc/fstab'": { stdout: `${fstabLine}\n` },
       [findmntCheckCmd]: { code: 0, stdout: liveMountStdout },
-      [findmntTestCmd]: { code: 0 },
       [flagsDirectoryCreateCmd]: { code: 1, stderr: "read-only filesystem" },
       [mountCmd]: { code: 0 },
       [umountCmd]: { code: 0 },
@@ -1402,7 +1500,6 @@ describe("mount.absent — apply", () => {
     const mockSsh = createMountApplyMockSsh({
       "cat '/etc/fstab'": { stdout: `${fstabLine}\n` },
       [findmntCheckCmd]: { code: 0, stdout: liveMountStdout },
-      [findmntTestCmd]: { code: 0 },
       [flagsDirectoryCreateCmd]: { code: 1, stderr: "read-only filesystem" },
       [mountCmd]: { code: 32, stderr: "restore failed" },
       [umountCmd]: { code: 0 },
@@ -1420,7 +1517,7 @@ describe("mount.absent — apply", () => {
 
   it("returns failed instead of rejecting when guarded fstab write detects a concurrent change", async () => {
     const mockSsh = createMountApplyMockSsh({
-      [findmntTestCmd]: { code: 1 },
+      [findmntCheckCmd]: { code: 1 },
     })
     const fstabReads = [`${fstabLine}\n`, `${fstabLine}\n# changed\n`]
     // eslint-disable-next-line @typescript-eslint/require-await -- Mock implementation
@@ -1436,7 +1533,7 @@ describe("mount.absent — apply", () => {
   it("returns failed instead of rejecting when removing the fstab entry throws", async () => {
     const mockSsh = createMountApplyMockSsh({
       "cat '/etc/fstab'": { stdout: `${fstabLine}\n` },
-      [findmntTestCmd]: { code: 1 },
+      [findmntCheckCmd]: { code: 1 },
     })
     mockSsh.writeFile = async (): Promise<void> => {
       await Promise.reject(new Error("sftp write failed"))
@@ -1451,7 +1548,7 @@ describe("mount.absent — apply", () => {
   it("returns ok when nothing to do (not mounted, no fstab entry)", async () => {
     const mockSsh = createMountApplyMockSsh({
       "cat '/etc/fstab'": { stdout: "# /etc/fstab\n" },
-      [findmntTestCmd]: { code: 1 },
+      [findmntCheckCmd]: { code: 1 },
     })
     const mod = mount.absent({ path: mountPath })
     const result = await mod.apply(mockSsh, emptyEnv)
@@ -1462,7 +1559,6 @@ describe("mount.absent — apply", () => {
     const mockSsh = createMountApplyMockSsh({
       "cat '/etc/fstab'": { stdout: "# /etc/fstab\n" },
       [findmntCheckCmd]: { code: 0, stdout: liveMountStdout },
-      [findmntTestCmd]: { code: 0 },
       [umountCmd]: { code: 0 },
     })
     const mod = mount.absent({ path: mountPath })
@@ -1472,7 +1568,7 @@ describe("mount.absent — apply", () => {
 
   it("skips fstab when persist is false", async () => {
     const mockSsh = createMountApplyMockSsh({
-      [findmntTestCmd]: { code: 1 },
+      [findmntCheckCmd]: { code: 1 },
     })
     const mod = mount.absent({ path: mountPath, persist: false })
     await mod.apply(mockSsh, emptyEnv)
@@ -1482,7 +1578,7 @@ describe("mount.absent — apply", () => {
   it("skips umount when not mounted", async () => {
     const mockSsh = createMountApplyMockSsh({
       "cat '/etc/fstab'": { stdout: "# /etc/fstab\n" },
-      [findmntTestCmd]: { code: 1 },
+      [findmntCheckCmd]: { code: 1 },
     })
     const mod = mount.absent({ path: mountPath })
     await mod.apply(mockSsh, emptyEnv)
