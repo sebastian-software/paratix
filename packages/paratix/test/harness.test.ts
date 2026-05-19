@@ -263,10 +263,52 @@ describe("ensureIntegrationRuntimeIsAvailable", () => {
     ])
   })
 
+  it("does not treat not running Colima status as running on macOS", async () => {
+    const { calls, run } = createCommandRunner({
+      "colima status": "not running",
+      "which colima": "/opt/homebrew/bin/colima",
+    })
+
+    await expect(
+      ensureIntegrationRuntimeIsAvailable({
+        env: {},
+        platform: "darwin",
+        run,
+      })
+    ).rejects.toThrow("PARATIX_INTEGRATION_START_COLIMA=true")
+
+    expect(calls).toStrictEqual([
+      { arguments: ["colima"], command: "which" },
+      { arguments: ["status"], command: "colima" },
+    ])
+  })
+
   it("starts Colima on macOS when explicitly opted in", async () => {
     const { calls, run } = createCommandRunner({
       "colima start": "",
       "colima status": "Stopped",
+      "docker info": "Server Version: 1.0.0",
+      "which colima": "/opt/homebrew/bin/colima",
+    })
+
+    await ensureIntegrationRuntimeIsAvailable({
+      env: { PARATIX_INTEGRATION_START_COLIMA: "true" },
+      platform: "darwin",
+      run,
+    })
+
+    expect(calls).toStrictEqual([
+      { arguments: ["colima"], command: "which" },
+      { arguments: ["status"], command: "colima" },
+      { arguments: ["start"], command: "colima" },
+      { arguments: ["info"], command: "docker" },
+    ])
+  })
+
+  it("starts Colima when not running on macOS and explicitly opted in", async () => {
+    const { calls, run } = createCommandRunner({
+      "colima start": "",
+      "colima status": "not running",
       "docker info": "Server Version: 1.0.0",
       "which colima": "/opt/homebrew/bin/colima",
     })

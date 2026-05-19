@@ -205,6 +205,10 @@ function createColimaNotRunningError(): Error {
   )
 }
 
+function isColimaRunningStatus(status: string): boolean {
+  return /^Status:\s*Running$/imv.test(status) || /^Running$/imv.test(status.trim())
+}
+
 async function ensureColimaIsAvailable(
   environment: NodeJS.ProcessEnv,
   run: CommandRunner
@@ -220,7 +224,7 @@ async function ensureColimaIsAvailable(
 
   try {
     const status = await run("colima", ["status"], { timeoutMs: SHORT_COMMAND_TIMEOUT_MS })
-    if (/running/iv.test(status)) return
+    if (isColimaRunningStatus(status)) return
   } catch {
     if (shouldStartColima(environment)) {
       await startColima(run)
