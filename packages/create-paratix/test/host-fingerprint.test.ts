@@ -71,7 +71,7 @@ describe("readHostFingerprintViaSsh2", () => {
     const fakeClient = createFakeHostKeyClient((config, client) => {
       callHostVerifier(config, hostKey)
       setImmediate(() => {
-        client.handlers.error(new Error("Host denied"))
+        client.emit("error", new Error("Host denied"))
       })
     })
 
@@ -101,7 +101,7 @@ describe("readHostFingerprintViaSsh2", () => {
       const fakeClient = createFakeHostKeyClient((config, client) => {
         callHostVerifier(config, hostKey)
         setImmediate(() => {
-          client.handlers.error(new Error("Host denied"))
+          client.emit("error", new Error("Host denied"))
         })
       })
 
@@ -119,7 +119,7 @@ describe("readHostFingerprintViaSsh2", () => {
   it("fails clearly when ssh2 cannot obtain a host key", async () => {
     const fakeClient = createFakeHostKeyClient((_config, client) => {
       setImmediate(() => {
-        client.handlers.error(new Error("connect ECONNREFUSED"))
+        client.emit("error", new Error("connect ECONNREFUSED"))
       })
     })
 
@@ -139,7 +139,7 @@ describe("readHostFingerprintViaSsh2", () => {
     const fakeClient = createFakeHostKeyClient((config, client) => {
       verdicts.push(callHostVerifier(config, hostKey))
       setImmediate(() => {
-        client.handlers.error(new Error("Host denied"))
+        client.emit("error", new Error("Host denied"))
       })
     })
 
@@ -170,7 +170,7 @@ describe("readHostFingerprintViaSsh2", () => {
     const fakeClient = createFakeHostKeyClient((config, client) => {
       callHostVerifier(config, hostKey)
       setImmediate(() => {
-        client.handlers.error(new Error("Host denied"))
+        client.emit("error", new Error("Host denied"))
       })
     })
 
@@ -196,7 +196,7 @@ describe("readHostFingerprintViaSsh2", () => {
     const fakeClient = createFakeHostKeyClient((config, client) => {
       callHostVerifier(config, hostKey)
       setImmediate(() => {
-        client.handlers.error(new Error("Host denied"))
+        client.emit("error", new Error("Host denied"))
       })
     })
 
@@ -213,7 +213,7 @@ describe("readHostFingerprintViaSsh2", () => {
     const fakeClient = createFakeHostKeyClient((config, client) => {
       callHostVerifier(config, truncatedKey)
       setImmediate(() => {
-        client.handlers.close()
+        client.emit("close")
       })
     })
 
@@ -231,7 +231,7 @@ describe("readHostFingerprintViaSsh2", () => {
     const fakeClient = createFakeHostKeyClient((config, client) => {
       callHostVerifier(config, hostKey)
       setImmediate(() => {
-        client.handlers.error(new Error("Host denied"))
+        client.emit("error", new Error("Host denied"))
       })
     })
 
@@ -248,7 +248,7 @@ describe("readHostFingerprintViaSsh2", () => {
     const fakeClient = createFakeHostKeyClient((config, client) => {
       callHostVerifier(config, hostKey)
       setImmediate(() => {
-        client.handlers.error(new Error("Host denied"))
+        client.emit("error", new Error("Host denied"))
       })
     })
 
@@ -265,7 +265,7 @@ describe("readHostFingerprintViaSsh2", () => {
     const fakeClient = createFakeHostKeyClient((config, client) => {
       callHostVerifier(config, hostKey)
       setImmediate(() => {
-        client.handlers.error(new Error("Host denied"))
+        client.emit("error", new Error("Host denied"))
       })
     })
 
@@ -282,7 +282,7 @@ describe("readHostFingerprintViaSsh2", () => {
     const fakeClient = createFakeHostKeyClient((config, client) => {
       callHostVerifier(config, hostKey)
       setImmediate(() => {
-        client.handlers.error(new Error("Host denied"))
+        client.emit("error", new Error("Host denied"))
       })
     })
 
@@ -304,7 +304,7 @@ describe("readHostFingerprintViaSsh2", () => {
     const fakeClient = createFakeHostKeyClient((config, client) => {
       callHostVerifier(config, hostKey)
       setImmediate(() => {
-        client.handlers.error(new Error("Host denied"))
+        client.emit("error", new Error("Host denied"))
       })
     })
 
@@ -329,7 +329,7 @@ describe("readHostFingerprintViaSsh2", () => {
     const fakeClient = createFakeHostKeyClient((config, client) => {
       callHostVerifier(config, hostKey)
       setImmediate(() => {
-        client.handlers.error(new Error("Host denied"))
+        client.emit("error", new Error("Host denied"))
       })
     })
 
@@ -354,7 +354,7 @@ describe("readHostFingerprintViaSsh2", () => {
     const fakeClient = createFakeHostKeyClient((config, client) => {
       callHostVerifier(config, hostKey)
       setImmediate(() => {
-        client.handlers.error(new Error("Host denied"))
+        client.emit("error", new Error("Host denied"))
       })
     })
 
@@ -379,7 +379,7 @@ describe("readHostFingerprintViaSsh2", () => {
     const fakeClient = createFakeHostKeyClient((config, client) => {
       callHostVerifier(config, hostKey)
       setImmediate(() => {
-        client.handlers.error(new Error("Host denied"))
+        client.emit("error", new Error("Host denied"))
       })
     })
 
@@ -404,7 +404,7 @@ describe("readHostFingerprintViaSsh2", () => {
     const fakeClient = createFakeHostKeyClient((config, client) => {
       callHostVerifier(config, hostKey)
       setImmediate(() => {
-        client.handlers.error(new Error("Host denied"))
+        client.emit("error", new Error("Host denied"))
       })
     })
 
@@ -424,7 +424,7 @@ describe("readHostFingerprintViaSsh2", () => {
     const fakeClient = createFakeHostKeyClient((config, client) => {
       setImmediate(() => {
         verdicts.push(callHostVerifier(config, hostKey))
-        client.handlers.error(new Error("Host denied"))
+        client.emit("error", new Error("Host denied"))
       })
     })
 
@@ -502,25 +502,22 @@ describe("readHostFingerprintViaSsh2", () => {
   // client.end() (half-closed socket, ssh2-layer throws) do not bubble up
   // as uncaught errors and crash the process.
   it("absorbs late error events emitted during client.end()", async () => {
-    // FakeHostKeyClient.handlers is a plain dictionary keyed by event name,
-    // not a real EventEmitter listener list. This test therefore only
-    // validates the removeAllListeners() + no-op registration sequence and
-    // dictionary-slot semantics: cleanupClient must reach removeAllListeners
-    // and then register a no-op error handler that survives a late emit.
-    // A fuller test of actual listener-list cleanup (multiple listeners,
-    // ordering, real EventEmitter teardown) would require an
-    // EventEmitter-based fake instead of this dictionary stub.
     const hostKey = buildEd25519HostKeyBuffer()
+    const firstOldErrorListener = vi.fn<(error?: Error) => void>()
+    const secondOldErrorListener = vi.fn<(error?: Error) => void>()
     const fakeClient = createFakeHostKeyClient((config, client) => {
+      client.on("error", firstOldErrorListener)
+      client.on("error", secondOldErrorListener)
       callHostVerifier(config, hostKey)
       setImmediate(() => {
-        client.handlers.error(new Error("Host denied"))
+        client.emit("error", new Error("Host denied"))
       })
     })
     // After removeAllListeners + on("error", noop), end() emits a late
     // error. The no-op listener installed by cleanupClient must absorb it.
-    fakeClient.end.mockImplementation((): void => {
-      fakeClient.handlers.error(new Error("late socket teardown error"))
+    fakeClient.end.mockImplementation(() => {
+      fakeClient.emit("error", new Error("late socket teardown error"))
+      return useFakeHostKeyClient(fakeClient)
     })
 
     await expect(
@@ -534,7 +531,11 @@ describe("readHostFingerprintViaSsh2", () => {
     const errorListenerRegistrations = fakeClient.on.mock.calls.filter(
       ([event]) => event === "error"
     )
-    expect(errorListenerRegistrations.length).toBeGreaterThanOrEqual(2)
+    expect(errorListenerRegistrations.length).toBeGreaterThanOrEqual(4)
+    expect(firstOldErrorListener).toHaveBeenCalledOnce()
+    expect(secondOldErrorListener).toHaveBeenCalledOnce()
+    expect(firstOldErrorListener).toHaveBeenCalledWith(new Error("Host denied"))
+    expect(secondOldErrorListener).toHaveBeenCalledWith(new Error("Host denied"))
   })
 
   // R-0000127: when the close handler resolves first, the watchdog must be
@@ -548,7 +549,7 @@ describe("readHostFingerprintViaSsh2", () => {
       const fakeClient = createFakeHostKeyClient((config, client) => {
         callHostVerifier(config, hostKey)
         setImmediate(() => {
-          client.handlers.error(new Error("Host denied"))
+          client.emit("error", new Error("Host denied"))
         })
       })
 
