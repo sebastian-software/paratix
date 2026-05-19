@@ -61,7 +61,10 @@ function createCommandRunner(responses: Partial<Record<string, Error | string>>)
 const mockExecFile = vi.mocked(execFile)
 const mockRm = vi.mocked(rm)
 
-function mockIntegrationBuildFailure(commands: CommandCall[]): void {
+function mockIntegrationBuildFailure(
+  commands: CommandCall[],
+  output: { stderr?: string; stdout?: string } = {}
+): void {
   mockExecFile.mockImplementation((...callArguments: unknown[]) => {
     const command = callArguments[0] as string
     const commandArguments = callArguments[1] as string[]
@@ -84,7 +87,11 @@ function mockIntegrationBuildFailure(commands: CommandCall[]): void {
       return undefined as never
     }
     if (command === "docker" && commandArguments[0] === "build") {
-      callback(new Error("build failed"), "", "docker build failed")
+      callback(
+        new Error("build failed"),
+        output.stdout ?? "",
+        output.stderr ?? "docker build failed"
+      )
       return undefined as never
     }
     callback(null, "ok", "")
@@ -161,6 +168,43 @@ describe("createIntegrationEnvironment", () => {
         expect.stringMatching(/^docker image rm -f paratix-integration-sshd:/v),
       ])
     )
+  })
+
+  it("includes stdout and stderr tails when a setup command fails", async () => {
+    const commands: CommandCall[] = []
+    mockIntegrationBuildFailure(commands, {
+      stderr: "stderr diagnostic",
+      stdout: "stdout diagnostic",
+    })
+
+    await expect(createIntegrationEnvironment(resolve(import.meta.dirname, ".."))).rejects.toThrow(
+      "stdout:\nstdout diagnostic\nstderr:\nstderr diagnostic"
+    )
+  })
+
+  it("bounds command failure stdout and stderr details", async () => {
+    const commands: CommandCall[] = []
+    const longStdout = `stdout-start\n${"o".repeat(9000)}stdout-end`
+    const longStderr = `stderr-start\n${"e".repeat(9000)}stderr-end`
+    mockIntegrationBuildFailure(commands, {
+      stderr: longStderr,
+      stdout: longStdout,
+    })
+
+    let caughtError: unknown
+    try {
+      await createIntegrationEnvironment(resolve(import.meta.dirname, ".."))
+    } catch (error) {
+      caughtError = error
+    }
+
+    expect(caughtError).toBeInstanceOf(Error)
+    const message = (caughtError as Error).message
+    expect(message).toContain("stdout-end")
+    expect(message).toContain("stderr-end")
+    expect(message).not.toContain("stdout-start")
+    expect(message).not.toContain("stderr-start")
+    expect(message.length).toBeLessThan(longStdout.length + longStderr.length)
   })
 })
 

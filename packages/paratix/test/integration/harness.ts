@@ -79,17 +79,38 @@ export function restoreHomeEnvironmentVariable(originalHome: string | undefined)
 
 class CommandExecutionError extends Error {
   public readonly stderr: string
+  public readonly stdout: string
 
-  public constructor(message: string, stderr: string, options: { cause: Error }) {
+  public constructor(
+    message: string,
+    streams: { stderr: string; stdout: string },
+    options: { cause: Error }
+  ) {
     super(message, options)
     this.name = "CommandExecutionError"
-    this.stderr = stderr
+    this.stderr = streams.stderr
+    this.stdout = streams.stdout
   }
 }
 
 function tailOutput(output: string): string {
   if (output.length <= COMMAND_FAILURE_OUTPUT_LIMIT) return output
   return output.slice(-COMMAND_FAILURE_OUTPUT_LIMIT)
+}
+
+function formatCommandFailureStream(label: "stderr" | "stdout", output: string): string {
+  const tail = tailOutput(output).trim()
+  if (tail.length === 0) return ""
+  return `${label}:\n${tail}`
+}
+
+function formatCommandFailureStreams(streams: { stderr: string; stdout: string }): string {
+  return [
+    formatCommandFailureStream("stdout", streams.stdout),
+    formatCommandFailureStream("stderr", streams.stderr),
+  ]
+    .filter((details) => details.length > 0)
+    .join("\n")
 }
 
 async function execFileText(
@@ -111,9 +132,14 @@ async function execFileText(
       (error, stdout, stderr) => {
         if (error != null) {
           reject(
-            new CommandExecutionError("Command execution failed", tailOutput(stderr), {
-              cause: error,
-            })
+            new CommandExecutionError(
+              "Command execution failed",
+              {
+                stderr,
+                stdout,
+              },
+              { cause: error }
+            )
           )
           return
         }
@@ -125,7 +151,7 @@ async function execFileText(
 
 function getCommandFailureDetails(error: unknown): string {
   if (!(error instanceof CommandExecutionError)) return ""
-  return error.stderr.trim()
+  return formatCommandFailureStreams({ stderr: error.stderr, stdout: error.stdout })
 }
 
 async function runCommand(

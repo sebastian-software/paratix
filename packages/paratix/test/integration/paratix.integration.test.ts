@@ -24,6 +24,7 @@ const emptyEnv = {}
 const HTTP_SERVER_READY_DELAY_MS = 250
 const HTTP_SERVER_READY_RETRIES = 20
 const CLI_COMMAND_TIMEOUT_MS = 60_000
+const CLI_COMMAND_FAILURE_OUTPUT_LIMIT = 8 * 1024
 const CLI_COMMAND_MAX_BUFFER = 10 * 1024 * 1024
 const unicodeFileName = "über datei こんにちは.txt"
 const unicodeTemplateName = "grüße-vorlage.tmpl"
@@ -44,6 +45,22 @@ type RemoteStat = {
 type CleanupStep = {
   name: string
   run: () => Promise<void> | void
+}
+
+class CliCommandExecutionError extends Error {
+  public readonly stderr: string
+  public readonly stdout: string
+
+  public constructor(
+    message: string,
+    streams: { stderr: string; stdout: string },
+    options: { cause: Error }
+  ) {
+    super(message, options)
+    this.name = "CliCommandExecutionError"
+    this.stderr = streams.stderr
+    this.stdout = streams.stdout
+  }
 }
 
 function getEnvironment(): IntegrationEnvironment {
@@ -168,10 +185,19 @@ async function execFileText(
         maxBuffer: CLI_COMMAND_MAX_BUFFER,
         timeout: CLI_COMMAND_TIMEOUT_MS,
       },
-      (error, stdout) => {
+      (error, stdout, stderr) => {
         if (error != null) {
-          reject(
+          const cause =
             error instanceof Error ? error : new Error("Command execution failed", { cause: error })
+          reject(
+            new CliCommandExecutionError(
+              formatCliCommandFailureMessage(executablePath, commandArguments, {
+                stderr,
+                stdout,
+              }),
+              { stderr, stdout },
+              { cause }
+            )
           )
           return
         }
@@ -179,6 +205,32 @@ async function execFileText(
       }
     )
   })
+}
+
+function tailCliCommandOutput(output: string): string {
+  if (output.length <= CLI_COMMAND_FAILURE_OUTPUT_LIMIT) return output
+  return output.slice(-CLI_COMMAND_FAILURE_OUTPUT_LIMIT)
+}
+
+function formatCliCommandFailureStream(label: "stderr" | "stdout", output: string): string {
+  const tail = tailCliCommandOutput(output).trim()
+  if (tail.length === 0) return ""
+  return `${label}:\n${tail}`
+}
+
+function formatCliCommandFailureMessage(
+  executablePath: string,
+  commandArguments: string[],
+  streams: { stderr: string; stdout: string }
+): string {
+  const details = [
+    formatCliCommandFailureStream("stdout", streams.stdout),
+    formatCliCommandFailureStream("stderr", streams.stderr),
+  ]
+    .filter((detail) => detail.length > 0)
+    .join("\n")
+  const suffix = details.length > 0 ? `\n${details}` : ""
+  return `Command failed: ${executablePath} ${commandArguments.join(" ")}${suffix}`
 }
 
 async function expectModuleCheckOk(
@@ -394,6 +446,70 @@ describe("cleanup helper", () => {
         },
       ])
     ).rejects.toThrow(AggregateError)
+  })
+})
+
+describe("CLI command helper", () => {
+  it("includes stdout and stderr tails when the CLI process fails", async () => {
+    const localDirectory = mkdtempSync(join(tmpdir(), "paratix-cli-helper-"))
+    const scriptPath = join(localDirectory, "fail.mjs")
+
+    try {
+      writeFileSync(
+        scriptPath,
+        [
+          "process.stdout.write('stdout diagnostic\\n')",
+          "process.stderr.write('stderr diagnostic\\n')",
+          "process.exit(1)",
+          "",
+        ].join("\n")
+      )
+
+      await expect(
+        execFileText(process.execPath, [scriptPath], {
+          cwd: localDirectory,
+        })
+      ).rejects.toThrow("stdout:\nstdout diagnostic\nstderr:\nstderr diagnostic")
+    } finally {
+      await rm(localDirectory, { force: true, recursive: true })
+    }
+  })
+
+  it("bounds CLI failure stdout and stderr details", async () => {
+    const localDirectory = mkdtempSync(join(tmpdir(), "paratix-cli-helper-"))
+    const scriptPath = join(localDirectory, "fail-large.mjs")
+    const longStdout = `stdout-start\n${"o".repeat(9000)}stdout-end`
+    const longStderr = `stderr-start\n${"e".repeat(9000)}stderr-end`
+
+    try {
+      writeFileSync(
+        scriptPath,
+        [
+          `process.stdout.write(${JSON.stringify(longStdout)})`,
+          `process.stderr.write(${JSON.stringify(longStderr)})`,
+          "process.exit(1)",
+          "",
+        ].join("\n")
+      )
+
+      let caughtError: unknown
+      try {
+        await execFileText(process.execPath, [scriptPath], {
+          cwd: localDirectory,
+        })
+      } catch (error) {
+        caughtError = error
+      }
+
+      expect(caughtError).toBeInstanceOf(Error)
+      const message = (caughtError as Error).message
+      expect(message).toContain("stdout-end")
+      expect(message).toContain("stderr-end")
+      expect(message).not.toContain("stdout-start")
+      expect(message).not.toContain("stderr-start")
+    } finally {
+      await rm(localDirectory, { force: true, recursive: true })
+    }
   })
 })
 
