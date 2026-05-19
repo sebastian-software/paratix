@@ -4,6 +4,10 @@ import { describe, expect, it, vi } from "vitest"
 import type { ExecOptions } from "../../src/types.js"
 
 import { download } from "../../src/modules/download.js"
+import {
+  renderGuardedChmodCommand as buildGuardedChmodShell,
+  renderGuardedChownCommand as buildGuardedChownShell,
+} from "../../src/modules/fileMetadataHelpers.js"
 import { registerSecret, unregisterSecret } from "../../src/secretSink.js"
 import { createMockSsh as createBaseMockSsh, type ExecCall } from "../helpers/mockSsh.js"
 
@@ -83,20 +87,9 @@ function buildSafeDownloadApplyStubs(): NonNullable<
       result: { code: 0 },
     },
     {
-      // eslint-disable-next-line security/detect-unsafe-regex -- bounded mock command regex, not user input
-      command: /^chmod '[0-7]{3,4}' '\/(?:opt|tmp|usr|var)(?:\/[^\/']+)*'$/v,
-      result: { code: 0 },
-    },
-    {
       command:
         // eslint-disable-next-line security/detect-unsafe-regex -- bounded mock command regex, not user input
         /^path='\/(?:opt|tmp|usr|var)(?:\/[^\/']+)*'\nbefore=\$\(stat -c '%d:%i:%F' -- "\$path"\)/v,
-      result: { code: 0 },
-    },
-    {
-      command:
-        // eslint-disable-next-line security/detect-unsafe-regex -- bounded mock command regex, not user input
-        /^chown -- '(?:\w[\w.\-]*)?:(?:\w[\w.\-]*)?' '\/(?:opt|tmp|usr|var)(?:\/[^\/']+)*'$/v,
       result: { code: 0 },
     },
     {
@@ -768,10 +761,10 @@ describe("download.url", () => {
     })
 
     it("returns failed when chmod exits non-zero", async () => {
-      const chmodCommand = `chmod '0755' '${temporaryDestination}'`
+      const guardedChmodShell = buildGuardedChmodShell("0755", temporaryDestination)
       const mockSsh = createMockSsh({
         ...downloadMktempStub(destination, temporaryDestination),
-        [chmodCommand]: { code: 1, stderr: "chmod: operation not permitted\n" },
+        [guardedChmodShell]: { code: 1, stderr: "chmod: operation not permitted\n" },
       })
       const mod = download.url(destination, url, { ...allowUnverifiedDownload, mode: "0755" })
       const result = await mod.apply(mockSsh, emptyEnv)
@@ -782,10 +775,10 @@ describe("download.url", () => {
     })
 
     it("returns failed when chown exits non-zero", async () => {
-      const chownCommand = `chown -- 'deploy:' '${temporaryDestination}'`
+      const guardedChownShell = buildGuardedChownShell("deploy:", temporaryDestination)
       const mockSsh = createMockSsh({
         ...downloadMktempStub(destination, temporaryDestination),
-        [chownCommand]: { code: 1, stderr: "chown: invalid user\n" },
+        [guardedChownShell]: { code: 1, stderr: "chown: invalid user\n" },
       })
       const mod = download.url(destination, url, {
         ...allowUnverifiedDownload,
@@ -807,7 +800,43 @@ describe("download.url", () => {
       const mod = download.url(destination, url, { ...allowUnverifiedDownload, mode: "0755" })
       const result = await mod.apply(mockSsh, emptyEnv)
       expect(result.status).toBe("changed")
-      expect(mockSsh.calls).toContain(`chmod '0755' '${temporaryDestination}'`)
+      expect(findGuardedMetadataCall(mockSsh.calls, "chmod -- '0755'")).toContain(`[ -L "$path" ]`)
+      expect(mockSsh.calls).not.toContain(`chmod '0755' '${temporaryDestination}'`)
+    })
+
+    it("fails fresh-download chmod when the temporary file is swapped for a symlink", async () => {
+      const guardedChmodShell = buildGuardedChmodShell("0755", temporaryDestination)
+      const mockSsh = createMockSsh({
+        ...downloadMktempStub(destination, temporaryDestination),
+        [guardedChmodShell]: { code: 1, stderr: "refuses to operate through symlink\n" },
+      })
+      const mod = download.url(destination, url, { ...allowUnverifiedDownload, mode: "0755" })
+      const result = await mod.apply(mockSsh, emptyEnv)
+
+      expect(result.status).toBe("failed")
+      expect(result.error?.message).toContain(`[download] chmod failed for ${temporaryDestination}`)
+      expect(result.error?.message).toContain("refuses to operate through symlink")
+      expect(mockSsh.calls).toContain(guardedChmodShell)
+      expect(mockSsh.calls).not.toContain(`mv -T -- '${temporaryDestination}' '${destination}'`)
+    })
+
+    it("fails fresh-download chown when the temporary file is swapped for a symlink", async () => {
+      const guardedChownShell = buildGuardedChownShell("deploy:", temporaryDestination)
+      const mockSsh = createMockSsh({
+        ...downloadMktempStub(destination, temporaryDestination),
+        [guardedChownShell]: { code: 1, stderr: "refuses to operate through symlink\n" },
+      })
+      const mod = download.url(destination, url, {
+        ...allowUnverifiedDownload,
+        owner: "deploy",
+      })
+      const result = await mod.apply(mockSsh, emptyEnv)
+
+      expect(result.status).toBe("failed")
+      expect(result.error?.message).toContain(`[download] chown failed for ${temporaryDestination}`)
+      expect(result.error?.message).toContain("refuses to operate through symlink")
+      expect(mockSsh.calls).toContain(guardedChownShell)
+      expect(mockSsh.calls).not.toContain(`mv -T -- '${temporaryDestination}' '${destination}'`)
     })
 
     it("sets owner and group via chown when both are specified", async () => {
@@ -823,7 +852,10 @@ describe("download.url", () => {
       })
       const result = await mod.apply(mockSsh, emptyEnv)
       expect(result.status).toBe("changed")
-      expect(mockSsh.calls).toContain(`chown -- 'root:wheel' '${temporaryDestination}'`)
+      expect(findGuardedMetadataCall(mockSsh.calls, "chown -- 'root:wheel'")).toContain(
+        `[ -L "$path" ]`
+      )
+      expect(mockSsh.calls).not.toContain(`chown -- 'root:wheel' '${temporaryDestination}'`)
     })
 
     it("sets only owner via chown when owner is specified without group", async () => {
@@ -835,7 +867,10 @@ describe("download.url", () => {
       const mod = download.url(destination, url, { ...allowUnverifiedDownload, owner: "deploy" })
       const result = await mod.apply(mockSsh, emptyEnv)
       expect(result.status).toBe("changed")
-      expect(mockSsh.calls).toContain(`chown -- 'deploy:' '${temporaryDestination}'`)
+      expect(findGuardedMetadataCall(mockSsh.calls, "chown -- 'deploy:'")).toContain(
+        `[ -L "$path" ]`
+      )
+      expect(mockSsh.calls).not.toContain(`chown -- 'deploy:' '${temporaryDestination}'`)
     })
 
     it("sets only group via chown when group is specified without owner", async () => {
@@ -847,7 +882,10 @@ describe("download.url", () => {
       const mod = download.url(destination, url, { ...allowUnverifiedDownload, group: "staff" })
       const result = await mod.apply(mockSsh, emptyEnv)
       expect(result.status).toBe("changed")
-      expect(mockSsh.calls).toContain(`chown -- ':staff' '${temporaryDestination}'`)
+      expect(findGuardedMetadataCall(mockSsh.calls, "chown -- ':staff'")).toContain(
+        `[ -L "$path" ]`
+      )
+      expect(mockSsh.calls).not.toContain(`chown -- ':staff' '${temporaryDestination}'`)
     })
 
     it("rejects option-like owner specs before chown", async () => {

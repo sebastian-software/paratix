@@ -13,11 +13,7 @@ import {
   hasSensitiveQueryParameters,
   validateHeaderPair,
 } from "./curlHelpers.js"
-import {
-  renderChownCommand,
-  renderGuardedChmodCommand,
-  renderGuardedChownCommand,
-} from "./fileMetadataHelpers.js"
+import { renderGuardedChmodCommand, renderGuardedChownCommand } from "./fileMetadataHelpers.js"
 import { applyWithFlagLock, hasFlag, setVersionedFlag } from "./moduleHelpers.js"
 import { validateHttpUrl } from "./netHelpers.js"
 
@@ -607,8 +603,12 @@ async function applyFileAttributes(
     // R-0000158: capture chmod failures as failedCommand so permission-denied
     // / invalid-target errors report a maskable failure instead of throwing.
     const chmodResult = await conn.exec(
-      `chmod ${shellQuote(parameters.mode)} ${shellQuote(parameters.destination)}`,
-      { ignoreExitCode: true, secrets: parameters.secrets, silent: true }
+      renderGuardedChmodCommand(parameters.mode, parameters.destination),
+      {
+        ignoreExitCode: true,
+        secrets: parameters.secrets,
+        silent: true,
+      }
     )
     if (chmodResult.code !== 0) {
       return failedCommand(
@@ -620,11 +620,14 @@ async function applyFileAttributes(
   }
   if (parameters.owner != null || parameters.group != null) {
     const ownerSpec = `${parameters.owner ?? ""}:${parameters.group ?? ""}`
-    const chownResult = await conn.exec(renderChownCommand(ownerSpec, parameters.destination), {
-      ignoreExitCode: true,
-      secrets: parameters.secrets,
-      silent: true,
-    })
+    const chownResult = await conn.exec(
+      renderGuardedChownCommand(ownerSpec, parameters.destination),
+      {
+        ignoreExitCode: true,
+        secrets: parameters.secrets,
+        silent: true,
+      }
+    )
     if (chownResult.code !== 0) {
       return failedCommand(
         `[download] chown failed for ${parameters.destination}`,
