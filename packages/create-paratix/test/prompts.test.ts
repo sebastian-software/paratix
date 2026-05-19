@@ -7,8 +7,44 @@ import {
   promptForInitialUserConfig,
   resolveCliOrPromptHost,
 } from "../src/index.js"
-import { cleanupSelectInput, createSelectLines } from "../src/promptUi.js"
+import { cleanupSelectInput, createSelectLines, createTerminalSelect } from "../src/promptUi.js"
 import { expectProcessExit, setProcessTtyForTest } from "./helpers.js"
+
+function restoreStdinIsTtyDescriptor(descriptor: PropertyDescriptor | undefined): void {
+  if (descriptor == null) {
+    delete (process.stdin as { isTTY?: boolean }).isTTY
+    return
+  }
+
+  Object.defineProperty(process.stdin, "isTTY", descriptor)
+}
+
+function restoreStdinIsRawDescriptor(descriptor: PropertyDescriptor | undefined): void {
+  if (descriptor == null) {
+    delete (process.stdin as { isRaw?: boolean }).isRaw
+    return
+  }
+
+  Object.defineProperty(process.stdin, "isRaw", descriptor)
+}
+
+function restoreStdinSetRawModeDescriptor(descriptor: PropertyDescriptor | undefined): void {
+  if (descriptor == null) {
+    delete (process.stdin as { setRawMode?: (mode: boolean) => NodeJS.ReadStream }).setRawMode
+    return
+  }
+
+  Object.defineProperty(process.stdin, "setRawMode", descriptor)
+}
+
+function restoreStdoutIsTtyDescriptor(descriptor: PropertyDescriptor | undefined): void {
+  if (descriptor == null) {
+    delete (process.stdout as { isTTY?: boolean }).isTTY
+    return
+  }
+
+  Object.defineProperty(process.stdout, "isTTY", descriptor)
+}
 
 describe("promptForInitialUserConfig", () => {
   beforeEach(() => {
@@ -370,6 +406,75 @@ describe("createSelectLines", () => {
     expect(rendered).toContain("/tmp/\\u{202E}id_ed25519.pub")
     expect(rendered).not.toContain(escapeByte)
     expect(rendered).not.toContain(bidiOverride)
+  })
+})
+
+describe("createTerminalSelect", () => {
+  afterEach(() => {
+    vi.restoreAllMocks()
+  })
+
+  it("cleans up stdin and terminal state when stdin emits an error", async () => {
+    const stdin = process.stdin as {
+      setRawMode?: (mode: boolean) => NodeJS.ReadStream
+    } & NodeJS.ReadStream
+    const stdinIsTtyDescriptor = Object.getOwnPropertyDescriptor(process.stdin, "isTTY")
+    const stdinIsRawDescriptor = Object.getOwnPropertyDescriptor(process.stdin, "isRaw")
+    const stdinSetRawModeDescriptor = Object.getOwnPropertyDescriptor(process.stdin, "setRawMode")
+    const stdoutIsTtyDescriptor = Object.getOwnPropertyDescriptor(process.stdout, "isTTY")
+    const setRawModeCalls: boolean[] = []
+    const listeners = new Map<string, (...args: unknown[]) => void>()
+
+    Object.defineProperty(process.stdin, "isTTY", { configurable: true, value: true })
+    Object.defineProperty(process.stdin, "isRaw", { configurable: true, value: false })
+    Object.defineProperty(process.stdout, "isTTY", { configurable: true, value: true })
+    Object.defineProperty(process.stdin, "setRawMode", {
+      configurable: true,
+      value(mode: boolean): NodeJS.ReadStream {
+        setRawModeCalls.push(mode)
+        return stdin
+      },
+    })
+
+    const resumeSpy = vi.spyOn(process.stdin, "resume").mockImplementation(() => process.stdin)
+    const pauseSpy = vi.spyOn(process.stdin, "pause").mockImplementation(() => process.stdin)
+    const writeSpy = vi.spyOn(process.stdout, "write").mockImplementation(() => true)
+    const onSpy = vi.spyOn(process.stdin, "on").mockImplementation((event, listener) => {
+      listeners.set(event, listener)
+      return process.stdin
+    })
+    const removeListenerSpy = vi
+      .spyOn(process.stdin, "removeListener")
+      .mockImplementation(() => process.stdin)
+
+    try {
+      const terminalSelect = createTerminalSelect()
+      const selection = terminalSelect.select("Choose a user:", [
+        {
+          description: "Bootstrap as root.",
+          label: "Root user",
+          value: "root",
+        },
+      ])
+      const stdinError = new Error("stdin failed")
+
+      listeners.get("error")?.(stdinError)
+
+      await expect(selection).rejects.toBe(stdinError)
+      expect(onSpy).toHaveBeenCalledWith("keypress", expect.any(Function))
+      expect(onSpy).toHaveBeenCalledWith("error", expect.any(Function))
+      expect(removeListenerSpy).toHaveBeenCalledWith("keypress", listeners.get("keypress"))
+      expect(removeListenerSpy).toHaveBeenCalledWith("error", listeners.get("error"))
+      expect(setRawModeCalls).toStrictEqual([true, false])
+      expect(resumeSpy).toHaveBeenCalledTimes(1)
+      expect(pauseSpy).toHaveBeenCalledTimes(1)
+      expect(writeSpy).toHaveBeenCalledWith("\x1B[?25h")
+    } finally {
+      restoreStdinSetRawModeDescriptor(stdinSetRawModeDescriptor)
+      restoreStdinIsTtyDescriptor(stdinIsTtyDescriptor)
+      restoreStdinIsRawDescriptor(stdinIsRawDescriptor)
+      restoreStdoutIsTtyDescriptor(stdoutIsTtyDescriptor)
+    }
   })
 })
 
