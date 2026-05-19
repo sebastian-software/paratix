@@ -31,23 +31,24 @@ const STALE_SOURCE_MTIME = 1000
 const DEFAULT_PARATIX_FILES = ["dist", "llm-guide.md"]
 const DEFAULT_CREATE_PARATIX_FILES = ["dist"]
 
-function createFs({
-  createParatixFiles = DEFAULT_CREATE_PARATIX_FILES,
-  createParatixVersion = DEFAULT_STABLE_VERSION,
-  mtimes: mtimeOverrides = {},
-  paratixFiles = DEFAULT_PARATIX_FILES,
-  paratixVersion = DEFAULT_STABLE_VERSION,
-  // R-0000685: callers can force `maxMtimeMillisecondsUnder` to fail with
-  // an arbitrary error code for a given directory path so tests can
-  // exercise the operator-friendly missing-src translation in
-  // `verifyDistributionArtefacts`.
-  readdirErrors = {},
-  // R-0000685: callers can declare a set of paths that report
-  // `isSymbolicLink() === true` from lstat so tests can model a vendored
-  // source tree behind a symlink (and the matching dist symlinks) and
-  // verify that the walker treats both sides identically.
-  symlinks: symlinkPaths = [],
-} = {}) {
+function createFs(options) {
+  const {
+    createParatixFiles = DEFAULT_CREATE_PARATIX_FILES,
+    createParatixVersion = DEFAULT_STABLE_VERSION,
+    mtimes: mtimeOverrides = {},
+    paratixFiles = DEFAULT_PARATIX_FILES,
+    paratixVersion = DEFAULT_STABLE_VERSION,
+    // R-0000685: callers can force `maxMtimeMillisecondsUnder` to fail with
+    // an arbitrary error code for a given directory path so tests can
+    // exercise the operator-friendly missing-src translation in
+    // `verifyDistributionArtefacts`.
+    readdirErrors = {},
+    // R-0000685: callers can declare a set of paths that report
+    // `isSymbolicLink() === true` from lstat so tests can model a vendored
+    // source tree behind a symlink (and the matching dist symlinks) and
+    // verify that the walker treats both sides identically.
+    symlinks: symlinkPaths = [],
+  } = options ?? {}
   const defaultMtimes = {
     "packages/create-paratix/dist": FRESH_DIST_MTIME,
     "packages/create-paratix/dist/index.js": FRESH_DIST_MTIME,
@@ -155,13 +156,12 @@ function createFs({
 }
 
 function createMissingPackageError() {
-  const error = new Error("missing")
-  error.stderr = "npm ERR! code E404"
-  return error
+  return Object.assign(new Error("missing"), { stderr: "npm ERR! code E404" })
 }
 
-function createCommandRunner(initiallyPublished = new Set(), publishedVersions = {}) {
-  const published = new Set(initiallyPublished)
+function createCommandRunner(initiallyPublished, publishedVersions) {
+  const published = new Set(initiallyPublished ?? [])
+  const publishedVersionOverrides = publishedVersions ?? {}
   const calls = []
 
   return {
@@ -187,8 +187,8 @@ function createCommandRunner(initiallyPublished = new Set(), publishedVersions =
       const isCreateParatix = directory.endsWith(CREATE_PARATIX_NAME)
       const defaultSpecifier = isCreateParatix ? CREATE_PARATIX_SPECIFIER : PARATIX_SPECIFIER
       const versionOverride = isCreateParatix
-        ? publishedVersions.createParatix
-        : publishedVersions.paratix
+        ? publishedVersionOverrides.createParatix
+        : publishedVersionOverrides.paratix
       const packageSpecifier =
         versionOverride === undefined
           ? defaultSpecifier

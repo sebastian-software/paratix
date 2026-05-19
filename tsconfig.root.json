@@ -2,9 +2,13 @@
   "extends": "./tsconfig.json",
   "compilerOptions": {
     "allowJs": true,
+    "checkJs": true,
     "declaration": false,
     "declarationMap": false,
-    "noEmit": true
+    "noEmit": true,
+    "noImplicitAny": false,
+    "useUnknownInCatchVariables": false,
+    "types": ["node"]
   },
   "include": ["eslint.config.ts", "oxlint.config.ts", "scripts/*.mjs"]
 }

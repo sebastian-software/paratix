@@ -559,31 +559,32 @@ function validateWorkspacePackages(workspacePackages) {
   }
 }
 
-export async function publishWorkspacePackages({
-  availabilityDelayMilliseconds,
-  availabilityRetries,
-  commandRunner = {
-    execFile: execFileAsync,
-    spawn: (command, commandArguments) =>
-      new Promise((resolve, reject) => {
-        const child = spawn(command, commandArguments, { stdio: "inherit" })
-        child.on("error", reject)
-        child.on("exit", (code) => {
-          if (code === 0) {
-            resolve()
-            return
-          }
+export async function publishWorkspacePackages(options) {
+  const {
+    availabilityDelayMilliseconds,
+    availabilityRetries,
+    commandRunner = {
+      execFile: execFileAsync,
+      spawn: (command, commandArguments) =>
+        new Promise((resolve, reject) => {
+          const child = spawn(command, commandArguments, { stdio: "inherit" })
+          child.on("error", reject)
+          child.on("exit", (code) => {
+            if (code === 0) {
+              resolve(undefined)
+              return
+            }
 
-          reject(
-            new Error(`${command} ${commandArguments.join(" ")} failed with exit code ${code}.`)
-          )
-        })
-      }),
-  },
-  fs = { lstat, readdir, readFile, stat },
-  filesystem = fs,
-  mode = "release",
-} = {}) {
+            reject(
+              new Error(`${command} ${commandArguments.join(" ")} failed with exit code ${code}.`)
+            )
+          })
+        }),
+    },
+    fs = { lstat, readdir, readFile, stat },
+    filesystem = fs,
+    mode = "release",
+  } = options ?? {}
   const publishMode = validatePublishMode(mode)
   // R-0000740: assert the static `packages` list matches the actual
   // `packages/` directory contents before reading any package.json so a
