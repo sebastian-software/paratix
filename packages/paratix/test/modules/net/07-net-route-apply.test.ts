@@ -287,7 +287,7 @@ describe("net.route — apply", () => {
 
     expect(result.status).toBe("failed")
     expect(String(result.error)).toContain("persistent drop-in write failed")
-    expect(String(result.error)).toContain("live route was rolled back")
+    expect(String(result.error)).toContain("route state was rolled back")
     expect(String(result.error)).toContain("disk full")
     expect(mockSsh.calls).toContain(
       "ip -4 route replace '10.0.0.0/24' via '192.168.1.1' dev 'eth0'"
@@ -295,6 +295,34 @@ describe("net.route — apply", () => {
     expect(mockSsh.calls).toContain("ip -4 route del '10.0.0.0/24' via '192.168.1.1' dev 'eth0'")
     expect(mockSsh.calls).not.toContain("networkctl reload")
     expect(mockSsh.calls.some((call) => call.includes("/var/lib/paratix/flags"))).toBe(false)
+  })
+
+  it("restores the previous drop-in when a route write fails after replacing the live route", async () => {
+    const previousDropin = `[Route]\nDestination=10.0.0.0/24\nGateway=192.168.1.254\n`
+    const mockSsh = createMockSsh(
+      {
+        [`[ -f '${routeDropinPath}' ] && [ ! -L '${routeDropinPath}' ]`]: { code: 0 },
+        [`cat '${routeDropinPath}'`]: { stdout: previousDropin },
+        [routeShowCommand]: { code: 0, stdout: "" },
+      },
+      SUCCESSFUL_ROUTE_APPLY_OPTIONS
+    )
+    const originalWriteFile = mockSsh.writeFile.bind(mockSsh)
+    vi.spyOn(mockSsh, "writeFile")
+      .mockRejectedValueOnce(new Error("disk full"))
+      .mockImplementation(originalWriteFile)
+    const mod = net.route("10.0.0.0/24", "192.168.1.1", { device: "eth0" })
+
+    const result = await mod.apply(mockSsh, emptyEnv)
+
+    expect(result.status).toBe("failed")
+    expect(String(result.error)).toContain("route state was rolled back")
+    expect(mockSsh.writeFileCalls).toContainEqual({
+      content: previousDropin,
+      options: { mode: "0644" },
+      remotePath: routeDropinPath,
+    })
+    expect(mockSsh.calls).not.toContain("networkctl reload")
   })
 
   it("rolls back the exact previous live route when multiple routes share a destination", async () => {
@@ -317,7 +345,7 @@ describe("net.route — apply", () => {
     const result = await mod.apply(mockSsh, emptyEnv)
 
     expect(result.status).toBe("failed")
-    expect(String(result.error)).toContain("live route was rolled back")
+    expect(String(result.error)).toContain("route state was rolled back")
     expect(mockSsh.calls).toContain(
       "ip -4 route replace '10.0.0.0/24' 'via' '192.168.1.1' 'dev' 'eth0'"
     )
@@ -343,7 +371,7 @@ describe("net.route — apply", () => {
     const result = await mod.apply(mockSsh, emptyEnv)
 
     expect(result.status).toBe("failed")
-    expect(String(result.error)).toContain("live route was rolled back")
+    expect(String(result.error)).toContain("route state was rolled back")
     expect(mockSsh.calls).toContain(
       "ip -4 route replace '10.0.0.0/24' 'via' '192.168.1.254' 'dev' 'eth0'"
     )
@@ -369,9 +397,35 @@ describe("net.route — apply", () => {
     const result = await mod.apply(mockSsh, emptyEnv)
 
     expect(result.status).toBe("failed")
-    expect(String(result.error)).toContain("live route was rolled back")
+    expect(String(result.error)).toContain("route state was rolled back")
     expect(mockSsh.calls).toContain("ip -6 route replace 'fd00::/64' 'via' 'fe80::2' 'dev' 'eth0'")
     expect(mockSsh.calls).not.toContain("ip -6 route del 'fd00::/64' via 'fe80::1' dev 'eth0'")
+  })
+
+  it("rolls back the full route state without reload when the drop-in becomes a symlink after replace", async () => {
+    const mockSsh = createMockSsh(
+      {
+        [routeShowCommand]: { code: 0, stdout: "" },
+      },
+      SUCCESSFUL_ROUTE_APPLY_OPTIONS
+    )
+    const originalTest = mockSsh.test.bind(mockSsh)
+    vi.spyOn(mockSsh, "test")
+      .mockImplementationOnce(originalTest)
+      .mockImplementationOnce(originalTest)
+      .mockResolvedValueOnce(false)
+      .mockResolvedValueOnce(true)
+      .mockImplementation(originalTest)
+    const mod = net.route("10.0.0.0/24", "192.168.1.1", { device: "eth0" })
+
+    const result = await mod.apply(mockSsh, emptyEnv)
+
+    expect(result.status).toBe("failed")
+    expect(String(result.error)).toContain("symlink")
+    expect(String(result.error)).toContain("route state was rolled back")
+    expect(mockSsh.writeFileCalls).toHaveLength(0)
+    expect(mockSsh.calls).toContain(`rm -f -- '${routeDropinPath}'`)
+    expect(mockSsh.calls).not.toContain("networkctl reload")
   })
 
   it("refuses a symlinked persistent route drop-in without reload or flag writes", async () => {

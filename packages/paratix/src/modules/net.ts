@@ -972,7 +972,8 @@ async function checkPresentRouteState(
 
 async function applyPresentRoute(
   conn: SshConnection,
-  parameters: RouteParameters
+  parameters: RouteParameters,
+  snapshot: RouteMutationSnapshot
 ): Promise<ModuleResult | null> {
   const preflight = await preparePresentRouteMutation(conn, parameters)
   if (preflight.failure != null) return preflight.failure
@@ -995,22 +996,28 @@ async function applyPresentRoute(
   // `ssh.writeFile`. Matches the second guard in applyHostsPresent/Absent
   // (R-0000677).
   if (await isSymlink(conn, dropinPath)) {
-    return rollbackLiveRouteAfterFailure({
+    return rollbackRouteMutationAfterFailure({
       conn,
-      message: `[net.route: ${destination}] refuses to write through symlink at ${dropinPath}`,
-      parameters,
-      snapshot: preflight.snapshot,
+      failure: failed(
+        `[net.route: ${destination}] refuses to write through symlink at ${dropinPath}`
+      ),
+      reloadAfterRollback: false,
+      route: parameters,
+      snapshot,
     })
   }
   try {
     await conn.writeFile(dropinPath, dropinContent, { mode: NET_CONFIG_FILE_MODE })
   } catch (error: unknown) {
     const reason = error instanceof Error ? error.message : String(error)
-    return rollbackLiveRouteAfterFailure({
+    return rollbackRouteMutationAfterFailure({
       conn,
-      message: `[net.route: ${destination}] persistent drop-in write failed after ip route replace: ${reason}`,
-      parameters,
-      snapshot: preflight.snapshot,
+      failure: failed(
+        `[net.route: ${destination}] persistent drop-in write failed after ip route replace: ${reason}`
+      ),
+      reloadAfterRollback: false,
+      route: parameters,
+      snapshot,
     })
   }
   return null
@@ -1417,7 +1424,7 @@ async function applyPresentRouteState(
     replacementIdentity: true,
   })
   if (snapshot.failure != null) return snapshot.failure
-  const failure = await applyPresentRoute(conn, parameters)
+  const failure = await applyPresentRoute(conn, parameters, snapshot.snapshot)
   if (failure != null) return failure
   const reloadFailure = await reloadNetworkctlForRoute(conn, parameters.destination)
   if (reloadFailure != null) {
