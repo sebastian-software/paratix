@@ -996,6 +996,43 @@ describe("ssh.authorizedKeys", () => {
     )
   })
 
+  it.each([
+    ["relative", "home/alice"],
+    ["colon-containing", "/home/al:ice"],
+    ["LF-containing", "/home/al\nice"],
+    ["CR-containing", "/home/al\rice"],
+  ])("rejects %s home paths in check", async (_caseName, home) => {
+    const mockSsh = createMockSsh({
+      "getent passwd 'alice' | cut -d: -f6": { stdout: home },
+    })
+    const mod = ssh.authorizedKeys("alice", testKey)
+
+    const result = await mod.check(mockSsh, emptyEnv)
+
+    expect(result).toBe("needs-apply")
+    expect(mockSsh.calls).toStrictEqual(["getent passwd 'alice' | cut -d: -f6"])
+  })
+
+  it.each([
+    ["relative", "home/alice"],
+    ["colon-containing", "/home/al:ice"],
+    ["LF-containing", "/home/al\nice"],
+    ["CR-containing", "/home/al\rice"],
+  ])("fails closed in apply for %s home paths", async (_caseName, home) => {
+    const mockSsh = createSshApplyMockSsh({
+      "getent passwd 'alice' | cut -d: -f6": { stdout: home },
+    })
+    const mod = ssh.authorizedKeys("alice", testKey)
+
+    const result = await mod.apply(mockSsh, emptyEnv)
+
+    expect(result.status).toBe("failed")
+    expect(result.error?.message).toContain(
+      "[ssh.authorizedKeys: alice] failed to resolve a safe home directory"
+    )
+    expect(mockSsh.calls).toStrictEqual(["getent passwd 'alice' | cut -d: -f6"])
+  })
+
   it("resolves home directory dynamically for root user", async () => {
     const mockSsh = createMockSsh({
       "[ -e '/root/.ssh' ]": { code: 0 },

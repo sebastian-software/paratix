@@ -11,9 +11,20 @@ const MUTATION_EXEC_OPTS = { ignoreExitCode: true, silent: true } as const
 // does not start with `<home>/.ssh/.paratix-authorized-keys.`.
 const AUTHORIZED_KEYS_TEMPORARY_PREFIX = ".paratix-authorized-keys"
 
+function isSafeAuthorizedKeysHome(home: string): boolean {
+  return (
+    home.length > 0 &&
+    home.startsWith("/") &&
+    home !== "/" &&
+    !home.includes(":") &&
+    !home.includes("\r") &&
+    !home.includes("\n")
+  )
+}
+
 async function resolveHome(conn: SshConnection, user: string): Promise<string> {
   const home = await conn.output(`getent passwd ${shellQuote(user)} | cut -d: -f6`)
-  if (home.length === 0 || home === "/") {
+  if (!isSafeAuthorizedKeysHome(home)) {
     throw new Error(`[ssh.authorizedKeys: ${user}] failed to resolve a safe home directory`)
   }
   return home
