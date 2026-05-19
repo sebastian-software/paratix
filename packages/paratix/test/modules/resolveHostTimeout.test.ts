@@ -10,6 +10,9 @@ import {
   resolveHostWithTimeout,
 } from "../../src/modules/resolveHostTimeout.js"
 
+const RUN_NODE_SCRIPT_TIMEOUT_MS = 5000
+const RUN_NODE_SCRIPT_KILL_GRACE_MS = 500
+
 async function resolveImmediately(): Promise<string> {
   await Promise.resolve()
   return "10.0.0.42"
@@ -37,6 +40,9 @@ async function runNodeScript(script: string): Promise<{
   stdout: string
 }> {
   return new Promise((resolve, reject) => {
+    let settled = false
+    let timeout: ReturnType<typeof setTimeout> | undefined
+    let killTimeout: ReturnType<typeof setTimeout> | undefined
     const child = spawn(
       process.execPath,
       ["--import", "tsx", "--input-type=module", "-e", script],
@@ -47,18 +53,73 @@ async function runNodeScript(script: string): Promise<{
     )
     let stdout = ""
     let stderr = ""
+    const cleanup = () => {
+      if (timeout !== undefined) {
+        clearTimeout(timeout)
+        timeout = undefined
+      }
+      if (killTimeout !== undefined) {
+        clearTimeout(killTimeout)
+        killTimeout = undefined
+      }
+      child.stdout.off("data", onStdout)
+      child.stderr.off("data", onStderr)
+      child.off("error", onError)
+      child.off("close", onClose)
+    }
+    const settle = <T>(settlePromise: (value: T) => void, value: T) => {
+      if (settled) {
+        return
+      }
+      settled = true
+      cleanup()
+      settlePromise(value)
+    }
+    const onStdout = (chunk: string) => {
+      stdout += chunk
+    }
+    const onStderr = (chunk: string) => {
+      stderr += chunk
+    }
+    const onError = (error: Error) => {
+      if (settled) {
+        cleanup()
+        return
+      }
+      settle(reject, error)
+    }
+    const onClose = (exitCode: null | number) => {
+      if (settled) {
+        cleanup()
+        return
+      }
+      settle(resolve, { exitCode, stderr, stdout })
+    }
+    const onTimeout = () => {
+      if (settled) {
+        return
+      }
+      settled = true
+      timeout = undefined
+      child.stdout.off("data", onStdout)
+      child.stderr.off("data", onStderr)
+      child.kill("SIGTERM")
+      killTimeout = setTimeout(() => {
+        child.kill("SIGKILL")
+      }, RUN_NODE_SCRIPT_KILL_GRACE_MS)
+      killTimeout.unref()
+      reject(
+        new Error(`Node script did not exit within ${RUN_NODE_SCRIPT_TIMEOUT_MS}ms; sent SIGTERM`)
+      )
+    }
     child.stdout.setEncoding("utf8")
     child.stderr.setEncoding("utf8")
-    child.stdout.on("data", (chunk: string) => {
-      stdout += chunk
-    })
-    child.stderr.on("data", (chunk: string) => {
-      stderr += chunk
-    })
-    child.on("error", reject)
-    child.on("close", (exitCode) => {
-      resolve({ exitCode, stderr, stdout })
-    })
+    child.stdout.on("data", onStdout)
+    child.stderr.on("data", onStderr)
+    child.on("error", onError)
+    child.on("close", onClose)
+    timeout = setTimeout(onTimeout, RUN_NODE_SCRIPT_TIMEOUT_MS)
+    timeout.unref()
   })
 }
 
