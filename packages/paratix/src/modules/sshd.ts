@@ -497,10 +497,20 @@ async function restoreSshServiceBootState(
   bootState: SshdServiceBootState | undefined
 ): Promise<void> {
   if (bootState == null || bootState.enabled) return
-  await ssh.exec(`${SYSTEMCTL} disable ${bootState.unit}.service`, {
+  const result = await ssh.exec(`${SYSTEMCTL} disable ${bootState.unit}.service`, {
     ignoreExitCode: true,
     silent: true,
   })
+  throwIfRollbackExecFailed(
+    `[sshd.port] failed to restore SSH service boot state (${SYSTEMCTL} disable ${bootState.unit}.service)`,
+    result
+  )
+}
+
+function throwIfRollbackExecFailed(message: string, result: ExecResult): void {
+  if (result.code === 0) return
+  const failure = failedCommand(message, result)
+  throw failure.error ?? new Error(message)
 }
 
 async function socketActivationBootPathNeedsApply(ssh: SshConnection): Promise<boolean> {
@@ -742,10 +752,14 @@ function buildRestartFailureRollbackSteps(
     steps.push({
       name: "ssh service restart",
       async run() {
-        await ssh.exec(`${SYSTEMCTL} restart ${serviceUnit}`, {
+        const result = await ssh.exec(`${SYSTEMCTL} restart ${serviceUnit}`, {
           ignoreExitCode: true,
           silent: true,
         })
+        throwIfRollbackExecFailed(
+          `[sshd.port] failed to restart SSH service during restart-failure rollback (${SYSTEMCTL} restart ${serviceUnit})`,
+          result
+        )
       },
     })
   }
@@ -1155,10 +1169,14 @@ async function restartSshdIfNotAlreadyOnOriginalPort(
     )
   }
   const serviceUnit = parameters.serviceUnit ?? (await resolveSshServiceUnit(ssh))
-  await ssh.exec(`${SYSTEMCTL} restart ${serviceUnit}`, {
+  const result = await ssh.exec(`${SYSTEMCTL} restart ${serviceUnit}`, {
     ignoreExitCode: true,
     silent: true,
   })
+  throwIfRollbackExecFailed(
+    `[sshd.port] failed to restart SSH service during rollback (${SYSTEMCTL} restart ${serviceUnit})`,
+    result
+  )
   return { restarted: true }
 }
 

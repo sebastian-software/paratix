@@ -483,6 +483,67 @@ describe("sshd.port — apply: validation and rollback", () => {
     expect(execSpy.mock.calls.map((args) => args[0])).toContain("systemctl enable sshd.service")
   })
 
+  it("surfaces rollback failure when restoring the SSH service boot state fails", async () => {
+    const originalConfig = "Port 22"
+    const mockSsh = createMockSsh({
+      [CAT_SSHD]: { stdout: originalConfig },
+    })
+    trackWriteFile(mockSsh)
+    vi.spyOn(mockSsh, "readFile")
+      .mockResolvedValueOnce(originalConfig) // initial read in applySshdPort
+      .mockResolvedValueOnce(originalConfig) // guard read in guardedWriteFile
+    const originalExec = mockSsh.exec.bind(mockSsh)
+    /* oxlint-disable vitest/no-conditional-in-test -- command dispatch is the test fixture, not test logic */
+    const execSpy = vi.spyOn(mockSsh, "exec").mockImplementation(async (command, options) => {
+      if (command === "systemctl cat ssh.socket") {
+        await Promise.resolve()
+        return { code: 0, stderr: "", stdout: "" }
+      }
+      if (command === "systemctl is-enabled --quiet ssh.socket") {
+        await Promise.resolve()
+        return { code: 0, stderr: "", stdout: "" }
+      }
+      if (command === "systemctl is-active --quiet ssh.socket") {
+        await Promise.resolve()
+        return { code: 0, stderr: "", stdout: "" }
+      }
+      if (command === "systemctl is-enabled --quiet sshd.service") {
+        await Promise.resolve()
+        return { code: 1, stderr: "", stdout: "" }
+      }
+      if (command === "systemctl disable sshd.service") {
+        await Promise.resolve()
+        return { code: 1, stderr: "disable failed", stdout: "" }
+      }
+      if (command === "systemctl enable sshd.service") {
+        await Promise.resolve()
+        return { code: 0, stderr: "", stdout: "" }
+      }
+      if (command === "ss -H -ltnp 'sport = :2222'") {
+        await Promise.resolve()
+        return { code: 127, stderr: "ss: command not found", stdout: "" }
+      }
+      if (command === "ss -H -ltnp 'sport = :22'") {
+        await Promise.resolve()
+        return { code: 0, stderr: "", stdout: SS_PROBE_LISTENING_STDOUT }
+      }
+      return originalExec(command, options)
+    })
+    /* oxlint-enable vitest/no-conditional-in-test */
+
+    const mod = sshd.port(2222)
+    const result = await mod.apply(mockSsh, emptyEnv)
+
+    expect(result.status).toBe("failed")
+    expect(result.error?.message).toContain("rollback also failed")
+    expect(result.error?.message).toContain("service boot-state restore failed")
+    expect(result.error?.message).toContain("failed to restore SSH service boot state")
+    expect(result.error?.message).toContain("disable failed")
+    const execCommands = execSpy.mock.calls.map((args) => args[0])
+    expect(execCommands).toContain("systemctl enable sshd.service")
+    expect(execCommands).toContain("systemctl disable sshd.service")
+  })
+
   // R-0000608: Fedora/RHEL ship socket activation as `sshd.socket` rather than
   // the Debian/Ubuntu `ssh.socket`. The capture/restore helpers must follow the
   // resolved unit name through enable/disable so socket-state rollback actually
@@ -1070,6 +1131,48 @@ describe("sshd.port — apply: validation and rollback", () => {
       .filter((cmd) => cmd === "systemctl restart sshd")
     expect(restartCalls).toHaveLength(1)
   }, 10_000)
+
+  it("surfaces rollback failure when the final sshd restart exits non-zero", async () => {
+    const originalConfig = "Port 22"
+    const mockSsh = createMockSsh({
+      [CAT_SSHD]: { stdout: originalConfig },
+    })
+    trackWriteFile(mockSsh)
+    const originalExec = mockSsh.exec.bind(mockSsh)
+    let restartCalls = 0
+    /* oxlint-disable vitest/no-conditional-in-test -- command dispatch is the test fixture, not test logic */
+    const execSpy = vi.spyOn(mockSsh, "exec").mockImplementation(async (command, options) => {
+      if (command === "systemctl restart sshd") {
+        restartCalls += 1
+        await Promise.resolve()
+        if (restartCalls === 1) return { code: 0, stderr: "", stdout: "" }
+        return { code: 1, stderr: "restart rollback failed", stdout: "" }
+      }
+      if (command === "ss -H -ltnp 'sport = :2222'") {
+        await Promise.resolve()
+        return { code: 127, stderr: "ss: command not found", stdout: "" }
+      }
+      if (command === "ss -H -ltnp 'sport = :22'") {
+        await Promise.resolve()
+        return { code: 0, stderr: "", stdout: "" }
+      }
+      return originalExec(command, options)
+    })
+    /* oxlint-enable vitest/no-conditional-in-test */
+
+    const mod = sshd.port(2222)
+    const result = await mod.apply(mockSsh, emptyEnv)
+
+    expect(result.status).toBe("failed")
+    expect(result.error?.message).toContain("rollback also failed")
+    expect(result.error?.message).toContain("ssh service restart failed")
+    expect(result.error?.message).toContain("failed to restart SSH service during rollback")
+    expect(result.error?.message).toContain("restart rollback failed")
+    const restartCommands = execSpy.mock.calls
+      .map((args) => args[0])
+      .filter((command) => command === "systemctl restart sshd")
+    expect(restartCommands).toHaveLength(2)
+  })
 
   // R-0000614: when the post-restart live-port verification fails the rollback
   // path must keep trying every step instead of bailing on the first failure.
