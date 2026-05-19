@@ -133,8 +133,8 @@ const createMockSsh: typeof createBaseMockSsh = (responses, options) => {
       // R-0000283: post-restart live verify defaults to "listener present" so
       // the existing fixtures keep proceeding past the new verify step.
       {
-        command: /^ss -H -ltnp 'sport = :\d+'$/v,
-        result: { code: 0, stdout: 'LISTEN 0 128 0.0.0.0:0 users:(("sshd",pid=1,fd=3))\n' },
+        command: ssProbeCommand(2222),
+        result: { code: 0, stdout: ssProbeListeningStdout(2222) },
       },
       ...(options?.responseStubs ?? []),
     ],
@@ -163,8 +163,31 @@ function trackWriteFile(
 // R-0000283: post-restart verify probe pattern; tests that bulk-mock exec to
 // `code: 0, stdout: ""` need a stand-in stdout for these probes so
 // `liveSshdPortMatches` returns true.
-const SS_PROBE_PATTERN = /^ss -H -ltnp 'sport = :\d+'$/v
-const SS_PROBE_LISTENING_STDOUT = 'LISTEN 0 128 0.0.0.0:0 users:(("sshd",pid=1,fd=3))\n'
+const SS_PROBE_COMMAND_PATTERN = /^ss -H -ltnp 'sport = :(?<port>\d+)'$/v
+
+function ssProbeCommand(port: number): string {
+  return `ss -H -ltnp 'sport = :${port}'`
+}
+
+function ssProbeListeningStdout(port: number): string {
+  return `LISTEN 0 128 0.0.0.0:${port} users:(("sshd",pid=1,fd=3))\n`
+}
+
+function getSsProbePort(command: string): number | undefined {
+  const match = SS_PROBE_COMMAND_PATTERN.exec(command)
+  return match?.groups?.port === undefined ? undefined : Number(match.groups.port)
+}
+
+function assertExpectedSsProbe(
+  command: string,
+  allowedPorts: readonly number[]
+): number | undefined {
+  const port = getSsProbePort(command)
+  if (port !== undefined && !allowedPorts.includes(port)) {
+    throw new Error(`Unexpected ss sport probe: ${command}`)
+  }
+  return port
+}
 
 // R-0000766: route the dry-run mktemp call to a fixed stub path.
 const SSHD_DRY_RUN_MKTEMP_10 = "mktemp -p /tmp -- 'paratix-sshd-dry-run.XXXXXX'"
@@ -176,8 +199,9 @@ function spyExecSuccessAcceptingSsProbe(mockSsh: ReturnType<typeof createMockSsh
     if (command === SSHD_DRY_RUN_MKTEMP_10) {
       return { code: 0, stderr: "", stdout: SSHD_DRY_RUN_TEMP_PATH_10 }
     }
-    if (SS_PROBE_PATTERN.test(command)) {
-      return { code: 0, stderr: "", stdout: SS_PROBE_LISTENING_STDOUT }
+    const ssProbePort = assertExpectedSsProbe(command, [2222])
+    if (ssProbePort !== undefined) {
+      return { code: 0, stderr: "", stdout: ssProbeListeningStdout(ssProbePort) }
     }
     return { code: 0, stderr: "", stdout: "" }
   })
@@ -332,6 +356,8 @@ describe("sshd.port — apply: ufw lockout guard", () => {
     expect(result.status).toBe("changed")
     const execCommands = execSpy.mock.calls.map((args) => args[0])
     expect(execCommands).toContain("systemctl restart sshd")
+    expect(execCommands).toContain(ssProbeCommand(2222))
+    expect(execCommands).not.toContain(ssProbeCommand(22))
   })
 
   it("proceeds when ufw is active and the target port is allowed for TCP", async () => {
@@ -348,6 +374,8 @@ describe("sshd.port — apply: ufw lockout guard", () => {
     expect(result.status).toBe("changed")
     const execCommands = execSpy.mock.calls.map((args) => args[0])
     expect(execCommands).toContain("systemctl restart sshd")
+    expect(execCommands).toContain(ssProbeCommand(2222))
+    expect(execCommands).not.toContain(ssProbeCommand(22))
   })
 
   it("proceeds when ufw is active and the target port is allowed for both IPv4 and IPv6", async () => {
@@ -364,6 +392,8 @@ describe("sshd.port — apply: ufw lockout guard", () => {
     expect(result.status).toBe("changed")
     const execCommands = execSpy.mock.calls.map((args) => args[0])
     expect(execCommands).toContain("systemctl restart sshd")
+    expect(execCommands).toContain(ssProbeCommand(2222))
+    expect(execCommands).not.toContain(ssProbeCommand(22))
   })
 
   it("proceeds when ufw is active and the target port is allowed for TCP on both address families", async () => {
@@ -380,6 +410,8 @@ describe("sshd.port — apply: ufw lockout guard", () => {
     expect(result.status).toBe("changed")
     const execCommands = execSpy.mock.calls.map((args) => args[0])
     expect(execCommands).toContain("systemctl restart sshd")
+    expect(execCommands).toContain(ssProbeCommand(2222))
+    expect(execCommands).not.toContain(ssProbeCommand(22))
   })
 
   it("proceeds when ufw is inactive (Status: inactive)", async () => {
@@ -396,6 +428,8 @@ describe("sshd.port — apply: ufw lockout guard", () => {
     expect(result.status).toBe("changed")
     const execCommands = execSpy.mock.calls.map((args) => args[0])
     expect(execCommands).toContain("systemctl restart sshd")
+    expect(execCommands).toContain(ssProbeCommand(2222))
+    expect(execCommands).not.toContain(ssProbeCommand(22))
   })
 })
 

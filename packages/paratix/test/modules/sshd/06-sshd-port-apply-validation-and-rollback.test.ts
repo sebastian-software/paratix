@@ -88,11 +88,8 @@ const createMockSsh: typeof createBaseMockSsh = (responses, options) => {
         // present" so existing fixtures keep passing. Tests that exercise the
         // missing listener path stub `ss` explicitly with a non-zero exit.
         {
-          command: /^ss -H -ltnp 'sport = :\d+'$/v,
-          result: {
-            code: 0,
-            stdout: 'LISTEN 0 128 0.0.0.0:2222 users:(("sshd",pid=1,fd=3))\n',
-          },
+          command: ssProbeCommand(2222),
+          result: { code: 0, stdout: ssProbeListeningStdout(2222) },
         },
       ],
     }
@@ -127,8 +124,33 @@ function trackWriteFile(
 // Tests that bulk-mock exec to `code: 0, stdout: ""` need a stand-in stdout for
 // these probes so `liveSshdPortMatches` returns true and the verify loop exits
 // instead of polling until timeout.
-const SS_PROBE_PATTERN = /^ss -H -ltnp 'sport = :\d+'$/v
-const SS_PROBE_LISTENING_STDOUT = 'LISTEN 0 128 0.0.0.0:0 users:(("sshd",pid=1,fd=3))\n'
+const SS_PROBE_COMMAND_PATTERN = /^ss -H -ltnp 'sport = :(?<port>\d+)'$/v
+
+function ssProbeCommand(port: number): string {
+  return `ss -H -ltnp 'sport = :${port}'`
+}
+
+function ssProbeListeningStdout(port: number): string {
+  return `LISTEN 0 128 0.0.0.0:${port} users:(("sshd",pid=1,fd=3))\n`
+}
+
+function getSsProbePort(command: string): number | undefined {
+  const match = SS_PROBE_COMMAND_PATTERN.exec(command)
+  return match?.groups?.port === undefined ? undefined : Number(match.groups.port)
+}
+
+function assertExpectedSsProbe(
+  command: string,
+  allowedPorts: readonly number[]
+): number | undefined {
+  const port = getSsProbePort(command)
+  if (port !== undefined && !allowedPorts.includes(port)) {
+    throw new Error(`Unexpected ss sport probe: ${command}`)
+  }
+  return port
+}
+
+const SS_PROBE_LISTENING_STDOUT = ssProbeListeningStdout(2222)
 
 type ExecSpy = {
   mockImplementation: (impl: ReturnType<typeof createMockSsh>["exec"]) => unknown
@@ -136,7 +158,8 @@ type ExecSpy = {
 
 function mockExecResolvedValue(
   execSpy: ExecSpy,
-  result: { code: number; stderr?: string; stdout?: string }
+  result: { code: number; stderr?: string; stdout?: string },
+  allowedSsProbePorts: readonly number[] = [2222]
 ) {
   execSpy.mockImplementation(async (command) => {
     await Promise.resolve()
@@ -146,8 +169,9 @@ function mockExecResolvedValue(
     if (command === "mktemp -p /tmp -- 'paratix-sshd-dry-run.XXXXXX'") {
       return { code: 0, stderr: "", stdout: "/tmp/paratix-sshd-dry-run.ABCDEF" }
     }
-    if (SS_PROBE_PATTERN.test(command) && result.code === 0) {
-      return { code: 0, stderr: "", stdout: SS_PROBE_LISTENING_STDOUT }
+    const ssProbePort = assertExpectedSsProbe(command, allowedSsProbePorts)
+    if (ssProbePort !== undefined && result.code === 0) {
+      return { code: 0, stderr: "", stdout: ssProbeListeningStdout(ssProbePort) }
     }
     return { code: result.code, stderr: result.stderr ?? "", stdout: result.stdout ?? "" }
   })
@@ -155,10 +179,12 @@ function mockExecResolvedValue(
 
 function buildExecWithSsOverride(
   originalExec: ReturnType<typeof createMockSsh>["exec"],
-  ssResponse: { code: number; stderr?: string; stdout?: string }
+  ssResponse: { code: number; stderr?: string; stdout?: string },
+  expectedPorts: readonly number[] = [2222]
 ): ReturnType<typeof createMockSsh>["exec"] {
   return async (command, options) => {
-    if (!SS_PROBE_PATTERN.test(command)) return originalExec(command, options)
+    const ssProbePort = assertExpectedSsProbe(command, expectedPorts)
+    if (ssProbePort === undefined) return originalExec(command, options)
     await Promise.resolve()
     return {
       code: ssResponse.code,
@@ -244,11 +270,13 @@ function buildMutexAwareExecSequence(
 
 function buildSequencedSsProbeExec(
   originalExec: ReturnType<typeof createMockSsh>["exec"],
-  responses: ReadonlyArray<{ code: number; stderr?: string; stdout?: string }>
+  responses: ReadonlyArray<{ code: number; stderr?: string; stdout?: string }>,
+  expectedPort = 2222
 ): ReturnType<typeof createMockSsh>["exec"] {
   let callIndex = 0
   return async (command, options) => {
-    if (!SS_PROBE_PATTERN.test(command)) {
+    const ssProbePort = assertExpectedSsProbe(command, [expectedPort])
+    if (ssProbePort === undefined) {
       return originalExec(command, options)
     }
     const response = responses[Math.min(callIndex, responses.length - 1)] ?? { code: 0 }
@@ -270,8 +298,9 @@ function mockSshdDryRunExecSuccess(mockSsh: ReturnType<typeof createMockSsh>) {
     if (command === SSHD_DRY_RUN_MKTEMP_06) {
       return { code: 0, stderr: "", stdout: SSHD_DRY_RUN_TEMP_PATH_06 }
     }
-    if (SS_PROBE_PATTERN.test(command)) {
-      return { code: 0, stderr: "", stdout: SS_PROBE_LISTENING_STDOUT }
+    const ssProbePort = assertExpectedSsProbe(command, [2222])
+    if (ssProbePort !== undefined) {
+      return { code: 0, stderr: "", stdout: ssProbeListeningStdout(ssProbePort) }
     }
     return { code: 0, stderr: "", stdout: "" }
   })
@@ -281,6 +310,7 @@ function mockSshdDryRunExecValidationFailure(mockSsh: ReturnType<typeof createMo
   return vi.spyOn(mockSsh, "exec").mockImplementation(async (command) => {
     mockSsh.calls.push(command)
     await Promise.resolve()
+    assertExpectedSsProbe(command, [])
     if (command === SSHD_DRY_RUN_MKTEMP_06) {
       return { code: 0, stderr: "", stdout: SSHD_DRY_RUN_TEMP_PATH_06 }
     }
@@ -418,6 +448,8 @@ describe("sshd.port — apply: validation and rollback", () => {
     expect(execCommands).toContain("systemctl cat ssh.socket")
     expect(execCommands).toContain("systemctl disable --now ssh.socket")
     expect(execCommands).toContain("systemctl restart sshd")
+    expect(execCommands).toContain(ssProbeCommand(2222))
+    expect(execCommands).not.toContain(ssProbeCommand(22))
     expect(addPortSpy).toHaveBeenCalledWith(2222)
   })
 
@@ -519,13 +551,13 @@ describe("sshd.port — apply: validation and rollback", () => {
         await Promise.resolve()
         return { code: 0, stderr: "", stdout: "" }
       }
-      if (command === "ss -H -ltnp 'sport = :2222'") {
+      if (command === ssProbeCommand(2222)) {
         await Promise.resolve()
         return { code: 127, stderr: "ss: command not found", stdout: "" }
       }
-      if (command === "ss -H -ltnp 'sport = :22'") {
+      if (command === ssProbeCommand(22)) {
         await Promise.resolve()
-        return { code: 0, stderr: "", stdout: SS_PROBE_LISTENING_STDOUT }
+        return { code: 0, stderr: "", stdout: ssProbeListeningStdout(22) }
       }
       return originalExec(command, options)
     })
@@ -716,9 +748,9 @@ describe("sshd.port — apply: validation and rollback", () => {
   it("returns ok and does not write when the desired port is already configured", async () => {
     const mockSsh = createMockSsh({
       [CAT_SSHD]: { stdout: "Port 2222\n" },
-      "ss -H -ltnp 'sport = :2222'": {
+      [ssProbeCommand(2222)]: {
         code: 0,
-        stdout: 'LISTEN 0 128 0.0.0.0:2222 users:(("sshd",pid=123,fd=3))\n',
+        stdout: ssProbeListeningStdout(2222),
       },
     })
     const writtenFiles = trackWriteFile(mockSsh)
@@ -733,6 +765,8 @@ describe("sshd.port — apply: validation and rollback", () => {
     expect(result.status).toBe("ok")
     expect(result).not.toHaveProperty("meta")
     const execCommands = execSpy.mock.calls.map((args) => args[0])
+    expect(execCommands).toContain(ssProbeCommand(2222))
+    expect(execCommands).not.toContain(ssProbeCommand(22))
     expect(execCommands).not.toContain("systemctl restart sshd")
     expect(addPortSpy).not.toHaveBeenCalled()
   })
@@ -805,6 +839,8 @@ describe("sshd.port — apply: validation and rollback", () => {
     expect(result.meta?.find(isSshdPortMetaEntry)?.port).toBe(2222)
     expect(addPortSpy).toHaveBeenCalledWith(2222)
     expect(execSpy.mock.calls.map((args) => args[0])).toContain("systemctl restart sshd")
+    expect(execSpy.mock.calls.map((args) => args[0])).toContain(ssProbeCommand(2222))
+    expect(execSpy.mock.calls.map((args) => args[0])).not.toContain(ssProbeCommand(22))
   })
 
   it("regression — addPort is called before systemctl restart sshd", async () => {
@@ -1056,13 +1092,13 @@ describe("sshd.port — apply: validation and rollback", () => {
     // elsewhere in this file with the same local disable.
     /* oxlint-disable vitest/no-conditional-in-test -- command dispatch is the test fixture, not test logic */
     const execSpy = vi.spyOn(mockSsh, "exec").mockImplementation(async (command, options) => {
-      if (command === "ss -H -ltnp 'sport = :2222'") {
+      if (command === ssProbeCommand(2222)) {
         await Promise.resolve()
         return { code: 0, stderr: "", stdout: "" }
       }
-      if (command === "ss -H -ltnp 'sport = :22'") {
+      if (command === ssProbeCommand(22)) {
         await Promise.resolve()
-        return { code: 0, stderr: "", stdout: SS_PROBE_LISTENING_STDOUT }
+        return { code: 0, stderr: "", stdout: ssProbeListeningStdout(22) }
       }
       return originalExec(command, options)
     })
@@ -1102,11 +1138,11 @@ describe("sshd.port — apply: validation and rollback", () => {
     // outcome must include the probe error as a warning.
     /* oxlint-disable vitest/no-conditional-in-test -- command dispatch is the test fixture, not test logic */
     const execSpy = vi.spyOn(mockSsh, "exec").mockImplementation(async (command, options) => {
-      if (command === "ss -H -ltnp 'sport = :2222'") {
+      if (command === ssProbeCommand(2222)) {
         await Promise.resolve()
         return { code: 0, stderr: "", stdout: "" }
       }
-      if (command === "ss -H -ltnp 'sport = :22'") {
+      if (command === ssProbeCommand(22)) {
         await Promise.resolve()
         return { code: 1, stderr: "Permission denied", stdout: "" }
       }
@@ -1148,11 +1184,11 @@ describe("sshd.port — apply: validation and rollback", () => {
         if (restartCalls === 1) return { code: 0, stderr: "", stdout: "" }
         return { code: 1, stderr: "restart rollback failed", stdout: "" }
       }
-      if (command === "ss -H -ltnp 'sport = :2222'") {
+      if (command === ssProbeCommand(2222)) {
         await Promise.resolve()
         return { code: 127, stderr: "ss: command not found", stdout: "" }
       }
-      if (command === "ss -H -ltnp 'sport = :22'") {
+      if (command === ssProbeCommand(22)) {
         await Promise.resolve()
         return { code: 0, stderr: "", stdout: "" }
       }
@@ -1297,7 +1333,9 @@ describe("sshd.port — apply: validation and rollback", () => {
     })
     const writtenFiles = trackWriteFile(mockSsh)
     const originalExec = mockSsh.exec.bind(mockSsh)
-    vi.spyOn(mockSsh, "exec").mockImplementation(buildExecWithSsOverride(originalExec, { code: 0 }))
+    vi.spyOn(mockSsh, "exec").mockImplementation(
+      buildExecWithSsOverride(originalExec, { code: 0 }, [2222, 22])
+    )
     const removePortSpy = vi.spyOn(mockSsh, "removePort")
 
     const mod = sshd.port(2222)
