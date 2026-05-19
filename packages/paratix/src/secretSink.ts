@@ -130,9 +130,10 @@ export function unregisterSecret(secret: string): void {
  * code that may throw — it keeps the sink balanced even when the caller
  * does not own the error.
  *
- * @param secrets - The values to register. Values shorter than
- *   {@link MINIMUM_SECRET_LENGTH} characters are ignored, mirroring the
- *   behaviour of {@link registerSecret}.
+ * @param secrets - The values to register process-wide and mask inside this
+ *   scope. Values shorter than {@link MINIMUM_SECRET_LENGTH} characters are
+ *   only ignored for process-wide registration; scoped result/error masking
+ *   still redacts them.
  * @param body - The async unit of work whose failures must be redacted.
  * @returns Whatever `body` resolves to.
  */
@@ -147,7 +148,7 @@ export async function withRegisteredSecrets<T>(
   // both protected by the same try/finally — if a future API extension
   // causes `registerSecret` to throw mid-iteration, already-registered
   // values are still released.
-  for (const secret of registerableSecrets) {
+  for (const secret of secrets) {
     assertRegistrableSecret(secret)
   }
   try {
@@ -156,9 +157,9 @@ export async function withRegisteredSecrets<T>(
       registered.push(secret)
     }
     const result = await body()
-    return maskScopedResult(result, registered)
+    return maskScopedResult(result, secrets)
   } catch (error) {
-    throw maskScopedError(error, registered)
+    throw maskScopedError(error, secrets)
   } finally {
     for (const secret of registered) {
       unregisterSecret(secret)

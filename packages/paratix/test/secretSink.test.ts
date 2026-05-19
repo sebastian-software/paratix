@@ -106,6 +106,18 @@ describe("withRegisteredSecrets", () => {
     expect(getRegisteredSecrets()).toStrictEqual([])
   })
 
+  it("masks short scoped secrets on errors without globally registering them", async () => {
+    await expect(
+      withRegisteredSecrets(["pin"], async () => {
+        await Promise.resolve()
+        expect(getRegisteredSecrets()).toStrictEqual([])
+        throw new Error("boom pin")
+      })
+    ).rejects.toThrow(`boom ${REDACTED}`)
+
+    expect(getRegisteredSecrets()).toStrictEqual([])
+  })
+
   // R-0000259: maskScopedError now returns a clone instead of mutating the
   // caller's Error instance, so an outer consumer that retains the original
   // reference (a test framework, a logger registered before the scope) still
@@ -234,6 +246,37 @@ describe("withRegisteredSecrets", () => {
     expect(result.error).toBeInstanceOf(CommandError)
     expect((result.error as CommandError | undefined)?.fullStdout).toBe("stdout [REDACTED]")
     expect((result.error as CommandError | undefined)?.fullStderr).toBe("stderr [REDACTED]")
+    expect(getRegisteredSecrets()).toStrictEqual([])
+  })
+
+  it("masks short scoped secrets in module result details", async () => {
+    const result = await withRegisteredSecrets(["pin"], async () => {
+      await Promise.resolve()
+      expect(getRegisteredSecrets()).toStrictEqual([])
+      return {
+        detail: "rotated pin",
+        status: "changed" as const,
+      }
+    })
+
+    expect(result.detail).toBe(`rotated ${REDACTED}`)
+    expect(getRegisteredSecrets()).toStrictEqual([])
+  })
+
+  it("masks short scoped secrets in failed CommandError payloads", async () => {
+    const result = await withRegisteredSecrets(["pin"], async () => {
+      await Promise.resolve()
+      expect(getRegisteredSecrets()).toStrictEqual([])
+      return {
+        error: new CommandError("failed pin", "stdout pin", "stderr pin"),
+        status: "failed" as const,
+      }
+    })
+
+    expect(result.error.message).toBe(`failed ${REDACTED}`)
+    expect(result.error).toBeInstanceOf(CommandError)
+    expect((result.error as CommandError | undefined)?.fullStdout).toBe(`stdout ${REDACTED}`)
+    expect((result.error as CommandError | undefined)?.fullStderr).toBe(`stderr ${REDACTED}`)
     expect(getRegisteredSecrets()).toStrictEqual([])
   })
 
