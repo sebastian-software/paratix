@@ -188,6 +188,9 @@ async function authorizedKeysSecurityStateIsValid(
 ): Promise<boolean> {
   const { authorizedKeysPath, primaryGroup, sshDirectoryPath, user } = parameters
 
+  const isSshDirectorySymlink = await conn.test(`[ -L ${shellQuote(sshDirectoryPath)} ]`)
+  if (isSshDirectorySymlink) return false
+
   const isAuthorizedKeysSymlink = await conn.test(`[ -L ${shellQuote(authorizedKeysPath)} ]`)
   if (isAuthorizedKeysSymlink) return false
 
@@ -580,10 +583,6 @@ export async function checkAuthorizedKeys(
   })
   if (missingPathResult != null) return missingPathResult
 
-  // R-0000044: whole-line match so check stays consistent with the apply
-  // path (which writes/removes whole lines) and never falsely reports a key
-  // as present when only its body appears as a substring of another entry.
-  const keyExists = await conn.test(`grep -qxF -- ${shellQuote(key)} ${authKeysPath}`)
   // R-0000065: resolve the primary group via `id -gn` so the stat-based
   // ownership comparison matches what apply actually writes and does not
   // flap for users whose primary group differs from the username.
@@ -594,6 +593,12 @@ export async function checkAuthorizedKeys(
     sshDirectoryPath,
     user,
   })
+  if (!securityStateIsValid) return NEEDS_APPLY
+
+  // R-0000044: whole-line match so check stays consistent with the apply
+  // path (which writes/removes whole lines) and never falsely reports a key
+  // as present when only its body appears as a substring of another entry.
+  const keyExists = await conn.test(`grep -qxF -- ${shellQuote(key)} ${authKeysPath}`)
 
   return finalizeAuthorizedKeysCheck(state, keyExists, securityStateIsValid)
 }

@@ -224,6 +224,7 @@ describe("ssh.authorizedKeys", () => {
     extra?: Record<string, Partial<{ code: number; stderr: string; stdout: string }>>
   ) {
     return {
+      "[ -L '/home/alice/.ssh' ]": { code: 1 },
       [getentAlice]: { stdout: aliceHome },
       [idGroupAlice]: { stdout: "alice" },
       ...extra,
@@ -418,6 +419,28 @@ describe("ssh.authorizedKeys", () => {
     const result = await mod.check(mockSsh, emptyEnv)
 
     expect(result).toBe("needs-apply")
+  })
+
+  it("check returns needs-apply before reading keys when .ssh is a symlink", async () => {
+    const mockSsh = createMockSsh(
+      aliceResponses({
+        "[ -e '/home/alice/.ssh' ]": { code: 0 },
+        "[ -e '/home/alice/.ssh/authorized_keys' ]": { code: 0 },
+        "[ -L '/home/alice/.ssh' ]": { code: 0 },
+        "[ -L '/home/alice/.ssh/authorized_keys' ]": { code: 1 },
+        [`grep -qxF -- '${testKey}' ${aliceKeys}`]: { code: 0 },
+        "stat -c '%a %U %G %F' '/home/alice/.ssh'": { stdout: "700 alice alice directory" },
+        "stat -c '%a %U %G %F' '/home/alice/.ssh/authorized_keys'": {
+          stdout: "600 alice alice regular file",
+        },
+      })
+    )
+    const mod = ssh.authorizedKeys("alice", testKey)
+
+    const result = await mod.check(mockSsh, emptyEnv)
+
+    expect(result).toBe("needs-apply")
+    expect(mockSsh.calls).not.toContain(`grep -qxF -- '${testKey}' ${aliceKeys}`)
   })
 
   it("check returns needs-apply when .ssh ownership or mode has drifted", async () => {
@@ -1037,6 +1060,7 @@ describe("ssh.authorizedKeys", () => {
     const mockSsh = createMockSsh({
       "[ -e '/root/.ssh' ]": { code: 0 },
       "[ -e '/root/.ssh/authorized_keys' ]": { code: 0 },
+      "[ -L '/root/.ssh' ]": { code: 1 },
       "[ -L '/root/.ssh/authorized_keys' ]": { code: 1 },
       [`grep -qxF -- '${testKey}' '/root/.ssh/authorized_keys'`]: { code: 0 },
       "getent passwd 'root' | cut -d: -f6": { stdout: "/root" },
@@ -1055,6 +1079,7 @@ describe("ssh.authorizedKeys", () => {
     const mockSsh = createMockSsh({
       "[ -e '/home/deploy/.ssh' ]": { code: 0 },
       "[ -e '/home/deploy/.ssh/authorized_keys' ]": { code: 0 },
+      "[ -L '/home/deploy/.ssh' ]": { code: 1 },
       "[ -L '/home/deploy/.ssh/authorized_keys' ]": { code: 1 },
       [`grep -qxF -- '${testKey}' '/home/deploy/.ssh/authorized_keys'`]: { code: 0 },
       "getent passwd 'deploy' | cut -d: -f6": { stdout: "/home/deploy" },
@@ -1074,6 +1099,7 @@ describe("ssh.authorizedKeys", () => {
     const mockSsh = createMockSsh({
       "[ -e '/home/my user/.ssh' ]": { code: 0 },
       "[ -e '/home/my user/.ssh/authorized_keys' ]": { code: 0 },
+      "[ -L '/home/my user/.ssh' ]": { code: 1 },
       "[ -L '/home/my user/.ssh/authorized_keys' ]": { code: 1 },
       [`grep -qxF -- '${testKey}' '/home/my user/.ssh/authorized_keys'`]: { code: 0 },
       "getent passwd 'alice' | cut -d: -f6": { stdout: spaceyHome },
@@ -1187,6 +1213,7 @@ describe("ssh.authorizedKeys", () => {
     const mockSsh = createMockSsh({
       "[ -e '/home/deploy/.ssh' ]": { code: 0 },
       "[ -e '/home/deploy/.ssh/authorized_keys' ]": { code: 0 },
+      "[ -L '/home/deploy/.ssh' ]": { code: 1 },
       "[ -L '/home/deploy/.ssh/authorized_keys' ]": { code: 1 },
       [`grep -qxF -- '${testKey}' '/home/deploy/.ssh/authorized_keys'`]: { code: 0 },
       "getent passwd 'deploy' | cut -d: -f6": { stdout: "/home/deploy" },
