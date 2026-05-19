@@ -1365,6 +1365,14 @@ async function removeRouteDropinIfExpected(
   conn: SshConnection,
   parameters: RouteParameters
 ): Promise<RouteApplyOutcome> {
+  if (await isSymlink(conn, parameters.dropinPath)) {
+    return removeRouteDropinSymlink({
+      conn,
+      label: "drop-in",
+      parameters,
+      path: parameters.dropinPath,
+    })
+  }
   if (!(await routeDropinMatchesExpected(conn, parameters)))
     return { changed: false, failure: null }
   // R-0000759: terminate options with `--` so a future caller cannot smuggle
@@ -1385,6 +1393,14 @@ async function removeLegacyRouteDropinIfExpected(
   conn: SshConnection,
   parameters: RouteParameters
 ): Promise<RouteApplyOutcome> {
+  if (await isSymlink(conn, parameters.legacyDropinPath)) {
+    return removeRouteDropinSymlink({
+      conn,
+      label: "legacy drop-in",
+      parameters,
+      path: parameters.legacyDropinPath,
+    })
+  }
   if (!(await legacyRouteDropinMatchesExpected(conn, parameters))) {
     return { changed: false, failure: null }
   }
@@ -1400,6 +1416,24 @@ async function removeLegacyRouteDropinIfExpected(
         changed: false,
         failure: failedCommand(
           `[net.route: ${parameters.destination}] legacy drop-in removal failed`,
+          removeResult
+        ),
+      }
+}
+
+async function removeRouteDropinSymlink(options: {
+  conn: SshConnection
+  label: string
+  parameters: RouteParameters
+  path: string
+}): Promise<RouteApplyOutcome> {
+  const removeResult = await options.conn.exec(`rm -f -- ${shellQuote(options.path)}`, EXEC_OPTS)
+  return removeResult.code === 0
+    ? { changed: true, failure: null }
+    : {
+        changed: false,
+        failure: failedCommand(
+          `[net.route: ${options.parameters.destination}] ${options.label} symlink removal failed`,
           removeResult
         ),
       }

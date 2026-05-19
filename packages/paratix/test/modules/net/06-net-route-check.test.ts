@@ -207,6 +207,17 @@ describe("net.route — check", () => {
     expect(result).toBe("needs-apply")
   })
 
+  it("returns needs-apply when a foreign current drop-in symlink exists (state: absent)", async () => {
+    const mockSsh = createMockSsh({
+      "ip -4 route show '10.0.0.0/24'": { stdout: "" },
+      [regularFileCheck(routeDropinPath)]: { code: 1 },
+      [symlinkCheck(routeDropinPath)]: { code: 0 },
+    })
+    const mod = net.route("10.0.0.0/24", "192.168.1.1", { device: "eth0", state: "absent" })
+    const result = await mod.check(mockSsh, emptyEnv)
+    expect(result).toBe("needs-apply")
+  })
+
   it("returns needs-apply when route is present (state: absent)", async () => {
     const mockSsh = createMockSsh({
       "ip -4 route show '10.0.0.0/24'": { stdout: "10.0.0.0/24 via 192.168.1.1 dev eth0" },

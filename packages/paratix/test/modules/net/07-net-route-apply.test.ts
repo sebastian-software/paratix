@@ -35,7 +35,7 @@ const createMockSsh: typeof createBaseMockSsh = (responses, options) =>
       },
       {
         command:
-          /^\[ -L '\/etc\/systemd\/network\/60-paratix-[^\/]+\.network\.d\/50-paratix-route-[^']+\.conf' \]$/v,
+          /^\[ -L '\/etc\/systemd\/network\/(?:60-paratix-[^\/]+\.network\.d\/50-paratix-route-[^']+\.conf|50-paratix-route-[^']+\.network)' \]$/v,
         result: { code: 1 },
       },
     ],
@@ -661,6 +661,61 @@ describe("net.route — apply", () => {
     const mod = net.route("10.0.0.0/24", "192.168.1.1", { device: "eth0", state: "absent" })
     await mod.apply(mockSsh, emptyEnv)
     expect(mockSsh.calls).toContain(`rm -f -- '${dropinPath}'`)
+  })
+
+  it("removes a dangling current drop-in symlink when state is absent", async () => {
+    const mockSsh = createMockSsh(
+      {
+        [`[ -L '${routeDropinPath}' ]`]: { code: 0 },
+        [routeShowCommand]: { code: 0, stdout: "" },
+      },
+      SUCCESSFUL_ROUTE_APPLY_OPTIONS
+    )
+    const mod = net.route("10.0.0.0/24", "192.168.1.1", { device: "eth0", state: "absent" })
+
+    const result = await mod.apply(mockSsh, emptyEnv)
+
+    expect(result.status).toBe("changed")
+    expect(mockSsh.calls).toContain(`rm -f -- '${routeDropinPath}'`)
+    expect(mockSsh.calls).not.toContain(`cat '${routeDropinPath}'`)
+    expect(mockSsh.calls).toContain("networkctl reload")
+  })
+
+  it("returns failed when current drop-in symlink removal fails", async () => {
+    const mockSsh = createMockSsh(
+      {
+        [`[ -L '${routeDropinPath}' ]`]: { code: 0 },
+        [`rm -f -- '${routeDropinPath}'`]: { code: 1, stderr: "permission denied" },
+        [routeShowCommand]: { code: 0, stdout: "" },
+      },
+      SUCCESSFUL_ROUTE_APPLY_OPTIONS
+    )
+    const mod = net.route("10.0.0.0/24", "192.168.1.1", { device: "eth0", state: "absent" })
+
+    const result = await mod.apply(mockSsh, emptyEnv)
+
+    expect(result.status).toBe("failed")
+    expect(String(result.error)).toContain("drop-in symlink removal failed")
+    expect(mockSsh.calls).not.toContain("networkctl reload")
+  })
+
+  it("removes a foreign legacy drop-in symlink when state is absent", async () => {
+    const mockSsh = createMockSsh(
+      {
+        [`[ -L '${legacyRouteDropinPath}' ]`]: { code: 0 },
+        [`[ -L '${routeDropinPath}' ]`]: { code: 1 },
+        [routeShowCommand]: { code: 0, stdout: "" },
+      },
+      SUCCESSFUL_ROUTE_APPLY_OPTIONS
+    )
+    const mod = net.route("10.0.0.0/24", "192.168.1.1", { device: "eth0", state: "absent" })
+
+    const result = await mod.apply(mockSsh, emptyEnv)
+
+    expect(result.status).toBe("changed")
+    expect(mockSsh.calls).toContain(`rm -f -- '${legacyRouteDropinPath}'`)
+    expect(mockSsh.calls).not.toContain(`cat '${legacyRouteDropinPath}'`)
+    expect(mockSsh.calls).toContain("networkctl reload")
   })
 
   it("leaves a foreign drop-in with the same destination in place", async () => {
