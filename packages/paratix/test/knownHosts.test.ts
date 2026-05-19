@@ -670,6 +670,61 @@ describe("buildHostVerifier", () => {
     expect(appendFileMock).toHaveBeenCalled()
   })
 
+  it("mode 'accept-new' rejects a conflicting key persisted by a concurrent verifier", async () => {
+    readFileSyncMock.mockReturnValue("")
+    const stderrSpy = vi.spyOn(process.stderr, "write").mockImplementation(() => true)
+
+    try {
+      const first = await buildHostVerifier("accept-new", {
+        host: "race.example.com",
+        port: 22,
+      })
+      const second = await buildHostVerifier("accept-new", {
+        host: "race.example.com",
+        port: 22,
+      })
+      const competingKey = makeKeyBuffer("ssh-ed25519", Buffer.from("competing-key"))
+
+      expect(first.hostVerifier!(ed25519Key)).toBe(true)
+      expect(second.hostVerifier!(competingKey)).toBe(true)
+
+      await first.commitAcceptedHostKey?.()
+      readFileSyncMock.mockReturnValue(makeKnownHostsContent("race.example.com", 22, ed25519Key))
+      await expect(second.commitAcceptedHostKey!()).rejects.toThrow(HostKeyVerificationError)
+
+      expect(appendFileMock).toHaveBeenCalledOnce()
+    } finally {
+      stderrSpy.mockRestore()
+    }
+  })
+
+  it("mode 'accept-new' treats identical concurrent accepts as idempotent", async () => {
+    readFileSyncMock.mockReturnValue("")
+    const stderrSpy = vi.spyOn(process.stderr, "write").mockImplementation(() => true)
+
+    try {
+      const first = await buildHostVerifier("accept-new", {
+        host: "race.example.com",
+        port: 22,
+      })
+      const second = await buildHostVerifier("accept-new", {
+        host: "race.example.com",
+        port: 22,
+      })
+
+      expect(first.hostVerifier!(ed25519Key)).toBe(true)
+      expect(second.hostVerifier!(ed25519Key)).toBe(true)
+
+      await first.commitAcceptedHostKey?.()
+      readFileSyncMock.mockReturnValue(makeKnownHostsContent("race.example.com", 22, ed25519Key))
+      await second.commitAcceptedHostKey?.()
+
+      expect(appendFileMock).toHaveBeenCalledOnce()
+    } finally {
+      stderrSpy.mockRestore()
+    }
+  })
+
   it("mode 'accept-new' treats missing known_hosts as an empty trust store", async () => {
     const missingFileError = Object.assign(new Error("missing"), { code: "ENOENT" })
     readFileSyncMock.mockImplementation(() => {

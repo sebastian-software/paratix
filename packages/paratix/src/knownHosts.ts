@@ -422,15 +422,20 @@ export async function appendHostKey(host: string, port: number, keyBuffer: Buffe
     // the lifetime of a process append duplicate lines to known_hosts which
     // bloat the file and dilute later trust audits.
     const existingEntries = await loadKnownHostEntries()
-    const alreadyTrusted = existingEntries.some(
+    const matchingRawHostEntries = existingEntries.filter(
+      (entry) => entry.marker == null && matchesKnownHostEntry(entry, hostLabel)
+    )
+    const alreadyTrusted = matchingRawHostEntries.some(
       (entry) =>
-        entry.marker == null &&
         entry.algo === algo &&
-        matchesKnownHostEntry(entry, hostLabel) &&
         entry.key.length === keyBuffer.length &&
         timingSafeEqual(entry.key, keyBuffer)
     )
     if (alreadyTrusted) return
+    const conflictingEntry = matchingRawHostEntries.find(
+      (entry) => entry.key.length !== keyBuffer.length || !timingSafeEqual(entry.key, keyBuffer)
+    )
+    if (conflictingEntry != null) throwHostKeyMismatch(host, keyBuffer, conflictingEntry.key)
     // R-0000793: create the file with restrictive 0600 permissions. The
     // historical 0644 mode mirrored the OpenSSH default that lets other
     // local users read the file, but Paratix pins host keys on behalf of
@@ -496,6 +501,31 @@ async function loadKnownHostEntries(): Promise<KnownHostEntry[]> {
   }
 }
 
+function formatAcceptedHostKeyWarning(host: string, key: Buffer): string {
+  try {
+    const algo = extractAlgoFromKey(key)
+    const fingerprint = computeFingerprint(key)
+    return (
+      `WARNING: Permanently added '${host}' (${algo}) to the list of known hosts. ` +
+      `Fingerprint: ${fingerprint}\n`
+    )
+  } catch {
+    return `WARNING: Permanently added '${host}' to the list of known hosts.\n`
+  }
+}
+
+function writeHostKeyPersistFallbackWarning(host: string, port: number, error: unknown): void {
+  const keyscanArguments =
+    port === DEFAULT_SSH_PORT ? shellQuote(host) : `-p ${port} ${shellQuote(host)}`
+  process.stderr.write(
+    `WARNING: Could not persist host key for ${host} — ` +
+      `the key is cached in memory for this session. ` +
+      `To persist it, ensure ~/.ssh/ is writable or run: ` +
+      `ssh-keyscan ${keyscanArguments} >> ~/.ssh/known_hosts. ` +
+      `${String(error)}\n`
+  )
+}
+
 /**
  * Accept an unknown host key, warn to stderr, and persist it to `~/.ssh/known_hosts`.
  *
@@ -515,30 +545,18 @@ async function acceptAndPersistHostKey(
   cache: HostKeyCache
 ): Promise<void> {
   const { host, port } = location
-  try {
-    const algo = extractAlgoFromKey(key)
-    const fingerprint = computeFingerprint(key)
-    process.stderr.write(
-      `WARNING: Permanently added '${host}' (${algo}) to the list of known hosts. ` +
-        `Fingerprint: ${fingerprint}\n`
-    )
-  } catch {
-    process.stderr.write(`WARNING: Permanently added '${host}' to the list of known hosts.\n`)
-  }
-  cache.set(formatHostNeedle(host, port), key)
+  const acceptedWarning = formatAcceptedHostKeyWarning(host, key)
   try {
     await appendHostKey(host, port, key)
   } catch (error: unknown) {
-    const keyscanArguments =
-      port === DEFAULT_SSH_PORT ? shellQuote(host) : `-p ${port} ${shellQuote(host)}`
-    process.stderr.write(
-      `WARNING: Could not persist host key for ${host} — ` +
-        `the key is cached in memory for this session. ` +
-        `To persist it, ensure ~/.ssh/ is writable or run: ` +
-        `ssh-keyscan ${keyscanArguments} >> ~/.ssh/known_hosts. ` +
-        `${String(error)}\n`
-    )
+    if (error instanceof HostKeyVerificationError) throw error
+    cache.set(formatHostNeedle(host, port), key)
+    process.stderr.write(acceptedWarning)
+    writeHostKeyPersistFallbackWarning(host, port, error)
+    return
   }
+  cache.set(formatHostNeedle(host, port), key)
+  process.stderr.write(acceptedWarning)
 }
 
 /**
