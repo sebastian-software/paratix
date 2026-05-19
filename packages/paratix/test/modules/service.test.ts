@@ -75,6 +75,15 @@ describe("service.running", () => {
     const result = await mod.check(null, emptyEnv)
     expect(result).toBe("needs-apply")
   })
+
+  it("check returns needs-apply when the active-state probe fails unexpectedly", async () => {
+    const ssh = createMockSsh({
+      "systemctl is-active --quiet -- 'nginx'": { code: 127, stderr: "systemctl: not found" },
+    })
+    const mod = service.running("nginx")
+    const result = await mod.check(ssh, emptyEnv)
+    expect(result).toBe("needs-apply")
+  })
 })
 
 describe("service.enabled", () => {
@@ -99,6 +108,15 @@ describe("service.enabled", () => {
   it("check returns needs-apply when ssh is null", async () => {
     const mod = service.enabled("nginx")
     const result = await mod.check(null, emptyEnv)
+    expect(result).toBe("needs-apply")
+  })
+
+  it("check returns needs-apply when the enabled-state probe fails unexpectedly", async () => {
+    const ssh = createMockSsh({
+      "systemctl is-enabled --quiet -- 'nginx'": { code: 127, stderr: "systemctl: not found" },
+    })
+    const mod = service.enabled("nginx")
+    const result = await mod.check(ssh, emptyEnv)
     expect(result).toBe("needs-apply")
   })
 
@@ -134,6 +152,32 @@ describe("service.enabled", () => {
     const mod = service.enabled("nginx")
     const result = await mod.apply(ssh, emptyEnv)
     expect(result.status).toBe("failed")
+  })
+
+  it("apply returns failed without enabling when the enabled-state probe is unavailable", async () => {
+    const ssh = createMockSsh({
+      "systemctl is-enabled --quiet -- 'nginx'": { code: 127, stderr: "systemctl: not found" },
+    })
+    const mod = service.enabled("nginx")
+    const result = await mod.apply(ssh, emptyEnv)
+    expect(result.status).toBe("failed")
+    expect(result.error?.message).toContain(
+      "[service.enabled: nginx] systemctl is-enabled failed while probing service state"
+    )
+    expect(ssh.calls).toStrictEqual(["systemctl is-enabled --quiet -- 'nginx'"])
+  })
+
+  it("apply returns failed without enabling when the enabled-state probe returns an unexpected code", async () => {
+    const ssh = createMockSsh({
+      "systemctl is-enabled --quiet -- 'nginx'": { code: 99, stderr: "unexpected failure" },
+    })
+    const mod = service.enabled("nginx")
+    const result = await mod.apply(ssh, emptyEnv)
+    expect(result.status).toBe("failed")
+    expect(result.error?.message).toContain(
+      "[service.enabled: nginx] systemctl is-enabled failed while probing service state"
+    )
+    expect(ssh.calls).toStrictEqual(["systemctl is-enabled --quiet -- 'nginx'"])
   })
 
   it("apply returns failed when ssh is null", async () => {
@@ -177,6 +221,32 @@ describe("service.running apply", () => {
     const mod = service.running("nginx")
     const result = await mod.apply(ssh, emptyEnv)
     expect(result.status).toBe("failed")
+  })
+
+  it("apply returns failed without starting when the active-state probe is unavailable", async () => {
+    const ssh = createMockSsh({
+      "systemctl is-active --quiet -- 'nginx'": { code: 127, stderr: "systemctl: not found" },
+    })
+    const mod = service.running("nginx")
+    const result = await mod.apply(ssh, emptyEnv)
+    expect(result.status).toBe("failed")
+    expect(result.error?.message).toContain(
+      "[service.running: nginx] systemctl is-active failed while probing service state"
+    )
+    expect(ssh.calls).toStrictEqual(["systemctl is-active --quiet -- 'nginx'"])
+  })
+
+  it("apply returns failed without starting when the active-state probe returns an unexpected code", async () => {
+    const ssh = createMockSsh({
+      "systemctl is-active --quiet -- 'nginx'": { code: 99, stderr: "unexpected failure" },
+    })
+    const mod = service.running("nginx")
+    const result = await mod.apply(ssh, emptyEnv)
+    expect(result.status).toBe("failed")
+    expect(result.error?.message).toContain(
+      "[service.running: nginx] systemctl is-active failed while probing service state"
+    )
+    expect(ssh.calls).toStrictEqual(["systemctl is-active --quiet -- 'nginx'"])
   })
 
   it("apply returns failed when ssh is null", async () => {
