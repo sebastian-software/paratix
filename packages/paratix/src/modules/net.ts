@@ -1015,7 +1015,7 @@ async function preparePresentRouteMutation(
   }
   const mkdirFailure = await ensureRouteDropinDirectory(conn, parameters)
   if (mkdirFailure != null) return { failure: mkdirFailure, snapshot: null }
-  return captureLiveRouteSnapshot(conn, destination)
+  return captureLiveRouteSnapshot(conn, parameters)
 }
 
 type LiveRouteSnapshot = {
@@ -1028,8 +1028,9 @@ type LiveRouteSnapshotOutcome =
 
 async function captureLiveRouteSnapshot(
   conn: SshConnection,
-  destination: string
+  parameters: RouteParameters
 ): Promise<LiveRouteSnapshotOutcome> {
+  const { destination } = parameters
   const result = await conn.exec(`ip route show ${shellQuote(destination)}`, EXEC_OPTS)
   if (result.code !== 0) {
     return {
@@ -1040,7 +1041,7 @@ async function captureLiveRouteSnapshot(
   const line = result.stdout
     .split("\n")
     .map((entry) => entry.trim())
-    .find((entry) => entry.length > 0)
+    .find((entry) => entry.length > 0 && routeLineMatches(entry, parameters))
   return { failure: null, snapshot: { line: line ?? null } }
 }
 
@@ -1151,7 +1152,7 @@ async function deleteLiveRouteIfPresent(
   if (!(await hasLiveRoute(conn, { destination, device, gateway }))) {
     return { changed: false, failure: null, snapshot: null }
   }
-  const snapshot = await captureLiveRouteSnapshot(conn, destination)
+  const snapshot = await captureLiveRouteSnapshot(conn, parameters)
   if (snapshot.failure != null) return { changed: false, failure: snapshot.failure, snapshot: null }
   const devicePart = device !== undefined && device !== "" ? ` dev ${shellQuote(device)}` : ""
   const routeResult = await conn.exec(

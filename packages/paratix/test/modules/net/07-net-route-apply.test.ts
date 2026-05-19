@@ -265,6 +265,35 @@ describe("net.route — apply", () => {
     expect(mockSsh.calls.some((call) => call.includes("/var/lib/paratix/flags"))).toBe(false)
   })
 
+  it("rolls back the exact previous live route when multiple routes share a destination", async () => {
+    const mockSsh = createMockSsh(
+      {
+        "ip route replace '10.0.0.0/24' 'via' '192.168.1.1' 'dev' 'eth0'": { code: 0 },
+        [routeShowCommand]: {
+          code: 0,
+          stdout: [
+            "10.0.0.0/24 via 192.168.1.254 dev eth1",
+            "10.0.0.0/24 via 192.168.1.1 dev eth0",
+          ].join("\n"),
+        },
+      },
+      SUCCESSFUL_ROUTE_APPLY_OPTIONS
+    )
+    vi.spyOn(mockSsh, "writeFile").mockRejectedValue(new Error("disk full"))
+    const mod = net.route("10.0.0.0/24", "192.168.1.1", { device: "eth0" })
+
+    const result = await mod.apply(mockSsh, emptyEnv)
+
+    expect(result.status).toBe("failed")
+    expect(String(result.error)).toContain("live route was rolled back")
+    expect(mockSsh.calls).toContain(
+      "ip route replace '10.0.0.0/24' 'via' '192.168.1.1' 'dev' 'eth0'"
+    )
+    expect(mockSsh.calls).not.toContain(
+      "ip route replace '10.0.0.0/24' 'via' '192.168.1.254' 'dev' 'eth1'"
+    )
+  })
+
   it("refuses a symlinked persistent route drop-in without reload or flag writes", async () => {
     const mockSsh = createMockSsh(
       {},
