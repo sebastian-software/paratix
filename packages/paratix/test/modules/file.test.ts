@@ -50,7 +50,7 @@ const createMockSsh: typeof createBaseMockSsh = (responses, options) =>
       {
         command:
           // eslint-disable-next-line security/detect-unsafe-regex -- bounded mock command regex, not user input
-          /^if \[ -L '\/(?:remote|var)(?:\/[^']*)?' \];/v,
+          /^set -e\nif \[ -L '\/(?:remote|var)(?:\/[^']*)?' \];/v,
         result: { code: 0 },
       },
       {
@@ -85,8 +85,19 @@ const unicodeRemotePath = "/remote/über ordner/äöü.txt"
 
 function findGuardedMkdirCall(calls: string[], directory: string): string | undefined {
   return calls.find(
-    (call) => call.includes(`if [ -L '${directory}' ];`) && call.includes(`mkdir -- '${directory}'`)
+    (call) => call.startsWith("set -e\n") && call.includes(`mkdir -- '${directory}'`)
   )
+}
+
+function directoryPathWithAncestors(remotePath: string): string[] {
+  const parts = remotePath.split("/").filter(Boolean)
+  const directories: string[] = []
+  let current = ""
+  for (const part of parts) {
+    current = `${current}/${part}`
+    directories.push(current)
+  }
+  return directories
 }
 
 function finalDirectoryValidationLines(directory: string): string[] {
@@ -101,20 +112,45 @@ function finalDirectoryValidationLines(directory: string): string[] {
 }
 
 function guardedMkdirCommand(directory: string): string {
-  return [
-    `if [ -L '${directory}' ]; then`,
-    `  printf '%s\\n' 'directory path is a symlink' >&2`,
-    `  exit 1`,
-    `fi`,
-    `if [ -e '${directory}' ] && [ ! -d '${directory}' ]; then`,
-    `  printf '%s\\n' 'directory path exists and is not a directory' >&2`,
-    `  exit 1`,
-    `fi`,
-    `if [ ! -d '${directory}' ]; then`,
-    `  mkdir -- '${directory}'`,
-    `fi`,
-    ...finalDirectoryValidationLines(directory),
-  ].join("\n")
+  const lines = ["set -e"]
+  const directories = directoryPathWithAncestors(directory)
+  for (let index = 0; index < directories.length; index += 1) {
+    const component = directories[index]
+    const confirmedDirectories = directories.slice(0, index + 1)
+    lines.push(
+      `if [ -L '${component}' ]; then`,
+      `  printf '%s\\n' 'directory path is a symlink' >&2`,
+      `  exit 1`,
+      `fi`,
+      `if [ -e '${component}' ]; then`,
+      `  directory_type=$(stat -c '%F' '${component}')`,
+      `  if [ "$directory_type" != 'directory' ]; then`,
+      `    printf '%s\\n' 'directory path exists and is not a directory' >&2`,
+      `    exit 1`,
+      `  fi`,
+      `else`,
+      `  mkdir -- '${component}'`,
+      `fi`,
+      ...finalDirectoryValidationLines(component),
+      `directory_${String(index)}_state=$(stat -c '%d:%i:%F' '${component}')`,
+      `case "$directory_${String(index)}_state" in`,
+      `  *':directory')`,
+      `    ;;`,
+      `  *)`,
+      `    printf '%s\\n' 'directory path failed final validation' >&2`,
+      `    exit 1`,
+      `    ;;`,
+      `esac`,
+      ...confirmedDirectories.flatMap((confirmedDirectory, confirmedIndex) => [
+        `directory_${String(confirmedIndex)}_current=$(stat -c '%d:%i:%F' '${confirmedDirectory}')`,
+        `if [ "$directory_${String(confirmedIndex)}_current" != "$directory_${String(confirmedIndex)}_state" ]; then`,
+        `  printf '%s\\n' 'directory ancestor changed during creation: ${confirmedDirectory}' >&2`,
+        `  exit 1`,
+        `fi`,
+      ])
+    )
+  }
+  return lines.join("\n")
 }
 
 describe("file.directory", () => {
@@ -347,50 +383,64 @@ describe("file.directory", () => {
   })
 
   it("fails when a nested component becomes a symlink after mkdir", async () => {
-    const guardedVarCommand = guardedMkdirCommand("/var")
-    const guardedAppCommand = guardedMkdirCommand("/var/app")
     const guardedDataCommand = guardedMkdirCommand("/var/app/data")
     const ssh = createMockSsh({
       "[ -d '/var/app/data' ]": { code: 1 },
       "[ -L '/var' ]": { code: 1 },
       "[ -L '/var/app' ]": { code: 1 },
       "[ -L '/var/app/data' ]": { code: 1 },
-      [guardedAppCommand]: {
+      [guardedDataCommand]: {
         code: 1,
         stderr: "directory path failed final validation\n",
       },
-      [guardedVarCommand]: { code: 0 },
     })
     const mod = file.directory("/var/app/data")
     const result = await mod.apply(ssh, emptyEnv)
 
     expect(result.status).toBe("failed")
     expect(String(result.error)).toContain("mkdir failed")
-    expect(ssh.calls).toContain(guardedAppCommand)
-    expect(ssh.calls).not.toContain(guardedDataCommand)
+    expect(ssh.calls).toContain(guardedDataCommand)
   })
 
-  it("creates nested directories through guarded component steps instead of plain mkdir -p", async () => {
-    const guardedVarCommand = guardedMkdirCommand("/var")
-    const guardedAppCommand = guardedMkdirCommand("/var/app")
+  it("creates nested directories through one combined guarded command instead of plain mkdir -p", async () => {
     const guardedDataCommand = guardedMkdirCommand("/var/app/data")
     const ssh = createMockSsh({
       "[ -d '/var/app/data' ]": { code: 1 },
       "[ -L '/var' ]": { code: 1 },
       "[ -L '/var/app' ]": { code: 1 },
       "[ -L '/var/app/data' ]": { code: 1 },
-      [guardedAppCommand]: { code: 0 },
       [guardedDataCommand]: { code: 0 },
-      [guardedVarCommand]: { code: 0 },
     })
     const mod = file.directory("/var/app/data")
     const result = await mod.apply(ssh, emptyEnv)
 
     expect(result.status).toBe("changed")
-    expect(ssh.calls).toContain(guardedVarCommand)
-    expect(ssh.calls).toContain(guardedAppCommand)
     expect(ssh.calls).toContain(guardedDataCommand)
+    expect(ssh.calls).toContainEqual(
+      expect.stringContaining('if [ "$directory_0_current" != "$directory_0_state" ]; then')
+    )
     expect(ssh.calls).not.toContain("mkdir -p '/var/app/data'")
+  })
+
+  it("detects when a confirmed ancestor changes during combined directory creation", async () => {
+    const guardedDataCommand = guardedMkdirCommand("/var/app/data")
+    const ssh = createMockSsh({
+      "[ -d '/var/app/data' ]": { code: 1 },
+      "[ -L '/var' ]": { code: 1 },
+      "[ -L '/var/app' ]": { code: 1 },
+      "[ -L '/var/app/data' ]": { code: 1 },
+      [guardedDataCommand]: {
+        code: 1,
+        stderr: "directory ancestor changed during creation: /var\n",
+      },
+    })
+    const mod = file.directory("/var/app/data")
+    const result = await mod.apply(ssh, emptyEnv)
+
+    expect(result.status).toBe("failed")
+    expect(String(result.error)).toContain("mkdir failed")
+    expect(ssh.calls).toContain(guardedDataCommand)
+    expect(guardedDataCommand).toContain("directory ancestor changed during creation: /var")
   })
 
   it("R-0000270: returns failed when mkdir on a read-only filesystem exits non-zero", async () => {

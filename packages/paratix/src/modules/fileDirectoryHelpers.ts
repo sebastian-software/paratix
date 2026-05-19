@@ -103,12 +103,9 @@ async function ensureDirectoryExists(input: {
   // R-0000270: mkdir on a read-only fs or in a directory the current user
   // cannot write to must propagate as a failedCommand result, not as an
   // unguarded CommandError that bypasses the runner failure pipeline.
-  for (const directory of directoryPathWithAncestors(input.remotePath)) {
-    // eslint-disable-next-line no-await-in-loop -- parent directories must be created before children
-    const result = await input.ssh.exec(renderGuardedMkdirCommand(directory), EXEC_OPTS)
-    if (result.code !== 0) {
-      return failedCommand(`[file.directory: ${input.remotePath}] mkdir failed`, result)
-    }
+  const result = await input.ssh.exec(renderGuardedMkdirCommand(input.remotePath), EXEC_OPTS)
+  if (result.code !== 0) {
+    return failedCommand(`[file.directory: ${input.remotePath}] mkdir failed`, result)
   }
   return true
 }
@@ -152,22 +149,70 @@ async function assertFinalDirectoryTarget(input: {
   return failedCommand(`[file.directory: ${input.remotePath}] final validation failed`, result)
 }
 
-function renderGuardedMkdirCommand(directory: string): string {
+function renderDirectoryStateCaptureLines(index: number, directory: string): string[] {
+  const quotedDirectory = shellQuote(directory)
+  const stateVariable = `directory_${String(index)}_state`
+  return [
+    `${stateVariable}=$(stat -c '%d:%i:%F' ${quotedDirectory})`,
+    `case "$${stateVariable}" in`,
+    `  *':directory')`,
+    `    ;;`,
+    `  *)`,
+    `    printf '%s\\n' 'directory path failed final validation' >&2`,
+    `    exit 1`,
+    `    ;;`,
+    `esac`,
+  ]
+}
+
+function renderConfirmedDirectoryRecheckLines(directories: string[]): string[] {
+  return directories.flatMap((directory, index) => {
+    const quotedDirectory = shellQuote(directory)
+    const variableIndex = String(index)
+    const changedMessage = shellQuote(`directory ancestor changed during creation: ${directory}`)
+    return [
+      `directory_${variableIndex}_current=$(stat -c '%d:%i:%F' ${quotedDirectory})`,
+      `if [ "$directory_${variableIndex}_current" != "$directory_${variableIndex}_state" ]; then`,
+      `  printf '%s\\n' ${changedMessage} >&2`,
+      `  exit 1`,
+      `fi`,
+    ]
+  })
+}
+
+function renderGuardedMkdirComponentLines(directory: string): string[] {
   const quotedDirectory = shellQuote(directory)
   return [
     `if [ -L ${quotedDirectory} ]; then`,
     `  printf '%s\\n' 'directory path is a symlink' >&2`,
     `  exit 1`,
     `fi`,
-    `if [ -e ${quotedDirectory} ] && [ ! -d ${quotedDirectory} ]; then`,
-    `  printf '%s\\n' 'directory path exists and is not a directory' >&2`,
-    `  exit 1`,
-    `fi`,
-    `if [ ! -d ${quotedDirectory} ]; then`,
+    `if [ -e ${quotedDirectory} ]; then`,
+    `  directory_type=$(stat -c '%F' ${quotedDirectory})`,
+    `  if [ "$directory_type" != 'directory' ]; then`,
+    `    printf '%s\\n' 'directory path exists and is not a directory' >&2`,
+    `    exit 1`,
+    `  fi`,
+    `else`,
     `  mkdir -- ${quotedDirectory}`,
     `fi`,
     ...renderFinalDirectoryValidationLines(quotedDirectory),
-  ].join("\n")
+  ]
+}
+
+function renderGuardedMkdirCommand(remotePath: string): string {
+  const directories = directoryPathWithAncestors(remotePath)
+  const lines = [`set -e`]
+  for (let index = 0; index < directories.length; index += 1) {
+    const directory = directories[index]
+    const confirmedDirectories = directories.slice(0, index + 1)
+    lines.push(
+      ...renderGuardedMkdirComponentLines(directory),
+      ...renderDirectoryStateCaptureLines(index, directory),
+      ...renderConfirmedDirectoryRecheckLines(confirmedDirectories)
+    )
+  }
+  return lines.join("\n")
 }
 async function ensureDirectoryPathNotSymlinked(input: {
   remotePath: string
