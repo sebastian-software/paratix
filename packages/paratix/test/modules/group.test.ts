@@ -40,11 +40,19 @@ describe("group.present", () => {
 
   it("check returns needs-apply when the group does not exist", async () => {
     const ssh = createMockSsh({
-      "getent group 'deploy'": { code: 1 },
+      "getent group 'deploy'": { code: 2 },
     })
     const mod = group.present("deploy")
     const result = await mod.check(ssh, emptyEnv)
     expect(result).toBe("needs-apply")
+  })
+
+  it("check throws when getent group fails", async () => {
+    const ssh = createMockSsh({
+      "getent group 'deploy'": { code: 1, stderr: "getent: database unavailable" },
+    })
+    const mod = group.present("deploy")
+    await expect(mod.check(ssh, emptyEnv)).rejects.toThrow("getent group failed")
   })
 
   it("check returns needs-apply when ssh is null", async () => {
@@ -76,7 +84,7 @@ describe("group.present", () => {
 
   it("apply returns changed when groupadd succeeds without gid", async () => {
     const ssh = createMockSsh({
-      "getent group 'deploy'": { code: 1 },
+      "getent group 'deploy'": { code: 2 },
       "groupadd -- 'deploy'": { code: 0 },
     })
     const mod = group.present("deploy")
@@ -87,7 +95,7 @@ describe("group.present", () => {
 
   it("apply returns changed when groupadd succeeds with gid", async () => {
     const ssh = createMockSsh({
-      "getent group 'deploy'": { code: 1 },
+      "getent group 'deploy'": { code: 2 },
       "groupadd --gid 1200 -- 'deploy'": { code: 0 },
     })
     const mod = group.present("deploy", { gid: 1200 })
@@ -98,7 +106,7 @@ describe("group.present", () => {
 
   it("apply returns failed when groupadd exits with non-zero code", async () => {
     const ssh = createMockSsh({
-      "getent group 'deploy'": { code: 1 },
+      "getent group 'deploy'": { code: 2 },
       "groupadd --gid 1200 -- 'deploy'": { code: 1 },
     })
     const mod = group.present("deploy", { gid: 1200 })
@@ -107,7 +115,7 @@ describe("group.present", () => {
   })
 
   it("apply returns ok when a parallel run creates the group after the initial probe", async () => {
-    const ssh = createGroupLookupSequenceSsh([{ code: 1 }, { code: 0, stdout: "deploy:x:1234:" }], {
+    const ssh = createGroupLookupSequenceSsh([{ code: 2 }, { code: 0, stdout: "deploy:x:1234:" }], {
       "groupadd -- 'deploy'": { code: 9, stderr: "groupadd: group 'deploy' already exists" },
     })
     const mod = group.present("deploy")
@@ -117,7 +125,7 @@ describe("group.present", () => {
   })
 
   it("apply returns ok when a parallel run creates the group with the desired GID", async () => {
-    const ssh = createGroupLookupSequenceSsh([{ code: 1 }, { code: 0, stdout: "deploy:x:1200:" }], {
+    const ssh = createGroupLookupSequenceSsh([{ code: 2 }, { code: 0, stdout: "deploy:x:1200:" }], {
       "groupadd --gid 1200 -- 'deploy'": {
         code: 9,
         stderr: "groupadd: group 'deploy' already exists",
@@ -130,7 +138,7 @@ describe("group.present", () => {
   })
 
   it("apply heals GID drift when a parallel run creates the group with the wrong GID", async () => {
-    const ssh = createGroupLookupSequenceSsh([{ code: 1 }, { code: 0, stdout: "deploy:x:1234:" }], {
+    const ssh = createGroupLookupSequenceSsh([{ code: 2 }, { code: 0, stdout: "deploy:x:1234:" }], {
       "groupadd --gid 1200 -- 'deploy'": {
         code: 9,
         stderr: "groupadd: group 'deploy' already exists",
@@ -144,13 +152,47 @@ describe("group.present", () => {
   })
 
   it("apply returns the original groupadd failure when the group is still missing", async () => {
-    const ssh = createGroupLookupSequenceSsh([{ code: 1 }, { code: 1 }], {
+    const ssh = createGroupLookupSequenceSsh([{ code: 2 }, { code: 2 }], {
       "groupadd --gid 1200 -- 'deploy'": { code: 1, stderr: "permission denied" },
     })
     const mod = group.present("deploy", { gid: 1200 })
     const result = await mod.apply(ssh, emptyEnv)
     expect(result.status).toBe("failed")
     expect(ssh.calls.filter((c) => c === "getent group 'deploy'")).toHaveLength(2)
+  })
+
+  it("apply returns failed when the initial getent group lookup fails", async () => {
+    const ssh = createMockSsh({
+      "getent group 'deploy'": { code: 1, stderr: "getent: database unavailable" },
+    })
+    const mod = group.present("deploy")
+    const result = await mod.apply(ssh, emptyEnv)
+    expect(result.status).toBe("failed")
+    expect(result.error?.message).toContain("getent group failed")
+    expect(ssh.calls.some((c) => c.startsWith("groupadd"))).toBe(false)
+  })
+
+  it("apply returns failed when the race fallback getent group lookup fails", async () => {
+    const ssh = createGroupLookupSequenceSsh(
+      [{ code: 2 }, { code: 1, stderr: "getent: database unavailable" }],
+      {
+        "groupadd -- 'deploy'": { code: 9, stderr: "groupadd: group 'deploy' already exists" },
+      }
+    )
+    const mod = group.present("deploy")
+    const result = await mod.apply(ssh, emptyEnv)
+    expect(result.status).toBe("failed")
+    expect(result.error?.message).toContain("getent group failed")
+  })
+
+  it("apply returns failed when getent group returns malformed output", async () => {
+    const ssh = createMockSsh({
+      "getent group 'deploy'": { code: 0, stdout: "deploy:x:" },
+    })
+    const mod = group.present("deploy")
+    const result = await mod.apply(ssh, emptyEnv)
+    expect(result.status).toBe("failed")
+    expect(result.error?.message).toContain("malformed group entry")
   })
 
   // R-0000048 regression: an existing group with a matching GID converges
@@ -226,7 +268,7 @@ describe("group.present", () => {
 describe("group.absent", () => {
   it("check returns needs-apply when the group exists", async () => {
     const ssh = createMockSsh({
-      "getent group 'deploy'": { code: 0 },
+      "getent group 'deploy'": { code: 0, stdout: "deploy:x:1234:" },
     })
     const mod = group.absent("deploy")
     const result = await mod.check(ssh, emptyEnv)
@@ -235,11 +277,19 @@ describe("group.absent", () => {
 
   it("check returns ok when the group does not exist", async () => {
     const ssh = createMockSsh({
-      "getent group 'deploy'": { code: 1 },
+      "getent group 'deploy'": { code: 2 },
     })
     const mod = group.absent("deploy")
     const result = await mod.check(ssh, emptyEnv)
     expect(result).toBe("ok")
+  })
+
+  it("check throws when getent group fails", async () => {
+    const ssh = createMockSsh({
+      "getent group 'deploy'": { code: 1, stderr: "getent: database unavailable" },
+    })
+    const mod = group.absent("deploy")
+    await expect(mod.check(ssh, emptyEnv)).rejects.toThrow("getent group failed")
   })
 
   it("check returns needs-apply when ssh is null", async () => {
@@ -275,11 +325,33 @@ describe("group.absent", () => {
   // apply from reporting failedCommand for an already-satisfied state.
   it("apply returns ok and skips groupdel when the group does not exist", async () => {
     const ssh = createMockSsh({
-      "getent group 'deploy'": { code: 1 },
+      "getent group 'deploy'": { code: 2 },
     })
     const mod = group.absent("deploy")
     const result = await mod.apply(ssh, emptyEnv)
     expect(result.status).toBe("ok")
+    expect(ssh.calls.some((c) => c.startsWith("groupdel"))).toBe(false)
+  })
+
+  it("apply returns failed and skips groupdel when getent group fails", async () => {
+    const ssh = createMockSsh({
+      "getent group 'deploy'": { code: 1, stderr: "getent: database unavailable" },
+    })
+    const mod = group.absent("deploy")
+    const result = await mod.apply(ssh, emptyEnv)
+    expect(result.status).toBe("failed")
+    expect(result.error?.message).toContain("getent group failed")
+    expect(ssh.calls.some((c) => c.startsWith("groupdel"))).toBe(false)
+  })
+
+  it("apply returns failed and skips groupdel when getent group returns malformed output", async () => {
+    const ssh = createMockSsh({
+      "getent group 'deploy'": { code: 0, stdout: "deploy:x:" },
+    })
+    const mod = group.absent("deploy")
+    const result = await mod.apply(ssh, emptyEnv)
+    expect(result.status).toBe("failed")
+    expect(result.error?.message).toContain("malformed group entry")
     expect(ssh.calls.some((c) => c.startsWith("groupdel"))).toBe(false)
   })
 

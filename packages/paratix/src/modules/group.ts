@@ -3,6 +3,8 @@ import { shellQuote } from "../ssh.js"
 import { type Module, type ModuleResult, NEEDS_APPLY, type SshConnection } from "../types.js"
 
 const GETENT_GROUP = "getent group"
+const GETENT_NOT_FOUND_EXIT_CODE = 2
+const GROUP_ENTRY_FIELD_COUNT = 4
 
 // R-0000238: validate group names at module-construction time so empty,
 // flag-shaped, or shell-control-shaped names cannot reach groupadd,
@@ -54,34 +56,77 @@ async function handleFailedGroupadd(input: {
   ssh: SshConnection
 }): Promise<ModuleResult> {
   const { gid, name, result, ssh } = input
-  const concurrentGid = await readGroupGid(ssh, name)
-  if (concurrentGid == null)
+  const concurrentGroup = await readGroupGid(ssh, name)
+  if (concurrentGroup.kind === "missing")
     return failedCommand(`[group.present: ${name}] groupadd failed`, result)
-  return convergeExistingGroup({ existingGid: concurrentGid, gid, name, ssh })
+  if (concurrentGroup.kind === "error") return concurrentGroup.failure
+  return convergeExistingGroup({ existingGid: concurrentGroup.gid, gid, name, ssh })
+}
+
+type GroupLookupResult =
+  | { failure: ModuleResult; kind: "error" }
+  | { gid: string; kind: "found" }
+  | { kind: "missing" }
+
+function failCheckWithLookupError(
+  name: string,
+  lookup: Extract<GroupLookupResult, { kind: "error" }>
+): never {
+  throw lookup.failure.error ?? new Error(`[group: ${name}] group lookup failed`)
+}
+
+function parseGroupEntry(name: string, stdout: string): GroupLookupResult {
+  const entry = stdout.trim()
+  const lines = entry.length === 0 ? [] : entry.split(/\r?\n/v)
+  if (lines.length !== 1) {
+    return {
+      failure: failed(
+        `[group: ${name}] getent group returned ${String(lines.length)} entries (expected 1)`
+      ),
+      kind: "error",
+    }
+  }
+  const fields = lines[0].split(":")
+  const gid = fields[2] ?? ""
+  const numericGid = Number(gid)
+  if (
+    fields.length !== GROUP_ENTRY_FIELD_COUNT ||
+    !/^(?:0|[1-9]\d*)$/v.test(gid) ||
+    !Number.isInteger(numericGid) ||
+    numericGid < 0 ||
+    numericGid >= GID_MAX_EXCLUSIVE
+  ) {
+    return {
+      failure: failed(`[group: ${name}] getent group returned a malformed group entry`),
+      kind: "error",
+    }
+  }
+  return { gid, kind: "found" }
 }
 
 /**
- * Read the GID of an existing group via `getent group <name>`. Returns the
- * GID as the string it appears in `/etc/group` (third colon-separated
- * field), or `null` when the group does not exist.
+ * Read the GID of an existing group via `getent group <name>`.
  *
- * `getent group` exits non-zero when the group is absent, which we surface
- * by returning `null` instead of throwing — both `check` and `apply` need
- * to disambiguate "missing" from "drifted".
+ * `getent group` uses exit code 2 for an absent key. Other non-zero exit
+ * codes are lookup/toolchain errors and must not be treated as converged.
  *
  * @param ssh - Active SSH connection to the remote host.
  * @param name - Group name to look up.
- * @returns The GID string, or `null` when the group does not exist.
+ * @returns A discriminated group lookup result.
  */
-async function readGroupGid(ssh: SshConnection, name: string): Promise<null | string> {
+async function readGroupGid(ssh: SshConnection, name: string): Promise<GroupLookupResult> {
   const result = await ssh.exec(`${GETENT_GROUP} ${shellQuote(name)}`, {
     ignoreExitCode: true,
     silent: true,
   })
-  if (result.code !== 0) return null
-  // /etc/group format: name:passwd:gid:userlist
-  const fields = result.stdout.trim().split(":")
-  return fields[2] ?? null
+  if (result.code === GETENT_NOT_FOUND_EXIT_CODE) return { kind: "missing" }
+  if (result.code !== 0) {
+    return {
+      failure: failedCommand(`[group: ${name}] getent group failed`, result),
+      kind: "error",
+    }
+  }
+  return parseGroupEntry(name, result.stdout)
 }
 
 /**
@@ -106,7 +151,9 @@ export const group = {
     return {
       async apply(ssh: null | SshConnection): Promise<ModuleResult> {
         if (!ssh) return failed(`[group.absent: ${name}] SSH connection is required`)
-        if ((await readGroupGid(ssh, name)) == null) return { status: "ok" }
+        const existingGroup = await readGroupGid(ssh, name)
+        if (existingGroup.kind === "missing") return { status: "ok" }
+        if (existingGroup.kind === "error") return existingGroup.failure
         const result = await ssh.exec(`groupdel -- ${shellQuote(name)}`, {
           ignoreExitCode: true,
           silent: true,
@@ -117,7 +164,9 @@ export const group = {
       },
       async check(ssh: null | SshConnection): Promise<"needs-apply" | "ok"> {
         if (!ssh) return NEEDS_APPLY
-        return (await ssh.test(`${GETENT_GROUP} ${shellQuote(name)}`)) ? NEEDS_APPLY : "ok"
+        const existingGroup = await readGroupGid(ssh, name)
+        if (existingGroup.kind === "error") failCheckWithLookupError(name, existingGroup)
+        return existingGroup.kind === "found" ? NEEDS_APPLY : "ok"
       },
       name: `group.absent: ${name}`,
     }
@@ -140,8 +189,9 @@ export const group = {
       async apply(ssh: null | SshConnection): Promise<ModuleResult> {
         if (!ssh) return failed(`[group.present: ${name}] SSH connection is required`)
 
-        const existingGid = await readGroupGid(ssh, name)
-        if (existingGid == null) {
+        const existingGroup = await readGroupGid(ssh, name)
+        if (existingGroup.kind === "error") return existingGroup.failure
+        if (existingGroup.kind === "missing") {
           // Group does not exist yet — create it with the desired GID.
           const arguments_ = options?.gid == null ? ["--"] : ["--gid", String(options.gid), "--"]
           const result = await ssh.exec(`groupadd ${arguments_.join(" ")} ${shellQuote(name)}`, {
@@ -152,16 +202,22 @@ export const group = {
           return handleFailedGroupadd({ gid: options?.gid, name, result, ssh })
         }
 
-        return convergeExistingGroup({ existingGid, gid: options?.gid, name, ssh })
+        return convergeExistingGroup({
+          existingGid: existingGroup.gid,
+          gid: options?.gid,
+          name,
+          ssh,
+        })
       },
       async check(ssh: null | SshConnection): Promise<"needs-apply" | "ok"> {
         if (!ssh) return NEEDS_APPLY
 
-        const existingGid = await readGroupGid(ssh, name)
-        if (existingGid == null) return NEEDS_APPLY
+        const existingGroup = await readGroupGid(ssh, name)
+        if (existingGroup.kind === "error") failCheckWithLookupError(name, existingGroup)
+        if (existingGroup.kind === "missing") return NEEDS_APPLY
         // R-0000048: when a desired GID is set, treat a mismatched GID as
         // drift so apply can heal it via groupmod.
-        if (options?.gid != null && existingGid !== String(options.gid)) return NEEDS_APPLY
+        if (options?.gid != null && existingGroup.gid !== String(options.gid)) return NEEDS_APPLY
         return "ok"
       },
       name: `group.present: ${name}`,
