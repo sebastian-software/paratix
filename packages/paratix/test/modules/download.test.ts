@@ -155,6 +155,11 @@ function buildLargeDownloadVersionedFlagCommand(parameters: {
   return `find /var/lib/paratix/flags -maxdepth 1 -type f -name '${flagPrefix}*' ! -name '*.lock' -delete && touch /var/lib/paratix/flags/'${parameters.flagName}'`
 }
 
+function buildUnverifiedHashMarkerReadCommand(destination: string): string {
+  const markerPath = `${destination}.sha256`
+  return `[ ! -L '${markerPath}' ] && [ -f '${markerPath}' ] && cat -- '${markerPath}'`
+}
+
 type MockSshWithOptions = {
   exec: (
     command: string,
@@ -2148,14 +2153,50 @@ describe("download.large", () => {
       expect(result).toBe("needs-apply")
     })
 
-    it("returns ok when flag file exists", async () => {
+    it("returns ok when flag file and unverified hash marker match", async () => {
+      const recordedHash = "aabbccddaabbccddaabbccddaabbccddaabbccddaabbccddaabbccdd"
       const mockSsh = createMockSsh({
+        [`[ -f '${destination}.sha256' ]`]: { code: 0 },
+        [`[ -f '${destination}' ]`]: { code: 0 },
+        [`[ -f /var/lib/paratix/flags/'${flagName}' ]`]: { code: 0 },
+        [`sha256sum '${destination}'`]: { stdout: `${recordedHash}  ${destination}` },
+        [buildUnverifiedHashMarkerReadCommand(destination)]: {
+          code: 0,
+          stdout: `${recordedHash}\n`,
+        },
+      })
+      const mod = download.large(destination, url, allowUnverifiedDownload)
+      const result = await mod.check(mockSsh, emptyEnv)
+      expect(result).toBe("ok")
+    })
+
+    it("returns needs-apply when flag exists but the unverified hash marker is missing", async () => {
+      const mockSsh = createMockSsh({
+        [`[ -f '${destination}.sha256' ]`]: { code: 1 },
         [`[ -f '${destination}' ]`]: { code: 0 },
         [`[ -f /var/lib/paratix/flags/'${flagName}' ]`]: { code: 0 },
       })
       const mod = download.large(destination, url, allowUnverifiedDownload)
       const result = await mod.check(mockSsh, emptyEnv)
-      expect(result).toBe("ok")
+      expect(result).toBe("needs-apply")
+    })
+
+    it("returns needs-apply when flag exists but the unverified hash marker differs", async () => {
+      const recordedHash = "aabbccddaabbccddaabbccddaabbccddaabbccddaabbccddaabbccdd"
+      const tamperedHash = "1111111111111111111111111111111111111111111111111111111111111111"
+      const mockSsh = createMockSsh({
+        [`[ -f '${destination}.sha256' ]`]: { code: 0 },
+        [`[ -f '${destination}' ]`]: { code: 0 },
+        [`[ -f /var/lib/paratix/flags/'${flagName}' ]`]: { code: 0 },
+        [`sha256sum '${destination}'`]: { stdout: `${tamperedHash}  ${destination}` },
+        [buildUnverifiedHashMarkerReadCommand(destination)]: {
+          code: 0,
+          stdout: `${recordedHash}\n`,
+        },
+      })
+      const mod = download.large(destination, url, allowUnverifiedDownload)
+      const result = await mod.check(mockSsh, emptyEnv)
+      expect(result).toBe("needs-apply")
     })
 
     it("returns needs-apply when flag exists but destination is a symlink to a regular file", async () => {
@@ -2329,9 +2370,16 @@ describe("download.large", () => {
     })
 
     it("direct apply returns ok without downloading when the flag already exists", async () => {
+      const recordedHash = "aabbccddaabbccddaabbccddaabbccddaabbccdd"
       const mockSsh = createMockSsh({
+        [`[ -f '${destination}.sha256' ]`]: { code: 0 },
         [`[ -f '${destination}' ]`]: { code: 0 },
         [`[ -f /var/lib/paratix/flags/'${flagName}' ]`]: { code: 0 },
+        [`sha256sum '${destination}'`]: { stdout: `${recordedHash}  ${destination}` },
+        [buildUnverifiedHashMarkerReadCommand(destination)]: {
+          code: 0,
+          stdout: `${recordedHash}\n`,
+        },
       })
       const mod = download.large(destination, url, allowUnverifiedDownload)
       const result = await mod.apply(mockSsh, emptyEnv)
@@ -2382,10 +2430,14 @@ describe("download.large", () => {
     })
 
     it("downloads file via curl --config from stdin and sets flag on success", async () => {
+      const recordedHash = "aabbccddaabbccddaabbccddaabbccddaabbccdd"
       const mockSsh = createMockSsh({
+        [`[ -f '${destination}' ]`]: { code: 0 },
+        [`[ -L '${destination}.sha256' ]`]: { code: 1 },
         [`mktemp "$(dirname -- '${destination}')/.paratix-download.XXXXXX"`]: {
           stdout: `${temporaryDestination}\n`,
         },
+        [`sha256sum '${destination}'`]: { stdout: `${recordedHash}  ${destination}` },
       })
       const mod = download.large(destination, url, allowUnverifiedDownload)
       const result = await mod.apply(mockSsh, emptyEnv)
@@ -2399,6 +2451,13 @@ describe("download.large", () => {
       expect(mockSsh.calls).toContain(
         buildLargeDownloadVersionedFlagCommand({ destination, flagName })
       )
+      expect(mockSsh.writeFileCalls).toStrictEqual([
+        {
+          content: `${recordedHash}\n`,
+          options: { mode: "0444" },
+          remotePath: `${destination}.sha256`,
+        },
+      ])
     })
 
     it("passes custom curl timeout flags and SSH exec timeout", async () => {
@@ -3069,7 +3128,13 @@ describe("buildCurlCommand — redirect protocol policy", () => {
   })
 
   it("propagates insecure http redirect opt-in for large downloads", async () => {
-    const mockSsh = createMockSsh(downloadMktempStub(largeDestination, largeTempPath))
+    const recordedHash = "aabbccddaabbccddaabbccddaabbccddaabbccdd"
+    const mockSsh = createMockSsh({
+      ...downloadMktempStub(largeDestination, largeTempPath),
+      [`[ -f '${largeDestination}' ]`]: { code: 0 },
+      [`[ -L '${largeDestination}.sha256' ]`]: { code: 1 },
+      [`sha256sum '${largeDestination}'`]: { stdout: `${recordedHash}  ${largeDestination}` },
+    })
     const mod = download.large(largeDestination, "http://example.com/big.iso", {
       ...allowUnverifiedDownload,
       allowInsecureHttp: true,

@@ -487,15 +487,22 @@ async function checkLargeDownload(
     destination: string
     flagName: string
     options: BaseDownloadOptions
+    usesUnverifiedHashMarker: boolean
   }
 ): Promise<"needs-apply" | "ok"> {
-  const { destination, flagName, options } = parameters
+  const { destination, flagName, options, usesUnverifiedHashMarker } = parameters
   const flagExists = await hasFlag(conn, flagName)
   const destinationExists = await destinationIsRegularFile(conn, destination)
 
   if (!flagExists) return NEEDS_APPLY
   if (!destinationExists) return NEEDS_APPLY
   if (!(await destinationHashMatches(conn, destination, options))) return NEEDS_APPLY
+  if (
+    usesUnverifiedHashMarker &&
+    (await compareUnverifiedHashMarker(conn, destination)) !== "match"
+  ) {
+    return NEEDS_APPLY
+  }
   if (!(await metadataMatches(conn, destination, options))) return NEEDS_APPLY
 
   return "ok"
@@ -1267,6 +1274,8 @@ export const download = {
     // setVersionedFlag, preventing unbounded accumulation in
     // /var/lib/paratix/flags/.
     const { flagName, flagPrefix } = buildLargeDownloadFlagInfo(downloadParameters)
+    const usesUnverifiedHashMarker =
+      resolvedOptions.sha256 == null && resolvedOptions.allowUnverifiedDownload === true
 
     return {
       // R-0000708 / R-0000754: when `performDownload` returns `"ok"` the
@@ -1307,6 +1316,9 @@ export const download = {
             // instead of leaking onto disk forever.
             const flagFailure = await setVersionedFlag(conn, flagName, flagPrefix)
             if (flagFailure) return flagFailure
+            if (result.status === "changed" && usesUnverifiedHashMarker) {
+              await writeUnverifiedHashMarker(conn, destination)
+            }
             // R-0000156: respect the original result.status (e.g. "ok" when
             // performDownload skipped the download because content + metadata
             // already matched). Always forcing "changed" would falsely
@@ -1321,6 +1333,7 @@ export const download = {
                 destination,
                 flagName,
                 options: resolvedOptions,
+                usesUnverifiedHashMarker,
               })) === NEEDS_APPLY
             )
           },
@@ -1328,7 +1341,12 @@ export const download = {
       },
       async check(conn: null | SshConnection): Promise<"needs-apply" | "ok"> {
         if (!conn) return NEEDS_APPLY
-        return checkLargeDownload(conn, { destination, flagName, options: resolvedOptions })
+        return checkLargeDownload(conn, {
+          destination,
+          flagName,
+          options: resolvedOptions,
+          usesUnverifiedHashMarker,
+        })
       },
       name: `download.large: ${destination}`,
     }
