@@ -1668,6 +1668,26 @@ describe("file.line — apply without options.match", () => {
     expect(ssh.calls).not.toContain("cat >> '/etc/config'")
   })
 
+  it.each([
+    {
+      name: "poisoned multiline output",
+      stagingPath: "/etc/.config.paratix-create.ABC123\n/etc/.config.paratix-create.EVIL",
+    },
+    { name: "out-of-dir output", stagingPath: "/tmp/.config.paratix-create.ABC123" },
+    { name: "wrong prefix output", stagingPath: "/etc/.other.paratix-create.ABC123" },
+  ])("rejects $name from mktemp before upload or publish", async ({ stagingPath }) => {
+    const ssh = createMockSsh({
+      "[ -e '/etc/config' ]": { code: 1 },
+      "mktemp -p '/etc' -- '.config.paratix-create.XXXXXX'": { stdout: stagingPath },
+    })
+
+    const mod = file.line("/etc/config", "my-line")
+
+    await expect(mod.apply(ssh, emptyEnv)).rejects.toThrow(/Unexpected mktemp output/v)
+    expect(ssh.uploadFileCalls).toStrictEqual([])
+    expect(ssh.execCalls).toStrictEqual([])
+  })
+
   // R-0000761: when the target file materialises between the initial
   // `[ -e ]` probe and the recheck immediately before the create, apply
   // refuses to overwrite the concurrently-created file instead of

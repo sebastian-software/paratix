@@ -4,7 +4,7 @@ import { tmpdir } from "node:os"
 import { join, posix } from "node:path"
 
 import { failed, failedCommand } from "../moduleFailure.js"
-import { shellQuote, validateMode } from "../ssh.js"
+import { shellQuote, validateMktempPath, validateMode } from "../ssh.js"
 import { renderTemplate } from "../template.js"
 import {
   type Environment,
@@ -110,6 +110,12 @@ function buildCreateOnlyRemoteTemporaryCommand(remotePath: string): string {
   return `mktemp -p ${shellQuote(directory)} -- ${shellQuote(stagingTemplate)}`
 }
 
+function validateCreateOnlyStagingPath(remotePath: string, stagingPath: string): string {
+  const directory = posix.dirname(remotePath)
+  const basename = posix.basename(remotePath)
+  return validateMktempPath(directory, stagingPath, `.${basename}.paratix-create`)
+}
+
 function buildCreateOnlyPublishScript(parameters: {
   remotePath: string
   stagingPath: string
@@ -133,11 +139,12 @@ async function writeLineCreateStagingFile(input: {
   remotePath: string
   ssh: SshConnection
 }): Promise<string> {
+  const remoteStagingPath = validateCreateOnlyStagingPath(
+    input.remotePath,
+    await input.ssh.output(buildCreateOnlyRemoteTemporaryCommand(input.remotePath))
+  )
   const localDirectory = await mkdtemp(join(tmpdir(), "paratix-file-line-"))
   const localPath = join(localDirectory, "content")
-  const remoteStagingPath = await input.ssh.output(
-    buildCreateOnlyRemoteTemporaryCommand(input.remotePath)
-  )
   try {
     // eslint-disable-next-line security/detect-non-literal-fs-filename -- localPath is inside a freshly created private OS temp directory
     await writeFile(localPath, `${input.line}\n`)
