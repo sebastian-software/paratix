@@ -522,6 +522,31 @@ describe("publishWorkspacePackages release validations", () => {
     assert.equal(hasCommandCall(commandRunner.calls, "pnpm"), false)
   })
 
+  it("R-0000661: aborts when a create-paratix dist artefact is missing", async () => {
+    const commandRunner = createCommandRunner()
+    const fs = createFs({
+      mtimes: {
+        "packages/create-paratix/dist/index.js": undefined,
+      },
+    })
+
+    let caught
+    try {
+      await publishWorkspacePackages({
+        availabilityDelayMilliseconds: 0,
+        commandRunner,
+        fs,
+      })
+    } catch (error) {
+      caught = error
+    }
+
+    assert.ok(caught, "publishWorkspacePackages should reject")
+    assert.equal(caught.message.includes(CREATE_PARATIX_NAME), true, caught.message)
+    assert.equal(caught.message.includes("is missing"), true, caught.message)
+    assert.equal(hasCommandCall(commandRunner.calls, "pnpm"), false)
+  })
+
   it("R-0000661: aborts when a dist artefact mtime is older than the src tree", async () => {
     const commandRunner = createCommandRunner()
     const fs = createFs({
