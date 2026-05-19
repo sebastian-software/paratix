@@ -12,11 +12,27 @@ const emptyEnv = {}
 
 const repo = "git@github.com:example/repo.git"
 const destination = "/opt/myapp"
+const destinationParent = "/opt"
 const gitDir = `${destination}/.git`
 const originUrlCommand = `git -C '${destination}' remote get-url origin`
+const stagingDestination = `${destinationParent}/paratix-git-clone.TEST123`
 const destinationSymlinkProbe = `[ -L '${destination}' ]`
 const optSymlinkProbe = "[ -L '/opt' ]"
 const gitDirSymlinkProbe = `[ -L '${gitDir}' ]`
+const stagingMktempCommand = verifiedPhysicalDirectoryCommand(
+  destinationParent,
+  `mktemp -d -p '${destinationParent}' -- paratix-git-clone.XXXXXX`
+)
+const publishStagedCloneCommand = verifiedPhysicalDirectoryCommand(
+  destinationParent,
+  [
+    `[ ! -e '${destination}' ]`,
+    `[ ! -L '${destination}' ]`,
+    `mv -T -n -- '${stagingDestination}' '${destination}'`,
+    `[ ! -e '${stagingDestination}' ]`,
+    `[ -d '${gitDir}' ]`,
+  ].join(" && ")
+)
 const noSymlinkResponseStubs: MockResponseStub[] = [
   { command: /^\[ -L .+ \]$/v, result: { code: 1 } },
 ]
@@ -41,6 +57,11 @@ const createMockSsh: typeof createBaseMockSsh = (responses, options) =>
 
 function createGitApplyMockSsh(responses: MockSshResponses = {}) {
   return createMockSsh(responses)
+}
+
+function verifiedPhysicalDirectoryCommand(directory: string, command: string): string {
+  const quotedDirectory = shellQuote(directory)
+  return `[ ! -L ${quotedDirectory} ] && [ -d ${quotedDirectory} ] && cd -P -- ${quotedDirectory} && [ "$(pwd -P)" = ${quotedDirectory} ] && ${command}`
 }
 
 function expectNoGitMutationCalls(calls: string[]) {
@@ -450,13 +471,18 @@ describe("git.clone — apply", () => {
 
   it("clones repo without branch when .git does not exist and no ref is given", async () => {
     const mockSsh = createGitApplyMockSsh({
-      [`git clone -- '${repo}' '${destination}'`]: { code: 0 },
+      [`git clone -- '${repo}' '${stagingDestination}'`]: { code: 0 },
       [`test -d '${gitDir}'`]: { code: 1 },
+      [publishStagedCloneCommand]: { code: 0 },
+      [stagingMktempCommand]: { code: 0, stdout: `${stagingDestination}\n` },
     })
     const mod = git.clone(repo, destination)
     const result = await mod.apply(mockSsh, emptyEnv)
     expect(result.status).toBe("changed")
-    expect(mockSsh.calls).toContain(`git clone -- '${repo}' '${destination}'`)
+    expect(mockSsh.calls).toContain(stagingMktempCommand)
+    expect(mockSsh.calls).toContain(`git clone -- '${repo}' '${stagingDestination}'`)
+    expect(mockSsh.calls).toContain(publishStagedCloneCommand)
+    expect(mockSsh.calls).not.toContain(`git clone -- '${repo}' '${destination}'`)
   })
 
   it("returns failed without mutation when the destination is a symlink", async () => {
@@ -503,34 +529,55 @@ describe("git.clone — apply", () => {
 
   it("clones repo with --branch when .git does not exist and ref is given", async () => {
     const mockSsh = createGitApplyMockSsh({
-      [`git clone --branch 'main' -- '${repo}' '${destination}'`]: { code: 0 },
+      [`git clone --branch 'main' -- '${repo}' '${stagingDestination}'`]: { code: 0 },
       [`test -d '${gitDir}'`]: { code: 1 },
-      [`test -e '${destination}'`]: { code: 1 },
+      [publishStagedCloneCommand]: { code: 0 },
+      [stagingMktempCommand]: { code: 0, stdout: `${stagingDestination}\n` },
     })
     const mod = git.clone(repo, destination, { ref: "main" })
     const result = await mod.apply(mockSsh, emptyEnv)
     expect(result.status).toBe("changed")
-    expect(mockSsh.calls).toContain(`git clone --branch 'main' -- '${repo}' '${destination}'`)
+    expect(mockSsh.calls).toContain(
+      `git clone --branch 'main' -- '${repo}' '${stagingDestination}'`
+    )
+    expect(mockSsh.calls).toContain(publishStagedCloneCommand)
   })
 
   it("quotes adversarial repo, destination, and ref values when cloning", async () => {
     const adversarialRepo = "git@example.com:team/repo '$(touch repo-apply)'.git"
     const adversarialDestination = "/opt/my app/it's $(touch dest-apply)"
+    const adversarialParent = "/opt/my app"
+    const adversarialStagingDestination = `${adversarialParent}/paratix-git-clone.APPLY123`
     // R-0000482: refs may no longer contain apostrophes. The remaining
     // metacharacters still exercise shell-quote on the command boundary.
     const adversarialRef = "release/x;$(touch_ref-apply)"
     const adversarialGitDir = `${adversarialDestination}/.git`
+    const expectedMktempCommand = verifiedPhysicalDirectoryCommand(
+      adversarialParent,
+      `mktemp -d -p ${shellQuote(adversarialParent)} -- paratix-git-clone.XXXXXX`
+    )
     const expectedCommand = [
       "git clone --branch",
       shellQuote(adversarialRef),
       "--",
       shellQuote(adversarialRepo),
-      shellQuote(adversarialDestination),
+      shellQuote(adversarialStagingDestination),
     ].join(" ")
+    const expectedPublishCommand = verifiedPhysicalDirectoryCommand(
+      adversarialParent,
+      [
+        `[ ! -e ${shellQuote(adversarialDestination)} ]`,
+        `[ ! -L ${shellQuote(adversarialDestination)} ]`,
+        `mv -T -n -- ${shellQuote(adversarialStagingDestination)} ${shellQuote(adversarialDestination)}`,
+        `[ ! -e ${shellQuote(adversarialStagingDestination)} ]`,
+        `[ -d ${shellQuote(adversarialGitDir)} ]`,
+      ].join(" && ")
+    )
     const mockSsh = createMockSsh({
       [`test -d ${shellQuote(adversarialGitDir)}`]: { code: 1 },
-      [`test -e ${shellQuote(adversarialDestination)}`]: { code: 1 },
       [expectedCommand]: { code: 0 },
+      [expectedMktempCommand]: { code: 0, stdout: `${adversarialStagingDestination}\n` },
+      [expectedPublishCommand]: { code: 0 },
     })
     const mod = git.clone(adversarialRepo, adversarialDestination, { ref: adversarialRef })
 
@@ -541,19 +588,25 @@ describe("git.clone — apply", () => {
       command: expectedCommand,
       options: { ignoreExitCode: true, silent: true },
     })
+    expect(mockSsh.calls).toContain(expectedPublishCommand)
   })
 
   it("resets to the remote default HEAD when .git exists and no ref is given", async () => {
+    const fetchHeadCommand = verifiedPhysicalDirectoryCommand(destination, "git fetch origin HEAD")
+    const resetHeadCommand = verifiedPhysicalDirectoryCommand(
+      destination,
+      "git reset --hard FETCH_HEAD"
+    )
     const mockSsh = createGitApplyMockSsh({
-      [`git -C '${destination}' fetch origin HEAD`]: { code: 0 },
-      [`git -C '${destination}' reset --hard FETCH_HEAD`]: { code: 0 },
       [`test -d '${gitDir}'`]: { code: 0 },
+      [fetchHeadCommand]: { code: 0 },
+      [resetHeadCommand]: { code: 0 },
     })
     const mod = git.clone(repo, destination)
     const result = await mod.apply(mockSsh, emptyEnv)
     expect(result.status).toBe("changed")
-    expect(mockSsh.calls).toContain(`git -C '${destination}' fetch origin HEAD`)
-    expect(mockSsh.calls).toContain(`git -C '${destination}' reset --hard FETCH_HEAD`)
+    expect(mockSsh.calls).toContain(fetchHeadCommand)
+    expect(mockSsh.calls).toContain(resetHeadCommand)
   })
 
   // R-0000279: when a `fetch + reset --hard` rerun lands on the same HEAD
@@ -562,10 +615,10 @@ describe("git.clone — apply", () => {
   it("returns ok when fetch + reset --hard leaves HEAD unchanged", async () => {
     const sha = "1234567890abcdef1234567890abcdef12345678"
     const mockSsh = createGitApplyMockSsh({
-      [`git -C '${destination}' fetch origin HEAD`]: { code: 0 },
-      [`git -C '${destination}' reset --hard FETCH_HEAD`]: { code: 0 },
       [`git -C '${destination}' rev-parse HEAD`]: { code: 0, stdout: `${sha}\n` },
       [`test -d '${gitDir}'`]: { code: 0 },
+      [verifiedPhysicalDirectoryCommand(destination, "git fetch origin HEAD")]: { code: 0 },
+      [verifiedPhysicalDirectoryCommand(destination, "git reset --hard FETCH_HEAD")]: { code: 0 },
     })
     const mod = git.clone(repo, destination)
     const result = await mod.apply(mockSsh, emptyEnv)
@@ -578,9 +631,9 @@ describe("git.clone — apply", () => {
     // default (code: 1, stdout: "") and the comparison short-circuits to
     // "changed". This matches the existing apply fixtures.
     const mockSsh = createGitApplyMockSsh({
-      [`git -C '${destination}' fetch origin HEAD`]: { code: 0 },
-      [`git -C '${destination}' reset --hard FETCH_HEAD`]: { code: 0 },
       [`test -d '${gitDir}'`]: { code: 0 },
+      [verifiedPhysicalDirectoryCommand(destination, "git fetch origin HEAD")]: { code: 0 },
+      [verifiedPhysicalDirectoryCommand(destination, "git reset --hard FETCH_HEAD")]: { code: 0 },
     })
     const mod = git.clone(repo, destination)
     const result = await mod.apply(mockSsh, emptyEnv)
@@ -589,112 +642,155 @@ describe("git.clone — apply", () => {
 
   it("updates the origin URL before resetting to remote HEAD when an existing checkout drifted", async () => {
     const oldRepo = "git@github.com:other/repo.git"
+    const setOriginCommand = verifiedPhysicalDirectoryCommand(
+      destination,
+      `git remote set-url origin '${repo}'`
+    )
+    const fetchHeadCommand = verifiedPhysicalDirectoryCommand(destination, "git fetch origin HEAD")
+    const resetHeadCommand = verifiedPhysicalDirectoryCommand(
+      destination,
+      "git reset --hard FETCH_HEAD"
+    )
     const mockSsh = createGitApplyMockSsh({
-      [`git -C '${destination}' fetch origin HEAD`]: { code: 0 },
-      [`git -C '${destination}' remote set-url origin '${repo}'`]: { code: 0 },
-      [`git -C '${destination}' reset --hard FETCH_HEAD`]: { code: 0 },
       [`test -d '${gitDir}'`]: { code: 0 },
+      [fetchHeadCommand]: { code: 0 },
       [originUrlCommand]: { code: 0, stdout: oldRepo },
+      [resetHeadCommand]: { code: 0 },
+      [setOriginCommand]: { code: 0 },
     })
     const mod = git.clone(repo, destination)
 
     const result = await mod.apply(mockSsh, emptyEnv)
 
     expect(result.status).toBe("changed")
-    expect(mockSsh.calls).toContain(`git -C '${destination}' remote set-url origin '${repo}'`)
-    expect(mockSsh.calls).toContain(`git -C '${destination}' fetch origin HEAD`)
-    expect(mockSsh.calls).toContain(`git -C '${destination}' reset --hard FETCH_HEAD`)
+    expect(mockSsh.calls).toContain(setOriginCommand)
+    expect(mockSsh.calls).toContain(fetchHeadCommand)
+    expect(mockSsh.calls).toContain(resetHeadCommand)
   })
 
   it("adds origin before resetting to remote HEAD when an existing git repository has no origin", async () => {
+    const addOriginCommand = verifiedPhysicalDirectoryCommand(
+      destination,
+      `git remote add origin '${repo}'`
+    )
+    const fetchHeadCommand = verifiedPhysicalDirectoryCommand(destination, "git fetch origin HEAD")
+    const resetHeadCommand = verifiedPhysicalDirectoryCommand(
+      destination,
+      "git reset --hard FETCH_HEAD"
+    )
     const mockSsh = createGitApplyMockSsh({
-      [`git -C '${destination}' fetch origin HEAD`]: { code: 0 },
-      [`git -C '${destination}' remote add origin '${repo}'`]: { code: 0 },
-      [`git -C '${destination}' reset --hard FETCH_HEAD`]: { code: 0 },
       [`test -d '${gitDir}'`]: { code: 0 },
+      [addOriginCommand]: { code: 0 },
+      [fetchHeadCommand]: { code: 0 },
       [originUrlCommand]: { code: 2 },
+      [resetHeadCommand]: { code: 0 },
     })
     const mod = git.clone(repo, destination)
 
     const result = await mod.apply(mockSsh, emptyEnv)
 
     expect(result.status).toBe("changed")
-    expect(mockSsh.calls).toContain(`git -C '${destination}' remote add origin '${repo}'`)
-    expect(mockSsh.calls).toContain(`git -C '${destination}' fetch origin HEAD`)
-    expect(mockSsh.calls).toContain(`git -C '${destination}' reset --hard FETCH_HEAD`)
+    expect(mockSsh.calls).toContain(addOriginCommand)
+    expect(mockSsh.calls).toContain(fetchHeadCommand)
+    expect(mockSsh.calls).toContain(resetHeadCommand)
     const originCall = mockSsh.execCalls.find((call) => call.command === originUrlCommand)
     expect(originCall?.options).toStrictEqual({ ignoreExitCode: true, silent: true })
   })
 
   it("fetches, checks out, and resets to origin/<ref> when ref is a remote-tracking branch", async () => {
+    const fetchCommand = verifiedPhysicalDirectoryCommand(
+      destination,
+      "git fetch origin --tags --force"
+    )
+    const checkoutCommand = verifiedPhysicalDirectoryCommand(destination, "git checkout 'main'")
+    const resetCommand = verifiedPhysicalDirectoryCommand(
+      destination,
+      "git reset --hard 'origin/main'"
+    )
     const mockSsh = createGitApplyMockSsh({
-      [`git -C '${destination}' checkout 'main'`]: { code: 0 },
-      [`git -C '${destination}' fetch origin --tags --force`]: { code: 0 },
       [`git -C '${destination}' for-each-ref --format=%(refname) 'refs/remotes/origin/main'`]: {
         code: 0,
         stdout: "refs/remotes/origin/main\n",
       },
-      [`git -C '${destination}' reset --hard 'origin/main'`]: { code: 0 },
       [`test -d '${gitDir}'`]: { code: 0 },
+      [checkoutCommand]: { code: 0 },
+      [fetchCommand]: { code: 0 },
+      [resetCommand]: { code: 0 },
     })
     const mod = git.clone(repo, destination, { ref: "main" })
     const result = await mod.apply(mockSsh, emptyEnv)
     expect(result.status).toBe("changed")
-    expect(mockSsh.calls).toContain(`git -C '${destination}' fetch origin --tags --force`)
-    expect(mockSsh.calls).toContain(`git -C '${destination}' checkout 'main'`)
-    expect(mockSsh.calls).toContain(`git -C '${destination}' reset --hard 'origin/main'`)
-    expect(mockSsh.calls).not.toContain(`git -C '${destination}' reset --hard 'main'`)
+    expect(mockSsh.calls).toContain(fetchCommand)
+    expect(mockSsh.calls).toContain(checkoutCommand)
+    expect(mockSsh.calls).toContain(resetCommand)
+    expect(mockSsh.calls).not.toContain(
+      verifiedPhysicalDirectoryCommand(destination, "git reset --hard 'main'")
+    )
   })
 
   it("resets directly to <ref> when ref is a tag and has no remote-tracking branch", async () => {
     // The for-each-ref probe returns no match, so the direct reset path
     // resolves the tag commit (and not a same-named branch tip).
+    const resetCommand = verifiedPhysicalDirectoryCommand(destination, "git reset --hard 'v1.0.0'")
     const mockSsh = createGitApplyMockSsh({
-      [`git -C '${destination}' checkout 'v1.0.0'`]: { code: 0 },
-      [`git -C '${destination}' fetch origin --tags --force`]: { code: 0 },
       [`git -C '${destination}' for-each-ref --format=%(refname) 'refs/remotes/origin/v1.0.0'`]: {
         code: 0,
         stdout: "",
       },
-      [`git -C '${destination}' reset --hard 'v1.0.0'`]: { code: 0 },
       [`test -d '${gitDir}'`]: { code: 0 },
+      [resetCommand]: { code: 0 },
+      [verifiedPhysicalDirectoryCommand(destination, "git checkout 'v1.0.0'")]: { code: 0 },
+      [verifiedPhysicalDirectoryCommand(destination, "git fetch origin --tags --force")]: {
+        code: 0,
+      },
     })
     const mod = git.clone(repo, destination, { ref: "v1.0.0" })
     const result = await mod.apply(mockSsh, emptyEnv)
     expect(result.status).toBe("changed")
-    expect(mockSsh.calls).toContain(`git -C '${destination}' reset --hard 'v1.0.0'`)
-    expect(mockSsh.calls).not.toContain(`git -C '${destination}' reset --hard 'origin/v1.0.0'`)
+    expect(mockSsh.calls).toContain(resetCommand)
+    expect(mockSsh.calls).not.toContain(
+      verifiedPhysicalDirectoryCommand(destination, "git reset --hard 'origin/v1.0.0'")
+    )
   })
 
   it("resets directly to <ref> when ref is a bare commit SHA", async () => {
     const sha = "abc123def456"
+    const resetCommand = verifiedPhysicalDirectoryCommand(destination, `git reset --hard '${sha}'`)
     const mockSsh = createGitApplyMockSsh({
-      [`git -C '${destination}' checkout '${sha}'`]: { code: 0 },
-      [`git -C '${destination}' fetch origin --tags --force`]: { code: 0 },
       [`git -C '${destination}' for-each-ref --format=%(refname) 'refs/remotes/origin/${sha}'`]: {
         code: 0,
         stdout: "",
       },
-      [`git -C '${destination}' reset --hard '${sha}'`]: { code: 0 },
       [`test -d '${gitDir}'`]: { code: 0 },
+      [resetCommand]: { code: 0 },
+      [verifiedPhysicalDirectoryCommand(destination, "git fetch origin --tags --force")]: {
+        code: 0,
+      },
+      [verifiedPhysicalDirectoryCommand(destination, `git checkout '${sha}'`)]: { code: 0 },
     })
     const mod = git.clone(repo, destination, { ref: sha })
     const result = await mod.apply(mockSsh, emptyEnv)
     expect(result.status).toBe("changed")
-    expect(mockSsh.calls).toContain(`git -C '${destination}' reset --hard '${sha}'`)
-    expect(mockSsh.calls).not.toContain(`git -C '${destination}' reset --hard 'origin/${sha}'`)
+    expect(mockSsh.calls).toContain(resetCommand)
+    expect(mockSsh.calls).not.toContain(
+      verifiedPhysicalDirectoryCommand(destination, `git reset --hard 'origin/${sha}'`)
+    )
   })
 
   it("returns failed when branch reset fails", async () => {
     const mockSsh = createGitApplyMockSsh({
-      [`git -C '${destination}' checkout 'main'`]: { code: 0 },
-      [`git -C '${destination}' fetch origin --tags --force`]: { code: 0 },
       [`git -C '${destination}' for-each-ref --format=%(refname) 'refs/remotes/origin/main'`]: {
         code: 0,
         stdout: "refs/remotes/origin/main\n",
       },
-      [`git -C '${destination}' reset --hard 'origin/main'`]: { code: 1 },
       [`test -d '${gitDir}'`]: { code: 0 },
+      [verifiedPhysicalDirectoryCommand(destination, "git checkout 'main'")]: { code: 0 },
+      [verifiedPhysicalDirectoryCommand(destination, "git fetch origin --tags --force")]: {
+        code: 0,
+      },
+      [verifiedPhysicalDirectoryCommand(destination, "git reset --hard 'origin/main'")]: {
+        code: 1,
+      },
     })
     const mod = git.clone(repo, destination, { ref: "main" })
     const result = await mod.apply(mockSsh, emptyEnv)
@@ -703,14 +799,16 @@ describe("git.clone — apply", () => {
 
   it("returns failed when direct reset fails for a tag", async () => {
     const mockSsh = createGitApplyMockSsh({
-      [`git -C '${destination}' checkout 'v1.0.0'`]: { code: 0 },
-      [`git -C '${destination}' fetch origin --tags --force`]: { code: 0 },
       [`git -C '${destination}' for-each-ref --format=%(refname) 'refs/remotes/origin/v1.0.0'`]: {
         code: 0,
         stdout: "",
       },
-      [`git -C '${destination}' reset --hard 'v1.0.0'`]: { code: 1 },
       [`test -d '${gitDir}'`]: { code: 0 },
+      [verifiedPhysicalDirectoryCommand(destination, "git checkout 'v1.0.0'")]: { code: 0 },
+      [verifiedPhysicalDirectoryCommand(destination, "git fetch origin --tags --force")]: {
+        code: 0,
+      },
+      [verifiedPhysicalDirectoryCommand(destination, "git reset --hard 'v1.0.0'")]: { code: 1 },
     })
     const mod = git.clone(repo, destination, { ref: "v1.0.0" })
     const result = await mod.apply(mockSsh, emptyEnv)
@@ -719,52 +817,77 @@ describe("git.clone — apply", () => {
 
   it("falls back to clone without --branch when --branch fails (bare SHA)", async () => {
     const sha = "abc123def456"
+    const fallbackStagingDestination = stagingDestination
+    const fallbackCheckoutCommand = verifiedPhysicalDirectoryCommand(
+      fallbackStagingDestination,
+      `git checkout '${sha}'`
+    )
+    const fallbackPublishCommand = publishStagedCloneCommand.replace(
+      stagingDestination,
+      fallbackStagingDestination
+    )
     const mockSsh = createGitApplyMockSsh({
-      [`git -C '${destination}' checkout '${sha}'`]: { code: 0 },
-      [`git clone -- '${repo}' '${destination}'`]: { code: 0 },
-      [`git clone --branch '${sha}' -- '${repo}' '${destination}'`]: { code: 128 },
-      [`rm -rf -- '${destination}'`]: { code: 0 },
+      [`git clone -- '${repo}' '${fallbackStagingDestination}'`]: { code: 0 },
+      [`git clone --branch '${sha}' -- '${repo}' '${stagingDestination}'`]: { code: 128 },
+      [`rm -rf -- '${stagingDestination}'`]: { code: 0 },
       [`test -d '${gitDir}'`]: { code: 1 },
-      [`test -e '${destination}'`]: { code: 1 },
+      [fallbackCheckoutCommand]: { code: 0 },
+      [fallbackPublishCommand]: { code: 0 },
+      [stagingMktempCommand]: { code: 0, stdout: `${stagingDestination}\n` },
     })
     const mod = git.clone(repo, destination, { ref: sha })
     const result = await mod.apply(mockSsh, emptyEnv)
     expect(result.status).toBe("changed")
-    expect(mockSsh.calls).toContain(`git clone -- '${repo}' '${destination}'`)
-    expect(mockSsh.calls).toContain(`git -C '${destination}' checkout '${sha}'`)
+    expect(mockSsh.calls).toContain(`git clone -- '${repo}' '${fallbackStagingDestination}'`)
+    expect(mockSsh.calls).toContain(fallbackCheckoutCommand)
+    expect(mockSsh.calls).not.toContain(`rm -rf -- '${destination}'`)
   })
 
   // R-0000223: a failed first-pass `git clone --branch <ref>` can leave a
-  // partially-populated destination behind. The fallback `git clone` would
-  // then abort with "destination path … already exists". Ensure the fallback
-  // path removes the destination first and that the rm precedes the second
-  // clone in the call order.
-  it("R-0000223: removes the destination before retrying fallback clone", async () => {
+  // partially-populated staging directory behind. The fallback `git clone`
+  // would then abort if it reused that path. Ensure the fallback path removes
+  // only the staging directory before allocating the second clone target.
+  it("R-0000223: removes the staging directory before retrying fallback clone", async () => {
     const sha = "abc123def456"
+    const fallbackStagingDestination = stagingDestination
+    const fallbackCheckoutCommand = verifiedPhysicalDirectoryCommand(
+      fallbackStagingDestination,
+      `git checkout '${sha}'`
+    )
+    const fallbackPublishCommand = publishStagedCloneCommand.replace(
+      stagingDestination,
+      fallbackStagingDestination
+    )
     const mockSsh = createGitApplyMockSsh({
-      [`git -C '${destination}' checkout '${sha}'`]: { code: 0 },
-      [`git clone -- '${repo}' '${destination}'`]: { code: 0 },
-      [`git clone --branch '${sha}' -- '${repo}' '${destination}'`]: { code: 128 },
-      [`rm -rf -- '${destination}'`]: { code: 0 },
+      [`git clone -- '${repo}' '${fallbackStagingDestination}'`]: { code: 0 },
+      [`git clone --branch '${sha}' -- '${repo}' '${stagingDestination}'`]: { code: 128 },
+      [`rm -rf -- '${stagingDestination}'`]: { code: 0 },
       [`test -d '${gitDir}'`]: { code: 1 },
-      [`test -e '${destination}'`]: { code: 1 },
+      [fallbackCheckoutCommand]: { code: 0 },
+      [fallbackPublishCommand]: { code: 0 },
+      [stagingMktempCommand]: { code: 0, stdout: `${stagingDestination}\n` },
     })
     const mod = git.clone(repo, destination, { ref: sha })
     const result = await mod.apply(mockSsh, emptyEnv)
     expect(result.status).toBe("changed")
-    const cleanupIndex = mockSsh.calls.indexOf(`rm -rf -- '${destination}'`)
-    const fallbackIndex = mockSsh.calls.indexOf(`git clone -- '${repo}' '${destination}'`)
+    const cleanupIndex = mockSsh.calls.indexOf(`rm -rf -- '${stagingDestination}'`)
+    const fallbackIndex = mockSsh.calls.indexOf(
+      `git clone -- '${repo}' '${fallbackStagingDestination}'`
+    )
     expect(cleanupIndex).toBeGreaterThanOrEqual(0)
     expect(fallbackIndex).toBeGreaterThan(cleanupIndex)
+    expect(mockSsh.calls).not.toContain(`rm -rf -- '${destination}'`)
   })
 
   it("does not remove a pre-existing non-git destination after a failed ref clone", async () => {
     const sha = "abc123def456"
+    const fallbackStagingDestination = stagingDestination
     const mockSsh = createGitApplyMockSsh({
-      [`git clone -- '${repo}' '${destination}'`]: { code: 128 },
-      [`git clone --branch '${sha}' -- '${repo}' '${destination}'`]: { code: 128 },
+      [`git clone -- '${repo}' '${fallbackStagingDestination}'`]: { code: 128 },
+      [`git clone --branch '${sha}' -- '${repo}' '${stagingDestination}'`]: { code: 128 },
+      [`rm -rf -- '${stagingDestination}'`]: { code: 0 },
       [`test -d '${gitDir}'`]: { code: 1 },
-      [`test -e '${destination}'`]: { code: 0 },
+      [stagingMktempCommand]: { code: 0, stdout: `${stagingDestination}\n` },
     })
     const mod = git.clone(repo, destination, { ref: sha })
 
@@ -772,24 +895,26 @@ describe("git.clone — apply", () => {
 
     expect(result.status).toBe("failed")
     expect(mockSsh.calls).not.toContain(`rm -rf -- '${destination}'`)
-    expect(mockSsh.calls).toContain(`git clone -- '${repo}' '${destination}'`)
+    expect(mockSsh.calls).toContain(`git clone -- '${repo}' '${fallbackStagingDestination}'`)
   })
 
   // R-0000642: when the initial `git clone --branch <ref>` fails and the
   // unconstrained fallback succeeds, but the subsequent `git checkout <ref>`
   // fails, the host is left with a partial clone at the repository's default
-  // branch — a state the caller never requested. Ensure the fallback path
-  // cleans up the destination it created so the host stays in the original
-  // state.
-  it("R-0000642: removes the fallback clone when checkout fails and destination did not exist", async () => {
+  // branch. Ensure the fallback path cleans up only its staging directory.
+  it("R-0000642: removes the fallback staging clone when checkout fails", async () => {
     const sha = "abc123def456"
+    const checkoutCommand = verifiedPhysicalDirectoryCommand(
+      stagingDestination,
+      `git checkout '${sha}'`
+    )
     const mockSsh = createGitApplyMockSsh({
-      [`git -C '${destination}' checkout '${sha}'`]: { code: 1 },
-      [`git clone -- '${repo}' '${destination}'`]: { code: 0 },
-      [`git clone --branch '${sha}' -- '${repo}' '${destination}'`]: { code: 128 },
-      [`rm -rf -- '${destination}'`]: { code: 0 },
+      [`git clone -- '${repo}' '${stagingDestination}'`]: { code: 0 },
+      [`git clone --branch '${sha}' -- '${repo}' '${stagingDestination}'`]: { code: 128 },
+      [`rm -rf -- '${stagingDestination}'`]: { code: 0 },
       [`test -d '${gitDir}'`]: { code: 1 },
-      [`test -e '${destination}'`]: { code: 1 },
+      [checkoutCommand]: { code: 1 },
+      [stagingMktempCommand]: { code: 0, stdout: `${stagingDestination}\n` },
     })
     const mod = git.clone(repo, destination, { ref: sha })
 
@@ -799,40 +924,47 @@ describe("git.clone — apply", () => {
     // Two rm calls: one before the fallback clone (R-0000223), one after the
     // failed checkout (R-0000642). Both must be present, and the post-checkout
     // cleanup must follow the failed checkout.
-    const cleanupCalls = mockSsh.calls.filter((c) => c === `rm -rf -- '${destination}'`)
+    const cleanupCalls = mockSsh.calls.filter((c) => c === `rm -rf -- '${stagingDestination}'`)
     expect(cleanupCalls.length).toBeGreaterThanOrEqual(2)
-    const checkoutIndex = mockSsh.calls.indexOf(`git -C '${destination}' checkout '${sha}'`)
-    const lastCleanupIndex = mockSsh.calls.lastIndexOf(`rm -rf -- '${destination}'`)
+    const checkoutIndex = mockSsh.calls.indexOf(checkoutCommand)
+    const lastCleanupIndex = mockSsh.calls.lastIndexOf(`rm -rf -- '${stagingDestination}'`)
     expect(checkoutIndex).toBeGreaterThanOrEqual(0)
     expect(lastCleanupIndex).toBeGreaterThan(checkoutIndex)
+    expect(mockSsh.calls).not.toContain(`rm -rf -- '${destination}'`)
   })
 
-  // R-0000642: the cleanup must NOT remove a destination that already existed
-  // before apply ran. This mirrors the R-0000223 cleanup guard for the
-  // pre-fallback-clone branch so the module never deletes user-staged work.
-  it("R-0000642: preserves a pre-existing destination when fallback checkout fails", async () => {
+  it("R-0000939: fails publish without replacing a destination created during clone", async () => {
     const sha = "abc123def456"
+    const checkoutCommand = verifiedPhysicalDirectoryCommand(
+      stagingDestination,
+      `git checkout '${sha}'`
+    )
+    const failedPublishCommand = publishStagedCloneCommand
     const mockSsh = createGitApplyMockSsh({
-      [`git -C '${destination}' checkout '${sha}'`]: { code: 1 },
-      [`git clone -- '${repo}' '${destination}'`]: { code: 0 },
-      [`git clone --branch '${sha}' -- '${repo}' '${destination}'`]: { code: 128 },
+      [`git clone -- '${repo}' '${stagingDestination}'`]: { code: 0 },
+      [`git clone --branch '${sha}' -- '${repo}' '${stagingDestination}'`]: { code: 128 },
+      [`rm -rf -- '${stagingDestination}'`]: { code: 0 },
       [`test -d '${gitDir}'`]: { code: 1 },
-      [`test -e '${destination}'`]: { code: 0 },
+      [checkoutCommand]: { code: 0 },
+      [failedPublishCommand]: { code: 1 },
+      [stagingMktempCommand]: { code: 0, stdout: `${stagingDestination}\n` },
     })
     const mod = git.clone(repo, destination, { ref: sha })
 
     const result = await mod.apply(mockSsh, emptyEnv)
 
     expect(result.status).toBe("failed")
-    // destinationExistedBeforeClone is true; neither cleanup branch is allowed
-    // to run because the caller's pre-existing files would be destroyed.
+    expect(mockSsh.calls).toContain(failedPublishCommand)
+    expect(mockSsh.calls).toContain(`rm -rf -- '${stagingDestination}'`)
     expect(mockSsh.calls).not.toContain(`rm -rf -- '${destination}'`)
   })
 
   it("returns failed when clone fails", async () => {
     const mockSsh = createMockSsh({
-      [`git clone -- '${repo}' '${destination}'`]: { code: 128 },
+      [`git clone -- '${repo}' '${stagingDestination}'`]: { code: 128 },
+      [`rm -rf -- '${stagingDestination}'`]: { code: 0 },
       [`test -d '${gitDir}'`]: { code: 1 },
+      [stagingMktempCommand]: { code: 0, stdout: `${stagingDestination}\n` },
     })
     const mod = git.clone(repo, destination)
     const result = await mod.apply(mockSsh, emptyEnv)
@@ -841,8 +973,10 @@ describe("git.clone — apply", () => {
 
   it("returns failed when update fetch fails", async () => {
     const mockSsh = createMockSsh({
-      [`git -C '${destination}' fetch origin --tags --force`]: { code: 1 },
       [`test -d '${gitDir}'`]: { code: 0 },
+      [verifiedPhysicalDirectoryCommand(destination, "git fetch origin --tags --force")]: {
+        code: 1,
+      },
     })
     const mod = git.clone(repo, destination, { ref: "main" })
     const result = await mod.apply(mockSsh, emptyEnv)

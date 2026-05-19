@@ -1,10 +1,18 @@
+/* eslint-disable max-lines -- Git clone/update hardening keeps security guards and regression context local. */
 import { posix } from "node:path"
 
 import { failed } from "../moduleFailure.js"
 import { shellQuote } from "../ssh.js"
 import { type Module, type ModuleResult, NEEDS_APPLY, type SshConnection } from "../types.js"
 import { hasSensitiveQueryParameters } from "./curlHelpers.js"
-import { findSymlinkInAncestorWalk, isSymlink } from "./remoteFileChecks.js"
+import {
+  allocateRemoteStagingDirectory,
+  cleanupRemoteStagingPath,
+  findSymlinkInAncestorWalk,
+  isSymlink,
+  publishRemoteStagedDirectory,
+  verifiedPhysicalDirectoryCommand,
+} from "./remoteFileChecks.js"
 
 const EXEC_OPTS = { ignoreExitCode: true, silent: true } as const
 
@@ -29,6 +37,10 @@ function validateCloneDestination(destination: string): void {
     throw new Error(
       `git.clone: destination must not start with '-' because Git could parse it as an option: ${destination}`
     )
+  }
+
+  if (trimmedDestination.includes("\n") || trimmedDestination.includes("\r")) {
+    throw new Error(`git.clone: destination must not contain control characters: ${destination}`)
   }
 
   if (!posix.isAbsolute(trimmedDestination))
@@ -110,65 +122,86 @@ async function hasSymlink(ssh: SshConnection, paths: [string, string]): Promise<
   return destinationProbe !== null || (await isSymlink(ssh, paths[1]))
 }
 
-async function cleanupFailedCloneDestination(
+async function allocateCloneStagingDestination(
   conn: SshConnection,
   destination: string
-): Promise<void> {
-  await conn.exec(`rm -rf -- ${shellQuote(destination)}`, EXEC_OPTS)
+): Promise<null | string> {
+  return allocateRemoteStagingDirectory(conn, {
+    execOptions: EXEC_OPTS,
+    parent: posix.dirname(destination),
+    prefix: "paratix-git-clone",
+  })
+}
+
+async function publishStagedClone(
+  conn: SshConnection,
+  parameters: { destination: string; stagingDestination: string }
+): Promise<boolean> {
+  const { destination, stagingDestination } = parameters
+  return publishRemoteStagedDirectory(conn, {
+    destination,
+    execOptions: EXEC_OPTS,
+    parent: posix.dirname(destination),
+    postPublishDirectory: `${destination}/.git`,
+    stagingDestination,
+  })
 }
 
 async function cloneRepoFallback(
   conn: SshConnection,
-  parameters: { reference: string } & GitCloneParameters,
-  destinationExistedBeforeClone: boolean
+  parameters: { reference: string } & GitCloneParameters
 ): Promise<boolean> {
   const { destination, reference, repo } = parameters
+  const stagingDestination = await allocateCloneStagingDestination(conn, destination)
+  if (stagingDestination === null) return false
   // Fallback: clone without --branch then checkout (handles bare commit SHAs).
   const fallback = await conn.exec(
-    `git clone -- ${shellQuote(repo)} ${shellQuote(destination)}`,
+    `git clone -- ${shellQuote(repo)} ${shellQuote(stagingDestination)}`,
     EXEC_OPTS
   )
-  if (fallback.code !== 0) return false
-  const checkout = await conn.exec(
-    `git -C ${shellQuote(destination)} checkout ${shellQuote(reference)}`,
-    EXEC_OPTS
-  )
-  if (checkout.code === 0) return true
-  // R-0000642: the fallback clone left a worktree on the requested
-  // destination at the repository's default branch, but the subsequent
-  // checkout to the caller-provided reference failed. Without cleanup the
-  // host is left in a state the caller never asked for. Only remove the
-  // directory when this apply created it; if the path existed beforehand
-  // (e.g. a user staged work in it) the original cleanup guard already
-  // skipped removal and we mirror that decision here.
-  if (!destinationExistedBeforeClone) {
-    await cleanupFailedCloneDestination(conn, destination)
+  if (fallback.code !== 0) {
+    await cleanupRemoteStagingPath(conn, stagingDestination, EXEC_OPTS)
+    return false
   }
+  const checkout = await conn.exec(
+    verifiedPhysicalDirectoryCommand(stagingDestination, `git checkout ${shellQuote(reference)}`),
+    EXEC_OPTS
+  )
+  if (checkout.code === 0) return publishStagedClone(conn, { destination, stagingDestination })
+  // R-0000642: the fallback clone left a worktree on the requested
+  // staging destination at the repository's default branch, but the subsequent
+  // checkout to the caller-provided reference failed. Cleanup only the
+  // mktemp-owned staging directory, never the requested destination.
+  await cleanupRemoteStagingPath(conn, stagingDestination, EXEC_OPTS)
   return false
 }
 
 async function cloneRepo(conn: SshConnection, parameters: GitCloneParameters): Promise<boolean> {
   const { destination, reference, repo } = parameters
+  const stagingDestination = await allocateCloneStagingDestination(conn, destination)
+  if (stagingDestination === null) return false
   if (reference !== undefined && reference !== "") {
-    const destinationExistedBeforeClone = await conn.test(`test -e ${shellQuote(destination)}`)
     // Try --branch first (works for branches and tags, not bare SHAs).
     const result = await conn.exec(
-      `git clone --branch ${shellQuote(reference)} -- ${shellQuote(repo)} ${shellQuote(destination)}`,
+      `git clone --branch ${shellQuote(reference)} -- ${shellQuote(repo)} ${shellQuote(stagingDestination)}`,
       EXEC_OPTS
     )
-    if (result.code === 0) return true
-    // R-0000223: remove any partially-populated destination before retrying;
-    // a leftover .git or refs/ would cause the fallback clone to abort.
-    if (!destinationExistedBeforeClone) {
-      await cleanupFailedCloneDestination(conn, destination)
-    }
-    return cloneRepoFallback(conn, { destination, reference, repo }, destinationExistedBeforeClone)
+    if (result.code === 0) return publishStagedClone(conn, { destination, stagingDestination })
+    // R-0000223: remove only the partially-populated staging destination
+    // before retrying; a leftover .git or refs/ would cause the fallback clone
+    // to abort, but the requested destination must not be touched.
+    await cleanupRemoteStagingPath(conn, stagingDestination, EXEC_OPTS)
+    return cloneRepoFallback(conn, { destination, reference, repo })
   }
   const cloneResult = await conn.exec(
-    `git clone -- ${shellQuote(repo)} ${shellQuote(destination)}`,
+    `git clone -- ${shellQuote(repo)} ${shellQuote(stagingDestination)}`,
     EXEC_OPTS
   )
-  return cloneResult.code === 0
+  if (cloneResult.code !== 0) {
+    await cleanupRemoteStagingPath(conn, stagingDestination, EXEC_OPTS)
+    return false
+  }
+  return publishStagedClone(conn, { destination, stagingDestination })
 }
 
 /**
@@ -220,12 +253,12 @@ async function updateRepo(conn: SshConnection, parameters: GitCloneParameters): 
   const { destination, reference } = parameters
   if (reference !== undefined && reference !== "") {
     const fetchResult = await conn.exec(
-      `git -C ${shellQuote(destination)} fetch origin --tags --force`,
+      verifiedPhysicalDirectoryCommand(destination, "git fetch origin --tags --force"),
       EXEC_OPTS
     )
     if (fetchResult.code !== 0) return false
     const checkout = await conn.exec(
-      `git -C ${shellQuote(destination)} checkout ${shellQuote(reference)}`,
+      verifiedPhysicalDirectoryCommand(destination, `git checkout ${shellQuote(reference)}`),
       EXEC_OPTS
     )
     if (checkout.code !== 0) return false
@@ -237,18 +270,18 @@ async function updateRepo(conn: SshConnection, parameters: GitCloneParameters): 
     // collapse a multi-word reference into a second argv item.
     const resetTarget = isBranch ? shellQuote(`origin/${reference}`) : shellQuote(reference)
     const reset = await conn.exec(
-      `git -C ${shellQuote(destination)} reset --hard ${resetTarget}`,
+      verifiedPhysicalDirectoryCommand(destination, `git reset --hard ${resetTarget}`),
       EXEC_OPTS
     )
     return reset.code === 0
   }
   const fetchHeadResult = await conn.exec(
-    `git -C ${shellQuote(destination)} fetch origin HEAD`,
+    verifiedPhysicalDirectoryCommand(destination, "git fetch origin HEAD"),
     EXEC_OPTS
   )
   if (fetchHeadResult.code !== 0) return false
   const resetHeadResult = await conn.exec(
-    `git -C ${shellQuote(destination)} reset --hard FETCH_HEAD`,
+    verifiedPhysicalDirectoryCommand(destination, "git reset --hard FETCH_HEAD"),
     EXEC_OPTS
   )
   return resetHeadResult.code === 0
@@ -285,8 +318,11 @@ async function ensureOriginUrl(
 
   const command =
     currentOrigin == null
-      ? `git -C ${shellQuote(destination)} remote add origin ${shellQuote(repo)}`
-      : `git -C ${shellQuote(destination)} remote set-url origin ${shellQuote(repo)}`
+      ? verifiedPhysicalDirectoryCommand(destination, `git remote add origin ${shellQuote(repo)}`)
+      : verifiedPhysicalDirectoryCommand(
+          destination,
+          `git remote set-url origin ${shellQuote(repo)}`
+        )
   const result = await conn.exec(command, EXEC_OPTS)
   return result.code === 0
 }

@@ -1,8 +1,8 @@
 import { posix } from "node:path"
 
-import type { SshConnection } from "../types.js"
+import type { ExecOptions, SshConnection } from "../types.js"
 
-import { shellQuote } from "../ssh.js"
+import { shellQuote, validateMktempPath } from "../ssh.js"
 
 export async function isRegularFileWithoutSymlink(
   ssh: SshConnection,
@@ -100,4 +100,64 @@ export async function findSymlinkInAncestorWalk(
     ancestor = posix.dirname(ancestor)
   }
   return null
+}
+
+export function verifiedPhysicalDirectoryCommand(directory: string, command: string): string {
+  const quotedDirectory = shellQuote(directory)
+  return `[ ! -L ${quotedDirectory} ] && [ -d ${quotedDirectory} ] && cd -P -- ${quotedDirectory} && [ "$(pwd -P)" = ${quotedDirectory} ] && ${command}`
+}
+
+export async function allocateRemoteStagingDirectory(
+  ssh: SshConnection,
+  parameters: { execOptions: ExecOptions; parent: string; prefix: string }
+): Promise<null | string> {
+  const { execOptions, parent, prefix } = parameters
+  const quotedParent = shellQuote(parent)
+  const result = await ssh.exec(
+    verifiedPhysicalDirectoryCommand(parent, `mktemp -d -p ${quotedParent} -- ${prefix}.XXXXXX`),
+    execOptions
+  )
+  if (result.code !== 0) return null
+  try {
+    return validateMktempPath(parent, result.stdout.trim(), prefix)
+  } catch {
+    return null
+  }
+}
+
+export async function cleanupRemoteStagingPath(
+  ssh: SshConnection,
+  stagingPath: string,
+  execOptions: ExecOptions
+): Promise<void> {
+  await ssh.exec(`rm -rf -- ${shellQuote(stagingPath)}`, execOptions)
+}
+
+export async function publishRemoteStagedDirectory(
+  ssh: SshConnection,
+  parameters: {
+    destination: string
+    execOptions: ExecOptions
+    parent: string
+    postPublishDirectory: string
+    stagingDestination: string
+  }
+): Promise<boolean> {
+  const { destination, execOptions, parent, postPublishDirectory, stagingDestination } = parameters
+  const result = await ssh.exec(
+    verifiedPhysicalDirectoryCommand(
+      parent,
+      [
+        `[ ! -e ${shellQuote(destination)} ]`,
+        `[ ! -L ${shellQuote(destination)} ]`,
+        `mv -T -n -- ${shellQuote(stagingDestination)} ${shellQuote(destination)}`,
+        `[ ! -e ${shellQuote(stagingDestination)} ]`,
+        `[ -d ${shellQuote(postPublishDirectory)} ]`,
+      ].join(" && ")
+    ),
+    execOptions
+  )
+  if (result.code === 0) return true
+  await cleanupRemoteStagingPath(ssh, stagingDestination, execOptions)
+  return false
 }
