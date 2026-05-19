@@ -326,6 +326,54 @@ describe("net.route — apply", () => {
     )
   })
 
+  it("snapshots the replaced IPv4 route by destination and device when gateway changes", async () => {
+    const mockSsh = createMockSsh(
+      {
+        "ip -4 route replace '10.0.0.0/24' 'via' '192.168.1.254' 'dev' 'eth0'": { code: 0 },
+        [routeShowCommand]: {
+          code: 0,
+          stdout: "10.0.0.0/24 via 192.168.1.254 dev eth0",
+        },
+      },
+      SUCCESSFUL_ROUTE_APPLY_OPTIONS
+    )
+    vi.spyOn(mockSsh, "writeFile").mockRejectedValue(new Error("disk full"))
+    const mod = net.route("10.0.0.0/24", "192.168.1.1", { device: "eth0" })
+
+    const result = await mod.apply(mockSsh, emptyEnv)
+
+    expect(result.status).toBe("failed")
+    expect(String(result.error)).toContain("live route was rolled back")
+    expect(mockSsh.calls).toContain(
+      "ip -4 route replace '10.0.0.0/24' 'via' '192.168.1.254' 'dev' 'eth0'"
+    )
+    expect(mockSsh.calls).not.toContain(
+      "ip -4 route del '10.0.0.0/24' via '192.168.1.1' dev 'eth0'"
+    )
+  })
+
+  it("snapshots the replaced IPv6 route by destination and device when gateway changes", async () => {
+    const mockSsh = createMockSsh(
+      {
+        "ip -6 route replace 'fd00::/64' 'via' 'fe80::2' 'dev' 'eth0'": { code: 0 },
+        "ip -6 route show 'fd00::/64'": {
+          code: 0,
+          stdout: "fd00::/64 via fe80::2 dev eth0",
+        },
+      },
+      SUCCESSFUL_ROUTE_APPLY_OPTIONS
+    )
+    vi.spyOn(mockSsh, "writeFile").mockRejectedValue(new Error("disk full"))
+    const mod = net.route("fd00::/64", "fe80::1", { device: "eth0" })
+
+    const result = await mod.apply(mockSsh, emptyEnv)
+
+    expect(result.status).toBe("failed")
+    expect(String(result.error)).toContain("live route was rolled back")
+    expect(mockSsh.calls).toContain("ip -6 route replace 'fd00::/64' 'via' 'fe80::2' 'dev' 'eth0'")
+    expect(mockSsh.calls).not.toContain("ip -6 route del 'fd00::/64' via 'fe80::1' dev 'eth0'")
+  })
+
   it("refuses a symlinked persistent route drop-in without reload or flag writes", async () => {
     const mockSsh = createMockSsh(
       {},

@@ -833,6 +833,15 @@ function routeLineMatches(
   return parameters.device == null || routeTokenValueMatches(tokens, "dev", parameters.device)
 }
 
+function routeLineMatchesReplacementIdentity(
+  line: string,
+  parameters: { destination: string; device?: string }
+): boolean {
+  const tokens = line.trim().split(/\s+/v)
+  if (tokens[0] !== parameters.destination) return false
+  return parameters.device == null || routeTokenValueMatches(tokens, "dev", parameters.device)
+}
+
 /**
  * Run the live-route check against the remote host.
  *
@@ -1025,7 +1034,7 @@ async function preparePresentRouteMutation(
   }
   const mkdirFailure = await ensureRouteDropinDirectory(conn, parameters)
   if (mkdirFailure != null) return { failure: mkdirFailure, snapshot: null }
-  return captureLiveRouteSnapshot(conn, parameters)
+  return captureLiveRouteSnapshot(conn, parameters, { replacementIdentity: true })
 }
 
 type LiveRouteSnapshot = {
@@ -1065,7 +1074,8 @@ function routeCommandBase(parameters: { destination: string; gateway: string }):
 
 async function captureLiveRouteSnapshot(
   conn: SshConnection,
-  parameters: RouteParameters
+  parameters: RouteParameters,
+  options?: { replacementIdentity?: boolean }
 ): Promise<LiveRouteSnapshotOutcome> {
   const { destination } = parameters
   const result = await conn.exec(
@@ -1081,7 +1091,13 @@ async function captureLiveRouteSnapshot(
   const line = result.stdout
     .split("\n")
     .map((entry) => entry.trim())
-    .find((entry) => entry.length > 0 && routeLineMatches(entry, parameters))
+    .find(
+      (entry) =>
+        entry.length > 0 &&
+        (options?.replacementIdentity === true
+          ? routeLineMatchesReplacementIdentity(entry, parameters)
+          : routeLineMatches(entry, parameters))
+    )
   return { failure: null, snapshot: { line: line ?? null } }
 }
 
@@ -1099,9 +1115,10 @@ async function captureRouteDropinSnapshot(
 
 async function captureRouteMutationSnapshot(
   conn: SshConnection,
-  parameters: RouteParameters
+  parameters: RouteParameters,
+  options?: { replacementIdentity?: boolean }
 ): Promise<RouteMutationSnapshotOutcome> {
-  const live = await captureLiveRouteSnapshot(conn, parameters)
+  const live = await captureLiveRouteSnapshot(conn, parameters, options)
   if (live.failure != null) return { failure: live.failure, snapshot: null }
   return {
     failure: null,
@@ -1396,7 +1413,9 @@ async function applyPresentRouteState(
   conn: SshConnection,
   parameters: RouteCheckParameters
 ): Promise<ModuleResult> {
-  const snapshot = await captureRouteMutationSnapshot(conn, parameters)
+  const snapshot = await captureRouteMutationSnapshot(conn, parameters, {
+    replacementIdentity: true,
+  })
   if (snapshot.failure != null) return snapshot.failure
   const failure = await applyPresentRoute(conn, parameters)
   if (failure != null) return failure
