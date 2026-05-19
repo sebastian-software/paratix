@@ -1,4 +1,12 @@
-import { lstatSync, mkdirSync, mkdtempSync, renameSync, type Stats } from "node:fs"
+import {
+  lstatSync,
+  mkdirSync,
+  mkdtempSync,
+  readdirSync,
+  renameSync,
+  rmdirSync,
+  type Stats,
+} from "node:fs"
 import { dirname, join } from "node:path"
 
 import { formatCliValue } from "./cliFormat.js"
@@ -25,26 +33,13 @@ export function createProjectDirectoryAtomically(
 
 export type StagedProjectDirectory = {
   projectDirectory: string
+  projectDirectoryIdentity: ProjectDirectoryIdentity
   stagingDirectory: string
 }
 
 export type ProjectDirectoryIdentity = {
   dev: Stats["dev"]
   ino: Stats["ino"]
-}
-
-function projectDirectoryExists(projectDirectory: string): boolean {
-  try {
-    // eslint-disable-next-line security/detect-non-literal-fs-filename
-    lstatSync(projectDirectory)
-    return true
-  } catch (error: unknown) {
-    if (isErrnoException(error) && error.code === "ENOENT") {
-      return false
-    }
-
-    throw error
-  }
 }
 
 function exitWithDirectoryAlreadyExists(normalizedProjectName: string): never {
@@ -62,26 +57,66 @@ export function createStagedProjectDirectory(
   projectDirectory: string,
   normalizedProjectName: string
 ): StagedProjectDirectory {
-  if (projectDirectoryExists(projectDirectory)) {
-    exitWithDirectoryAlreadyExists(normalizedProjectName)
+  try {
+    // eslint-disable-next-line security/detect-non-literal-fs-filename
+    mkdirSync(projectDirectory, { recursive: false })
+  } catch (error: unknown) {
+    if (isErrnoException(error) && error.code === "EEXIST") {
+      exitWithDirectoryAlreadyExists(normalizedProjectName)
+    }
+    throw error
   }
 
+  const projectDirectoryIdentity = readProjectDirectoryIdentity(projectDirectory)
   const stagingParentDirectory = dirname(projectDirectory)
   const stagingPrefix = join(stagingParentDirectory, `.${normalizedProjectName}-staging-`)
 
-  return {
-    projectDirectory,
-    stagingDirectory: mkdtempSync(stagingPrefix),
+  try {
+    return {
+      projectDirectory,
+      projectDirectoryIdentity,
+      stagingDirectory: mkdtempSync(stagingPrefix),
+    }
+  } catch (error: unknown) {
+    removeReservedProjectDirectoryIfEmpty({ projectDirectory, projectDirectoryIdentity })
+    throw error
   }
 }
 
+function assertReservedProjectDirectory(
+  { projectDirectory, projectDirectoryIdentity }: StagedProjectDirectory,
+  normalizedProjectName: string
+): void {
+  if (!isSameProjectDirectoryIdentity(projectDirectory, projectDirectoryIdentity)) {
+    exitWithDirectoryAlreadyExists(normalizedProjectName)
+  }
+
+  // eslint-disable-next-line security/detect-non-literal-fs-filename
+  if (readdirSync(projectDirectory).length > 0) {
+    exitWithDirectoryAlreadyExists(normalizedProjectName)
+  }
+}
+
+function publishStagedProjectDirectory({
+  projectDirectory,
+  stagingDirectory,
+}: StagedProjectDirectory): void {
+  // eslint-disable-next-line security/detect-non-literal-fs-filename
+  for (const entry of readdirSync(stagingDirectory)) {
+    // eslint-disable-next-line security/detect-non-literal-fs-filename
+    renameSync(join(stagingDirectory, entry), join(projectDirectory, entry))
+  }
+  // eslint-disable-next-line security/detect-non-literal-fs-filename
+  rmdirSync(stagingDirectory)
+}
+
 export function finalizeStagedProjectDirectory(
-  { projectDirectory, stagingDirectory }: StagedProjectDirectory,
+  stagedProjectDirectory: StagedProjectDirectory,
   normalizedProjectName: string
 ): ProjectDirectoryIdentity {
   try {
-    // eslint-disable-next-line security/detect-non-literal-fs-filename
-    renameSync(stagingDirectory, projectDirectory)
+    assertReservedProjectDirectory(stagedProjectDirectory, normalizedProjectName)
+    publishStagedProjectDirectory(stagedProjectDirectory)
   } catch (error: unknown) {
     const errorCode = isErrnoException(error) ? error.code : undefined
     if (errorCode === "EEXIST" || errorCode === "ENOTEMPTY") {
@@ -91,7 +126,7 @@ export function finalizeStagedProjectDirectory(
     throw error
   }
 
-  return readProjectDirectoryIdentity(projectDirectory)
+  return readProjectDirectoryIdentity(stagedProjectDirectory.projectDirectory)
 }
 
 export function isSameProjectDirectoryIdentity(
@@ -104,6 +139,27 @@ export function isSameProjectDirectoryIdentity(
   } catch (error: unknown) {
     if (isErrnoException(error) && error.code === "ENOENT") {
       return false
+    }
+
+    throw error
+  }
+}
+
+export function removeReservedProjectDirectoryIfEmpty({
+  projectDirectory,
+  projectDirectoryIdentity,
+}: Pick<StagedProjectDirectory, "projectDirectory" | "projectDirectoryIdentity">): void {
+  if (!isSameProjectDirectoryIdentity(projectDirectory, projectDirectoryIdentity)) {
+    return
+  }
+
+  try {
+    // eslint-disable-next-line security/detect-non-literal-fs-filename
+    rmdirSync(projectDirectory)
+  } catch (error: unknown) {
+    const errorCode = isErrnoException(error) ? error.code : undefined
+    if (errorCode === "ENOENT" || errorCode === "ENOTEMPTY") {
+      return
     }
 
     throw error

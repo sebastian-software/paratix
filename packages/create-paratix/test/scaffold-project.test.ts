@@ -4,6 +4,10 @@ import { join, resolve } from "node:path"
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 
 import { scaffoldProject } from "../src/index.js"
+import {
+  createStagedProjectDirectory,
+  finalizeStagedProjectDirectory,
+} from "../src/projectDirectory.js"
 import { expectProcessExit, TEST_ADMIN_PUBLIC_KEY } from "./helpers.js"
 
 describe("scaffoldProject", () => {
@@ -319,6 +323,23 @@ describe("scaffoldProject", () => {
     expect(console.error).toHaveBeenCalledWith(`Error: Directory "${projectName}" already exists.`)
     expect(installer).not.toHaveBeenCalled()
     expect(readFileSync(sentinelPath, "utf8")).toBe("PRE_EXISTING_CONTENT")
+  })
+
+  it("reserves the target path and rejects a replacement before staged publish", async () => {
+    const stagedProjectDirectory = createStagedProjectDirectory(projectDirectory, projectName)
+    writeFileSync(join(stagedProjectDirectory.stagingDirectory, "staged.txt"), "STAGED_CONTENT")
+
+    expect(existsSync(projectDirectory)).toBe(true)
+
+    rmSync(projectDirectory, { force: true, recursive: true })
+    mkdirSync(projectDirectory)
+
+    await expectProcessExit(() => {
+      finalizeStagedProjectDirectory(stagedProjectDirectory, projectName)
+    })
+
+    expect(console.error).toHaveBeenCalledWith(`Error: Directory "${projectName}" already exists.`)
+    expect(existsSync(join(projectDirectory, "staged.txt"))).toBe(false)
   })
 
   it("rejects invalid project names before creating directories", async () => {

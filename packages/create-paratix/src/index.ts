@@ -19,6 +19,7 @@ import {
   finalizeStagedProjectDirectory,
   isSameProjectDirectoryIdentity,
   type ProjectDirectoryIdentity,
+  removeReservedProjectDirectoryIfEmpty,
   type StagedProjectDirectory,
 } from "./projectDirectory.js"
 import {
@@ -255,6 +256,8 @@ function runScaffoldOrCleanup(
       isSameProjectDirectoryIdentity(prepared.projectDirectory, publishedProjectIdentity)
     ) {
       rmSync(prepared.projectDirectory, { force: true, recursive: true })
+    } else if (publishedProjectIdentity == null) {
+      removeReservedProjectDirectoryIfEmpty(prepared.stagedProjectDirectory)
     }
     throw error
   }
