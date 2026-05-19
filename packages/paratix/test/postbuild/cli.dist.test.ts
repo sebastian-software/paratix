@@ -22,8 +22,11 @@ const PACKAGE_COMMAND_TIMEOUT_MS = 60_000
 
 type CommandResponse = {
   code: number
+  stderr?: string
   stdout?: string
 }
+
+type CommandHandler = () => CommandResponse
 
 type TestSshServer = {
   close: () => Promise<void>
@@ -33,8 +36,23 @@ type TestSshServer = {
 
 function endExecStream(stream: ServerChannel, response: CommandResponse): void {
   if (response.stdout != null) stream.write(response.stdout)
+  if (response.stderr != null) stream.stderr.write(response.stderr)
   stream.exit(response.code)
   stream.end()
+}
+
+function handlePostbuildCommand(input: {
+  command: string
+  commandHandlers: Map<string, CommandHandler>
+  unexpectedCommands: string[]
+}): CommandResponse {
+  const handler = input.commandHandlers.get(input.command)
+  if (handler != null) return handler()
+  input.unexpectedCommands.push(input.command)
+  return {
+    code: 127,
+    stderr: `unexpected postbuild SSH command: ${input.command}\n`,
+  }
 }
 
 async function execFileBuffered(
@@ -209,9 +227,10 @@ export default {
     const playbookPath = join(tempDirectory, "valid-playbook.mjs")
     const markerPath = join(tempDirectory, "remote-marker.txt")
     const seenCommands: string[] = []
+    const unexpectedCommands: string[] = []
     const checkCommand = `test -f ${JSON.stringify(markerPath)}`
     const applyCommand = `printf 'changed\\n' > ${JSON.stringify(markerPath)}`
-    const commandHandlers = new Map<string, () => CommandResponse>([
+    const commandHandlers = new Map<string, CommandHandler>([
       [
         applyCommand,
         () => {
@@ -224,7 +243,7 @@ export default {
 
     const testServer = await startTestSshServer((command) => {
       seenCommands.push(command)
-      return commandHandlers.get(command)!()
+      return handlePostbuildCommand({ command, commandHandlers, unexpectedCommands })
     })
 
     try {
@@ -275,6 +294,7 @@ export default {
       expect(stdout).toContain("changed")
       expect(readFileSync(markerPath, "utf8")).toBe("changed\n")
       expect(seenCommands).toStrictEqual([checkCommand, applyCommand])
+      expect(unexpectedCommands).toStrictEqual([])
     } finally {
       await testServer.close()
       rmSync(tempDirectory, { force: true, recursive: true })
