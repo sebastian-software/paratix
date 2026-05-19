@@ -1842,18 +1842,16 @@ export const net = {
   ): Module {
     const state = options?.state ?? "present"
     const device = options?.device
-    // R-0000486: surface the missing-device error at construction time
-    // instead of letting check() report needs-apply and apply() then fail.
-    if (state === "present" && device == null) {
-      throw new Error("[net.route] options.device is required when state is 'present'")
+    // R-0000486 / R-0000918: surface the missing-device error at
+    // construction time for every state instead of allowing check() to report
+    // needs-apply for a route that apply() cannot persist to a stable state.
+    if (device == null) {
+      throw new Error("[net.route] options.device is required")
     }
     validateRouteOptions({ destination, device, gateway })
     const sanitized = sanitizeForFilename(destination)
     const routeHash = buildRoutePersistenceHash({ destination, device, gateway })
-    const dropinPath =
-      device == null
-        ? ""
-        : `/etc/systemd/network/60-paratix-${device}.network.d/50-paratix-route-${sanitized}-${routeHash}.conf`
+    const dropinPath = `/etc/systemd/network/60-paratix-${device}.network.d/50-paratix-route-${sanitized}-${routeHash}.conf`
     const legacyDropinPath = `/etc/systemd/network/50-paratix-route-${sanitized}.network`
 
     return {
@@ -1875,7 +1873,6 @@ export const net = {
       },
       async check(conn: null | SshConnection): Promise<"needs-apply" | "ok"> {
         if (!conn) return NEEDS_APPLY
-        if (device == null) return NEEDS_APPLY
         return checkRouteState(conn, {
           destination,
           device,

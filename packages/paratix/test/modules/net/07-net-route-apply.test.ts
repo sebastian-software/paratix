@@ -248,6 +248,12 @@ describe("net.route — apply", () => {
     expect(() => net.route("10.0.0.0/24", "192.168.1.1")).toThrow(/options\.device/v)
   })
 
+  it("fails closed when state is absent and no persistent target device is given", () => {
+    expect(() => net.route("10.0.0.0/24", "192.168.1.1", { state: "absent" })).toThrow(
+      /options\.device/v
+    )
+  })
+
   it("returns failed without reload when the persistent route drop-in cannot be written", async () => {
     const mockSsh = createMockSsh({}, SUCCESSFUL_ROUTE_APPLY_OPTIONS)
     vi.spyOn(mockSsh, "writeFile").mockRejectedValue(new Error("disk full"))

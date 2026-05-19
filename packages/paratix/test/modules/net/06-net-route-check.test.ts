@@ -129,6 +129,12 @@ describe("net.route — check", () => {
     expect(result).toBe("needs-apply")
   })
 
+  it("throws when state is absent and no persistent target device is given", () => {
+    expect(() => net.route("10.0.0.0/24", "192.168.1.1", { state: "absent" })).toThrow(
+      /options\.device/v
+    )
+  })
+
   it("returns ok when route is present (state: present)", async () => {
     const dropinPath = routeDropinPath
     const expectedDropin = `[Route]\nDestination=10.0.0.0/24\nGateway=192.168.1.1\n`
