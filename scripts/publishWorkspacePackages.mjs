@@ -1,11 +1,13 @@
 import { execFile, spawn } from "node:child_process"
 import { realpathSync } from "node:fs"
 import { lstat, readdir, readFile, stat } from "node:fs/promises"
-import { join, resolve } from "node:path"
+import { dirname, join, resolve } from "node:path"
 import { fileURLToPath } from "node:url"
 import { promisify } from "node:util"
 
 const execFileAsync = promisify(execFile)
+const SCRIPT_DIRECTORY = import.meta.dirname
+const REPOSITORY_ROOT = dirname(SCRIPT_DIRECTORY)
 
 function readEnvironmentAvailabilityRetries() {
   const rawValue = process.env.PARATIX_PUBLISH_AVAILABILITY_RETRIES
@@ -30,11 +32,20 @@ const DEFAULT_AVAILABILITY_DELAY_MS = 10_000
 // static list against the actual `packages/` directory listing at
 // startup. An unexpected entry — or a missing one — aborts the publish
 // flow before any registry side effects.
-const PACKAGES_ROOT_DIRECTORY = "packages"
+const PACKAGES_ROOT_DIRECTORY = join(REPOSITORY_ROOT, "packages")
+const PACKAGES_ROOT_DISPLAY_DIRECTORY = "packages"
 
 const packages = [
-  { directory: "packages/paratix", name: "paratix" },
-  { directory: "packages/create-paratix", name: "create-paratix" },
+  {
+    directory: join(REPOSITORY_ROOT, "packages/paratix"),
+    displayDirectory: "packages/paratix",
+    name: "paratix",
+  },
+  {
+    directory: join(REPOSITORY_ROOT, "packages/create-paratix"),
+    displayDirectory: "packages/create-paratix",
+    name: "create-paratix",
+  },
 ]
 
 const PUBLISH_MODE_RECOVER_CREATE_PARATIX = "recover-create-paratix"
@@ -62,7 +73,7 @@ function assertNoWorkspacePackageSymlinks(entries) {
     .map((entry) => entry.name)
   if (symbolicLinkEntries.length === 0) return
   throw new Error(
-    `Refusing to publish: ${PACKAGES_ROOT_DIRECTORY}/ contains symbolic links (${symbolicLinkEntries.join(", ")}). ` +
+    `Refusing to publish: ${PACKAGES_ROOT_DISPLAY_DIRECTORY}/ contains symbolic links (${symbolicLinkEntries.join(", ")}). ` +
       "Remove the symlinks (e.g. unlink a development checkout) and re-run the publish script."
   )
 }
@@ -73,7 +84,7 @@ function assertWorkspacePackageDirectoriesMatch(entries) {
     .map((entry) => entry.name)
     .sort()
   const declaredDirectories = packages
-    .map((packageInfo) => packageInfo.directory.replace(/^packages\//v, ""))
+    .map((packageInfo) => packageInfo.displayDirectory.replace(/^packages\//v, ""))
     .sort()
   const filesystemSet = new Set(filesystemDirectories)
   const declaredSet = new Set(declaredDirectories)
@@ -94,9 +105,6 @@ function assertWorkspacePackageDirectoriesMatch(entries) {
 }
 
 async function assertWorkspacePackagesMatchFilesystem(fs) {
-  // The other fs accessors in this script consume relative paths
-  // (`packages/<name>/package.json`), so we keep the same convention
-  // here for symmetry with the existing test mocks.
   const entries = await fs.readdir(PACKAGES_ROOT_DIRECTORY, { withFileTypes: true })
   assertNoWorkspacePackageSymlinks(entries)
   assertWorkspacePackageDirectoriesMatch(entries)
@@ -132,6 +140,7 @@ async function readPackageJson(directory, fs = { readFile }) {
 
   return {
     directory,
+    displayDirectory: directory,
     files,
     name: packageJson.name,
     version: packageJson.version,
@@ -346,13 +355,14 @@ async function minMtimeMillisecondsForBuildArtefacts({
 
 async function assertFilesEntryIsPublishable(packageInfo, fileEntry, filesystem) {
   const absolutePath = join(packageInfo.directory, fileEntry)
+  const displayPath = join(packageInfo.displayDirectory, fileEntry)
   let linkStats
   try {
     linkStats = await filesystem.lstat(absolutePath)
   } catch (error) {
     if (error?.code === "ENOENT") {
       throw new Error(
-        `${packageInfo.name}: ${fileEntry} referenced by package.json#files is missing under ${packageInfo.directory}. Run the build before publishing.`,
+        `${packageInfo.name}: ${fileEntry} referenced by package.json#files is missing under ${packageInfo.displayDirectory}. Run the build before publishing.`,
         { cause: error }
       )
     }
@@ -360,7 +370,7 @@ async function assertFilesEntryIsPublishable(packageInfo, fileEntry, filesystem)
   }
   if (linkStats.isSymbolicLink()) {
     throw new Error(
-      `${packageInfo.name}: ${absolutePath} referenced by package.json#files is a symbolic link. Materialize the built artefact before publishing.`
+      `${packageInfo.name}: ${displayPath} referenced by package.json#files is a symbolic link. Materialize the built artefact before publishing.`
     )
   }
 }
@@ -389,7 +399,7 @@ async function readSourceMtime(packageInfo, sourceDirectory, filesystem) {
 async function verifyDistributionArtefacts(packageInfo, filesystem) {
   if (packageInfo.files.length === 0) {
     throw new Error(
-      `${packageInfo.directory}/package.json must declare a "files" allowlist before publish.`
+      `${packageInfo.displayDirectory}/package.json must declare a "files" allowlist before publish.`
     )
   }
 
@@ -440,7 +450,7 @@ function buildStaleArtefactMessage({
 }) {
   const baseMessage =
     `${packageInfo.name}: build artefact mtime (${new Date(buildArtefactsMtime).toISOString()}) is ` +
-    `older than ${packageInfo.directory}/src mtime (${new Date(sourceMtime).toISOString()}). ` +
+    `older than ${packageInfo.displayDirectory}/src mtime (${new Date(sourceMtime).toISOString()}). ` +
     `Run the build before publishing.`
   if (symlinkedEntries.length === 0) return baseMessage
   const formattedEntries = symlinkedEntries.join(", ")
@@ -457,6 +467,7 @@ async function publishPackage({
   availabilityRetries,
   commandRunner,
   packageInfo,
+  repositoryRoot,
 }) {
   if (await isPublished(packageInfo.name, packageInfo.version, commandRunner)) {
     console.log(
@@ -469,15 +480,19 @@ async function publishPackage({
   console.log(
     `Publishing ${packageInfo.name}@${packageInfo.version} under --tag ${distributionTag}.`
   )
-  await commandRunner.spawn("pnpm", [
-    "--dir",
-    packageInfo.directory,
-    "publish",
-    "--no-git-checks",
-    "--provenance",
-    "--tag",
-    distributionTag,
-  ])
+  await commandRunner.spawn(
+    "pnpm",
+    [
+      "--dir",
+      packageInfo.directory,
+      "publish",
+      "--no-git-checks",
+      "--provenance",
+      "--tag",
+      distributionTag,
+    ],
+    { cwd: repositoryRoot }
+  )
 
   // R-0000861: registry propagation can lag behind a successful
   // `pnpm publish`. Use the bounded availability wait after every new
@@ -499,6 +514,7 @@ async function recoverCreateParatixPackage({
   commandRunner,
   createParatixPackage,
   paratixPackage,
+  repositoryRoot,
 }) {
   const paratixPublished = await isPublished(
     paratixPackage.name,
@@ -536,11 +552,17 @@ async function recoverCreateParatixPackage({
     availabilityRetries,
     commandRunner,
     packageInfo: createParatixPackage,
+    repositoryRoot,
   })
 }
 
 async function readWorkspacePackages(fs) {
-  return Promise.all(packages.map((packageInfo) => readPackageJson(packageInfo.directory, fs)))
+  return Promise.all(
+    packages.map(async (packageInfo) => ({
+      ...(await readPackageJson(packageInfo.directory, fs)),
+      displayDirectory: packageInfo.displayDirectory,
+    }))
+  )
 }
 
 function validateWorkspacePackages(workspacePackages) {
@@ -565,9 +587,13 @@ export async function publishWorkspacePackages(options) {
     availabilityRetries,
     commandRunner = {
       execFile: execFileAsync,
-      spawn: (command, commandArguments) =>
+      spawn: (command, commandArguments, spawnOptions) =>
         new Promise((resolve, reject) => {
-          const child = spawn(command, commandArguments, { stdio: "inherit" })
+          const child = spawn(command, commandArguments, {
+            cwd: REPOSITORY_ROOT,
+            ...spawnOptions,
+            stdio: "inherit",
+          })
           child.on("error", reject)
           child.on("exit", (code) => {
             if (code === 0) {
@@ -620,6 +646,7 @@ export async function publishWorkspacePackages(options) {
       commandRunner,
       createParatixPackage,
       paratixPackage,
+      repositoryRoot: REPOSITORY_ROOT,
     })
     return
   }
@@ -629,12 +656,14 @@ export async function publishWorkspacePackages(options) {
     availabilityRetries,
     commandRunner,
     packageInfo: paratixPackage,
+    repositoryRoot: REPOSITORY_ROOT,
   })
   await publishPackage({
     availabilityDelayMilliseconds,
     availabilityRetries,
     commandRunner,
     packageInfo: createParatixPackage,
+    repositoryRoot: REPOSITORY_ROOT,
   })
 }
 

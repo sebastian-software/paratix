@@ -1,7 +1,7 @@
 import assert from "node:assert/strict"
 import { mkdtempSync, realpathSync, symlinkSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
-import { join } from "node:path"
+import { dirname, join } from "node:path"
 import { describe, it } from "node:test"
 import { pathToFileURL } from "node:url"
 
@@ -10,8 +10,12 @@ import { isDirectExecution, publishWorkspacePackages } from "./publishWorkspaceP
 const DEFAULT_STABLE_VERSION = "1.2.3"
 const CREATE_PARATIX_NAME = "create-paratix"
 const PARATIX_NAME = "paratix"
+const REPOSITORY_ROOT = dirname(import.meta.dirname)
 const CREATE_PARATIX_DIRECTORY = `packages/${CREATE_PARATIX_NAME}`
 const PARATIX_DIRECTORY = `packages/${PARATIX_NAME}`
+const ABSOLUTE_CREATE_PARATIX_DIRECTORY = join(REPOSITORY_ROOT, CREATE_PARATIX_DIRECTORY)
+const ABSOLUTE_PARATIX_DIRECTORY = join(REPOSITORY_ROOT, PARATIX_DIRECTORY)
+const ABSOLUTE_PACKAGES_DIRECTORY = join(REPOSITORY_ROOT, "packages")
 const RECOVER_CREATE_PARATIX_MODE = "recover-create-paratix"
 const CREATE_PARATIX_SPECIFIER = `${CREATE_PARATIX_NAME}@${DEFAULT_STABLE_VERSION}`
 const PARATIX_SPECIFIER = `${PARATIX_NAME}@${DEFAULT_STABLE_VERSION}`
@@ -73,6 +77,9 @@ function createFs(options) {
     "packages/paratix/src": ["index.ts"],
   }
   const symlinkSet = new Set(symlinkPaths)
+  const calls = []
+  const toMockPath = (path) =>
+    path.startsWith(`${REPOSITORY_ROOT}/`) ? path.slice(REPOSITORY_ROOT.length + 1) : path
   // R-0000740: the drift assertion calls `readdir(path, { withFileTypes: true })`
   // for the `packages/` directory and expects entries whose
   // `isDirectory()` returns true. The default Dirent factory below
@@ -80,17 +87,20 @@ function createFs(options) {
   // directories register them here.
   const directoryEntries = new Set([CREATE_PARATIX_DIRECTORY, PARATIX_DIRECTORY])
   return {
+    calls,
     // R-0000685: lstat reports symbolic-link status without following the
     // link. mtimeMillisecondsForFileEntry now relies on lstat to stay
     // symmetric with maxMtimeMillisecondsUnder, which keys off
     // Dirent.isSymbolicLink() — itself derived from lstat semantics.
     async lstat(path) {
-      const mtime = mtimes[path]
+      calls.push(["lstat", path])
+      const mockPath = toMockPath(path)
+      const mtime = mtimes[mockPath]
       if (mtime === undefined) {
         throw Object.assign(new Error(`ENOENT lstat ${path}`), { code: "ENOENT" })
       }
-      const isSymbolicLink = symlinkSet.has(path)
-      const isDirectory = !isSymbolicLink && directories[path] !== undefined
+      const isSymbolicLink = symlinkSet.has(mockPath)
+      const isDirectory = !isSymbolicLink && directories[mockPath] !== undefined
       return {
         isDirectory: () => isDirectory,
         isFile: () => !isDirectory && !isSymbolicLink,
@@ -99,17 +109,19 @@ function createFs(options) {
       }
     },
     async readdir(path, options) {
-      const errorCode = readdirErrors[path]
+      calls.push(["readdir", path])
+      const mockPath = toMockPath(path)
+      const errorCode = readdirErrors[mockPath]
       if (errorCode !== undefined) {
         throw Object.assign(new Error(`${errorCode} readdir ${path}`), { code: errorCode })
       }
-      const entries = directories[path]
+      const entries = directories[mockPath]
       if (!entries) {
         throw Object.assign(new Error(`ENOENT readdir ${path}`), { code: "ENOENT" })
       }
       if (options?.withFileTypes !== true) return [...entries]
       return entries.map((name) => {
-        const fullPath = `${path}/${name}`
+        const fullPath = `${mockPath}/${name}`
         const isSymbolicLink = symlinkSet.has(fullPath)
         const isDirectory = directoryEntries.has(fullPath)
         return {
@@ -121,7 +133,9 @@ function createFs(options) {
       })
     },
     async readFile(path) {
-      if (path === "packages/paratix/package.json") {
+      calls.push(["readFile", path])
+      const mockPath = toMockPath(path)
+      if (mockPath === "packages/paratix/package.json") {
         return JSON.stringify({
           files: paratixFiles,
           name: PARATIX_NAME,
@@ -129,7 +143,7 @@ function createFs(options) {
         })
       }
 
-      if (path === "packages/create-paratix/package.json") {
+      if (mockPath === "packages/create-paratix/package.json") {
         return JSON.stringify({
           files: createParatixFiles,
           name: CREATE_PARATIX_NAME,
@@ -140,11 +154,13 @@ function createFs(options) {
       throw new Error(`Unexpected path: ${path}`)
     },
     async stat(path) {
-      const mtime = mtimes[path]
+      calls.push(["stat", path])
+      const mockPath = toMockPath(path)
+      const mtime = mtimes[mockPath]
       if (mtime === undefined) {
         throw Object.assign(new Error(`ENOENT stat ${path}`), { code: "ENOENT" })
       }
-      const isDirectory = directories[path] !== undefined
+      const isDirectory = directories[mockPath] !== undefined
       return {
         isDirectory: () => isDirectory,
         isFile: () => !isDirectory,
@@ -163,6 +179,7 @@ function createCommandRunner(initiallyPublished, publishedVersions) {
   const published = new Set(initiallyPublished ?? [])
   const publishedVersionOverrides = publishedVersions ?? {}
   const calls = []
+  const spawnOptions = []
 
   return {
     calls,
@@ -177,8 +194,9 @@ function createCommandRunner(initiallyPublished, publishedVersions) {
 
       throw createMissingPackageError()
     },
-    async spawn(command, commandArguments) {
+    async spawn(command, commandArguments, options) {
       calls.push([command, ...commandArguments])
+      spawnOptions.push(options)
       const directory = commandArguments[1]
       // Use the explicit per-directory version override when provided so
       // tests can simulate publishing arbitrary prerelease/build-metadata
@@ -195,6 +213,7 @@ function createCommandRunner(initiallyPublished, publishedVersions) {
           : `${isCreateParatix ? CREATE_PARATIX_NAME : PARATIX_NAME}@${versionOverride}`
       published.add(packageSpecifier)
     },
+    spawnOptions,
   }
 }
 
@@ -208,6 +227,16 @@ function hasCommandCall(calls, command) {
 
 function publishDirectories(calls) {
   return calls.filter((call) => call[0] === "pnpm").map((call) => call[2])
+}
+
+function areAllFilesystemCallsRepositoryAnchored(calls) {
+  return calls.every(([, path]) => path.startsWith(REPOSITORY_ROOT))
+}
+
+function hasPackagesRootDirectoryRead(calls) {
+  return calls.some(
+    ([method, path]) => method === "readdir" && path === ABSOLUTE_PACKAGES_DIRECTORY
+  )
 }
 
 async function assertRejectsWithMessage(promise, expectedMessage) {
@@ -238,7 +267,7 @@ describe("publishWorkspacePackages", () => {
       [
         "pnpm",
         "--dir",
-        "packages/paratix",
+        ABSOLUTE_PARATIX_DIRECTORY,
         "publish",
         "--no-git-checks",
         "--provenance",
@@ -250,7 +279,7 @@ describe("publishWorkspacePackages", () => {
       [
         "pnpm",
         "--dir",
-        "packages/create-paratix",
+        ABSOLUTE_CREATE_PARATIX_DIRECTORY,
         "publish",
         "--no-git-checks",
         "--provenance",
@@ -271,6 +300,36 @@ describe("publishWorkspacePackages", () => {
     })
 
     assert.equal(hasCommandCall(commandRunner.calls, "pnpm"), false)
+  })
+
+  it("anchors filesystem reads and pnpm publish to the repository root from a foreign cwd", async () => {
+    const commandRunner = createCommandRunner()
+    const fs = createFs()
+    const originalCwd = process.cwd()
+    // eslint-disable-next-line security/detect-non-literal-fs-filename -- Test fixture path is derived from the OS tmpdir.
+    const foreignCwd = realpathSync(mkdtempSync(join(tmpdir(), "publish-foreign-cwd-")))
+    try {
+      process.chdir(foreignCwd)
+      await publishWorkspacePackages({
+        availabilityDelayMilliseconds: 0,
+        availabilityRetries: 2,
+        commandRunner,
+        fs,
+      })
+    } finally {
+      process.chdir(originalCwd)
+    }
+
+    assert.equal(areAllFilesystemCallsRepositoryAnchored(fs.calls), true)
+    assert.equal(hasPackagesRootDirectoryRead(fs.calls), true)
+    assert.deepEqual(publishDirectories(commandRunner.calls), [
+      ABSOLUTE_PARATIX_DIRECTORY,
+      ABSOLUTE_CREATE_PARATIX_DIRECTORY,
+    ])
+    assert.deepEqual(commandRunner.spawnOptions, [
+      { cwd: REPOSITORY_ROOT },
+      { cwd: REPOSITORY_ROOT },
+    ])
   })
 
   it("fails clearly when create-paratix is published without a matching paratix runtime", async () => {
@@ -298,7 +357,7 @@ describe("publishWorkspacePackages recovery mode", () => {
       mode: RECOVER_CREATE_PARATIX_MODE,
     })
 
-    assert.deepEqual(publishDirectories(commandRunner.calls), [CREATE_PARATIX_DIRECTORY])
+    assert.deepEqual(publishDirectories(commandRunner.calls), [ABSOLUTE_CREATE_PARATIX_DIRECTORY])
   })
 
   it("rejects recovery mode when paratix is not already published", async () => {
