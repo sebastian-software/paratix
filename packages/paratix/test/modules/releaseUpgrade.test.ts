@@ -1659,6 +1659,74 @@ describe("releaseUpgrade.upgrade — apply (Debian)", () => {
       expect(String(result.error)).toContain("path is a symbolic link (NOFOLLOW guard)")
     })
 
+    it("rolls back the current sources file when chmod fails after a mutating rewrite", async () => {
+      const originalSources = "deb http://deb.debian.org/debian bookworm main\n"
+      const writes: WriteCapture[] = []
+      const ssh = createMockSsh(debianApplyResponses("bookworm", "trixie"))
+      const originalExec = ssh.exec.bind(ssh)
+      ssh.exec = async (command, execOptions) => {
+        const match = NOFOLLOW_WRITE_COMMAND_PATTERN.exec(command)
+        // oxlint-disable-next-line no-conditional-in-test -- mock dispatcher records mutating writes before returning the requested chmod failure
+        if (match?.groups == null) return originalExec(command, execOptions)
+        const content = execOptions!.input!
+        const path = match.groups.path
+        writes.push({ content, path })
+        // oxlint-disable-next-line no-conditional-in-test -- simulate chmod failing after dd/truncate already wrote the target suite
+        if (path === "/etc/apt/sources.list" && content.includes("trixie")) {
+          return { code: 202, stderr: "chmod: Operation not permitted", stdout: "" }
+        }
+        return { code: 0, stderr: "", stdout: "" }
+      }
+
+      const mod = releaseUpgrade.upgrade()
+      const result = await mod.apply(ssh, emptyEnv)
+
+      expect(result.status).toBe("failed")
+      expect(result.error?.message).toContain("chmod to 0644 failed")
+      expect(writes).toStrictEqual([
+        {
+          content: "deb http://deb.debian.org/debian trixie main\n",
+          path: "/etc/apt/sources.list",
+        },
+        { content: originalSources, path: "/etc/apt/sources.list" },
+      ])
+      expect(ssh.calls).not.toContain(APT_UPDATE_COMMAND)
+    })
+
+    it("rolls back the current sources file after a partial rewrite failure", async () => {
+      const originalSources = "deb http://deb.debian.org/debian bookworm main\n"
+      const writes: WriteCapture[] = []
+      const ssh = createMockSsh(debianApplyResponses("bookworm", "trixie"))
+      const originalExec = ssh.exec.bind(ssh)
+      ssh.exec = async (command, execOptions) => {
+        const match = NOFOLLOW_WRITE_COMMAND_PATTERN.exec(command)
+        // oxlint-disable-next-line no-conditional-in-test -- mock dispatcher records mutating writes before returning the requested truncate failure
+        if (match?.groups == null) return originalExec(command, execOptions)
+        const content = execOptions!.input!
+        const path = match.groups.path
+        writes.push({ content, path })
+        // oxlint-disable-next-line no-conditional-in-test -- simulate dd writing stdin before a later truncate step fails
+        if (path === "/etc/apt/sources.list" && content.includes("trixie")) {
+          return { code: 1, stderr: "truncate: Input/output error", stdout: "" }
+        }
+        return { code: 0, stderr: "", stdout: "" }
+      }
+
+      const mod = releaseUpgrade.upgrade()
+      const result = await mod.apply(ssh, emptyEnv)
+
+      expect(result.status).toBe("failed")
+      expect(result.error?.message).toContain("truncate: Input/output error")
+      expect(writes).toStrictEqual([
+        {
+          content: "deb http://deb.debian.org/debian trixie main\n",
+          path: "/etc/apt/sources.list",
+        },
+        { content: originalSources, path: "/etc/apt/sources.list" },
+      ])
+      expect(ssh.calls).not.toContain(APT_UPDATE_COMMAND)
+    })
+
     it("restores already rewritten sources when a later sources rewrite throws", async () => {
       const extraPath = "/etc/apt/sources.list.d/extra.list"
       const originalMainSources = "deb http://deb.debian.org/debian bookworm main\n"

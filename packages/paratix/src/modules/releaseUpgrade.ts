@@ -380,14 +380,37 @@ type RewriteSourcesParameters = {
   currentCodename: string
   originalContent: string
   remotePath: string
+  snapshots: SourcesSnapshot[]
   ssh: SshConnection
   targetCodename: string
+}
+
+async function writeSourcesFileWithRegisteredSnapshot(parameters: {
+  content: string
+  mode: string
+  remotePath: string
+  snapshot: SourcesSnapshot
+  snapshots: SourcesSnapshot[]
+  ssh: SshConnection
+}): Promise<void> {
+  const { content, mode, remotePath, snapshot, snapshots, ssh } = parameters
+  const snapshotIndex = snapshots.length
+  snapshots.push(snapshot)
+  try {
+    await writeSourcesFileNoFollow({ content, mode, remotePath, ssh })
+  } catch (error) {
+    if (!(error instanceof SourcesWriteCommandError) || !error.mayHaveMutated) {
+      snapshots.splice(snapshotIndex, 1)
+    }
+    throw error
+  }
 }
 
 async function rewriteSourcesFile(
   parameters: RewriteSourcesParameters
 ): Promise<null | SourcesSnapshot> {
-  const { currentCodename, originalContent, remotePath, ssh, targetCodename } = parameters
+  const { currentCodename, originalContent, remotePath, snapshots, ssh, targetCodename } =
+    parameters
   // Rewrite only apt suite fields. URLs, comments and unrelated deb822 fields
   // may contain release codenames as substrings and must remain untouched.
   const updatedContent = rewriteAptSourcesContent({
@@ -421,11 +444,19 @@ async function rewriteSourcesFile(
         "file content changed between read and write. Aborting to prevent data loss."
     )
   }
+  const snapshot = { mode, originalContent, remotePath }
   // R-0000718: route the write through the NOFOLLOW pipeline so a
   // symlink swap between the snapshot read above and this write step
   // cannot redirect the rewrite to an attacker-controlled target.
-  await writeSourcesFileNoFollow({ content: updatedContent, mode, remotePath, ssh })
-  return { mode, originalContent, remotePath }
+  await writeSourcesFileWithRegisteredSnapshot({
+    content: updatedContent,
+    mode,
+    remotePath,
+    snapshot,
+    snapshots,
+    ssh,
+  })
+  return snapshot
 }
 
 type SnapshotSourcesParameters = Omit<RewriteSourcesParameters, "originalContent">
@@ -451,6 +482,16 @@ const SOURCES_FILE_SYMLINK_EXIT_CODE = 200
 // failures.
 const SOURCES_FILE_WRITE_SYMLINK_EXIT_CODE = 201
 const SOURCES_FILE_WRITE_CHMOD_EXIT_CODE = 202
+
+class SourcesWriteCommandError extends Error {
+  public readonly mayHaveMutated: boolean
+
+  public constructor(message: string, mayHaveMutated: boolean) {
+    super(message)
+    this.name = "SourcesWriteCommandError"
+    this.mayHaveMutated = mayHaveMutated
+  }
+}
 
 // R-0000718: write an apt sources file with O_NOFOLLOW semantics so a
 // symlink swap between the snapshot read and the rewrite (or between the
@@ -541,15 +582,20 @@ async function writeSourcesFileNoFollow(parameters: {
   })
   if (result.code === 0) return
   if (result.code === SOURCES_FILE_WRITE_SYMLINK_EXIT_CODE) {
-    throw new Error(`writing ${remotePath} refused: path is a symbolic link (NOFOLLOW guard)`)
-  }
-  if (result.code === SOURCES_FILE_WRITE_CHMOD_EXIT_CODE) {
-    throw new Error(
-      `writing ${remotePath} succeeded but chmod to ${mode} failed: ${result.stderr.trim() || "no stderr"}`
+    throw new SourcesWriteCommandError(
+      `writing ${remotePath} refused: path is a symbolic link (NOFOLLOW guard)`,
+      false
     )
   }
-  throw new Error(
-    `writing ${remotePath} failed (exit code ${String(result.code)}): ${result.stderr.trim() || "no stderr"}`
+  if (result.code === SOURCES_FILE_WRITE_CHMOD_EXIT_CODE) {
+    throw new SourcesWriteCommandError(
+      `writing ${remotePath} succeeded but chmod to ${mode} failed: ${result.stderr.trim() || "no stderr"}`,
+      true
+    )
+  }
+  throw new SourcesWriteCommandError(
+    `writing ${remotePath} failed (exit code ${String(result.code)}): ${result.stderr.trim() || "no stderr"}`,
+    true
   )
 }
 
@@ -635,6 +681,7 @@ async function snapshotSourcesFileSafely(
 async function snapshotEnumeratedSourcesFile(parameters: {
   currentCodename: string
   filePath: string
+  snapshots: SourcesSnapshot[]
   ssh: SshConnection
   targetCodename: string
 }): Promise<null | SourcesSnapshot> {
@@ -642,6 +689,7 @@ async function snapshotEnumeratedSourcesFile(parameters: {
   return snapshotSourcesFileSafely({
     currentCodename: parameters.currentCodename,
     remotePath: parameters.filePath,
+    snapshots: parameters.snapshots,
     ssh: parameters.ssh,
     targetCodename: parameters.targetCodename,
   })
@@ -666,13 +714,13 @@ async function replaceCodenameInSourcesList(
 ): Promise<SourcesSnapshot[]> {
   const { currentCodename, snapshots, ssh, targetCodename } = parameters
   if (await ssh.exists(APT_SOURCES_LIST)) {
-    const mainSnapshot = await snapshotSourcesFileSafely({
+    await snapshotSourcesFileSafely({
       currentCodename,
       remotePath: APT_SOURCES_LIST,
+      snapshots,
       ssh,
       targetCodename,
     })
-    if (mainSnapshot != null) snapshots.push(mainSnapshot)
   }
 
   // R-0000053: use `find ... -print0` and split on the NUL byte so the
@@ -692,13 +740,13 @@ async function replaceCodenameInSourcesList(
   // carry ASCII control characters are skipped before readFile / writeFile.
   for (const filePath of listFilesResult.stdout.split("\0")) {
     // eslint-disable-next-line no-await-in-loop
-    const snapshot = await snapshotEnumeratedSourcesFile({
+    await snapshotEnumeratedSourcesFile({
       currentCodename,
       filePath,
+      snapshots,
       ssh,
       targetCodename,
     })
-    if (snapshot != null) snapshots.push(snapshot)
   }
 
   return snapshots
