@@ -10,6 +10,9 @@ import { isDirectExecution, publishWorkspacePackages } from "./publishWorkspaceP
 const DEFAULT_STABLE_VERSION = "1.2.3"
 const CREATE_PARATIX_NAME = "create-paratix"
 const PARATIX_NAME = "paratix"
+const CREATE_PARATIX_DIRECTORY = `packages/${CREATE_PARATIX_NAME}`
+const PARATIX_DIRECTORY = `packages/${PARATIX_NAME}`
+const RECOVER_CREATE_PARATIX_MODE = "recover-create-paratix"
 const CREATE_PARATIX_SPECIFIER = `${CREATE_PARATIX_NAME}@${DEFAULT_STABLE_VERSION}`
 const PARATIX_SPECIFIER = `${PARATIX_NAME}@${DEFAULT_STABLE_VERSION}`
 const BOTH_PACKAGE_SPECIFIERS = [CREATE_PARATIX_SPECIFIER, PARATIX_SPECIFIER]
@@ -74,7 +77,7 @@ function createFs({
   // `isDirectory()` returns true. The default Dirent factory below
   // reports all entries as files, so callers tracking package-level
   // directories register them here.
-  const directoryEntries = new Set(["packages/create-paratix", "packages/paratix"])
+  const directoryEntries = new Set([CREATE_PARATIX_DIRECTORY, PARATIX_DIRECTORY])
   return {
     // R-0000685: lstat reports symbolic-link status without following the
     // link. mtimeMillisecondsForFileEntry now relies on lstat to stay
@@ -203,6 +206,10 @@ function hasCommandCall(calls, command) {
   return false
 }
 
+function publishDirectories(calls) {
+  return calls.filter((call) => call[0] === "pnpm").map((call) => call[2])
+}
+
 async function assertRejectsWithMessage(promise, expectedMessage) {
   try {
     await promise
@@ -278,7 +285,66 @@ describe("publishWorkspacePackages", () => {
       "create-paratix@1.2.3 is already published, but paratix@1.2.3 is not available"
     )
   })
+})
 
+describe("publishWorkspacePackages recovery mode", () => {
+  it("publishes only create-paratix in recovery mode when paratix is already published", async () => {
+    const commandRunner = createCommandRunner(new Set([PARATIX_SPECIFIER]))
+
+    await publishWorkspacePackages({
+      availabilityDelayMilliseconds: 0,
+      commandRunner,
+      fs: createFs(),
+      mode: RECOVER_CREATE_PARATIX_MODE,
+    })
+
+    assert.deepEqual(publishDirectories(commandRunner.calls), [CREATE_PARATIX_DIRECTORY])
+  })
+
+  it("rejects recovery mode when paratix is not already published", async () => {
+    const commandRunner = createCommandRunner()
+
+    await assertRejectsWithMessage(
+      publishWorkspacePackages({
+        availabilityDelayMilliseconds: 0,
+        commandRunner,
+        fs: createFs(),
+        mode: RECOVER_CREATE_PARATIX_MODE,
+      }),
+      "Recovery mode requires paratix@1.2.3 to already be published"
+    )
+
+    assert.equal(hasCommandCall(commandRunner.calls, "pnpm"), false)
+  })
+
+  it("rejects recovery mode when create-paratix is already published", async () => {
+    const commandRunner = createCommandRunner(new Set(BOTH_PACKAGE_SPECIFIERS))
+
+    await assertRejectsWithMessage(
+      publishWorkspacePackages({
+        availabilityDelayMilliseconds: 0,
+        commandRunner,
+        fs: createFs(),
+        mode: RECOVER_CREATE_PARATIX_MODE,
+      }),
+      "Recovery mode requires create-paratix@1.2.3 to be missing"
+    )
+
+    assert.equal(hasCommandCall(commandRunner.calls, "pnpm"), false)
+  })
+
+  it("rejects unsupported publish modes", async () => {
+    await assertRejectsWithMessage(
+      publishWorkspacePackages({
+        fs: createFs(),
+        mode: "manual",
+      }),
+      "Unsupported publish mode"
+    )
+  })
+})
+
+describe("publishWorkspacePackages release validations", () => {
   it("rejects mismatched workspace package versions before publishing", async () => {
     const commandRunner = createCommandRunner()
 

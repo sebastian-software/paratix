@@ -108,4 +108,7 @@ jobs:
         with:
           name: package-dist
           path: packages
-      - run: node scripts/publishWorkspacePackages.mjs
+      - if: github.event_name == 'push'
+        run: node scripts/publishWorkspacePackages.mjs release
+      - if: github.event_name == 'workflow_dispatch'
+        run: node scripts/publishWorkspacePackages.mjs recover-create-paratix

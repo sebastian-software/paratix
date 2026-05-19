@@ -37,6 +37,17 @@ const packages = [
   { directory: "packages/create-paratix", name: "create-paratix" },
 ]
 
+const PUBLISH_MODE_RECOVER_CREATE_PARATIX = "recover-create-paratix"
+const PUBLISH_MODE_RELEASE = "release"
+const PUBLISH_MODES = new Set([PUBLISH_MODE_RECOVER_CREATE_PARATIX, PUBLISH_MODE_RELEASE])
+
+function validatePublishMode(mode) {
+  if (PUBLISH_MODES.has(mode)) return mode
+  throw new Error(
+    `Unsupported publish mode ${JSON.stringify(mode)}. Expected one of: ${[...PUBLISH_MODES].join(", ")}.`
+  )
+}
+
 // R-0000830: refuse to publish when any entry in packages/ is a symbolic
 // link. Symlinks under packages/ usually indicate a developer testing
 // setup (e.g. linking a local checkout into the workspace) or an
@@ -482,6 +493,52 @@ async function publishPackage({
   })
 }
 
+async function recoverCreateParatixPackage({
+  availabilityDelayMilliseconds,
+  availabilityRetries,
+  commandRunner,
+  createParatixPackage,
+  paratixPackage,
+}) {
+  const paratixPublished = await isPublished(
+    paratixPackage.name,
+    paratixPackage.version,
+    commandRunner
+  )
+  const createParatixPublished = await isPublished(
+    createParatixPackage.name,
+    createParatixPackage.version,
+    commandRunner
+  )
+
+  if (!paratixPublished) {
+    throw new Error(
+      `Recovery mode requires ${paratixPackage.name}@${paratixPackage.version} to already be published. ` +
+        "Run the normal release workflow instead."
+    )
+  }
+  if (createParatixPublished) {
+    throw new Error(
+      `Recovery mode requires ${createParatixPackage.name}@${createParatixPackage.version} to be missing. ` +
+        "No recovery publish is needed."
+    )
+  }
+
+  await waitForPublishedPackage({
+    commandRunner,
+    delayMilliseconds: availabilityDelayMilliseconds,
+    packageName: paratixPackage.name,
+    retries: availabilityRetries,
+    version: paratixPackage.version,
+  })
+  await publishPackage({
+    availabilityDelayMilliseconds,
+    availabilityRetries,
+    commandRunner,
+    packageInfo: createParatixPackage,
+  })
+}
+
 async function readWorkspacePackages(fs) {
   return Promise.all(packages.map((packageInfo) => readPackageJson(packageInfo.directory, fs)))
 }
@@ -525,7 +582,9 @@ export async function publishWorkspacePackages({
   },
   fs = { lstat, readdir, readFile, stat },
   filesystem = fs,
+  mode = "release",
 } = {}) {
+  const publishMode = validatePublishMode(mode)
   // R-0000740: assert the static `packages` list matches the actual
   // `packages/` directory contents before reading any package.json so a
   // new workspace package added without updating this script aborts the
@@ -551,6 +610,17 @@ export async function publishWorkspacePackages({
         `${paratixPackage.name}@${paratixPackage.version} is not available. Publish the runtime package manually ` +
         "before retrying."
     )
+  }
+
+  if (publishMode === PUBLISH_MODE_RECOVER_CREATE_PARATIX) {
+    await recoverCreateParatixPackage({
+      availabilityDelayMilliseconds,
+      availabilityRetries,
+      commandRunner,
+      createParatixPackage,
+      paratixPackage,
+    })
+    return
   }
 
   await publishPackage({
@@ -599,5 +669,5 @@ export function isDirectExecution(moduleUrl, argv1) {
 }
 
 if (isDirectExecution(import.meta.url, process.argv[1])) {
-  await publishWorkspacePackages()
+  await publishWorkspacePackages({ mode: process.argv[2] ?? PUBLISH_MODE_RELEASE })
 }
