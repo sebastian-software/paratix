@@ -31,7 +31,7 @@ import {
   withCliProcessEnvironment,
   withSerializedPlaybookImport,
 } from "../src/cli.js"
-import { printCliHeader } from "../src/output.js"
+import { printCliHeader, printCommandFailure } from "../src/output.js"
 import { clearRegisteredSecrets, registerSecret } from "../src/secretSink.js"
 
 declare const PACKAGE_VERSION: string
@@ -1453,6 +1453,57 @@ describe("printExceptionError", () => {
     expect(output).toContain("  Caused by:")
     expect(output).not.toContain("super-secret-payload")
     expect(output).toContain("[REDACTED Buffer]")
+  })
+
+  it("redacts direct Buffer causes rendered by command failure output", () => {
+    const error = new Error("top-level error")
+    error.cause = Buffer.from("super-secret-payload", "utf8")
+
+    printCommandFailure(error, false)
+
+    const output = errorSpy.mock.calls.map((args) => String(args[0])).join("\n")
+    expect(output).toContain("Cause:")
+    expect(output).toContain("[REDACTED Buffer]")
+    expect(output).not.toContain("super-secret-payload")
+  })
+
+  it("redacts TypedArray and ArrayBuffer values in verbose command failure causes", () => {
+    const error = new Error("top-level error")
+    error.cause = {
+      raw: new ArrayBuffer(32),
+      view: new Uint8Array([66, 66, 66, 66]),
+    }
+
+    printCommandFailure(error, true)
+
+    const output = errorSpy.mock.calls.map((args) => String(args[0])).join("\n")
+    expect(output).toContain("Cause 1:")
+    expect(output).toContain("[REDACTED Buffer]")
+    expect(output).not.toContain("ArrayBuffer")
+    expect(output).not.toContain("Uint8Array")
+    expect(output).not.toMatch(/66, 66/v)
+  })
+
+  it("redacts command failure causes without invoking getters or following cycles", () => {
+    const cause: { self?: unknown } = {}
+    Object.defineProperty(cause, "secret", {
+      enumerable: true,
+      get() {
+        throw new Error("getter should not run")
+      },
+    })
+    cause.self = cause
+    const error = new Error("top-level error")
+    error.cause = cause
+
+    expect(() => {
+      printCommandFailure(error, true)
+    }).not.toThrow()
+
+    const output = errorSpy.mock.calls.map((args) => String(args[0])).join("\n")
+    expect(output).toContain("[Accessor]")
+    expect(output).toContain("[Circular]")
+    expect(output).not.toContain("getter should not run")
   })
 
   it("prints a single cause when the error has one cause", () => {

@@ -1,9 +1,9 @@
 /* eslint-disable max-lines -- CLI output rendering is intentionally kept together */
-import { inspect } from "node:util"
 import pc from "picocolors"
 
 import type { ModuleStatus } from "./types.js"
 
+import { inspectRedactedBinaryValue } from "./errorRedaction.js"
 import { fitAnimatedModuleLine, formatDisplayModule } from "./outputFormatting.js"
 import { maskRegisteredSecrets } from "./secretSink.js"
 import { CommandError } from "./sshHelpers.js"
@@ -12,6 +12,7 @@ import { CommandError } from "./sshHelpers.js"
 // a runaway plain object cannot dump unbounded text into stderr.
 const CAUSE_INSPECT_DEPTH = 2
 const CAUSE_INSPECT_MAX_STRING_LENGTH = 1024
+const CAUSE_REDACT_BINARY_MAX_DEPTH = CAUSE_INSPECT_DEPTH + 1
 
 const MODULE_NAME_WIDTH = 56
 const MIN_MODULE_NAME_WIDTH = 12
@@ -445,7 +446,7 @@ function printVerboseErrorCause(
     return
   }
 
-  printVerboseErrorBlock(label, maskRegisteredSecrets(String(cause)))
+  printVerboseErrorBlock(label, maskRegisteredSecrets(formatCauseValue(cause)))
 }
 
 function printVerboseGenericError(error: Error): void {
@@ -469,17 +470,18 @@ function printVerboseGenericError(error: Error): void {
 /**
  * Format the textual representation of a single cause-chain link. `Error`
  * values surface their message; other values are rendered through
- * {@link inspect} with bounded depth/string length so primitives and plain
- * objects still carry diagnostic context without dumping unbounded text.
+ * a bounded inspector so primitives and plain objects still carry diagnostic
+ * context without dumping unbounded text.
  */
 function formatCauseValue(cause: unknown): string {
   if (cause instanceof Error) return cause.message
   // R-0000580: replace `String(cause)` with `util.inspect` so plain objects
   // produce useful output ("[object Object]" → `{ key: "…" }`) and the result
   // is capped via depth/string-length bounds.
-  return inspect(cause, {
+  return inspectRedactedBinaryValue(cause, {
     depth: CAUSE_INSPECT_DEPTH,
     maxStringLength: CAUSE_INSPECT_MAX_STRING_LENGTH,
+    redactMaxDepth: CAUSE_REDACT_BINARY_MAX_DEPTH,
   })
 }
 

@@ -4,13 +4,13 @@ import { AsyncLocalStorage } from "node:async_hooks"
 import { realpathSync } from "node:fs"
 import { extname, resolve } from "node:path"
 import { fileURLToPath, pathToFileURL } from "node:url"
-import { inspect } from "node:util"
 import pc from "picocolors"
 
 import type { Environment, ServerDefinition } from "./types.js"
 
 import { isMissingTsxDependencyError } from "./cliTsxHelpers.js"
 import { ENVIRONMENT_FORBIDDEN_KEYS } from "./environment.js"
+import { inspectRedactedBinaryValue } from "./errorRedaction.js"
 import { runWithFirstRunFlag, runWithoutFirstRunFlag } from "./firstRunContext.js"
 import { printCliHeader } from "./output.js"
 import { type RunOptions, runPlaybook } from "./runner.js"
@@ -188,14 +188,6 @@ const ERROR_INSPECT_MAX_ARRAY_LENGTH = 32
 const ERROR_INSPECT_MAX_STRING_LENGTH = 1024
 
 /**
- * R-0000691: token placed in the redacted graph wherever a Buffer-shaped
- * value used to live. Mirrors the masking style used elsewhere in the CLI
- * so a downstream operator can grep for "[REDACTED" and find every place
- * a sensitive payload was elided.
- */
-const REDACTED_BUFFER_PLACEHOLDER = "[REDACTED Buffer]"
-
-/**
  * R-0000691: maximum recursion depth applied to the pre-inspect redaction
  * walk. Stays one level beyond `ERROR_INSPECT_DEPTH` so a Buffer that
  * `inspect` would still render is still elided. A bounded depth is
@@ -203,137 +195,6 @@ const REDACTED_BUFFER_PLACEHOLDER = "[REDACTED Buffer]"
  * walk on a cyclic reference.
  */
 const REDACT_BUFFER_MAX_DEPTH = ERROR_INSPECT_DEPTH + 1
-
-/**
- * R-0000691: recursively clone `value` while replacing every Buffer it
- * contains with {@link REDACTED_BUFFER_PLACEHOLDER}. The `seen` WeakSet
- * short-circuits cycles so the walk always terminates. The clone is
- * intentionally shallow with respect to non-plain instances (Errors, Maps,
- * Sets, Promises, …) — those are reproduced as plain objects describing
- * their own keys so `inspect` can render them without re-following the
- * original instance. A Buffer found at any nesting level — including
- * `cause`, `data`, custom fields — collapses to the placeholder before
- * `inspect` ever sees it, eliminating the byte-array leak window.
- *
- * @param value - The caught value whose graph should be Buffer-redacted.
- * @param depth - Current recursion depth (callers should pass `0`).
- * @param seen - Identity set tracking already-visited object references.
- * @returns A Buffer-free clone safe to feed into `util.inspect`.
- */
-
-// R-0000786: Buffer.isBuffer covers Node's pooled Buffer subclass but skips
-// raw TypedArrays (Uint8Array, Float32Array, …) and ArrayBuffer itself.
-// Those carry the same byte-leak risk as a Buffer once `util.inspect`
-// walks them, so collapse them to the same placeholder before recursing.
-function isBufferLikeView(value: unknown): boolean {
-  if (Buffer.isBuffer(value)) return true
-  if (value instanceof ArrayBuffer) return true
-  return ArrayBuffer.isView(value)
-}
-
-/**
- * R-0000836: keys we must skip even if they appear as own properties so an
- * attacker-controlled error graph cannot mutate the freshly created clone's
- * prototype chain. `Object.create(null)` already removes Object.prototype,
- * but explicit skip is cheap defence-in-depth for the rare case the clone
- * gets re-rooted onto a non-null prototype downstream.
- */
-const REDACT_FORBIDDEN_KEYS = new Set(["__proto__", "constructor", "prototype"])
-
-/**
- * R-0000836/R-0000837: copy a single own-property from `source` into the
- * prototype-null `redacted` clone, applying the forbidden-key skip list,
- * descriptor-based access (so malicious getters never execute), and the
- * symbol-key prefix that prevents collisions with same-named string keys.
- *
- * @param parameters - Aggregated arguments describing the copy operation.
- * @param parameters.depth - Current recursion depth passed through to {@link redactBufferProperties}.
- * @param parameters.destinationKey - Pre-computed key (string-form) under which the value lands in `redacted`.
- * @param parameters.redacted - Prototype-null clone receiving the redacted value.
- * @param parameters.seen - Identity set tracking already-visited object references.
- * @param parameters.source - Original record the property descriptor is read from.
- * @param parameters.sourceKey - Own key on `source` (string or symbol) whose descriptor we copy.
- */
-function copyRedactedProperty(parameters: {
-  depth: number
-  destinationKey: string
-  redacted: Record<string, unknown>
-  seen: WeakSet<object>
-  source: Record<string, unknown>
-  sourceKey: PropertyKey
-}): void {
-  const { depth, destinationKey, redacted, seen, source, sourceKey } = parameters
-  const descriptor = Object.getOwnPropertyDescriptor(source, sourceKey)
-  if (descriptor == null) return
-  if (!("value" in descriptor)) {
-    redacted[destinationKey] = "[Accessor]"
-    return
-  }
-  const descriptorValue: unknown = descriptor.value
-  redacted[destinationKey] = redactBufferProperties(descriptorValue, depth + 1, seen)
-}
-
-function redactObjectProperties(
-  sourceRecord: Record<string, unknown>,
-  depth: number,
-  seen: WeakSet<object>
-): Record<string, unknown> {
-  // R-0000836: prototype-null clone so a `__proto__` key on a tampered cause
-  // graph cannot pollute Object.prototype during the assignment below.
-  // eslint-disable-next-line @typescript-eslint/no-unsafe-type-assertion -- intentional: Object.create(null) is the prototype-pollution defense
-  const redacted: Record<string, unknown> = Object.create(null) as Record<string, unknown>
-  // R-0000691: walk own-enumerable + own-symbol property names so a
-  // `cause`-shaped Buffer that lives on an Error instance is still
-  // captured. `inspect` later renders this plain object, which is fine
-  // because the goal is to elide the Buffer payload — not to reproduce
-  // the original prototype chain.
-  // R-0000836: read each property through its descriptor so a malicious
-  // getter does not execute during the walk. Accessor descriptors collapse
-  // to a static placeholder; only plain data values are recursed into.
-  // R-0000837: split string vs. symbol iteration and prefix symbol keys so
-  // a Symbol whose description happens to match an existing string key (e.g.
-  // both `"cause"` and `Symbol("cause")`) cannot overwrite the string-keyed
-  // entry in the clone.
-  for (const key of Object.keys(sourceRecord)) {
-    if (REDACT_FORBIDDEN_KEYS.has(key)) continue
-    copyRedactedProperty({
-      depth,
-      destinationKey: key,
-      redacted,
-      seen,
-      source: sourceRecord,
-      sourceKey: key,
-    })
-  }
-  for (const symbolKey of Object.getOwnPropertySymbols(sourceRecord)) {
-    // Stable, unambiguous prefix so symbol keys never collide with string
-    // keys produced above (Symbols cannot themselves be JSON keys, and
-    // `inspect` happily renders the prefixed string).
-    copyRedactedProperty({
-      depth,
-      destinationKey: `@@symbol:${symbolKey.toString()}`,
-      redacted,
-      seen,
-      source: sourceRecord,
-      sourceKey: symbolKey,
-    })
-  }
-  return redacted
-}
-
-function redactBufferProperties(value: unknown, depth: number, seen: WeakSet<object>): unknown {
-  if (isBufferLikeView(value)) return REDACTED_BUFFER_PLACEHOLDER
-  if (value === null || typeof value !== "object") return value
-  if (depth > REDACT_BUFFER_MAX_DEPTH) return value
-  if (seen.has(value)) return "[Circular]"
-  seen.add(value)
-  if (Array.isArray(value)) {
-    return value.map((entry) => redactBufferProperties(entry, depth + 1, seen))
-  }
-  // eslint-disable-next-line @typescript-eslint/no-unsafe-type-assertion -- the prior `typeof value !== "object"` and `Array.isArray` guards above prove that `value` is a non-array plain-style object whose keys can be enumerated via Reflect.ownKeys
-  const sourceRecord = value as Record<string, unknown>
-  return redactObjectProperties(sourceRecord, depth, seen)
-}
 
 /**
  * Returns a human-readable string for any caught value.
@@ -356,14 +217,14 @@ function errorToString(value: unknown): string {
     // leak into stderr through any caught value with a Buffer-shaped
     // cause / data field. The pre-pass clones the graph defensively so
     // the original error object stays untouched for downstream consumers.
-    const sanitized = redactBufferProperties(value, 0, new WeakSet<object>())
     return maskRegisteredSecrets(
-      inspect(sanitized, {
+      inspectRedactedBinaryValue(value, {
         breakLength: Infinity,
         compact: true,
         depth: ERROR_INSPECT_DEPTH,
         maxArrayLength: ERROR_INSPECT_MAX_ARRAY_LENGTH,
         maxStringLength: ERROR_INSPECT_MAX_STRING_LENGTH,
+        redactMaxDepth: REDACT_BUFFER_MAX_DEPTH,
       })
     )
   }
