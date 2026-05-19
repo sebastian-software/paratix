@@ -2,6 +2,75 @@ import { describe, expect, it, vi } from "vitest"
 
 import { createMockSsh, createStrictMockSsh } from "./mockSsh.js"
 
+const FLAG_LOCK_FLAGS_DIRECTORY = "/var/lib/paratix/flags"
+
+function flagPath(lockName: string, flagsDirectory = FLAG_LOCK_FLAGS_DIRECTORY): string {
+  return `${flagsDirectory}/'${lockName}'`
+}
+
+function markerPath(lockName: string, flagsDirectory = FLAG_LOCK_FLAGS_DIRECTORY): string {
+  return `${flagPath(lockName, flagsDirectory)}/holder`
+}
+
+function quotedMarkerPath(lockName: string, flagsDirectory = FLAG_LOCK_FLAGS_DIRECTORY): string {
+  return `'${flagsDirectory}/${lockName}/holder'`
+}
+
+function buildVerifiedReleaseCommand(
+  lockName: string,
+  options?: {
+    flagsDirectory?: string
+    quotedMarkerLockName?: string
+    removalLockName?: string
+    rmdirLockName?: string
+  }
+): string {
+  const flagsDirectory = options?.flagsDirectory ?? FLAG_LOCK_FLAGS_DIRECTORY
+  const quotedMarkerLockName = options?.quotedMarkerLockName ?? lockName
+  const removalLockName = options?.removalLockName ?? lockName
+  const rmdirLockName = options?.rmdirLockName ?? lockName
+  return (
+    `awk_token=$(awk 'NR==1{print $1}' -- ${quotedMarkerPath(quotedMarkerLockName, flagsDirectory)} 2>/dev/null); ` +
+    'awk_status=$?; [ "$awk_status" = 0 ] && [ "x$awk_token" = ' +
+    "'x12345@mockhost' ] && " +
+    `rm -f -- ${markerPath(removalLockName, flagsDirectory)} && ` +
+    `rmdir -- ${flagPath(rmdirLockName, flagsDirectory)}`
+  )
+}
+
+function buildMutexWaitCommand(
+  lockName: string,
+  options?: { finalLockName?: string; flagsDirectory?: string }
+): string {
+  const flagsDirectory = options?.flagsDirectory ?? FLAG_LOCK_FLAGS_DIRECTORY
+  const finalLockName = options?.finalLockName ?? lockName
+  return (
+    `i=0; while [ -d ${flagPath(lockName, flagsDirectory)} ] && [ "$i" -lt 300 ]; ` +
+    `do sleep 1; i=$((i+1)); done; [ ! -d ${flagPath(finalLockName, flagsDirectory)} ]`
+  )
+}
+
+function buildReclaimProbe(
+  lockName: string,
+  options?: { flagsDirectory?: string; markerLockName?: string }
+): string {
+  const flagsDirectory = options?.flagsDirectory ?? FLAG_LOCK_FLAGS_DIRECTORY
+  const markerLockName = options?.markerLockName ?? lockName
+  return (
+    `if [ -d ${flagPath(lockName, flagsDirectory)} ]; then ` +
+    `if [ -f ${markerPath(markerLockName, flagsDirectory)} ]; then ` +
+    `STALE_TOKEN="$(awk 'NR==1{print $1}' -- ${quotedMarkerPath(markerLockName, flagsDirectory)} 2>/dev/null)"; ` +
+    `if find ${markerPath(markerLockName, flagsDirectory)} -maxdepth 0 -mmin +0 -print -quit | grep -q .; then ` +
+    `[ "$(awk 'NR==1{print $1}' -- ${quotedMarkerPath(markerLockName, flagsDirectory)} 2>/dev/null)" = "$STALE_TOKEN" ] && ` +
+    `rm -f -- ${markerPath(markerLockName, flagsDirectory)} && rmdir -- ${flagPath(markerLockName, flagsDirectory)}; ` +
+    `else exit 1; fi; else ` +
+    `if find ${flagPath(lockName, flagsDirectory)} -maxdepth 0 -mmin +0 -print -quit | grep -q .; then ` +
+    `find ${flagPath(lockName, flagsDirectory)} -maxdepth 0 -mmin +0 -print -quit | grep -q . && ` +
+    `rm -f -- ${markerPath(lockName, flagsDirectory)} && rmdir -- ${flagPath(lockName, flagsDirectory)}; ` +
+    "else exit 1; fi; fi; else exit 1; fi"
+  )
+}
+
 describe("createMockSsh", () => {
   it("fails closed for unstubbed commands by default", async () => {
     const ssh = createMockSsh()
@@ -306,18 +375,7 @@ describe("createMockSsh", () => {
   })
 
   it("supports explicit flag-lock internal defaults", async () => {
-    const reclaimProbe =
-      "if [ -d /var/lib/paratix/flags/'etc-hosts-mutex' ]; then " +
-      "if [ -f /var/lib/paratix/flags/'etc-hosts-mutex'/holder ]; then " +
-      "STALE_TOKEN=\"$(awk 'NR==1{print $1}' -- '/var/lib/paratix/flags/etc-hosts-mutex/holder' 2>/dev/null)\"; " +
-      "if find /var/lib/paratix/flags/'etc-hosts-mutex'/holder -maxdepth 0 -mmin +0 -print -quit | grep -q .; then " +
-      "[ \"$(awk 'NR==1{print $1}' -- '/var/lib/paratix/flags/etc-hosts-mutex/holder' 2>/dev/null)\" = \"$STALE_TOKEN\" ] && " +
-      "rm -f -- /var/lib/paratix/flags/'etc-hosts-mutex'/holder && rmdir -- /var/lib/paratix/flags/'etc-hosts-mutex'; " +
-      "else exit 1; fi; else " +
-      "if find /var/lib/paratix/flags/'etc-hosts-mutex' -maxdepth 0 -mmin +0 -print -quit | grep -q .; then " +
-      "find /var/lib/paratix/flags/'etc-hosts-mutex' -maxdepth 0 -mmin +0 -print -quit | grep -q . && " +
-      "rm -f -- /var/lib/paratix/flags/'etc-hosts-mutex'/holder && rmdir -- /var/lib/paratix/flags/'etc-hosts-mutex'; " +
-      "else exit 1; fi; fi; else exit 1; fi"
+    const reclaimProbe = buildReclaimProbe("etc-hosts-mutex")
     const ssh = createMockSsh({}, { allowFlagLockInternalDefaults: true })
 
     await expect(ssh.exec("mkdir -p /var/lib/paratix/flags")).resolves.toMatchObject({ code: 0 })
@@ -327,6 +385,68 @@ describe("createMockSsh", () => {
     await expect(
       ssh.exec(reclaimProbe, { ignoreExitCode: true, silent: true })
     ).resolves.toMatchObject({ code: 1 })
+  })
+
+  it("rejects flag-lock internal defaults outside the flags directory", async () => {
+    const ssh = createMockSsh({}, { allowFlagLockInternalDefaults: true })
+
+    await expect(
+      ssh.exec(
+        `printf '%s@%s %s\\n' "$$" host "$(date +%s)" > ${markerPath("etc-hosts-mutex", "/tmp")}`
+      )
+    ).rejects.toThrow("createMockSsh: unstubbed exec call")
+    await expect(
+      ssh.output(`awk 'NR==1{print $1}' -- ${quotedMarkerPath("etc-hosts-mutex", "/tmp")}`)
+    ).rejects.toThrow("createMockSsh: unstubbed output call")
+    await expect(
+      ssh.exec(buildVerifiedReleaseCommand("etc-hosts-mutex", { flagsDirectory: "/tmp" }))
+    ).rejects.toThrow("createMockSsh: unstubbed exec call")
+    await expect(
+      ssh.exec(buildMutexWaitCommand("etc-hosts-mutex", { flagsDirectory: "/tmp" }))
+    ).rejects.toThrow("createMockSsh: unstubbed exec call")
+    await expect(
+      ssh.exec(buildReclaimProbe("etc-hosts-mutex", { flagsDirectory: "/tmp" }), {
+        ignoreExitCode: true,
+        silent: true,
+      })
+    ).rejects.toThrow("createMockSsh: unstubbed exec call")
+  })
+
+  it("rejects flag-lock internal defaults with inconsistent lock paths", async () => {
+    const ssh = createMockSsh({}, { allowFlagLockInternalDefaults: true })
+
+    await expect(
+      ssh.exec(buildVerifiedReleaseCommand("etc-hosts-mutex", { removalLockName: "other-mutex" }))
+    ).rejects.toThrow("createMockSsh: unstubbed exec call")
+    await expect(
+      ssh.exec(buildMutexWaitCommand("etc-hosts-mutex", { finalLockName: "other-mutex" }))
+    ).rejects.toThrow("createMockSsh: unstubbed exec call")
+    await expect(
+      ssh.exec(buildReclaimProbe("etc-hosts-mutex", { markerLockName: "other-mutex" }), {
+        ignoreExitCode: true,
+        silent: true,
+      })
+    ).rejects.toThrow("createMockSsh: unstubbed exec call")
+  })
+
+  it("rejects flag-lock internal defaults with invalid lock names", async () => {
+    const ssh = createMockSsh({}, { allowFlagLockInternalDefaults: true })
+
+    await expect(ssh.exec("mkdir /var/lib/paratix/flags/'etc..hosts-mutex'")).rejects.toThrow(
+      "createMockSsh: unstubbed exec call"
+    )
+    await expect(
+      ssh.exec(`printf '%s@%s %s\\n' "$$" host "$(date +%s)" > ${markerPath("etc..hosts-mutex")}`)
+    ).rejects.toThrow("createMockSsh: unstubbed exec call")
+    await expect(
+      ssh.output(`awk 'NR==1{print $1}' -- ${quotedMarkerPath("etc..hosts-mutex")}`)
+    ).rejects.toThrow("createMockSsh: unstubbed output call")
+    await expect(ssh.exec(buildVerifiedReleaseCommand("etc..hosts-mutex"))).rejects.toThrow(
+      "createMockSsh: unstubbed exec call"
+    )
+    await expect(
+      ssh.exec(buildReclaimProbe("etc..hosts-mutex"), { ignoreExitCode: true, silent: true })
+    ).rejects.toThrow("createMockSsh: unstubbed exec call")
   })
 
   it("rejects flag-lock reclaim probes without the token recheck", async () => {
