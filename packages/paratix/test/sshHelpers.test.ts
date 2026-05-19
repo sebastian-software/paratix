@@ -49,12 +49,20 @@ function trustedHostVerifier(): boolean {
 }
 
 type CollectResult = Promise<{ code: number; stderr: string; stdout: string }>
+type EmittedOutput = Buffer | Buffer[] | string
+
+function emitOutput(stream: EventEmitter, output: EmittedOutput): void {
+  const chunks = Array.isArray(output) ? output : [output]
+  for (const chunk of chunks) {
+    stream.emit("data", typeof chunk === "string" ? Buffer.from(chunk) : chunk)
+  }
+}
 
 async function runCollect(
   overrides: {
     emitClose?: { code: null | number | undefined; signal?: string }
-    emitStderr?: string
-    emitStdout?: string
+    emitStderr?: EmittedOutput
+    emitStdout?: EmittedOutput
   } & Partial<StreamOutputParameters>
 ): CollectResult {
   const { emitClose = { code: 0 }, emitStderr, emitStdout, ...params } = overrides
@@ -75,8 +83,8 @@ async function runCollect(
       ...params,
     })
 
-    if (emitStdout !== undefined) stream.emit("data", Buffer.from(emitStdout))
-    if (emitStderr !== undefined) stderr.emit("data", Buffer.from(emitStderr))
+    if (emitStdout !== undefined) emitOutput(stream, emitStdout)
+    if (emitStderr !== undefined) emitOutput(stderr, emitStderr)
     stream.emit("close", emitClose.code, emitClose.signal)
 
     clearTimeout(timer)
@@ -482,6 +490,42 @@ describe("collectStreamOutput", () => {
     expect(result.code).toBe(0)
     expect(result.stdout).toBe("hello\n")
     expect(result.stderr).toBe("")
+  })
+
+  it("preserves UTF-8 stdout split across buffer chunks", async () => {
+    const output = Buffer.from("before € after")
+    const result = await runCollect({
+      command: "printf",
+      emitClose: { code: 0 },
+      emitStdout: [output.subarray(0, 9), output.subarray(9)],
+    })
+
+    expect(result.stdout).toBe("before € after")
+  })
+
+  it("preserves UTF-8 stderr split across buffer chunks", async () => {
+    const output = Buffer.from("warn: snowman ☃")
+    const result = await runCollect({
+      command: "printf",
+      emitClose: { code: 0 },
+      emitStderr: [output.subarray(0, 16), output.subarray(16)],
+    })
+
+    expect(result.stderr).toBe("warn: snowman ☃")
+  })
+
+  it("masks a multibyte secret split across buffer chunks", async () => {
+    const secret = "päss🔐"
+    const output = Buffer.from(`token ${secret} done`)
+    const result = await runCollect({
+      command: "printf",
+      emitClose: { code: 0 },
+      emitStdout: [output.subarray(0, 8), output.subarray(8, 13), output.subarray(13)],
+      secrets: [secret],
+    })
+
+    expect(result.stdout).not.toContain(secret)
+    expect(result.stdout).toBe("token [REDACTED] done")
   })
 
   it("limits captured stdout on successful exit while keeping a truncation marker", async () => {

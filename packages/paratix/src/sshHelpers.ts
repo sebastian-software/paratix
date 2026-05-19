@@ -1,6 +1,8 @@
 /* eslint-disable max-lines, max-statements -- ssh2 stream handlers are intentionally co-located */
 import type { Client, ClientChannel, ConnectConfig } from "ssh2"
 
+import { StringDecoder } from "node:string_decoder"
+
 import type { ExecOptions, ExecResult } from "./types.js"
 
 /**
@@ -373,6 +375,8 @@ export function collectStreamOutput(parameters: StreamOutputParameters): void {
   }
   const stdout = new CapturedOutput(maxOutputBytes)
   const stderr = new CapturedOutput(maxOutputBytes)
+  const stdoutDecoder = new StringDecoder("utf8")
+  const stderrDecoder = new StringDecoder("utf8")
 
   const stdoutMasker = createStreamMasker((text) => {
     stdout.append(text)
@@ -382,27 +386,41 @@ export function collectStreamOutput(parameters: StreamOutputParameters): void {
     stderr.append(text)
     if (!options.silent) writeStderr(text)
   }, secrets)
+  const finishStdoutDecode = (): void => {
+    const text = stdoutDecoder.end()
+    if (text.length > 0) stdoutMasker.push(text)
+  }
+  const finishStderrDecode = (): void => {
+    const text = stderrDecoder.end()
+    if (text.length > 0) stderrMasker.push(text)
+  }
 
   stream.on("data", (data: Buffer) => {
-    stdoutMasker.push(data.toString())
+    stdoutMasker.push(stdoutDecoder.write(data))
   })
   stream.stderr.on("data", (data: Buffer) => {
-    stderrMasker.push(data.toString())
+    stderrMasker.push(stderrDecoder.write(data))
   })
   stream.on("error", (error: Error) => {
     clearTimeout(timer)
+    finishStdoutDecode()
+    finishStderrDecode()
     stdoutMasker.flush()
     stderrMasker.flush()
     reject(error)
   })
   stream.stderr.on("error", (error: Error) => {
     clearTimeout(timer)
+    finishStdoutDecode()
+    finishStderrDecode()
     stdoutMasker.flush()
     stderrMasker.flush()
     reject(error)
   })
   stream.on("close", (code: null | number | undefined, signal?: null | string) => {
     clearTimeout(timer)
+    finishStdoutDecode()
+    finishStderrDecode()
     stdoutMasker.flush()
     stderrMasker.flush()
     const capturedStdout = stdout.toString()
