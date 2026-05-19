@@ -134,11 +134,16 @@ type ScriptedExecStep05 =
   | { code: number; stderr?: string; stdout?: string }
   | { kind: "reject"; reason: Error }
 
+type ScriptedExecHarness05 = {
+  assertConsumed: () => void
+  exec: ReturnType<typeof createMockSsh>["exec"]
+}
+
 function buildMutexAwareExecSequence05(
   steps: readonly ScriptedExecStep05[]
-): ReturnType<typeof createMockSsh>["exec"] {
+): ScriptedExecHarness05 {
   let cursor = 0
-  return async (command) => {
+  const exec: ReturnType<typeof createMockSsh>["exec"] = async (command) => {
     if (isMutexBookkeepingCommand05(command)) {
       await Promise.resolve()
       return { code: 0, stderr: "", stdout: "" }
@@ -150,7 +155,10 @@ function buildMutexAwareExecSequence05(
       await Promise.resolve()
       return { code: 0, stderr: "", stdout: "/tmp/paratix-sshd-dry-run.ABCDEF" }
     }
-    const step = steps[cursor] ?? { code: 0, stderr: "", stdout: "" }
+    if (cursor >= steps.length) {
+      throw new Error(`Unexpected exec command after scripted sequence was consumed: ${command}`)
+    }
+    const step = steps[cursor]
     cursor += 1
     if ("kind" in step) {
       await Promise.resolve()
@@ -158,6 +166,12 @@ function buildMutexAwareExecSequence05(
     }
     await Promise.resolve()
     return { code: step.code, stderr: step.stderr ?? "", stdout: step.stdout ?? "" }
+  }
+  return {
+    assertConsumed() {
+      expect(cursor).toBe(steps.length)
+    },
+    exec,
   }
 }
 
@@ -495,7 +509,8 @@ describe("sshd.config — apply: validation and rollback", () => {
 
     // R-0000613: bypass mutex bookkeeping commands so the scripted sequence
     // matches the domain calls only.
-    execSpy.mockImplementation(buildMutexAwareExecSequence05([{ code: 1 }, { code: 1 }]))
+    const execSequence = buildMutexAwareExecSequence05([{ code: 1 }, { code: 1 }])
+    execSpy.mockImplementation(execSequence.exec)
 
     const mod = sshd.config({ PasswordAuthentication: "no" })
     const result = await mod.apply(mockSsh, emptyEnv)
@@ -509,6 +524,7 @@ describe("sshd.config — apply: validation and rollback", () => {
       .map((args) => args[0])
       .filter((cmd) => !isMutexBookkeepingCommand05(cmd))
     expect(domainCommands).toStrictEqual([SYSTEMCTL_CAT_SSHD, SYSTEMCTL_CAT_SSH])
+    execSequence.assertConsumed()
   })
 
   // R-0000621: when the original reload fails and the rollback path lands on
