@@ -4,6 +4,7 @@ import { failed } from "../moduleFailure.js"
 import { shellQuote } from "../ssh.js"
 import { type Module, type ModuleResult, NEEDS_APPLY, type SshConnection } from "../types.js"
 import { hasSensitiveQueryParameters } from "./curlHelpers.js"
+import { findSymlinkInAncestorWalk, isSymlink } from "./remoteFileChecks.js"
 
 const EXEC_OPTS = { ignoreExitCode: true, silent: true } as const
 
@@ -18,9 +19,7 @@ const EXEC_OPTS = { ignoreExitCode: true, silent: true } as const
 // invariant is established before any async exec / rm -rf path can execute.
 function validateCloneDestination(destination: string): void {
   const trimmedDestination = destination.trim()
-  if (trimmedDestination.length === 0) {
-    throw new Error("git.clone: destination must not be empty")
-  }
+  if (trimmedDestination.length === 0) throw new Error("git.clone: destination must not be empty")
 
   if (trimmedDestination !== destination) {
     throw new Error(`git.clone: destination must not start or end with whitespace: ${destination}`)
@@ -32,18 +31,15 @@ function validateCloneDestination(destination: string): void {
     )
   }
 
-  if (!posix.isAbsolute(trimmedDestination)) {
+  if (!posix.isAbsolute(trimmedDestination))
     throw new Error(`git.clone: destination must be an absolute path: ${destination}`)
-  }
 
   const normalizedDestination = posix.normalize(trimmedDestination)
-  if (normalizedDestination === "/") {
+  if (normalizedDestination === "/")
     throw new Error(`git.clone: refusing to use destructive destination path: ${destination}`)
-  }
 
-  if (trimmedDestination !== normalizedDestination) {
+  if (trimmedDestination !== normalizedDestination)
     throw new Error(`git.clone: destination must be normalized: ${destination}`)
-  }
 }
 
 function validateCloneRepo(repo: string): void {
@@ -60,19 +56,14 @@ function validateCloneRepo(repo: string): void {
     return
   }
 
-  if (
-    (parsed.protocol === "http:" || parsed.protocol === "https:") &&
-    (parsed.username.length > 0 || parsed.password.length > 0)
-  ) {
+  const isHttp = parsed.protocol === "http:" || parsed.protocol === "https:"
+  if (isHttp && (parsed.username.length > 0 || parsed.password.length > 0)) {
     throw new Error(
       "git.clone repo URLs must not embed credentials. Use SSH with deploy keys or an SSH agent instead."
     )
   }
 
-  if (
-    (parsed.protocol === "http:" || parsed.protocol === "https:") &&
-    hasSensitiveQueryParameters(parsed)
-  ) {
+  if (isHttp && hasSensitiveQueryParameters(parsed)) {
     throw new Error(
       "git.clone repo URLs must not contain sensitive query parameters. Use SSH with deploy keys or an SSH agent instead."
     )
@@ -114,15 +105,11 @@ type GitCloneParameters = {
   repo: string
 }
 
-/**
- * Remove the destination directory before retrying a clone. Used after a
- * failed first-pass clone leaves the destination partially populated; without
- * this cleanup the fallback `git clone` aborts with "destination path already
- * exists". R-0000223.
- *
- * @param conn - The SSH connection to the remote host.
- * @param destination - The destination path on the remote host.
- */
+async function hasSymlink(ssh: SshConnection, paths: [string, string]): Promise<boolean> {
+  const destinationProbe = await findSymlinkInAncestorWalk(ssh, paths[0])
+  return destinationProbe !== null || (await isSymlink(ssh, paths[1]))
+}
+
 async function cleanupFailedCloneDestination(
   conn: SshConnection,
   destination: string
@@ -130,19 +117,6 @@ async function cleanupFailedCloneDestination(
   await conn.exec(`rm -rf -- ${shellQuote(destination)}`, EXEC_OPTS)
 }
 
-/**
- * Run the fallback path of a referenced clone: plain `git clone` followed by
- * `git checkout <reference>`. Used after `git clone --branch <ref>` fails
- * (e.g. because the ref is a bare commit SHA). R-0000642: when the clone
- * succeeds but the checkout fails, the worktree is at the repository's
- * default branch instead of the requested reference; remove the destination
- * the apply just created so the host stays in the original state.
- *
- * @param conn - The SSH connection to the remote host.
- * @param parameters - Clone parameters including destination, reference, and repo.
- * @param destinationExistedBeforeClone - Whether the destination existed before this apply.
- * @returns A promise that resolves to `true` when the fallback clone + checkout succeeded.
- */
 async function cloneRepoFallback(
   conn: SshConnection,
   parameters: { reference: string } & GitCloneParameters,
@@ -173,21 +147,6 @@ async function cloneRepoFallback(
   return false
 }
 
-/**
- * Clone a repository into a new directory, optionally at a specific ref.
- *
- * When `reference` is non-empty the implementation first attempts a single
- * `git clone --branch <ref>`. If that fails (e.g. because the ref is a bare
- * commit SHA which `--branch` cannot accept) the destination is removed before
- * falling back to a plain `git clone` + `git checkout <ref>`. R-0000223:
- * without the destination cleanup the fallback clone fails immediately with
- * `destination path … already exists` because the first attempt may have left
- * a partial worktree behind.
- *
- * @param conn - The SSH connection to the remote host.
- * @param parameters - Clone parameters including repo, destination, and optional reference.
- * @returns A promise that resolves to `true` when the clone is complete.
- */
 async function cloneRepo(conn: SshConnection, parameters: GitCloneParameters): Promise<boolean> {
   const { destination, reference, repo } = parameters
   if (reference !== undefined && reference !== "") {
@@ -426,6 +385,22 @@ async function checkHeadMatchesReference(
   return head === resolved ? "ok" : NEEDS_APPLY
 }
 
+async function applyExistingRepo(
+  conn: SshConnection,
+  parameters: GitCloneParameters
+): Promise<ModuleResult> {
+  const { destination } = parameters
+  if (!(await ensureOriginUrl(conn, parameters)))
+    return failed(`[git.clone: ${destination}] git clone or update failed`)
+  const previousHead = await readWorktreeHead(conn, destination)
+  if (!(await updateRepo(conn, parameters)))
+    return failed(`[git.clone: ${destination}] git clone or update failed`)
+  const currentHead = await readWorktreeHead(conn, destination)
+  if (previousHead !== null && currentHead !== null && previousHead === currentHead)
+    return { status: "ok" }
+  return { status: "changed" }
+}
+
 /**
  * Resolve the remote default branch HEAD to a commit SHA.
  *
@@ -481,6 +456,12 @@ export const git = {
       async apply(conn: null | SshConnection): Promise<ModuleResult> {
         if (!conn) return failed(`[git.clone: ${destination}] SSH connection is required`)
 
+        if (await hasSymlink(conn, [destination, gitDirectory])) {
+          return failed(
+            `[git.clone: ${destination}] destination and .git must not contain symlinks`
+          )
+        }
+
         const directoryExists = await conn.test(`test -d ${shellQuote(gitDirectory)}`)
         if (!directoryExists) {
           const cloned = await cloneRepo(conn, parameters)
@@ -489,27 +470,12 @@ export const git = {
             : failed(`[git.clone: ${destination}] git clone or update failed`)
         }
 
-        // R-0000279: differentiate a true update from a no-op rerun. `updateRepo`
-        // performs `fetch + reset --hard`, which always succeeds even when the
-        // worktree was already at the desired commit. Without a HEAD comparison
-        // every apply would announce `changed` and uselessly fire downstream
-        // signals (service.reload, ...). compose.up:composeUpReportedChange
-        // follows the same pattern.
-        const originReady = await ensureOriginUrl(conn, parameters)
-        if (!originReady) return failed(`[git.clone: ${destination}] git clone or update failed`)
-
-        const previousHead = await readWorktreeHead(conn, destination)
-        const updated = await updateRepo(conn, parameters)
-        if (!updated) return failed(`[git.clone: ${destination}] git clone or update failed`)
-
-        const currentHead = await readWorktreeHead(conn, destination)
-        if (previousHead !== null && currentHead !== null && previousHead === currentHead) {
-          return { status: "ok" }
-        }
-        return { status: "changed" }
+        return applyExistingRepo(conn, parameters)
       },
       async check(conn: null | SshConnection): Promise<"needs-apply" | "ok"> {
         if (!conn) return NEEDS_APPLY
+
+        if (await hasSymlink(conn, [destination, gitDirectory])) return NEEDS_APPLY
 
         const gitDirectoryExists = await conn.test(`test -d ${shellQuote(gitDirectory)}`)
         if (!gitDirectoryExists) return NEEDS_APPLY

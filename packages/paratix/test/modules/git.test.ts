@@ -1,5 +1,7 @@
 import { describe, expect, it } from "vitest"
 
+import type { MockResponseStub } from "../helpers/mockSshCommandResponses.js"
+
 import { git } from "../../src/modules/git.js"
 import { shellQuote } from "../../src/ssh.js"
 import { createMockSsh as createBaseMockSsh } from "../helpers/mockSsh.js"
@@ -12,6 +14,12 @@ const repo = "git@github.com:example/repo.git"
 const destination = "/opt/myapp"
 const gitDir = `${destination}/.git`
 const originUrlCommand = `git -C '${destination}' remote get-url origin`
+const destinationSymlinkProbe = `[ -L '${destination}' ]`
+const optSymlinkProbe = "[ -L '/opt' ]"
+const gitDirSymlinkProbe = `[ -L '${gitDir}' ]`
+const noSymlinkResponseStubs: MockResponseStub[] = [
+  { command: /^\[ -L .+ \]$/v, result: { code: 1 } },
+]
 
 const createMockSsh: typeof createBaseMockSsh = (responses, options) =>
   createBaseMockSsh(
@@ -25,11 +33,20 @@ const createMockSsh: typeof createBaseMockSsh = (responses, options) =>
       [originUrlCommand]: { code: 0, stdout: repo },
       ...responses,
     },
-    options
+    {
+      ...options,
+      responseStubs: [...(options?.responseStubs ?? []), ...noSymlinkResponseStubs],
+    }
   )
 
 function createGitApplyMockSsh(responses: MockSshResponses = {}) {
   return createMockSsh(responses)
+}
+
+function expectNoGitMutationCalls(calls: string[]) {
+  expect(
+    calls.filter((call) => call.startsWith("git ") || call.startsWith("rm -rf"))
+  ).toStrictEqual([])
 }
 
 describe("git.clone — validation", () => {
@@ -174,6 +191,45 @@ describe("git.clone — check", () => {
     const mod = git.clone(repo, destination)
     const result = await mod.check(mockSsh, emptyEnv)
     expect(result).toBe("needs-apply")
+  })
+
+  it("returns needs-apply when the destination is a symlink", async () => {
+    const mockSsh = createMockSsh({
+      [destinationSymlinkProbe]: { code: 0 },
+    })
+    const mod = git.clone(repo, destination)
+
+    const result = await mod.check(mockSsh, emptyEnv)
+
+    expect(result).toBe("needs-apply")
+    expect(mockSsh.calls).not.toContain(`test -d '${gitDir}'`)
+    expect(mockSsh.calls).not.toContain(originUrlCommand)
+  })
+
+  it("returns needs-apply when a destination ancestor is a symlink", async () => {
+    const mockSsh = createMockSsh({
+      [optSymlinkProbe]: { code: 0 },
+    })
+    const mod = git.clone(repo, destination)
+
+    const result = await mod.check(mockSsh, emptyEnv)
+
+    expect(result).toBe("needs-apply")
+    expect(mockSsh.calls).not.toContain(`test -d '${gitDir}'`)
+    expect(mockSsh.calls).not.toContain(originUrlCommand)
+  })
+
+  it("returns needs-apply when .git is a symlink", async () => {
+    const mockSsh = createMockSsh({
+      [gitDirSymlinkProbe]: { code: 0 },
+    })
+    const mod = git.clone(repo, destination)
+
+    const result = await mod.check(mockSsh, emptyEnv)
+
+    expect(result).toBe("needs-apply")
+    expect(mockSsh.calls).not.toContain(`test -d '${gitDir}'`)
+    expect(mockSsh.calls).not.toContain(originUrlCommand)
   })
 
   it("returns ok when .git directory exists and no ref is specified", async () => {
@@ -401,6 +457,48 @@ describe("git.clone — apply", () => {
     const result = await mod.apply(mockSsh, emptyEnv)
     expect(result.status).toBe("changed")
     expect(mockSsh.calls).toContain(`git clone -- '${repo}' '${destination}'`)
+  })
+
+  it("returns failed without mutation when the destination is a symlink", async () => {
+    const mockSsh = createGitApplyMockSsh({
+      [destinationSymlinkProbe]: { code: 0 },
+    })
+    const mod = git.clone(repo, destination)
+
+    const result = await mod.apply(mockSsh, emptyEnv)
+
+    expect(result.status).toBe("failed")
+    expect(String(result.error?.message)).toContain("must not contain symlinks")
+    expectNoGitMutationCalls(mockSsh.calls)
+    expect(mockSsh.calls).not.toContain(`test -d '${gitDir}'`)
+  })
+
+  it("returns failed without mutation when a destination ancestor is a symlink", async () => {
+    const mockSsh = createGitApplyMockSsh({
+      [optSymlinkProbe]: { code: 0 },
+    })
+    const mod = git.clone(repo, destination)
+
+    const result = await mod.apply(mockSsh, emptyEnv)
+
+    expect(result.status).toBe("failed")
+    expect(String(result.error?.message)).toContain("must not contain symlinks")
+    expectNoGitMutationCalls(mockSsh.calls)
+    expect(mockSsh.calls).not.toContain(`test -d '${gitDir}'`)
+  })
+
+  it("returns failed without mutation when .git is a symlink", async () => {
+    const mockSsh = createGitApplyMockSsh({
+      [gitDirSymlinkProbe]: { code: 0 },
+    })
+    const mod = git.clone(repo, destination)
+
+    const result = await mod.apply(mockSsh, emptyEnv)
+
+    expect(result.status).toBe("failed")
+    expect(String(result.error?.message)).toContain("must not contain symlinks")
+    expectNoGitMutationCalls(mockSsh.calls)
+    expect(mockSsh.calls).not.toContain(`test -d '${gitDir}'`)
   })
 
   it("clones repo with --branch when .git does not exist and ref is given", async () => {
