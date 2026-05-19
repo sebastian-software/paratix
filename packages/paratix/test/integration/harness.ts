@@ -191,12 +191,16 @@ async function ensureDockerIsAvailable(run: CommandRunner): Promise<void> {
   try {
     await run("docker", ["info"], { timeoutMs: DEFAULT_COMMAND_TIMEOUT_MS })
   } catch (error) {
-    throw new Error("Integration tests require a reachable Docker runtime.", { cause: error })
+    throw createDockerNotReachableError(error)
   }
 }
 
 function shouldStartColima(environment: NodeJS.ProcessEnv): boolean {
   return environment.PARATIX_INTEGRATION_START_COLIMA === "true"
+}
+
+function createDockerNotReachableError(cause: unknown): Error {
+  return new Error("Integration tests require a reachable Docker runtime.", { cause })
 }
 
 function createColimaNotRunningError(): Error {
@@ -245,9 +249,11 @@ export async function ensureIntegrationRuntimeIsAvailable(
   const run = options.run ?? runCommand
 
   const isCiRuntime = environment.CI === "true"
-  if (isCiRuntime || platform !== "darwin") {
+  try {
     await ensureDockerIsAvailable(run)
     return
+  } catch (dockerError) {
+    if (isCiRuntime || platform !== "darwin") throw dockerError
   }
 
   await ensureColimaIsAvailable(environment, run)
