@@ -406,15 +406,16 @@ async function captureSshSocketState(ssh: SshConnection): Promise<SshSocketState
   }
 }
 
-async function disableSocketActivatedSsh(ssh: SshConnection): Promise<SshSocketState> {
-  const socketState = await captureSshSocketState(ssh)
-  if (!socketState.exists) return socketState
+async function disableSocketActivatedSsh(
+  ssh: SshConnection,
+  socketState: SshSocketState
+): Promise<void> {
+  if (!socketState.exists) return
 
   await ssh.exec(`systemctl disable --now ${socketState.unit}`, {
     ignoreExitCode: false,
     silent: true,
   })
-  return socketState
 }
 
 async function restoreSocketActivatedSsh(
@@ -854,7 +855,8 @@ async function restartSshdOnNewPort(
   let serviceUnit: SshdServiceUnit | undefined
   let serviceBootState: SshdServiceBootState | undefined
   try {
-    socketState = await disableSocketActivatedSsh(ssh)
+    socketState = await captureSshSocketState(ssh)
+    await disableSocketActivatedSsh(ssh, socketState)
     serviceUnit = await resolveSshServiceUnit(ssh)
     serviceBootState = await ensureSshServiceBootEnabled(ssh, { serviceUnit, socketState })
     await ssh.exec(`${SYSTEMCTL} restart ${serviceUnit}`, { silent: true })

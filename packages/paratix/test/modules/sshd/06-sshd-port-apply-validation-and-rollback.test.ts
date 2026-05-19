@@ -964,6 +964,46 @@ describe("sshd.port — apply: validation and rollback", () => {
     execSequence.assertConsumed()
   })
 
+  it("restores ssh.socket when disabling socket activation fails", async () => {
+    const originalConfig = "Port 22"
+    const mockSsh = createMockSsh({
+      [CAT_SSHD]: { stdout: originalConfig },
+    })
+    const writtenFiles = trackWriteFile(mockSsh)
+    vi.spyOn(mockSsh, "readFile")
+      .mockResolvedValueOnce(originalConfig) // initial read in applySshdPort
+      .mockResolvedValueOnce(originalConfig) // guard read in guardedWriteFile
+    const execSpy = vi.spyOn(mockSsh, "exec")
+    const removePortSpy = vi.spyOn(mockSsh, "removePort")
+
+    const execSequence = buildMutexAwareExecSequence([
+      { code: 0 }, // mkdir -p /run/sshd (dry-run)
+      { code: 0 }, // sshd -t -f <tmpfile>
+      { code: 0 }, // rm -f <tmpfile>
+      { code: 0 }, // ssh.socket exists
+      { code: 0 }, // ssh.socket enabled
+      { code: 0 }, // ssh.socket active
+      { kind: "reject", reason: new Error("disable --now ssh.socket failed") },
+      { code: 0 }, // enable --now ssh.socket (restore)
+    ])
+    execSpy.mockImplementation(execSequence.exec)
+
+    const mod = sshd.port(2222)
+    const result = await mod.apply(mockSsh, emptyEnv)
+
+    expect(result.status).toBe("failed")
+    expect(result.error?.message).toContain("sshd restart failed")
+    expect(result.error?.message).toContain("disable --now ssh.socket failed")
+    const execCommands = execSpy.mock.calls.map((args) => args[0])
+    expect(execCommands).toContain("systemctl disable --now ssh.socket")
+    expect(execCommands).toContain("systemctl enable --now ssh.socket")
+    expect(execCommands).not.toContain("systemctl restart sshd")
+    expect(removePortSpy).toHaveBeenCalledWith(2222)
+    expect(writtenFiles.at(-1)?.content).toBe(originalConfig)
+    expect(writtenFiles.at(-1)?.path).toBe(SSHD_CONFIG)
+    execSequence.assertConsumed()
+  })
+
   it("regression — removes added port even when rollback writeFile fails after restart error", async () => {
     const originalConfig = "Port 22"
     const mockSsh = createMockSsh({
