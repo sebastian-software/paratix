@@ -285,6 +285,14 @@ describe("net.hosts — apply", () => {
     const mod = net.hosts("10.0.0.1", ["web1"], { state: "absent" })
     const result = await mod.apply(mockSsh, emptyEnv)
     expect(result.status).toBe("changed")
+    expect(mockSsh.writeFileCalls).toStrictEqual([
+      {
+        content: "10.0.0.1 db1\n",
+        options: { mode: "0644" },
+        remotePath: "/etc/hosts",
+      },
+    ])
+    expect(mockSsh.writeFileCalls[0]?.content).not.toContain("web1")
   })
 
   it("reads /etc/hosts before writing (state: absent)", async () => {
