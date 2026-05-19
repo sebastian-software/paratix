@@ -1,6 +1,7 @@
 import type { SshConnection } from "../../src/types.js"
 
 import { shellQuote } from "../../src/ssh.js"
+import { CAPTURE_TRUNCATION_MARKER, DEFAULT_MAX_OUTPUT_BYTES } from "../../src/sshHelpers.js"
 import {
   createExec,
   createOutput,
@@ -86,6 +87,11 @@ export function createMockSsh(responses?: MockResponses, options?: MockSshOption
     probeSudoCalls: sideEffects.probeSudoCalls,
     async readFile(path) {
       const result = await exec(`cat ${shellQuote(path)}`, { silent: true })
+      if (result.stdout.endsWith(CAPTURE_TRUNCATION_MARKER)) {
+        throw new Error(
+          `[ssh.readFile: ${path}] remote file exceeds the captured-output cap of ${DEFAULT_MAX_OUTPUT_BYTES} bytes; refusing to return truncated contents`
+        )
+      }
       return result.stdout
     },
     reconnect: sideEffects.reconnect,
@@ -95,8 +101,13 @@ export function createMockSsh(responses?: MockResponses, options?: MockSshOption
     async sha256(path) {
       const exists = await this.test(`[ -f ${shellQuote(path)} ]`)
       if (!exists) return null
-      const output = await this.output(`sha256sum ${shellQuote(path)}`)
-      return output.split(/\s+/v)[0] ?? null
+      const result = await exec(`sha256sum ${shellQuote(path)}`, { silent: true })
+      if (result.stdout.endsWith(CAPTURE_TRUNCATION_MARKER)) {
+        throw new Error(
+          `[ssh.sha256: ${path}] sha256sum output exceeds the captured-output cap of ${DEFAULT_MAX_OUTPUT_BYTES} bytes; refusing to return a digest derived from truncated output`
+        )
+      }
+      return result.stdout.trim().split(/\s+/v)[0] ?? null
     },
     test: createTest(calls, responses, options),
     updateHost: spies.updateHost,

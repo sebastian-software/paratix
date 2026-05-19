@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from "vitest"
 
+import { CAPTURE_TRUNCATION_MARKER } from "../../src/sshHelpers.js"
 import { createMockSsh, createStrictMockSsh } from "./mockSsh.js"
 
 const FLAG_LOCK_FLAGS_DIRECTORY = "/var/lib/paratix/flags"
@@ -537,6 +538,46 @@ describe("createMockSsh", () => {
     await expect(ssh.sha256("/tmp/file")).rejects.toThrow(
       "Command failed with exit code 1: sha256sum '/tmp/file'"
     )
+  })
+
+  it("rejects readFile results that include the capture truncation marker", async () => {
+    const ssh = createMockSsh({
+      "cat '/tmp/file'": { stdout: `partial${CAPTURE_TRUNCATION_MARKER}` },
+    })
+
+    await expect(ssh.readFile("/tmp/file")).rejects.toThrow(
+      "[ssh.readFile: /tmp/file] remote file exceeds the captured-output cap"
+    )
+  })
+
+  it("rejects sha256 results that include the capture truncation marker", async () => {
+    const ssh = createMockSsh({
+      "[ -f '/tmp/file' ]": { code: 0 },
+      "sha256sum '/tmp/file'": {
+        stdout: `0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef  /tmp/file${CAPTURE_TRUNCATION_MARKER}`,
+      },
+    })
+
+    await expect(ssh.sha256("/tmp/file")).rejects.toThrow(
+      "[ssh.sha256: /tmp/file] sha256sum output exceeds the captured-output cap"
+    )
+  })
+
+  it("records sha256 as an exec call so truncation is inspected before output trimming", async () => {
+    const ssh = createMockSsh({
+      "[ -f '/tmp/file' ]": { code: 0 },
+      "sha256sum '/tmp/file'": {
+        stdout: "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef  /tmp/file\n",
+      },
+    })
+
+    await expect(ssh.sha256("/tmp/file")).resolves.toBe(
+      "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+    )
+    expect(ssh.execCalls).toContainEqual({
+      command: "sha256sum '/tmp/file'",
+      options: { silent: true },
+    })
   })
 
   it("supports precise response stubs without permitting unrelated commands", async () => {
