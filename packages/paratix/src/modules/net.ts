@@ -48,6 +48,9 @@ const DEFAULT_POLL_TIMEOUT_MS = 60_000
 const DEFAULT_EXPECTED_STATUS = 200
 const NET_RELOAD_HASH_LENGTH = 16
 const UNKNOWN_ROUTE_ERROR = "unknown error"
+const IPV4_ROUTE_FAMILY = "4"
+const IPV6_ROUTE_FAMILY = "6"
+const IPV6_IS_IP_VERSION = 6
 const MAX_HOSTNAME_LENGTH = 253
 const MAX_HOSTNAME_LABEL_LENGTH = 63
 const HOSTNAME_LABEL_CHARS_PATTERN = /^[a-z0-9\x2d]+$/iv
@@ -844,7 +847,10 @@ async function hasLiveRoute(
   conn: SshConnection,
   parameters: { destination: string; device?: string; gateway: string }
 ): Promise<boolean> {
-  const result = await conn.exec(`ip route show ${shellQuote(parameters.destination)}`, EXEC_OPTS)
+  const result = await conn.exec(
+    `${routeCommandBase(parameters)} show ${shellQuote(parameters.destination)}`,
+    EXEC_OPTS
+  )
   if (result.code !== 0) return false
   return result.stdout
     .split(/\r?\n/v)
@@ -964,11 +970,14 @@ async function applyPresentRoute(
   const { destination, device, dropinPath, gateway } = parameters
   const devicePart = device !== undefined && device !== "" ? ` dev ${shellQuote(device)}` : ""
   const routeResult = await conn.exec(
-    `ip route replace ${shellQuote(destination)} via ${shellQuote(gateway)}${devicePart}`,
+    `${routeCommandBase(parameters)} replace ${shellQuote(destination)} via ${shellQuote(gateway)}${devicePart}`,
     EXEC_OPTS
   )
   if (routeResult.code !== 0) {
-    return failedCommand(`[net.route: ${destination}] ip route replace failed`, routeResult)
+    return failedCommand(
+      `[net.route: ${destination}] ${routeCommandBase(parameters)} replace failed`,
+      routeResult
+    )
   }
   const dropinContent = buildRouteDropin(destination, gateway)
   // R-0000712: defense-in-depth — re-check the drop-in path after the
@@ -1042,12 +1051,27 @@ type RouteMutationSnapshotOutcome =
   | { failure: ModuleResult; snapshot: null }
   | { failure: null; snapshot: RouteMutationSnapshot }
 
+function routeIpFamily(parameters: { destination: string; gateway: string }): string {
+  const familySource =
+    parameters.destination === "default"
+      ? parameters.gateway
+      : parameters.destination.slice(0, parameters.destination.lastIndexOf("/"))
+  return isIP(familySource) === IPV6_IS_IP_VERSION ? IPV6_ROUTE_FAMILY : IPV4_ROUTE_FAMILY
+}
+
+function routeCommandBase(parameters: { destination: string; gateway: string }): string {
+  return `ip -${routeIpFamily(parameters)} route`
+}
+
 async function captureLiveRouteSnapshot(
   conn: SshConnection,
   parameters: RouteParameters
 ): Promise<LiveRouteSnapshotOutcome> {
   const { destination } = parameters
-  const result = await conn.exec(`ip route show ${shellQuote(destination)}`, EXEC_OPTS)
+  const result = await conn.exec(
+    `${routeCommandBase(parameters)} show ${shellQuote(destination)}`,
+    EXEC_OPTS
+  )
   if (result.code !== 0) {
     return {
       failure: failedCommand(`[net.route: ${destination}] live route snapshot failed`, result),
@@ -1108,8 +1132,8 @@ async function rollbackLiveRoute(
   const devicePart = device !== undefined && device !== "" ? ` dev ${shellQuote(device)}` : ""
   const command =
     snapshot.line == null
-      ? `ip route del ${shellQuote(destination)} via ${shellQuote(gateway)}${devicePart}`
-      : `ip route replace ${routeLineCommand(snapshot.line)}`
+      ? `${routeCommandBase(parameters)} del ${shellQuote(destination)} via ${shellQuote(gateway)}${devicePart}`
+      : `${routeCommandBase(parameters)} replace ${routeLineCommand(snapshot.line)}`
   const result = await conn.exec(command, EXEC_OPTS)
   if (result.code === 0) return null
   return failedCommand(`[net.route: ${destination}] live route rollback failed`, result)
@@ -1269,14 +1293,17 @@ async function deleteLiveRouteIfPresent(
   if (snapshot.failure != null) return { changed: false, failure: snapshot.failure, snapshot: null }
   const devicePart = device !== undefined && device !== "" ? ` dev ${shellQuote(device)}` : ""
   const routeResult = await conn.exec(
-    `ip route del ${shellQuote(destination)} via ${shellQuote(gateway)}${devicePart}`,
+    `${routeCommandBase(parameters)} del ${shellQuote(destination)} via ${shellQuote(gateway)}${devicePart}`,
     EXEC_OPTS
   )
   return routeResult.code === 0
     ? { changed: true, failure: null, snapshot: snapshot.snapshot }
     : {
         changed: false,
-        failure: failedCommand(`[net.route: ${destination}] ip route del failed`, routeResult),
+        failure: failedCommand(
+          `[net.route: ${destination}] ${routeCommandBase(parameters)} del failed`,
+          routeResult
+        ),
         snapshot: null,
       }
 }
