@@ -16,6 +16,7 @@ import {
   validateAptKeyUrl,
   verifyAptKeyFingerprint,
 } from "./aptKeyHelpers.js"
+import { ensureAptKeyringDirectorySymlinkFree } from "./aptKeyStaging.js"
 import { hexHashesEqual, sha256String } from "./fileHelpers.js"
 import { applyWithFlagLock, hasFlag, setVersionedFlag } from "./moduleHelpers.js"
 import { isSymlink } from "./remoteFileChecks.js"
@@ -23,6 +24,7 @@ import { isSymlink } from "./remoteFileChecks.js"
 const NONINTERACTIVE = "DEBIAN_FRONTEND=noninteractive"
 const APT_REPOSITORY_MODE = "0644"
 const APT_REPOSITORY_HASH_LENGTH = 16
+const APT_KEYRING_DIRECTORY = "/etc/apt/keyrings"
 
 // R-0000098: apt resource names land directly in shell paths like
 // `/etc/apt/keyrings/${name}.gpg` and `/etc/apt/sources.list.d/${name}.list`.
@@ -892,17 +894,29 @@ export const apt = {
     validateAptResourceName(name)
     validateAptKeyUrl(url)
     const expectedFingerprint = normalizeOpenPgpFingerprint(options.fingerprint)
-    const keyringPath = `/etc/apt/keyrings/${name}.gpg`
+    const keyringPath = `${APT_KEYRING_DIRECTORY}/${name}.gpg`
     return {
       async apply(ssh: null | SshConnection): Promise<ModuleResult> {
         if (!ssh) return failed(`[apt.key] SSH connection is required for ${name}`)
 
-        const mkdirResult = await ssh.exec("mkdir -p /etc/apt/keyrings", {
+        const preMkdirDirectoryFailure = await ensureAptKeyringDirectorySymlinkFree(ssh, {
+          directory: APT_KEYRING_DIRECTORY,
+          name,
+        })
+        if (preMkdirDirectoryFailure != null) return preMkdirDirectoryFailure
+
+        const mkdirResult = await ssh.exec(`mkdir -p ${APT_KEYRING_DIRECTORY}`, {
           ignoreExitCode: true,
           silent: true,
         })
         if (mkdirResult.code !== 0)
-          return failedCommand("[apt.key] failed to create /etc/apt/keyrings", mkdirResult)
+          return failedCommand(`[apt.key] failed to create ${APT_KEYRING_DIRECTORY}`, mkdirResult)
+
+        const postMkdirDirectoryFailure = await ensureAptKeyringDirectorySymlinkFree(ssh, {
+          directory: APT_KEYRING_DIRECTORY,
+          name,
+        })
+        if (postMkdirDirectoryFailure != null) return postMkdirDirectoryFailure
 
         return applyAptKey(ssh, { expectedFingerprint, keyringPath, name, url })
       },

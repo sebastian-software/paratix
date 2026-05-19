@@ -6,6 +6,8 @@ import { sha256String } from "../../src/modules/fileHelpers.js"
 import { createMockSsh as createBaseMockSsh } from "../helpers/mockSsh.js"
 import { MOCK_FLAG_LOCK_HOLDER_TOKEN } from "../helpers/mockSshFlagLock.js"
 
+const aptKeyringDirectoryRealpathCommand = "command -p realpath -m -- '/etc/apt/keyrings'"
+
 const createMockSsh: typeof createBaseMockSsh = (responses, options) =>
   createBaseMockSsh(responses, {
     ...options,
@@ -13,6 +15,13 @@ const createMockSsh: typeof createBaseMockSsh = (responses, options) =>
     allowWrites: [
       { options: { mode: "0644" }, remotePath: /^\/etc\/apt\/sources\.list\.d\/.+\.list$/v },
       ...(options?.allowWrites ?? []),
+    ],
+    responseStubs: [
+      {
+        command: aptKeyringDirectoryRealpathCommand,
+        result: { code: 0, stdout: "/etc/apt/keyrings\n" },
+      },
+      ...(options?.responseStubs ?? []),
     ],
   })
 
@@ -50,6 +59,27 @@ function distUpgradeApplyLockResponses(): Record<string, { code?: number; stdout
     "mkdir -p /var/lib/paratix/flags": { code: 0 },
     [verifiedReleaseCommand]: { code: 0 },
   }
+}
+
+function installSequencedOutputForExec(
+  ssh: ReturnType<typeof createMockSsh>,
+  command: string,
+  outputs: [string, ...string[]]
+): () => number {
+  const mockSsh = ssh
+  const originalExec = mockSsh.exec.bind(mockSsh)
+  let calls = 0
+  mockSsh.exec = async (nextCommand, options) => {
+    if (nextCommand === command) {
+      mockSsh.calls.push(nextCommand)
+      mockSsh.execCalls.push({ command: nextCommand, options })
+      const stdout = outputs[Math.min(calls, outputs.length - 1)]
+      calls += 1
+      return { code: 0, stderr: "", stdout }
+    }
+    return originalExec(nextCommand, options)
+  }
+  return () => calls
 }
 
 // R-0000163 helper: build an `exec` override whose first invocation of
@@ -107,7 +137,7 @@ describe("apt.key", () => {
   const dearmorStagingMktempCmd = `mktemp -p '/etc/apt/keyrings' -- '.apt-key.paratix-staging.XXXXXX'`
   const dearmorCommand = `gpg --no-default-keyring --no-options --homedir '${gpgHomedir}' --dearmor --yes -o '${dearmorStagingPath}' '${dearmorTempPath}'`
   const dearmorChmodCommand = `chmod 0644 '${dearmorStagingPath}'`
-  const dearmorPublishCommand = `{ if [ -L '${dearmorKeyringPath}' ]; then rm -f -- '${dearmorStagingPath}'; exit 73; fi && mv -T -- '${dearmorStagingPath}' '${dearmorKeyringPath}'; } || { status=$?; rm -f -- '${dearmorStagingPath}'; exit "$status"; }`
+  const dearmorPublishCommand = `{ resolved=$(command -p realpath -m -- '/etc/apt/keyrings') && [ "x$resolved" = 'x/etc/apt/keyrings' ] || { rm -f -- '${dearmorStagingPath}'; exit 74; }; if [ -L '${dearmorKeyringPath}' ]; then rm -f -- '${dearmorStagingPath}'; exit 73; fi && mv -T -- '${dearmorStagingPath}' '${dearmorKeyringPath}'; } || { status=$?; rm -f -- '${dearmorStagingPath}'; exit "$status"; }`
   const dearmorStagingCleanupCmd = `rm -f -- '${dearmorStagingPath}'`
 
   // R-0000704: `gpg --show-keys` is wrapped in a dedicated homedir scope just
@@ -515,6 +545,41 @@ describe("apt.key", () => {
     expect(ssh.calls).not.toContain(dearmorCommand)
   })
 
+  it("apply refuses a symlinked keyring directory chain before mkdir", async () => {
+    const ssh = createMockSsh({
+      [aptKeyringDirectoryRealpathCommand]: { code: 0, stdout: "/tmp/attacker-keyrings\n" },
+    })
+    const mod = apt.key("docker", "https://download.docker.com/linux/ubuntu/gpg", { fingerprint })
+    const result = await mod.apply(ssh, emptyEnv)
+
+    expect(result.status).toBe("failed")
+    expect(String(result.error)).toContain(
+      "[apt.key] keyring directory for docker resolves to /tmp/attacker-keyrings"
+    )
+    expect(ssh.calls).not.toContain("mkdir -p /etc/apt/keyrings")
+    expect(ssh.calls).not.toContain(dearmorStagingMktempCmd)
+  })
+
+  it("apply revalidates the keyring directory chain after mkdir", async () => {
+    const ssh = createMockSsh({
+      "mkdir -p /etc/apt/keyrings": { code: 0 },
+    })
+    const realpathCallCount = installSequencedOutputForExec(
+      ssh,
+      aptKeyringDirectoryRealpathCommand,
+      ["/etc/apt/keyrings\n", "/tmp/attacker-keyrings\n"]
+    )
+    const mod = apt.key("docker", "https://download.docker.com/linux/ubuntu/gpg", { fingerprint })
+    const result = await mod.apply(ssh, emptyEnv)
+
+    expect(result.status).toBe("failed")
+    expect(realpathCallCount()).toBe(2)
+    expect(String(result.error)).toContain(
+      "[apt.key] keyring directory for docker resolves to /tmp/attacker-keyrings"
+    )
+    expect(ssh.calls).not.toContain("mktemp '/tmp/apt-key-docker.XXXXXX'")
+  })
+
   // R-0000709: dearmor must stage the keyring next to the final path, chmod
   // the staging file, then publish atomically via `mv -T`. The shell guard
   // also fails fast on a symlink swap that materialises between the apply-
@@ -544,6 +609,8 @@ describe("apt.key", () => {
     expect(dearmorIndex).toBeGreaterThan(-1)
     expect(chmodIndex).toBeGreaterThan(dearmorIndex)
     expect(publishIndex).toBeGreaterThan(chmodIndex)
+    expect(ssh.calls.filter((call) => call === aptKeyringDirectoryRealpathCommand)).toHaveLength(3)
+    expect(dearmorPublishCommand).toContain("command -p realpath -m -- '/etc/apt/keyrings'")
     // Direct chmod on the final keyring path must never run — the staging
     // file already carried 0644 before the rename landed it.
     expect(ssh.calls).not.toContain(`chmod 0644 '${dearmorKeyringPath}'`)
@@ -577,6 +644,30 @@ describe("apt.key", () => {
     expect(result.status).toBe("failed")
     expect(String(result.error)).toContain(
       "[apt.key] refuses to write through symlink at /etc/apt/keyrings/docker.gpg"
+    )
+  })
+
+  it("surfaces a keyring directory revalidation failure from the publish guard", async () => {
+    const ssh = createMockSsh({
+      ...aptKeyDearmorBaseStubs(),
+      "[ -L '/etc/apt/keyrings/docker.gpg' ]": { code: 1 },
+      [dearmorCommand]: { code: 0 },
+      [dearmorPublishCommand]: { code: 74 },
+      [downloadCommand]: { code: 0 },
+      "mkdir -p /etc/apt/keyrings": { code: 0 },
+      "mktemp '/tmp/apt-key-docker.XXXXXX'": { stdout: "/tmp/apt-key-docker.ABCDEF\n" },
+      "rm -f '/tmp/apt-key-docker.ABCDEF'": { code: 0 },
+      [showKeysCommand("/tmp/apt-key-docker.ABCDEF")]: {
+        code: 0,
+        stdout: "pub:-:255:22:::\nfpr:::::::::1234567890ABCDEF1234567890ABCDEF12345678:\n",
+      },
+    })
+    const mod = apt.key("docker", "https://download.docker.com/linux/ubuntu/gpg", { fingerprint })
+    const result = await mod.apply(ssh, emptyEnv)
+
+    expect(result.status).toBe("failed")
+    expect(String(result.error)).toContain(
+      "[apt.key] keyring directory for docker is no longer symlink-free at /etc/apt/keyrings"
     )
   })
 })

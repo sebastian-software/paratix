@@ -16,6 +16,31 @@ const APT_KEY_STAGING_PREFIX = ".apt-key.paratix-staging"
 // between snapshot and publish. Surfaced as a named constant so callers can
 // distinguish the symlink-refusal branch from a generic publish failure.
 const APT_KEY_PUBLISH_SYMLINK_EXIT_CODE = 73
+const APT_KEY_PUBLISH_KEYRING_DIRECTORY_SYMLINK_EXIT_CODE = 74
+
+export async function ensureAptKeyringDirectorySymlinkFree(
+  ssh: SshConnection,
+  parameters: { directory: string; name: string }
+): Promise<ModuleResult | null> {
+  const { directory, name } = parameters
+  const result = await ssh.exec(`command -p realpath -m -- ${shellQuote(directory)}`, {
+    ignoreExitCode: true,
+    silent: true,
+  })
+  if (result.code !== 0) {
+    return failedCommand(
+      `[apt.key] failed to validate keyring directory for ${name} at ${directory}`,
+      result
+    )
+  }
+  const resolved = result.stdout.trim()
+  if (resolved !== directory) {
+    return failed(
+      `[apt.key] keyring directory for ${name} resolves to ${resolved}; refusing to use symlinked directory chain at ${directory}`
+    )
+  }
+  return null
+}
 
 /**
  * Allocate a throwaway gpg homedir so `gpg --show-keys` and `gpg --dearmor`
@@ -86,6 +111,8 @@ async function allocateAptKeyStagingPath(
   keyringPath: string
 ): Promise<{ failure: ModuleResult } | { stagingPath: string }> {
   const directory = posix.dirname(keyringPath)
+  const directoryFailure = await ensureAptKeyringDirectorySymlinkFree(ssh, { directory, name })
+  if (directoryFailure != null) return { failure: directoryFailure }
   const template = `${APT_KEY_STAGING_PREFIX}.XXXXXX`
   const rawStagingPath = await ssh.output(
     `mktemp -p ${shellQuote(directory)} -- ${shellQuote(template)}`
@@ -136,13 +163,20 @@ async function publishAptKeyStagingAtomically(
   parameters: { keyringPath: string; name: string; stagingPath: string }
 ): Promise<ModuleResult | null> {
   const { keyringPath, name, stagingPath } = parameters
+  const directory = posix.dirname(keyringPath)
+  const expectedDirectory = shellQuote(`x${directory}`)
   const publish = await ssh.exec(
-    `{ if [ -L ${shellQuote(keyringPath)} ]; then rm -f -- ${shellQuote(stagingPath)}; exit ${String(APT_KEY_PUBLISH_SYMLINK_EXIT_CODE)}; fi && mv -T -- ${shellQuote(stagingPath)} ${shellQuote(keyringPath)}; } || { status=$?; rm -f -- ${shellQuote(stagingPath)}; exit "$status"; }`,
+    `{ resolved=$(command -p realpath -m -- ${shellQuote(directory)}) && [ "x$resolved" = ${expectedDirectory} ] || { rm -f -- ${shellQuote(stagingPath)}; exit ${String(APT_KEY_PUBLISH_KEYRING_DIRECTORY_SYMLINK_EXIT_CODE)}; }; if [ -L ${shellQuote(keyringPath)} ]; then rm -f -- ${shellQuote(stagingPath)}; exit ${String(APT_KEY_PUBLISH_SYMLINK_EXIT_CODE)}; fi && mv -T -- ${shellQuote(stagingPath)} ${shellQuote(keyringPath)}; } || { status=$?; rm -f -- ${shellQuote(stagingPath)}; exit "$status"; }`,
     { ignoreExitCode: true, silent: true }
   )
   if (publish.code === 0) return null
   if (publish.code === APT_KEY_PUBLISH_SYMLINK_EXIT_CODE) {
     return failed(`[apt.key] refuses to write through symlink at ${keyringPath}`)
+  }
+  if (publish.code === APT_KEY_PUBLISH_KEYRING_DIRECTORY_SYMLINK_EXIT_CODE) {
+    return failed(
+      `[apt.key] keyring directory for ${name} is no longer symlink-free at ${directory}; refusing to publish ${keyringPath}`
+    )
   }
   return failedCommand(
     `[apt.key] failed to publish the keyring at ${keyringPath} for ${name}`,
