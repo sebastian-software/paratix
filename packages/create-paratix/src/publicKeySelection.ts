@@ -1,3 +1,5 @@
+import type { Stats } from "node:fs"
+
 import { lstatSync, readdirSync, readFileSync, realpathSync, statSync } from "node:fs"
 import { homedir } from "node:os"
 import { basename, join, resolve } from "node:path"
@@ -16,11 +18,24 @@ export type LocalPublicKey = {
 }
 
 type ExitWithMessage = (message: string) => never
+type AdminPublicKeyFileSystem = {
+  lstatSync: (path: string) => Stats
+  readFileSync: (path: string, encoding: "utf8") => string
+  realpathSync: (path: string) => string
+  statSync: (path: string) => Stats
+}
 
 type PublicKeyChoice = "local" | "placeholder"
 type ParsedPublicKey = { algorithm: string; encodedKey: string }
 type PromptForAdminPublicKeyOptions = {
   allowPlaceholder?: boolean
+}
+
+const adminPublicKeyFileSystem: AdminPublicKeyFileSystem = {
+  lstatSync,
+  readFileSync,
+  realpathSync,
+  statSync,
 }
 
 const PUBLIC_KEY_PROMPT_OPTIONS: Array<SelectOption<PublicKeyChoice>> = [
@@ -173,7 +188,11 @@ function preValidateAdminPublicKeyFilePath(exitWithMessage: ExitWithMessage, pat
   }
 }
 
-export function readAdminPublicKeyFile(exitWithMessage: ExitWithMessage, path: string): string {
+export function readAdminPublicKeyFile(
+  exitWithMessage: ExitWithMessage,
+  path: string,
+  fileSystem: AdminPublicKeyFileSystem = adminPublicKeyFileSystem
+): string {
   preValidateAdminPublicKeyFilePath(exitWithMessage, path)
 
   // R-0000126: resolve relative paths against cwd; emit neutral errors.
@@ -197,8 +216,7 @@ export function readAdminPublicKeyFile(exitWithMessage: ExitWithMessage, path: s
   // operator noticing.
   const linkStat = (() => {
     try {
-      // eslint-disable-next-line security/detect-non-literal-fs-filename
-      return lstatSync(resolvedPath)
+      return fileSystem.lstatSync(resolvedPath)
     } catch {
       return failWithReadError()
     }
@@ -215,8 +233,7 @@ export function readAdminPublicKeyFile(exitWithMessage: ExitWithMessage, path: s
   // remaining failure via failWithReadError.
   const materialisedPath = (() => {
     try {
-      // eslint-disable-next-line security/detect-non-literal-fs-filename
-      const realPath = realpathSync(resolvedPath)
+      const realPath = fileSystem.realpathSync(resolvedPath)
       if (realPath !== resolvedPath) {
         if (linkStat.isSymbolicLink()) {
           console.log(`Reading public key from ${realPath} (symlink target of ${resolvedPath}).`)
@@ -244,8 +261,7 @@ export function readAdminPublicKeyFile(exitWithMessage: ExitWithMessage, path: s
   // realpath and stat or between stat and readFile.
   const stat = (() => {
     try {
-      // eslint-disable-next-line security/detect-non-literal-fs-filename
-      return statSync(materialisedPath)
+      return fileSystem.statSync(materialisedPath)
     } catch {
       return failWithReadError()
     }
@@ -257,8 +273,7 @@ export function readAdminPublicKeyFile(exitWithMessage: ExitWithMessage, path: s
 
   const value = (() => {
     try {
-      // eslint-disable-next-line security/detect-non-literal-fs-filename
-      return readFileSync(materialisedPath, "utf8")
+      return fileSystem.readFileSync(materialisedPath, "utf8")
     } catch {
       return failWithReadError()
     }
