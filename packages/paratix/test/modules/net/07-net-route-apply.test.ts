@@ -30,6 +30,11 @@ const createMockSsh: typeof createBaseMockSsh = (responses, options) =>
       ...(options?.responseStubs ?? []),
       {
         command:
+          /^\[ -f '\/etc\/systemd\/network\/(?:60-paratix-[^\/]+\.network\.d\/50-paratix-route-[^']+\.conf|50-paratix-route-[^']+\.network)' \] && \[ ! -L '\/etc\/systemd\/network\/(?:60-paratix-[^\/]+\.network\.d\/50-paratix-route-[^']+\.conf|50-paratix-route-[^']+\.network)' \]$/v,
+        result: { code: 1 },
+      },
+      {
+        command:
           /^\[ -L '\/etc\/systemd\/network\/60-paratix-[^\/]+\.network\.d\/50-paratix-route-[^']+\.conf' \]$/v,
         result: { code: 1 },
       },
@@ -373,6 +378,72 @@ describe("net.route — apply", () => {
     expect(mockSsh.calls.some((call) => call.includes(reloadFlagPath))).toBe(false)
   })
 
+  it("rolls back live route and drop-in when networkctl reload fails after adding route", async () => {
+    const mockSsh = createMockSsh(
+      {
+        "networkctl reload": { code: 1, stderr: "reload failed" },
+      },
+      SUCCESSFUL_ROUTE_APPLY_OPTIONS
+    )
+    const mod = net.route("10.0.0.0/24", "192.168.1.1", { device: "eth0" })
+
+    const result = await mod.apply(mockSsh, emptyEnv)
+
+    expect(result.status).toBe("failed")
+    expect(String(result.error)).toContain("route state was rolled back")
+    expect(mockSsh.calls).toContain("ip route del '10.0.0.0/24' via '192.168.1.1' dev 'eth0'")
+    expect(mockSsh.calls).toContain(`rm -f -- '${routeDropinPath}'`)
+    expect(mockSsh.calls.some((call) => call.includes("/var/lib/paratix/flags"))).toBe(false)
+  })
+
+  it("rolls back route state and reloads again when the reload flag cannot be written", async () => {
+    const mockSsh = createMockSsh(
+      {},
+      {
+        ...SUCCESSFUL_ROUTE_APPLY_OPTIONS,
+        responseStubs: [
+          {
+            command:
+              /^find \/var\/lib\/paratix\/flags -maxdepth 1 -type f -name 'net-route-[^']+-\*' ! -name '\*\.lock' -delete && touch \/var\/lib\/paratix\/flags\/'net-route-[^']+'$/v,
+            result: { code: 1, stderr: "read-only filesystem" },
+          },
+          ...SUCCESSFUL_ROUTE_APPLY_OPTIONS.responseStubs,
+        ],
+      }
+    )
+    const mod = net.route("10.0.0.0/24", "192.168.1.1", { device: "eth0" })
+
+    const result = await mod.apply(mockSsh, emptyEnv)
+
+    expect(result.status).toBe("failed")
+    expect(String(result.error)).toContain("route state was rolled back")
+    expect(String(result.error)).toContain("read-only filesystem")
+    expect(mockSsh.calls.filter((call) => call === "networkctl reload")).toHaveLength(2)
+    expect(mockSsh.calls).toContain("ip route del '10.0.0.0/24' via '192.168.1.1' dev 'eth0'")
+    expect(mockSsh.calls).toContain(`rm -f -- '${routeDropinPath}'`)
+  })
+
+  it("surfaces rollback failure when reload failure rollback cannot restore live route", async () => {
+    const mockSsh = createMockSsh(
+      {
+        "ip route del '10.0.0.0/24' via '192.168.1.1' dev 'eth0'": {
+          code: 2,
+          stderr: "rollback failed",
+        },
+        "networkctl reload": { code: 1, stderr: "reload failed" },
+      },
+      SUCCESSFUL_ROUTE_APPLY_OPTIONS
+    )
+    const mod = net.route("10.0.0.0/24", "192.168.1.1", { device: "eth0" })
+
+    const result = await mod.apply(mockSsh, emptyEnv)
+
+    expect(result.status).toBe("failed")
+    expect(String(result.error)).toContain("networkctl reload failed")
+    expect(String(result.error)).toContain("rollback failed")
+    expect(String(result.error)).toContain("live route rollback failed")
+  })
+
   it("returns changed after removing a route (state: absent)", async () => {
     const mockSsh = createMockSsh({}, SUCCESSFUL_ROUTE_APPLY_OPTIONS)
     const mod = net.route("10.0.0.0/24", "192.168.1.1", { device: "eth0", state: "absent" })
@@ -526,6 +597,44 @@ describe("net.route — apply", () => {
     const result = await mod.apply(mockSsh, emptyEnv)
     expect(result.status).toBe("failed")
     expect(String(result.error)).toContain("networkctl reload failed")
+  })
+
+  it("rolls back live route and drop-in when networkctl reload fails after removing route", async () => {
+    const expectedDropin = `[Route]\nDestination=10.0.0.0/24\nGateway=192.168.1.1\n`
+    const mockSsh = createMockSsh(
+      {
+        [`cat '${routeDropinPath}'`]: { stdout: expectedDropin },
+        "ip route replace '10.0.0.0/24' 'via' '192.168.1.1' 'dev' 'eth0'": { code: 0 },
+        "networkctl reload": { code: 1, stderr: "reload failed" },
+        [routeShowCommand]: { code: 0, stdout: liveRouteOutput },
+      },
+      {
+        ...SUCCESSFUL_ROUTE_APPLY_OPTIONS,
+        responseStubs: [
+          {
+            command:
+              /^\[ -f '\/etc\/systemd\/network\/60-paratix-eth0\.network\.d\/50-paratix-route-10\.0\.0\.0-24-faf00cb4d15f7f16\.conf' \] && \[ ! -L '\/etc\/systemd\/network\/60-paratix-eth0\.network\.d\/50-paratix-route-10\.0\.0\.0-24-faf00cb4d15f7f16\.conf' \]$/v,
+            result: { code: 0 },
+          },
+          ...SUCCESSFUL_ROUTE_APPLY_OPTIONS.responseStubs,
+        ],
+      }
+    )
+    const mod = net.route("10.0.0.0/24", "192.168.1.1", { device: "eth0", state: "absent" })
+
+    const result = await mod.apply(mockSsh, emptyEnv)
+
+    expect(result.status).toBe("failed")
+    expect(String(result.error)).toContain("route state was rolled back")
+    expect(mockSsh.calls).toContain("ip route del '10.0.0.0/24' via '192.168.1.1' dev 'eth0'")
+    expect(mockSsh.calls).toContain(
+      "ip route replace '10.0.0.0/24' 'via' '192.168.1.1' 'dev' 'eth0'"
+    )
+    expect(mockSsh.writeFileCalls).toContainEqual({
+      content: expectedDropin,
+      options: { mode: "0644" },
+      remotePath: routeDropinPath,
+    })
   })
 
   it("returns ok and skips networkctl reload when nothing to remove (state: absent)", async () => {

@@ -47,6 +47,7 @@ const DEFAULT_POLL_INTERVAL_MS = 2000
 const DEFAULT_POLL_TIMEOUT_MS = 60_000
 const DEFAULT_EXPECTED_STATUS = 200
 const NET_RELOAD_HASH_LENGTH = 16
+const UNKNOWN_ROUTE_ERROR = "unknown error"
 const MAX_HOSTNAME_LENGTH = 253
 const MAX_HOSTNAME_LABEL_LENGTH = 63
 const HOSTNAME_LABEL_CHARS_PATTERN = /^[a-z0-9\x2d]+$/iv
@@ -1022,9 +1023,24 @@ type LiveRouteSnapshot = {
   line: null | string
 }
 
+type RouteDropinSnapshot = {
+  content: string
+  existed: boolean
+  path: string
+}
+
+type RouteMutationSnapshot = {
+  dropins: RouteDropinSnapshot[]
+  live: LiveRouteSnapshot
+}
+
 type LiveRouteSnapshotOutcome =
   | { failure: ModuleResult; snapshot: null }
   | { failure: null; snapshot: LiveRouteSnapshot }
+
+type RouteMutationSnapshotOutcome =
+  | { failure: ModuleResult; snapshot: null }
+  | { failure: null; snapshot: RouteMutationSnapshot }
 
 async function captureLiveRouteSnapshot(
   conn: SshConnection,
@@ -1043,6 +1059,36 @@ async function captureLiveRouteSnapshot(
     .map((entry) => entry.trim())
     .find((entry) => entry.length > 0 && routeLineMatches(entry, parameters))
   return { failure: null, snapshot: { line: line ?? null } }
+}
+
+async function captureRouteDropinSnapshot(
+  conn: SshConnection,
+  path: string
+): Promise<RouteDropinSnapshot> {
+  const existed = await routeDropinIsRegularFile(conn, path)
+  return {
+    content: existed ? await conn.readFile(path) : "",
+    existed,
+    path,
+  }
+}
+
+async function captureRouteMutationSnapshot(
+  conn: SshConnection,
+  parameters: RouteParameters
+): Promise<RouteMutationSnapshotOutcome> {
+  const live = await captureLiveRouteSnapshot(conn, parameters)
+  if (live.failure != null) return { failure: live.failure, snapshot: null }
+  return {
+    failure: null,
+    snapshot: {
+      dropins: [
+        await captureRouteDropinSnapshot(conn, parameters.dropinPath),
+        await captureRouteDropinSnapshot(conn, parameters.legacyDropinPath),
+      ],
+      live: live.snapshot,
+    },
+  }
 }
 
 function routeLineCommand(line: string): string {
@@ -1086,10 +1132,77 @@ async function rollbackLiveRouteAfterFailure(
   )
   if (rollbackFailure != null) {
     return failed(
-      `${context.message}; rollback failed: ${rollbackFailure.error?.message ?? "unknown error"}`
+      `${context.message}; rollback failed: ${rollbackFailure.error?.message ?? UNKNOWN_ROUTE_ERROR}`
     )
   }
   return failed(`${context.message}; live route was rolled back`)
+}
+
+async function rollbackRouteDropin(
+  conn: SshConnection,
+  snapshot: RouteDropinSnapshot
+): Promise<ModuleResult | null> {
+  if (snapshot.existed) {
+    try {
+      await conn.writeFile(snapshot.path, snapshot.content, { mode: NET_CONFIG_FILE_MODE })
+    } catch (error: unknown) {
+      const reason = error instanceof Error ? error.message : String(error)
+      return failed(`[net.route] drop-in rollback restore failed for ${snapshot.path}: ${reason}`)
+    }
+    return null
+  }
+  const removeResult = await conn.exec(`rm -f -- ${shellQuote(snapshot.path)}`, EXEC_OPTS)
+  return removeResult.code === 0
+    ? null
+    : failedCommand(
+        `[net.route] drop-in rollback removal failed for ${snapshot.path}`,
+        removeResult
+      )
+}
+
+async function rollbackRouteMutationSnapshot(parameters: {
+  conn: SshConnection
+  route: RouteParameters
+  snapshot: RouteMutationSnapshot
+}): Promise<ModuleResult | null> {
+  for (const dropin of parameters.snapshot.dropins) {
+    // eslint-disable-next-line no-await-in-loop
+    const dropinFailure = await rollbackRouteDropin(parameters.conn, dropin)
+    if (dropinFailure != null) return dropinFailure
+  }
+  return rollbackLiveRoute(parameters.conn, parameters.route, parameters.snapshot.live)
+}
+
+async function rollbackRouteMutationAfterFailure(parameters: {
+  conn: SshConnection
+  failure: ModuleResult
+  reloadAfterRollback: boolean
+  route: RouteParameters
+  snapshot: RouteMutationSnapshot
+}): Promise<ModuleResult> {
+  const message =
+    parameters.failure.error?.message ??
+    `[net.route: ${parameters.route.destination}] route apply failed`
+  const rollbackFailure = await rollbackRouteMutationSnapshot(parameters)
+  if (rollbackFailure != null) {
+    return failed(
+      `${message}; rollback failed: ${rollbackFailure.error?.message ?? UNKNOWN_ROUTE_ERROR}`
+    )
+  }
+  if (parameters.reloadAfterRollback) {
+    const reloadFailure = await reloadNetworkctlForRoute(
+      parameters.conn,
+      parameters.route.destination
+    )
+    if (reloadFailure != null) {
+      return failed(
+        `${message}; rollback restored the previous route state but networkctl reload after rollback failed: ${
+          reloadFailure.error?.message ?? UNKNOWN_ROUTE_ERROR
+        }`
+      )
+    }
+  }
+  return failed(`${message}; route state was rolled back`)
 }
 
 async function ensureRouteDropinDirectory(
@@ -1256,16 +1369,34 @@ async function applyPresentRouteState(
   conn: SshConnection,
   parameters: RouteCheckParameters
 ): Promise<ModuleResult> {
+  const snapshot = await captureRouteMutationSnapshot(conn, parameters)
+  if (snapshot.failure != null) return snapshot.failure
   const failure = await applyPresentRoute(conn, parameters)
   if (failure != null) return failure
   const reloadFailure = await reloadNetworkctlForRoute(conn, parameters.destination)
-  if (reloadFailure != null) return reloadFailure
+  if (reloadFailure != null) {
+    return rollbackRouteMutationAfterFailure({
+      conn,
+      failure: reloadFailure,
+      reloadAfterRollback: false,
+      route: parameters,
+      snapshot: snapshot.snapshot,
+    })
+  }
   const reloadFlag = buildRouteReloadFlag(parameters)
   // R-0000273: surface flag-persist failures (EROFS/EPERM/ENOSPC) through
   // the failedCommand path rather than letting the helper throw after a
   // successful networkctl reload.
   const flagFailure = await setVersionedFlag(conn, reloadFlag.flagName, reloadFlag.flagPrefix)
-  if (flagFailure) return flagFailure
+  if (flagFailure) {
+    return rollbackRouteMutationAfterFailure({
+      conn,
+      failure: flagFailure,
+      reloadAfterRollback: true,
+      route: parameters,
+      snapshot: snapshot.snapshot,
+    })
+  }
   return { status: "changed" }
 }
 
@@ -1276,11 +1407,21 @@ async function applyAbsentRouteState(
   // R-0000219: skip networkctl reload entirely when applyAbsentRoute is a
   // no-op (live route absent and no matching drop-in) so the module reports
   // `ok` instead of falsely signalling `changed`.
+  const snapshot = await captureRouteMutationSnapshot(conn, parameters)
+  if (snapshot.failure != null) return snapshot.failure
   const outcome = await applyAbsentRoute(conn, parameters)
   if (outcome.failure != null) return outcome.failure
   if (!outcome.changed) return { status: "ok" }
   const reloadFailure = await reloadNetworkctlForRoute(conn, parameters.destination)
-  if (reloadFailure != null) return reloadFailure
+  if (reloadFailure != null) {
+    return rollbackRouteMutationAfterFailure({
+      conn,
+      failure: reloadFailure,
+      reloadAfterRollback: false,
+      route: parameters,
+      snapshot: snapshot.snapshot,
+    })
+  }
   return { status: "changed" }
 }
 
