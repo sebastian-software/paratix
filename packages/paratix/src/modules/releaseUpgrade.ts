@@ -493,56 +493,63 @@ class SourcesWriteCommandError extends Error {
   }
 }
 
-// R-0000718: write an apt sources file with O_NOFOLLOW semantics so a
-// symlink swap between the snapshot read and the rewrite (or between the
-// pipeline failure and the rollback) cannot trick the writer into
+const SOURCES_FILE_NOFOLLOW_WRITER_SCRIPT = [
+  "import errno",
+  "import os",
+  "import sys",
+  "path = sys.argv[1]",
+  "mode = int(sys.argv[2], 8)",
+  "data = sys.stdin.buffer.read()",
+  "fd = None",
+  "try:",
+  "    try:",
+  "        fd = os.open(path, os.O_WRONLY | os.O_NOFOLLOW)",
+  "    except OSError as error:",
+  "        if error.errno == errno.ELOOP:",
+  `            sys.exit(${String(SOURCES_FILE_WRITE_SYMLINK_EXIT_CODE)})`,
+  "        raise",
+  "    offset = 0",
+  "    while offset < len(data):",
+  "        offset += os.write(fd, data[offset:])",
+  "    os.ftruncate(fd, len(data))",
+  "    try:",
+  "        os.fchmod(fd, mode)",
+  "    except OSError as error:",
+  "        print(str(error), file=sys.stderr)",
+  `        sys.exit(${String(SOURCES_FILE_WRITE_CHMOD_EXIT_CODE)})`,
+  "finally:",
+  "    if fd is not None:",
+  "        os.close(fd)",
+].join("\n")
+
+// R-0000718/R-0000905: write an apt sources file with O_NOFOLLOW semantics
+// so a symlink swap between the snapshot read and the rewrite (or between
+// the pipeline failure and the rollback) cannot trick the writer into
 // overwriting an attacker-controlled target. The fused shell statement:
 //
 //   - probes `[ -L <path> ]` to reject the path early if it already is a
 //     symlink at the time of the probe, with exit code 201 so the caller
 //     can distinguish it from generic dd failures
-//   - opens the destination via `dd of=<path> conv=notrunc oflag=nofollow`
+//   - opens the destination in Python with `os.O_WRONLY | os.O_NOFOLLOW`
 //     so a TOCTOU symlink swap between the probe and the open fails with
 //     ELOOP at open(2) — the load-bearing guarantee that the `[ -L ]`
 //     check alone cannot provide
-//   - `conv=notrunc` keeps the destination's inode metadata stable: dd
-//     opens with `O_WRONLY | O_NOFOLLOW` without `O_TRUNC`, then we
-//     truncate to the new content length via `truncate` afterwards. This
-//     order matters because `O_TRUNC` would happen *before* the symlink
-//     check on dd's open(2) and undo any partial-write recovery
-//   - chmod the destination to restore the snapshot's recorded mode,
-//     reporting a dedicated exit code (202) when chmod fails so the
-//     caller can distinguish mode-restoration from write failures
+//   - writes stdin, truncates to the new content length, and restores the
+//     snapshot mode through the same fd using `os.write`, `os.ftruncate`,
+//     and `os.fchmod`, so a symlink swap after the open cannot redirect
+//     truncate or chmod to a different target
 //
 // `set -eu` aborts the pipeline on the first non-zero step. `input` is
-// supplied by `ssh.exec` so the content is streamed to dd's stdin instead
+// supplied by `ssh.exec` so the content is streamed to Python's stdin instead
 // of embedded in the argv (which would leak via `ps`).
-//
-// `truncate -s <size>` runs after the dd write so a shorter replacement
-// does not leave trailing bytes of the previous content. `wc -c` cannot
-// receive the input over the same stdin pipe, so the byte length is
-// passed via an explicit argument computed locally and embedded as a
-// numeric literal — the value is bounded by `Buffer.byteLength` on the
-// caller side so the embedded literal is always safe.
-function buildWriteSourcesFileNoFollowCommand(
-  remotePath: string,
-  byteLength: number,
-  mode: string
-): string {
+function buildWriteSourcesFileNoFollowCommand(remotePath: string, mode: string): string {
   const quotedPath = shellQuote(remotePath)
   const quotedMode = shellQuote(mode)
-  const sizeLiteral = String(byteLength)
-  // `dd if=/dev/stdin` reads the new content from the stdin payload we
-  // pass via `ssh.exec({ input })`. `conv=notrunc` keeps the inode stable
-  // and `oflag=nofollow` makes open(2) fail with ELOOP if the path is a
-  // symlink.  The intermediate `truncate -s <bytes>` step matches the new
-  // payload length so a shorter rewrite does not leave stale tail bytes.
+  const quotedWriterScript = shellQuote(SOURCES_FILE_NOFOLLOW_WRITER_SCRIPT)
   return [
     "set -eu",
     `[ ! -L ${quotedPath} ] || exit ${String(SOURCES_FILE_WRITE_SYMLINK_EXIT_CODE)}`,
-    `dd if=/dev/stdin of=${quotedPath} conv=notrunc oflag=nofollow status=none`,
-    `truncate -s ${sizeLiteral} ${quotedPath}`,
-    `chmod ${quotedMode} ${quotedPath} || exit ${String(SOURCES_FILE_WRITE_CHMOD_EXIT_CODE)}`,
+    `python3 -c ${quotedWriterScript} ${quotedPath} ${quotedMode}`,
   ].join("; ")
 }
 
@@ -555,7 +562,8 @@ function buildWriteSourcesFileNoFollowCommand(
  * with symlinks pointing at sensitive files (e.g. `/etc/shadow`,
  * `/root/.ssh/authorized_keys`) between the time Paratix reads the
  * original content and the time it writes back. The fused
- * `[ -L ] + dd oflag=nofollow` statement collapses that TOCTOU window.
+ * `[ -L ] + Python O_NOFOLLOW fd-writer` statement collapses that TOCTOU
+ * window and keeps write, truncate and chmod on the same opened file.
  *
  * @param parameters - Bundle of inputs for the NOFOLLOW write.
  * @param parameters.ssh - Active SSH connection to the remote host.
@@ -573,8 +581,7 @@ async function writeSourcesFileNoFollow(parameters: {
   ssh: SshConnection
 }): Promise<void> {
   const { content, mode, remotePath, ssh } = parameters
-  const byteLength = Buffer.byteLength(content, "utf8")
-  const command = buildWriteSourcesFileNoFollowCommand(remotePath, byteLength, mode)
+  const command = buildWriteSourcesFileNoFollowCommand(remotePath, mode)
   const result = await ssh.exec(command, {
     ignoreExitCode: true,
     input: content,

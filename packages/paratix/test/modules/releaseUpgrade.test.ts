@@ -63,13 +63,14 @@ function bridgeCatSourcesStubsToDdNoFollow(
   return bridged
 }
 
-// R-0000718: pattern that matches the NOFOLLOW write pipeline emitted by
-// `writeSourcesFileNoFollow` from the production module. Tests stub the
-// pipeline to succeed by default; the capture helper intercepts the
-// pipeline to record the new content for assertions.
+// R-0000718/R-0000905: pattern that matches the NOFOLLOW write pipeline
+// emitted by `writeSourcesFileNoFollow` from the production module. Tests
+// stub the pipeline to succeed by default; the capture helper intercepts
+// the pipeline to record the new content for assertions. The writer must
+// use one Python-opened O_NOFOLLOW fd for write, truncate and mode restore.
 const NOFOLLOW_WRITE_COMMAND_PATTERN =
   // eslint-disable-next-line security/detect-unsafe-regex -- Bounded literal pattern matching the well-known apt sources write command issued by the module under test.
-  /^set -eu; \[ ! -L '(?<path>\/etc\/apt\/sources\.list(?:\.d\/[^']+)?)' \] \|\| exit 201; dd if=\/dev\/stdin of='\/etc\/apt\/sources\.list(?:\.d\/[^']+)?' conv=notrunc oflag=nofollow status=none; truncate -s \d+ '\/etc\/apt\/sources\.list(?:\.d\/[^']+)?'; chmod '(?<mode>[0-7]+)' '\/etc\/apt\/sources\.list(?:\.d\/[^']+)?' \|\| exit 202$/v
+  /^set -eu; \[ ! -L '(?<path>\/etc\/apt\/sources\.list(?:\.d\/[^']+)?)' \] \|\| exit 201; python3 -c '.*os\.open\(path, os\.O_WRONLY \| os\.O_NOFOLLOW\).*os\.write\(fd, data\[offset:\]\).*os\.ftruncate\(fd, len\(data\)\).*os\.fchmod\(fd, mode\).*' '\/etc\/apt\/sources\.list(?:\.d\/[^']+)?' '(?<mode>[0-7]+)'$/sv
 
 const createMockSsh: typeof createBaseMockSsh = (responses, options) =>
   createBaseMockSsh(bridgeCatSourcesStubsToDdNoFollow(responses), {
@@ -851,7 +852,7 @@ describe("releaseUpgrade.upgrade — apply (Debian)", () => {
           },
       })
     )
-    // R-0000718: writes go through the NOFOLLOW dd pipeline now; intercept
+    // R-0000718/R-0000905: writes go through the NOFOLLOW fd-writer pipeline now; intercept
     // `ssh.exec` calls that match the pipeline and record the input
     // payload as the written content.
     const originalExec = ssh.exec.bind(ssh)
@@ -1492,9 +1493,9 @@ describe("releaseUpgrade.upgrade — apply (Debian)", () => {
 
     // R-0000241: the snapshot must capture the original mode so a rollback
     // restores the operator's exact permissions instead of forcing 0644.
-    // R-0000718: writes flow through the NOFOLLOW pipeline; the mode is
-    // embedded as the `chmod <mode> <path>` step of the pipeline, which we
-    // extract via `NOFOLLOW_WRITE_COMMAND_PATTERN`.
+    // R-0000718/R-0000905: writes flow through the NOFOLLOW fd-writer
+    // pipeline; the target mode is passed as argv to Python and restored
+    // through `os.fchmod` on the same fd.
     it("R-0000241: rollback restores the operator-specified mode of /etc/apt/sources.list", async () => {
       type ModeWriteCapture = { content: string; mode: string | undefined; path: string }
       const originalSources = "deb http://deb.debian.org/debian bookworm main\n"
@@ -1584,7 +1585,7 @@ describe("releaseUpgrade.upgrade — apply (Debian)", () => {
             },
         })
       )
-      // R-0000718: writes flow through the NOFOLLOW dd pipeline. Intercept
+      // R-0000718/R-0000905: writes flow through the NOFOLLOW fd-writer pipeline. Intercept
       // `ssh.exec` calls that match the pipeline, capture the input
       // payload, and simulate the third write (the rollback of
       // /etc/apt/sources.list) throwing so the rollback aggregation logic
@@ -1618,12 +1619,12 @@ describe("releaseUpgrade.upgrade — apply (Debian)", () => {
       expect(writes).toContainEqual({ content: originalExtraSources, path: extraPath })
     })
 
-    // R-0000718: sources writes (rewrite and rollback) must flow through
-    // the NOFOLLOW dd pipeline so a symlink swap at the target path cannot
-    // redirect the write to an attacker-controlled file. The pipeline
-    // surfaces the symlink case as a structured failure that aborts the
-    // upgrade rather than overwriting the symlink target.
-    it("R-0000718: rewrite issues a NOFOLLOW dd write command for /etc/apt/sources.list", async () => {
+    // R-0000718/R-0000905: sources writes (rewrite and rollback) must flow
+    // through the NOFOLLOW fd writer so a symlink swap at the target path
+    // cannot redirect the write, truncate or chmod to an attacker-controlled
+    // file. The pipeline surfaces the symlink case as a structured failure
+    // that aborts the upgrade rather than overwriting the symlink target.
+    it("R-0000905: rewrite uses one NOFOLLOW fd for write, truncate and chmod", async () => {
       const ssh = createMockSsh(debianApplyResponses("bookworm", "trixie"))
       const mod = releaseUpgrade.upgrade()
       const result = await mod.apply(ssh, emptyEnv)
@@ -1634,6 +1635,12 @@ describe("releaseUpgrade.upgrade — apply (Debian)", () => {
       // oxlint-disable-next-line no-conditional-in-test -- nullish fallback when the optional regex input is unavailable; assertion above guarantees a match
       const match = NOFOLLOW_WRITE_COMMAND_PATTERN.exec(writeCall ?? "")
       expect(match?.groups?.path).toBe("/etc/apt/sources.list")
+      expect(writeCall).toContain("python3 -c")
+      expect(writeCall).toContain("os.O_NOFOLLOW")
+      expect(writeCall).toContain("os.ftruncate(fd, len(data))")
+      expect(writeCall).toContain("os.fchmod(fd, mode)")
+      expect(writeCall).not.toContain("truncate -s")
+      expect(writeCall).not.toContain("chmod '")
     })
 
     it("R-0000718: rewrite fails closed when the sources file is a symlink at write time", async () => {
@@ -1671,7 +1678,7 @@ describe("releaseUpgrade.upgrade — apply (Debian)", () => {
         const content = execOptions!.input!
         const path = match.groups.path
         writes.push({ content, path })
-        // oxlint-disable-next-line no-conditional-in-test -- simulate chmod failing after dd/truncate already wrote the target suite
+        // oxlint-disable-next-line no-conditional-in-test -- simulate chmod failing after the fd-writer already wrote the target suite
         if (path === "/etc/apt/sources.list" && content.includes("trixie")) {
           return { code: 202, stderr: "chmod: Operation not permitted", stdout: "" }
         }
@@ -1693,21 +1700,21 @@ describe("releaseUpgrade.upgrade — apply (Debian)", () => {
       expect(ssh.calls).not.toContain(APT_UPDATE_COMMAND)
     })
 
-    it("rolls back the current sources file after a partial rewrite failure", async () => {
+    it("rolls back the current sources file after a partial fd-writer failure", async () => {
       const originalSources = "deb http://deb.debian.org/debian bookworm main\n"
       const writes: WriteCapture[] = []
       const ssh = createMockSsh(debianApplyResponses("bookworm", "trixie"))
       const originalExec = ssh.exec.bind(ssh)
       ssh.exec = async (command, execOptions) => {
         const match = NOFOLLOW_WRITE_COMMAND_PATTERN.exec(command)
-        // oxlint-disable-next-line no-conditional-in-test -- mock dispatcher records mutating writes before returning the requested truncate failure
+        // oxlint-disable-next-line no-conditional-in-test -- mock dispatcher records mutating writes before returning the requested fd-writer failure
         if (match?.groups == null) return originalExec(command, execOptions)
         const content = execOptions!.input!
         const path = match.groups.path
         writes.push({ content, path })
-        // oxlint-disable-next-line no-conditional-in-test -- simulate dd writing stdin before a later truncate step fails
+        // oxlint-disable-next-line no-conditional-in-test -- simulate the fd-writer writing stdin before ftruncate fails
         if (path === "/etc/apt/sources.list" && content.includes("trixie")) {
-          return { code: 1, stderr: "truncate: Input/output error", stdout: "" }
+          return { code: 1, stderr: "ftruncate: Input/output error", stdout: "" }
         }
         return { code: 0, stderr: "", stdout: "" }
       }
@@ -1716,7 +1723,7 @@ describe("releaseUpgrade.upgrade — apply (Debian)", () => {
       const result = await mod.apply(ssh, emptyEnv)
 
       expect(result.status).toBe("failed")
-      expect(result.error?.message).toContain("truncate: Input/output error")
+      expect(result.error?.message).toContain("ftruncate: Input/output error")
       expect(writes).toStrictEqual([
         {
           content: "deb http://deb.debian.org/debian trixie main\n",
