@@ -363,6 +363,31 @@ describe("promptForAdminPublicKey", () => {
     expect(select).toHaveBeenCalledTimes(2)
   })
 
+  it("confirms a single symlink-sensitive local public key before returning it", async () => {
+    const select = vi
+      .fn()
+      .mockResolvedValueOnce("local")
+      .mockResolvedValueOnce("/tmp/.ssh/id_ed25519.pub")
+
+    await expect(
+      promptForAdminPublicKey(select, [
+        {
+          key: "ssh-ed25519 AAAA example-ed25519",
+          label: "id_ed25519.pub -> /private/tmp/keys/id_ed25519.pub",
+          path: "/tmp/.ssh/id_ed25519.pub",
+        },
+      ])
+    ).resolves.toBe("ssh-ed25519 AAAA example-ed25519")
+    expect(select).toHaveBeenCalledTimes(2)
+    expect(select).toHaveBeenNthCalledWith(2, "Select the public key to embed into server.ts:", [
+      {
+        description: "/tmp/.ssh/id_ed25519.pub",
+        label: "id_ed25519.pub -> /private/tmp/keys/id_ed25519.pub",
+        value: "/tmp/.ssh/id_ed25519.pub",
+      },
+    ])
+  })
+
   it("falls back to the placeholder when no readable local public keys exist", async () => {
     const select = vi.fn().mockResolvedValueOnce("local")
 

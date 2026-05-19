@@ -404,10 +404,6 @@ export async function promptForAdminPublicKey(
     return undefined
   }
 
-  if (publicKeys.length === 1) {
-    return publicKeys[0]?.key
-  }
-
   const selectedPath = await select(
     "Select the public key to embed into server.ts:",
     createPublicKeyOptions(publicKeys)
