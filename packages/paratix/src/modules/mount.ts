@@ -24,6 +24,7 @@ const FSTAB_MODE = "0644"
 const FSTAB_FILE_MUTEX = "etc-fstab-mutex"
 const MOUNT_PRESENT = "mount.present"
 const MOUNT_ABSENT = "mount.absent"
+const LIVE_MOUNT_NOT_MOUNTED = "not-mounted"
 const WHITESPACE_PATTERN = /\s/v
 
 /**
@@ -367,9 +368,9 @@ type UnmountIfNeededResult = {
 }
 
 type LiveMountProbe =
-  | { kind: "failed"; failure: ModuleResult }
+  | { failure: ModuleResult; kind: "failed" }
   | { kind: "mounted"; live: LiveMount }
-  | { kind: "not-mounted" }
+  | { kind: typeof LIVE_MOUNT_NOT_MOUNTED }
 
 function buildMountCommand(parameters: {
   fstype: string
@@ -498,7 +499,7 @@ async function ensureLiveMount(
   const liveProbe = await probeLiveMount(ssh, MOUNT_PRESENT, path)
   if (liveProbe.kind === "failed") return liveProbe.failure
 
-  if (liveProbe.kind === "not-mounted") {
+  if (liveProbe.kind === LIVE_MOUNT_NOT_MOUNTED) {
     const mountResult = await ssh.exec(buildMountCommand({ fstype, opts, path, src }), EXEC_OPTS)
     if (mountResult.code !== 0) {
       return failedCommand(`[mount.present: ${path}] mount failed`, mountResult)
@@ -524,7 +525,7 @@ async function unmountIfNeeded(
 ): Promise<ModuleResult | UnmountIfNeededResult> {
   const liveProbe = await probeLiveMount(ssh, MOUNT_ABSENT, path)
   if (liveProbe.kind === "failed") return liveProbe.failure
-  if (liveProbe.kind === "not-mounted") return { changed: false, previousLive: null }
+  if (liveProbe.kind === LIVE_MOUNT_NOT_MOUNTED) return { changed: false, previousLive: null }
 
   const previousLive = snapshotLiveMount ? liveProbe.live : null
 
@@ -608,7 +609,7 @@ async function probeLiveMount(
     `findmnt --noheadings --output SOURCE,FSTYPE,OPTIONS ${shellQuote(path)}`,
     EXEC_OPTS
   )
-  if (findmntResult.code === 1) return { kind: "not-mounted" }
+  if (findmntResult.code === 1) return { kind: LIVE_MOUNT_NOT_MOUNTED }
   if (findmntResult.code !== 0) {
     return {
       failure: failedCommand(
@@ -704,7 +705,7 @@ export const mount = {
         const symlinkGuard = await ssh.exec(buildMountPathSymlinkGuard(path), EXEC_OPTS)
         if (symlinkGuard.code !== 0) return NEEDS_APPLY
         const liveProbe = await probeLiveMount(ssh, MOUNT_ABSENT, path)
-        if (liveProbe.kind !== "not-mounted") return NEEDS_APPLY
+        if (liveProbe.kind !== LIVE_MOUNT_NOT_MOUNTED) return NEEDS_APPLY
 
         if (persist) {
           const fstabContent = await ssh.readFile(FSTAB_PATH)
