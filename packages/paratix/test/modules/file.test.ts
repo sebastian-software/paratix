@@ -55,13 +55,13 @@ const createMockSsh: typeof createBaseMockSsh = (responses, options) =>
       },
       { command: /^chmod '[0-7]+' '\/(?:remote|var)\//v, result: { code: 0 } },
       { command: /^chmod -- '[0-7]+' '\/(?:remote|var)\//v, result: { code: 0 } },
-      { command: /\nchmod -- '[0-7]+' "\$path"$/v, result: { code: 0 } },
+      { command: /\nchmod -- '[0-7]+' \/proc\/self\/fd\/9/v, result: { code: 0 } },
       { command: /^chown '[^']+' '\/(?:remote|var)\//v, result: { code: 0 } },
       { command: /^chown -- '[^']+' '\/(?:remote|var)\//v, result: { code: 0 } },
-      { command: /\nchown -- '[^']+' "\$path"$/v, result: { code: 0 } },
+      { command: /\nchown -- '[^']+' \/proc\/self\/fd\/9/v, result: { code: 0 } },
       { command: /^chgrp '[^']+' '\/(?:remote|var)\//v, result: { code: 0 } },
       { command: /^chgrp -- '[^']+' '\/(?:remote|var)\//v, result: { code: 0 } },
-      { command: /\nchgrp -- '[^']+' "\$path"$/v, result: { code: 0 } },
+      { command: /\nchgrp -- '[^']+' \/proc\/self\/fd\/9/v, result: { code: 0 } },
     ],
   })
 
@@ -189,7 +189,7 @@ describe("file.directory", () => {
 
     expect(result.status).toBe("changed")
     expect(ssh.calls).not.toContain("mkdir -p '/var/app'")
-    expect(ssh.calls).toContainEqual(expect.stringContaining("chmod -- '0755' \"$path\""))
+    expect(ssh.calls).toContainEqual(expect.stringContaining("chmod -- '0755' /proc/self/fd/9"))
     expect(ssh.calls).not.toContain("chown -- 'www-data:www-data' '/var/app'")
   })
 
@@ -208,7 +208,7 @@ describe("file.directory", () => {
     expect(ssh.calls).not.toContain("mkdir -p '/var/app'")
     expect(ssh.calls).not.toContain("chmod '0755' '/var/app'")
     expect(ssh.calls).toContainEqual(
-      expect.stringContaining("chown -- 'www-data:www-data' \"$path\"")
+      expect.stringContaining("chown -- 'www-data:www-data' /proc/self/fd/9")
     )
   })
 
@@ -405,7 +405,7 @@ describe("file.directory", () => {
       {
         responseStubs: [
           {
-            command: /\nchmod -- '0755' "\$path"$/v,
+            command: /\nchmod -- '0755' \/proc\/self\/fd\/9/v,
             result: {
               code: 1,
               stderr: "chmod: changing permissions of '/var/app': Operation not permitted",
@@ -432,7 +432,7 @@ describe("file.directory", () => {
       {
         responseStubs: [
           {
-            command: /\nchown -- 'w{3}-data' "\$path"$/v,
+            command: /\nchown -- 'w{3}-data' \/proc\/self\/fd\/9/v,
             result: { code: 1, stderr: "chown: invalid user: 'www-data'" },
           },
         ],
@@ -455,7 +455,7 @@ describe("file.directory", () => {
       {
         responseStubs: [
           {
-            command: /\nchmod -- '0755' "\$path"$/v,
+            command: /\nchmod -- '0755' \/proc\/self\/fd\/9/v,
             result: { code: 1, stderr: "metadata target changed before chmod" },
           },
         ],
@@ -467,7 +467,7 @@ describe("file.directory", () => {
     expect(result.status).toBe("failed")
     expect(String(result.error)).toContain("metadata target changed before chmod")
     expect(ssh.calls).toContainEqual(expect.stringContaining("before=$(stat -c '%d:%i:%F'"))
-    expect(ssh.calls).toContainEqual(expect.stringContaining("chmod -- '0755' \"$path\""))
+    expect(ssh.calls).toContainEqual(expect.stringContaining("chmod -- '0755' /proc/self/fd/9"))
   })
 
   it("returns failed when the directory target changes before chown after creation", async () => {
@@ -480,7 +480,7 @@ describe("file.directory", () => {
       {
         responseStubs: [
           {
-            command: /\nchown -- 'w{3}-data' "\$path"$/v,
+            command: /\nchown -- 'w{3}-data' \/proc\/self\/fd\/9/v,
             result: { code: 1, stderr: "metadata target changed before chown" },
           },
         ],
@@ -492,7 +492,7 @@ describe("file.directory", () => {
     expect(result.status).toBe("failed")
     expect(String(result.error)).toContain("metadata target changed before chown")
     expect(ssh.calls).toContainEqual(expect.stringContaining("before=$(stat -c '%d:%i:%F'"))
-    expect(ssh.calls).toContainEqual(expect.stringContaining("chown -- 'www-data' \"$path\""))
+    expect(ssh.calls).toContainEqual(expect.stringContaining("chown -- 'www-data' /proc/self/fd/9"))
   })
 })
 
@@ -695,7 +695,7 @@ describe("file.chmod", () => {
     const result = await mod.apply(ssh, emptyEnv)
 
     expect(result.status).toBe("changed")
-    expect(ssh.calls).toContainEqual(expect.stringContaining("chmod -- '0644' \"$path\""))
+    expect(ssh.calls).toContainEqual(expect.stringContaining("chmod -- '0644' /proc/self/fd/9"))
     expect(ssh.calls).toContainEqual(expect.stringContaining("stat -c '%d:%i:%F' -- \"$path\""))
   })
 
@@ -711,7 +711,7 @@ describe("file.chmod", () => {
 
     expect(result.status).toBe("failed")
     expect(result.error?.message).toContain("refuses to operate through symlink")
-    expect(ssh.calls).not.toContainEqual(expect.stringContaining("chmod -- '0644' \"$path\""))
+    expect(ssh.calls).not.toContainEqual(expect.stringContaining("chmod -- '0644' /proc/self/fd/9"))
   })
 
   it("regression R-0000133 — check returns needs-apply when the target is a symlink", async () => {
@@ -734,7 +734,7 @@ describe("file.chmod", () => {
       {
         responseStubs: [
           {
-            command: /\nchmod -- '0644' "\$path"$/v,
+            command: /\nchmod -- '0644' \/proc\/self\/fd\/9/v,
             result: {
               code: 1,
               stderr: "chmod: changing permissions of '/var/app/config.yml': Read-only file system",
@@ -758,7 +758,7 @@ describe("file.chmod", () => {
       {
         responseStubs: [
           {
-            command: /\nchmod -- '0644' "\$path"$/v,
+            command: /\nchmod -- '0644' \/proc\/self\/fd\/9/v,
             result: {
               code: 1,
               stderr: "metadata target changed before chmod",
@@ -773,8 +773,8 @@ describe("file.chmod", () => {
     expect(result.status).toBe("failed")
     expect(String(result.error)).toContain("metadata target changed before chmod")
     expect(ssh.calls).toContainEqual(expect.stringContaining("before=$(stat -c '%d:%i:%F'"))
-    expect(ssh.calls).toContainEqual(expect.stringContaining('if [ "$before" != "$after" ]'))
-    expect(ssh.calls).toContainEqual(expect.stringContaining("chmod -- '0644' \"$path\""))
+    expect(ssh.calls).toContainEqual(expect.stringContaining('if [ "$before" != "$opened" ]'))
+    expect(ssh.calls).toContainEqual(expect.stringContaining("chmod -- '0644' /proc/self/fd/9"))
   })
 })
 
@@ -840,7 +840,7 @@ describe("file.chown", () => {
 
     expect(result.status).toBe("changed")
     expect(ssh.calls).toContainEqual(
-      expect.stringContaining("chown -- 'www-data:www-data' \"$path\"")
+      expect.stringContaining("chown -- 'www-data:www-data' /proc/self/fd/9")
     )
     expect(ssh.calls).toContainEqual(expect.stringContaining("stat -c '%d:%i:%F' -- \"$path\""))
   })
@@ -851,7 +851,9 @@ describe("file.chown", () => {
     const result = await mod.apply(ssh, emptyEnv)
 
     expect(result.status).toBe("changed")
-    expect(ssh.calls).toContainEqual(expect.stringContaining("chown -- '1000:1000' \"$path\""))
+    expect(ssh.calls).toContainEqual(
+      expect.stringContaining("chown -- '1000:1000' /proc/self/fd/9")
+    )
   })
 
   it("rejects owner specs whose group component starts with a dash", async () => {
@@ -875,7 +877,7 @@ describe("file.chown", () => {
     expect(result.status).toBe("failed")
     expect(result.error?.message).toContain("refuses to operate through symlink")
     expect(ssh.calls).not.toContainEqual(
-      expect.stringContaining("chown -- 'www-data:www-data' \"$path\"")
+      expect.stringContaining("chown -- 'www-data:www-data' /proc/self/fd/9")
     )
   })
 
@@ -897,7 +899,7 @@ describe("file.chown", () => {
       {
         responseStubs: [
           {
-            command: /\nchown -- 'w{3}-data:w{3}-data' "\$path"$/v,
+            command: /\nchown -- 'w{3}-data:w{3}-data' \/proc\/self\/fd\/9/v,
             result: { code: 1, stderr: "chown: invalid user: 'www-data:www-data'" },
           },
         ],
@@ -918,7 +920,7 @@ describe("file.chown", () => {
       {
         responseStubs: [
           {
-            command: /\nchown -- 'w{3}-data:w{3}-data' "\$path"$/v,
+            command: /\nchown -- 'w{3}-data:w{3}-data' \/proc\/self\/fd\/9/v,
             result: {
               code: 1,
               stderr: "metadata target changed before chown",
@@ -933,9 +935,9 @@ describe("file.chown", () => {
     expect(result.status).toBe("failed")
     expect(String(result.error)).toContain("metadata target changed before chown")
     expect(ssh.calls).toContainEqual(expect.stringContaining("before=$(stat -c '%d:%i:%F'"))
-    expect(ssh.calls).toContainEqual(expect.stringContaining('if [ "$before" != "$after" ]'))
+    expect(ssh.calls).toContainEqual(expect.stringContaining('if [ "$before" != "$opened" ]'))
     expect(ssh.calls).toContainEqual(
-      expect.stringContaining("chown -- 'www-data:www-data' \"$path\"")
+      expect.stringContaining("chown -- 'www-data:www-data' /proc/self/fd/9")
     )
   })
 })
@@ -1226,7 +1228,7 @@ describe("file.copy", () => {
       // R-0000750: chown now runs through a shell-guarded command that
       // re-checks for a symlink immediately before the chown line.
       const guardedChownCalls = ssh.calls
-        .filter((call) => call.endsWith(`\nchown -- 'www-data' "$path"`))
+        .filter((call) => call.includes(`chown -- 'www-data' /proc/self/fd/9`))
         .filter((call) => call.includes("path='/remote/file.txt'"))
       expect(guardedChownCalls).toHaveLength(1)
     } finally {
@@ -1252,7 +1254,7 @@ describe("file.copy", () => {
         {
           responseStubs: [
             {
-              command: /\nchown -- 'w{3}-data' "\$path"$/v,
+              command: /\nchown -- 'w{3}-data' \/proc\/self\/fd\/9/v,
               result: {
                 code: 1,
                 stderr: "chown: invalid user: 'www-data'",
@@ -1292,7 +1294,9 @@ describe("file.copy", () => {
       const result = await mod.apply(ssh, emptyEnv)
 
       expect(result.status).toBe("changed")
-      const chownCall = ssh.calls.find((call) => call.includes(`chown -- 'www-data' "$path"`))
+      const chownCall = ssh.calls.find((call) =>
+        call.includes(`chown -- 'www-data' /proc/self/fd/9`)
+      )
       expect(chownCall).toBeDefined()
       expect(chownCall).toContain(`path='/remote/file.txt'`)
       expect(chownCall).toContain(`if [ -L "$path" ]; then`)
@@ -2190,7 +2194,7 @@ describe("file.template", () => {
         {
           responseStubs: [
             {
-              command: /\nchmod -- '0600' "\$path"$/v,
+              command: /\nchmod -- '0600' \/proc\/self\/fd\/9/v,
               result: {
                 code: 1,
                 stderr: "chmod: changing permissions of '/remote/out.txt': Read-only file system",
@@ -2232,7 +2236,9 @@ describe("file.template", () => {
       expect(symlinkCheck).toHaveBeenNthCalledWith(1, "[ -L '/remote/out.txt' ]")
       expect(symlinkCheck).toHaveBeenNthCalledWith(2, "[ -L '/remote/out.txt' ]")
       expect(ssh.writeFile).toHaveBeenCalledWith("/remote/out.txt", "Hello", { mode: "0600" })
-      expect(ssh.calls).not.toContainEqual(expect.stringContaining("chmod -- '0600' \"$path\""))
+      expect(ssh.calls).not.toContainEqual(
+        expect.stringContaining("chmod -- '0600' /proc/self/fd/9")
+      )
     } finally {
       rmSync(dir, { recursive: true })
     }
@@ -2251,7 +2257,7 @@ describe("file.template", () => {
         {
           responseStubs: [
             {
-              command: /\nchown -- 'w{3}-data' "\$path"$/v,
+              command: /\nchown -- 'w{3}-data' \/proc\/self\/fd\/9/v,
               result: { code: 1, stderr: "chown: invalid user: 'www-data'" },
             },
           ],
@@ -2551,7 +2557,7 @@ describe("file.assemble", () => {
         {
           responseStubs: [
             {
-              command: /\nchmod -- '0600' "\$path"$/v,
+              command: /\nchmod -- '0600' \/proc\/self\/fd\/9/v,
               result: {
                 code: 1,
                 stderr:
@@ -2585,7 +2591,7 @@ describe("file.assemble", () => {
         {
           responseStubs: [
             {
-              command: /\nchown -- 'w{3}-data' "\$path"$/v,
+              command: /\nchown -- 'w{3}-data' \/proc\/self\/fd\/9/v,
               result: { code: 1, stderr: "chown: invalid user: 'www-data'" },
             },
           ],
@@ -2615,7 +2621,7 @@ describe("file.assemble", () => {
         {
           responseStubs: [
             {
-              command: /\nchmod -- '0600' "\$path"$/v,
+              command: /\nchmod -- '0600' \/proc\/self\/fd\/9/v,
               result: { code: 1, stderr: "metadata target changed before chmod" },
             },
           ],
@@ -2627,7 +2633,7 @@ describe("file.assemble", () => {
       expect(result.status).toBe("failed")
       expect(String(result.error)).toContain("metadata target changed before chmod")
       expect(ssh.calls).toContainEqual(expect.stringContaining("before=$(stat -c '%d:%i:%F'"))
-      expect(ssh.calls).toContainEqual(expect.stringContaining("chmod -- '0600' \"$path\""))
+      expect(ssh.calls).toContainEqual(expect.stringContaining("chmod -- '0600' /proc/self/fd/9"))
     } finally {
       rmSync(dir, { recursive: true })
     }
@@ -2646,7 +2652,7 @@ describe("file.assemble", () => {
         {
           responseStubs: [
             {
-              command: /\nchown -- 'w{3}-data' "\$path"$/v,
+              command: /\nchown -- 'w{3}-data' \/proc\/self\/fd\/9/v,
               result: { code: 1, stderr: "metadata target changed before chown" },
             },
           ],
@@ -2658,7 +2664,9 @@ describe("file.assemble", () => {
       expect(result.status).toBe("failed")
       expect(String(result.error)).toContain("metadata target changed before chown")
       expect(ssh.calls).toContainEqual(expect.stringContaining("before=$(stat -c '%d:%i:%F'"))
-      expect(ssh.calls).toContainEqual(expect.stringContaining("chown -- 'www-data' \"$path\""))
+      expect(ssh.calls).toContainEqual(
+        expect.stringContaining("chown -- 'www-data' /proc/self/fd/9")
+      )
     } finally {
       rmSync(dir, { recursive: true })
     }
@@ -2944,8 +2952,8 @@ describe("file.properties", () => {
     const result = await mod.apply(ssh, emptyEnv)
 
     expect(result.status).toBe("changed")
-    expect(ssh.calls).toContainEqual(expect.stringContaining("chmod -- '0644' \"$path\""))
-    expect(ssh.calls).toContainEqual(expect.stringContaining("chown -- 'www-data' \"$path\""))
+    expect(ssh.calls).toContainEqual(expect.stringContaining("chmod -- '0644' /proc/self/fd/9"))
+    expect(ssh.calls).toContainEqual(expect.stringContaining("chown -- 'www-data' /proc/self/fd/9"))
   })
 
   it("apply returns ok and does not run chmod/chown/chgrp when nothing has drifted", async () => {
@@ -2978,7 +2986,7 @@ describe("file.properties", () => {
     const result = await mod.apply(ssh, emptyEnv)
 
     expect(result.status).toBe("changed")
-    expect(ssh.calls).toContainEqual(expect.stringContaining("chmod -- '0644' \"$path\""))
+    expect(ssh.calls).toContainEqual(expect.stringContaining("chmod -- '0644' /proc/self/fd/9"))
     expect(ssh.calls).not.toContain("chown -- 'www-data:www-data' '/var/app'")
   })
 
@@ -2996,7 +3004,7 @@ describe("file.properties", () => {
     expect(result.status).toBe("changed")
     expect(ssh.calls).not.toContain("chmod -- '0644' '/var/app'")
     expect(ssh.calls).toContainEqual(
-      expect.stringContaining("chown -- 'www-data:www-data' \"$path\"")
+      expect.stringContaining("chown -- 'www-data:www-data' /proc/self/fd/9")
     )
     expect(ssh.calls).not.toContain("chown -- 'www-data' '/var/app'")
     expect(ssh.calls).not.toContain("chgrp -- 'www-data' '/var/app'")
@@ -3010,7 +3018,7 @@ describe("file.properties", () => {
     const result = await mod.apply(ssh, emptyEnv)
 
     expect(result.status).toBe("changed")
-    expect(ssh.calls).toContainEqual(expect.stringContaining("chgrp -- 'www-data' \"$path\""))
+    expect(ssh.calls).toContainEqual(expect.stringContaining("chgrp -- 'www-data' /proc/self/fd/9"))
   })
 
   it("apply normalises mode comparisons: 0644 desired matches 644 from stat", async () => {
@@ -3075,7 +3083,7 @@ describe("file.properties", () => {
       {
         responseStubs: [
           {
-            command: /\nchmod -- '0644' "\$path"$/v,
+            command: /\nchmod -- '0644' \/proc\/self\/fd\/9/v,
             result: {
               code: 1,
               stderr: "chmod: changing permissions of '/var/app': Read-only file system",
@@ -3099,7 +3107,7 @@ describe("file.properties", () => {
       {
         responseStubs: [
           {
-            command: /\nchown -- 'w{3}-data:w{3}-data' "\$path"$/v,
+            command: /\nchown -- 'w{3}-data:w{3}-data' \/proc\/self\/fd\/9/v,
             result: { code: 1, stderr: "chown: invalid user: 'www-data:www-data'" },
           },
         ],
@@ -3120,7 +3128,7 @@ describe("file.properties", () => {
       {
         responseStubs: [
           {
-            command: /\nchgrp -- 'w{3}-data' "\$path"$/v,
+            command: /\nchgrp -- 'w{3}-data' \/proc\/self\/fd\/9/v,
             result: { code: 1, stderr: "chgrp: invalid group: 'www-data'" },
           },
         ],
@@ -3141,7 +3149,7 @@ describe("file.properties", () => {
       {
         responseStubs: [
           {
-            command: /\nchmod -- '0644' "\$path"$/v,
+            command: /\nchmod -- '0644' \/proc\/self\/fd\/9/v,
             result: { code: 1, stderr: "metadata target changed before chmod" },
           },
         ],
@@ -3153,7 +3161,7 @@ describe("file.properties", () => {
     expect(result.status).toBe("failed")
     expect(String(result.error)).toContain("metadata target changed before chmod")
     expect(ssh.calls).toContainEqual(expect.stringContaining("before=$(stat -c '%d:%i:%F'"))
-    expect(ssh.calls).toContainEqual(expect.stringContaining("chmod -- '0644' \"$path\""))
+    expect(ssh.calls).toContainEqual(expect.stringContaining("chmod -- '0644' /proc/self/fd/9"))
   })
 
   it("returns failed when the chown target identity changes before mutation", async () => {
@@ -3164,7 +3172,7 @@ describe("file.properties", () => {
       {
         responseStubs: [
           {
-            command: /\nchown -- 'w{3}-data' "\$path"$/v,
+            command: /\nchown -- 'w{3}-data' \/proc\/self\/fd\/9/v,
             result: { code: 1, stderr: "metadata target changed before chown" },
           },
         ],
@@ -3176,7 +3184,7 @@ describe("file.properties", () => {
     expect(result.status).toBe("failed")
     expect(String(result.error)).toContain("metadata target changed before chown")
     expect(ssh.calls).toContainEqual(expect.stringContaining("before=$(stat -c '%d:%i:%F'"))
-    expect(ssh.calls).toContainEqual(expect.stringContaining("chown -- 'www-data' \"$path\""))
+    expect(ssh.calls).toContainEqual(expect.stringContaining("chown -- 'www-data' /proc/self/fd/9"))
   })
 
   it("returns failed when the chgrp target identity changes before mutation", async () => {
@@ -3187,7 +3195,7 @@ describe("file.properties", () => {
       {
         responseStubs: [
           {
-            command: /\nchgrp -- 'w{3}-data' "\$path"$/v,
+            command: /\nchgrp -- 'w{3}-data' \/proc\/self\/fd\/9/v,
             result: { code: 1, stderr: "metadata target changed before chgrp" },
           },
         ],
@@ -3199,7 +3207,7 @@ describe("file.properties", () => {
     expect(result.status).toBe("failed")
     expect(String(result.error)).toContain("metadata target changed before chgrp")
     expect(ssh.calls).toContainEqual(expect.stringContaining("before=$(stat -c '%d:%i:%F'"))
-    expect(ssh.calls).toContainEqual(expect.stringContaining("chgrp -- 'www-data' \"$path\""))
+    expect(ssh.calls).toContainEqual(expect.stringContaining("chgrp -- 'www-data' /proc/self/fd/9"))
   })
 })
 

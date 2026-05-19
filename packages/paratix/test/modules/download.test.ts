@@ -1324,20 +1324,7 @@ describe("download.url", () => {
       })
 
       it("fails metadata heal when guarded chmod detects a swapped target", async () => {
-        const guardedChmodCommand = [
-          `path='${destination}'`,
-          `before=$(stat -c '%d:%i:%F' -- "$path") || exit $?`,
-          `if [ -L "$path" ]; then`,
-          `  printf '%s\\n' 'refuses to operate through symlink' >&2`,
-          `  exit 1`,
-          `fi`,
-          `after=$(stat -c '%d:%i:%F' -- "$path") || exit $?`,
-          `if [ "$before" != "$after" ]; then`,
-          `  printf '%s\\n' 'metadata target changed before chmod' >&2`,
-          `  exit 1`,
-          `fi`,
-          `chmod -- '0755' "$path"`,
-        ].join("\n")
+        const guardedChmodCommand = buildGuardedChmodShell("0755", destination)
         const mockSsh = createMockSsh({
           [`[ -e '${destination}' ]`]: { code: 0 },
           [`[ -f '${destination}' ]`]: { code: 0 },

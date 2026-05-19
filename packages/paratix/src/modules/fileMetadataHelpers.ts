@@ -78,7 +78,9 @@ function renderGuardedMetadataCommand(
 ): string {
   if (kind === "chown") assertValidChownOwnershipSpec(value)
 
-  const operation = `${kind} -- ${shellQuote(value)} "$path"`
+  const fd = "9"
+  const fdPath = `/proc/self/fd/${fd}`
+  const operation = `${kind} -- ${shellQuote(value)} ${fdPath}`
 
   return [
     `path=${shellQuote(remotePath)}`,
@@ -87,12 +89,22 @@ function renderGuardedMetadataCommand(
     `  printf '%s\\n' 'refuses to operate through symlink' >&2`,
     `  exit 1`,
     `fi`,
-    `after=$(stat -c '%d:%i:%F' -- "$path") || exit $?`,
-    `if [ "$before" != "$after" ]; then`,
+    `exec ${fd}< "$path" || exit $?`,
+    `opened=$(stat -Lc '%d:%i:%F' -- ${fdPath}) || exit $?`,
+    `if [ "$before" != "$opened" ]; then`,
+    `  exec ${fd}<&-`,
     `  printf '%s\\n' 'metadata target changed before ${kind}' >&2`,
     `  exit 1`,
     `fi`,
+    `if [ -L "$path" ]; then`,
+    `  exec ${fd}<&-`,
+    `  printf '%s\\n' 'refuses to operate through symlink' >&2`,
+    `  exit 1`,
+    `fi`,
     operation,
+    `status=$?`,
+    `exec ${fd}<&-`,
+    `exit "$status"`,
   ].join("\n")
 }
 
