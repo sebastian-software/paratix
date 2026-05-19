@@ -101,10 +101,26 @@ function publishStagedProjectDirectory({
   projectDirectory,
   stagingDirectory,
 }: StagedProjectDirectory): void {
+  const publishedEntries: string[] = []
   // eslint-disable-next-line security/detect-non-literal-fs-filename
-  for (const entry of readdirSync(stagingDirectory)) {
-    // eslint-disable-next-line security/detect-non-literal-fs-filename
-    renameSync(join(stagingDirectory, entry), join(projectDirectory, entry))
+  const entries = readdirSync(stagingDirectory)
+  try {
+    for (const entry of entries) {
+      // eslint-disable-next-line security/detect-non-literal-fs-filename
+      renameSync(join(stagingDirectory, entry), join(projectDirectory, entry))
+      publishedEntries.push(entry)
+    }
+  } catch (error: unknown) {
+    for (const entry of publishedEntries.toReversed()) {
+      try {
+        // eslint-disable-next-line security/detect-non-literal-fs-filename
+        renameSync(join(projectDirectory, entry), join(stagingDirectory, entry))
+      } catch {
+        // Preserve the original publish failure; cleanup in the caller still
+        // removes any staging content that could not be restored.
+      }
+    }
+    throw error
   }
   // eslint-disable-next-line security/detect-non-literal-fs-filename
   rmdirSync(stagingDirectory)

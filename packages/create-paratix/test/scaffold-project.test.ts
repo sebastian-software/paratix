@@ -1,3 +1,5 @@
+import type * as NodeFs from "node:fs"
+
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join, resolve } from "node:path"
@@ -340,6 +342,51 @@ describe("scaffoldProject", () => {
 
     expect(console.error).toHaveBeenCalledWith(`Error: Directory "${projectName}" already exists.`)
     expect(existsSync(join(projectDirectory, "staged.txt"))).toBe(false)
+  })
+
+  it("rolls staged entries back when publishing fails after a partial move", async () => {
+    vi.resetModules()
+    vi.doMock("node:fs", async (importOriginal) => {
+      const actual = await importOriginal<typeof NodeFs>()
+      const renameSync = vi.fn(actual.renameSync)
+      renameSync.mockImplementationOnce(function renameFirstStagedEntry(oldPath, newPath) {
+        actual.renameSync(oldPath, newPath)
+      })
+      renameSync.mockImplementationOnce(() => {
+        const error = new Error("simulated publish rename failure") as NodeJS.ErrnoException
+        error.code = "EIO"
+        throw error
+      })
+      return {
+        ...actual,
+        renameSync,
+      }
+    })
+    try {
+      const {
+        createStagedProjectDirectory: createStagedProjectDirectoryWithMockedFs,
+        finalizeStagedProjectDirectory: finalizeStagedProjectDirectoryWithMockedFs,
+      } = await import("../src/projectDirectory.js")
+      const stagedProjectDirectory = createStagedProjectDirectoryWithMockedFs(
+        projectDirectory,
+        projectName
+      )
+      const firstEntry = join(stagedProjectDirectory.stagingDirectory, "01-first.txt")
+      const blockedEntry = join(stagedProjectDirectory.stagingDirectory, "02-blocked")
+      writeFileSync(firstEntry, "FIRST_CONTENT")
+      writeFileSync(blockedEntry, "BLOCKED_CONTENT")
+
+      expect(() => {
+        finalizeStagedProjectDirectoryWithMockedFs(stagedProjectDirectory, projectName)
+      }).toThrow("simulated publish rename failure")
+
+      expect(existsSync(join(projectDirectory, "01-first.txt"))).toBe(false)
+      expect(readFileSync(firstEntry, "utf8")).toBe("FIRST_CONTENT")
+      expect(readFileSync(blockedEntry, "utf8")).toBe("BLOCKED_CONTENT")
+    } finally {
+      vi.doUnmock("node:fs")
+      vi.resetModules()
+    }
   })
 
   it("rejects invalid project names before creating directories", async () => {
