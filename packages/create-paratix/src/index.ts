@@ -14,7 +14,13 @@ import {
 } from "./cliValidation.js"
 import { isDirectExecution } from "./directExecution.js"
 import { promptForHostFingerprint, promptForInitialUserConfig } from "./interactivePrompts.js"
-import { createProjectDirectoryAtomically } from "./projectDirectory.js"
+import {
+  createStagedProjectDirectory,
+  finalizeStagedProjectDirectory,
+  isSameProjectDirectoryIdentity,
+  type ProjectDirectoryIdentity,
+  type StagedProjectDirectory,
+} from "./projectDirectory.js"
 import {
   normalizeProgrammaticScaffoldStringOptions,
   parseInitialUserConfig as parseScaffoldInitialUserConfig,
@@ -197,6 +203,7 @@ type PreparedScaffold = {
   normalizedProjectName: string
   normalizedStringOptions: ReturnType<typeof normalizeProgrammaticScaffoldStringOptions>
   projectDirectory: string
+  stagedProjectDirectory: StagedProjectDirectory
 }
 
 function prepareScaffold(projectName: string, options?: ScaffoldOptions): PreparedScaffold {
@@ -205,31 +212,50 @@ function prepareScaffold(projectName: string, options?: ScaffoldOptions): Prepar
   const initialUser = normalizeProgrammaticInitialUserConfig(options?.initialUser)
   const normalizedStringOptions = normalizeProgrammaticScaffoldStringOptions(options)
   validateRootBootstrapConfiguration(initialUser, normalizedStringOptions.adminPublicKey)
-  createProjectDirectoryAtomically(projectDirectory, normalizedProjectName)
-  return { initialUser, normalizedProjectName, normalizedStringOptions, projectDirectory }
+  const stagedProjectDirectory = createStagedProjectDirectory(
+    projectDirectory,
+    normalizedProjectName
+  )
+  return {
+    initialUser,
+    normalizedProjectName,
+    normalizedStringOptions,
+    projectDirectory,
+    stagedProjectDirectory,
+  }
 }
 
-// R-0000499: if writeProjectFiles or the installer throws after the empty
-// project directory has been created, leaving the half-built directory behind
-// would block retries with the same name. Remove the directory before
-// rethrowing. A non-throwing installer return value (`false`) signals partial
-// success — scaffold files are valid, only the install step failed — and the
-// directory is preserved in that branch.
+// Scaffold into a private same-parent staging directory and only publish that
+// completed tree into the requested project path. If later installer work
+// fails, cleanup removes the final directory only while its identity still
+// matches the directory we published.
 function runScaffoldOrCleanup(
   prepared: PreparedScaffold,
   pm: PackageManager,
   options: ScaffoldOptions | undefined
 ): boolean {
+  const { stagingDirectory } = prepared.stagedProjectDirectory
+  let publishedProjectIdentity: ProjectDirectoryIdentity | undefined
   try {
-    writeProjectFiles(prepared.projectDirectory, {
-      ...options,
+    writeScaffoldFiles(stagingDirectory, {
       ...prepared.normalizedStringOptions,
       initialUser: prepared.initialUser,
+      packageName: prepared.normalizedProjectName,
     })
+    publishedProjectIdentity = finalizeStagedProjectDirectory(
+      prepared.stagedProjectDirectory,
+      prepared.normalizedProjectName
+    )
     const installer = options?.installer ?? installDependencies
     return installer(prepared.projectDirectory, pm)
   } catch (error) {
-    rmSync(prepared.projectDirectory, { force: true, recursive: true })
+    rmSync(stagingDirectory, { force: true, recursive: true })
+    if (
+      publishedProjectIdentity != null &&
+      isSameProjectDirectoryIdentity(prepared.projectDirectory, publishedProjectIdentity)
+    ) {
+      rmSync(prepared.projectDirectory, { force: true, recursive: true })
+    }
     throw error
   }
 }

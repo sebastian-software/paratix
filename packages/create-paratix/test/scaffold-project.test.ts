@@ -72,6 +72,10 @@ describe("scaffoldProject", () => {
       command: { args: ["install"], executable: "pnpm" },
       name: "pnpm",
     })
+    expect(existsSync(join(projectDirectory, "package.json"))).toBe(true)
+    expect(JSON.parse(readFileSync(join(projectDirectory, "package.json"), "utf8"))).toMatchObject({
+      name: projectName,
+    })
     expect(console.log).toHaveBeenCalledWith(`Creating Paratix project in ${projectDirectory}...`)
     expect(console.log).toHaveBeenCalledWith(
       expect.stringContaining("Project created successfully!")
@@ -86,6 +90,32 @@ describe("scaffoldProject", () => {
     expect(process.exitCode).toBeUndefined()
   })
 
+  it("does not clean a replacement final path when installer failure cleanup runs", () => {
+    const sentinelPath = join(projectDirectory, "sentinel.txt")
+    const installer = vi.fn(() => {
+      rmSync(projectDirectory, { recursive: true })
+      mkdirSync(projectDirectory)
+      writeFileSync(sentinelPath, "FOREIGN_CONTENT")
+      throw new Error("install failed")
+    })
+
+    expect(() => {
+      scaffoldProject(
+        projectName,
+        { command: { args: ["install"], executable: "pnpm" }, name: "pnpm" },
+        {
+          adminPublicKey: TEST_ADMIN_PUBLIC_KEY,
+          host: "example.com",
+          initialUser: { kind: "root" },
+          installer,
+        }
+      )
+    }).toThrow("install failed")
+
+    expect(readFileSync(sentinelPath, "utf8")).toBe("FOREIGN_CONTENT")
+    expect(existsSync(join(projectDirectory, "package.json"))).toBe(false)
+  })
+
   it("prints a partial-success message and keeps a non-zero exit code when dependency installation fails", () => {
     const installer = vi.fn().mockReturnValue(false)
 
@@ -96,6 +126,7 @@ describe("scaffoldProject", () => {
     )
 
     expect(result).toBe(false)
+    expect(existsSync(join(projectDirectory, "package.json"))).toBe(true)
     expect(console.log).toHaveBeenCalledWith(
       expect.stringContaining("Project files created, but dependency installation failed.")
     )
