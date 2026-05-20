@@ -372,6 +372,14 @@ function sanitizeUnitValue(value: string): string {
   return withoutControlChars.replaceAll("%", "%%")
 }
 
+function hasControlCharacter(value: string): boolean {
+  for (const character of value) {
+    const codePoint = character.codePointAt(0)
+    if (codePoint != null && (codePoint <= 0x1f || codePoint === 0x7f)) return true
+  }
+  return false
+}
+
 function validateGeneratedSystemdUnitContent(
   content: string,
   unitFileName: string
@@ -409,6 +417,11 @@ function validateComposeProjectDirectory(
   if (!posix.isAbsolute(projectDirectory)) {
     return failed(
       `[compose.systemd] projectDirectory must be an absolute path for ${unitFileName}, got: ${projectDirectory}`
+    )
+  }
+  if (hasControlCharacter(projectDirectory)) {
+    return failed(
+      `[compose.systemd] projectDirectory must not contain control characters for ${unitFileName}`
     )
   }
   return null

@@ -1453,6 +1453,20 @@ describe("compose.systemd — apply", () => {
     expect(result.status).toBe("failed")
   })
 
+  it("returns failed without writing when projectDirectory contains control characters", async () => {
+    const mockSsh = createComposeMockSsh({
+      "command -v podman": { code: 0 },
+    })
+    const writeSpy = vi.spyOn(mockSsh, "writeFile")
+    const mod = compose.systemd({ name: "app", projectDirectory: "/opt/app\nprod" })
+
+    const result = await mod.apply(mockSsh, emptyEnv)
+
+    expect(result.status).toBe("failed")
+    expect(result.error?.message).toContain("projectDirectory must not contain control characters")
+    expect(writeSpy).not.toHaveBeenCalled()
+  })
+
   it("writes unit file and runs daemon-reload", async () => {
     const expectedUnit = expectedPodmanUnit(projectDirectory, defaultServiceName)
     const writtenFiles: Array<{ content: string; path: string }> = []
