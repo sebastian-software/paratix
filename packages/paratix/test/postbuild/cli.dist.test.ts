@@ -1,4 +1,9 @@
-import { execFile, type ExecFileOptionsWithStringEncoding, execFileSync } from "node:child_process"
+import {
+  execFile,
+  type ExecFileOptionsWithStringEncoding,
+  execFileSync,
+  spawnSync,
+} from "node:child_process"
 import { generateKeyPairSync } from "node:crypto"
 import {
   existsSync,
@@ -14,7 +19,7 @@ import { tmpdir } from "node:os"
 import { dirname, join, resolve } from "node:path"
 import { pathToFileURL } from "node:url"
 import { Server, type ServerChannel } from "ssh2"
-import { describe, expect, it } from "vitest"
+import { afterAll, beforeAll, describe, expect, it } from "vitest"
 
 const packageRootDirectory = resolve(import.meta.dirname, "../..")
 const CLI_COMMAND_TIMEOUT_MS = 30_000
@@ -120,6 +125,84 @@ async function startTestSshServer(
 }
 
 describe("dist CLI", () => {
+  let packedPackageRootDirectory: string
+  let packedTempDirectory: string
+  let packedTarballEntries: string[]
+
+  beforeAll(() => {
+    packedTempDirectory = mkdtempSync(join(tmpdir(), "paratix-packed-package-"))
+    packedPackageRootDirectory = join(packedTempDirectory, "node_modules", "paratix")
+    mkdirSync(packedPackageRootDirectory, { recursive: true })
+    linkRuntimeDependencies(packedTempDirectory)
+
+    const packResult = spawnSync(
+      "pnpm",
+      ["pack", "--pack-destination", packedTempDirectory, "--json"],
+      {
+        cwd: packageRootDirectory,
+        encoding: "utf8",
+        killSignal: "SIGTERM",
+        maxBuffer: CLI_COMMAND_MAX_BUFFER,
+        timeout: PACKAGE_COMMAND_TIMEOUT_MS,
+      }
+    )
+    if (packResult.status !== 0) {
+      throw new Error(`pnpm pack failed:\n${packResult.stderr}`)
+    }
+
+    const packOutput = JSON.parse(packResult.stdout) as
+      | { filename: string }
+      | Array<{ filename: string }>
+    const packEntries = Array.isArray(packOutput) ? packOutput : [packOutput]
+    if (packEntries.length !== 1) {
+      throw new Error(`Expected pnpm pack to produce one tarball, got ${packEntries.length}`)
+    }
+    const packedTarballPath = resolve(packedTempDirectory, packEntries[0].filename)
+
+    const listResult = spawnSync("tar", ["-tzf", packedTarballPath], {
+      cwd: packedTempDirectory,
+      encoding: "utf8",
+      killSignal: "SIGTERM",
+      maxBuffer: CLI_COMMAND_MAX_BUFFER,
+      timeout: PACKAGE_COMMAND_TIMEOUT_MS,
+    })
+    if (listResult.status !== 0) {
+      throw new Error(`tar listing failed:\n${listResult.stderr}`)
+    }
+    packedTarballEntries = listResult.stdout.trim().split("\n").sort()
+
+    const extractResult = spawnSync(
+      "tar",
+      ["-xzf", packedTarballPath, "--strip-components", "1", "-C", packedPackageRootDirectory],
+      {
+        cwd: packedTempDirectory,
+        encoding: "utf8",
+        killSignal: "SIGTERM",
+        maxBuffer: CLI_COMMAND_MAX_BUFFER,
+        timeout: PACKAGE_COMMAND_TIMEOUT_MS,
+      }
+    )
+    if (extractResult.status !== 0) {
+      throw new Error(`tar extraction failed:\n${extractResult.stderr}`)
+    }
+  })
+
+  afterAll(() => {
+    rmSync(packedTempDirectory, { force: true, recursive: true })
+  })
+
+  it("packs the required published CLI files and excludes source-only files", () => {
+    expect(packedTarballEntries).toStrictEqual(
+      expect.arrayContaining([
+        "package/dist/cli.js",
+        "package/dist/index.js",
+        "package/package.json",
+      ])
+    )
+    expect(packedTarballEntries.some((entry) => entry.startsWith("package/src/"))).toBe(false)
+    expect(packedTarballEntries.some((entry) => entry.startsWith("package/test/"))).toBe(false)
+  })
+
   it("runs the published CLI for version and apply validation errors", () => {
     const packageJson = JSON.parse(
       readFileSync(join(packageRootDirectory, "package.json"), "utf8")
@@ -304,11 +387,14 @@ export default {
 
   it("loads a TypeScript playbook through the published apply CLI in dry-run mode", async () => {
     const packageJson = JSON.parse(
-      readFileSync(join(packageRootDirectory, "package.json"), "utf8")
+      readFileSync(join(packedPackageRootDirectory, "package.json"), "utf8")
     ) as {
       bin: { paratix: string }
     }
-    const distCliPath = resolve(packageRootDirectory, packageJson.bin.paratix)
+    const packedCliPath = resolve(packedPackageRootDirectory, packageJson.bin.paratix)
+    const firstLine = readFileSync(packedCliPath, "utf8").split("\n")[0]
+    expect(firstLine).toBe("#!/usr/bin/env node")
+
     const tempDirectory = mkdtempSync(join(tmpdir(), "paratix-cli-ts-dist-"))
     const nodeModulesDirectory = join(tempDirectory, "node_modules")
     const privateKeyPath = join(tempDirectory, "id_rsa")
@@ -336,7 +422,7 @@ export default {
 
     try {
       mkdirSync(nodeModulesDirectory)
-      symlinkSync(packageRootDirectory, join(nodeModulesDirectory, "paratix"))
+      symlinkSync(packedPackageRootDirectory, join(nodeModulesDirectory, "paratix"))
       writeFileSync(privateKeyPath, testServer.privateKey, { mode: 0o600 })
       writeFileSync(join(tempDirectory, "package.json"), `${JSON.stringify({ type: "module" })}\n`)
       writeFileSync(
@@ -364,18 +450,14 @@ export default server({
 `
       )
 
-      const stdout = await execFileBuffered(
-        process.execPath,
-        [distCliPath, "apply", playbookPath, "--dry-run"],
-        {
-          cwd: tempDirectory,
-          encoding: "utf8",
-          env: { ...process.env, SSH_AUTH_SOCK: "" },
-          killSignal: "SIGTERM",
-          maxBuffer: CLI_COMMAND_MAX_BUFFER,
-          timeout: CLI_COMMAND_TIMEOUT_MS,
-        }
-      )
+      const stdout = await execFileBuffered(packedCliPath, ["apply", playbookPath, "--dry-run"], {
+        cwd: tempDirectory,
+        encoding: "utf8",
+        env: { ...process.env, SSH_AUTH_SOCK: "" },
+        killSignal: "SIGTERM",
+        maxBuffer: CLI_COMMAND_MAX_BUFFER,
+        timeout: CLI_COMMAND_TIMEOUT_MS,
+      })
 
       expect(stdout).toContain("dist TypeScript dry-run module")
       expect(stdout).toContain("(dry-run)")
@@ -651,3 +733,18 @@ void grouped
     }
   })
 })
+
+function linkRuntimeDependencies(tempDirectory: string): void {
+  const packageJson = JSON.parse(
+    readFileSync(join(packageRootDirectory, "package.json"), "utf8")
+  ) as {
+    dependencies: Record<string, string>
+  }
+
+  for (const dependencyName of Object.keys(packageJson.dependencies)) {
+    const dependencyRootDirectory = join(packageRootDirectory, "node_modules", dependencyName)
+    const dependencyLink = join(tempDirectory, "node_modules", dependencyName)
+    mkdirSync(dirname(dependencyLink), { recursive: true })
+    symlinkSync(dependencyRootDirectory, dependencyLink)
+  }
+}
