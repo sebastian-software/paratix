@@ -613,6 +613,12 @@ async function readWorkspacePackages(fs) {
   )
 }
 
+function packageArtefactsForMode({ createParatixPackage, paratixPackage, publishMode }) {
+  return publishMode === PUBLISH_MODE_RECOVER_CREATE_PARATIX
+    ? [createParatixPackage]
+    : [paratixPackage, createParatixPackage]
+}
+
 function validateWorkspacePackages(workspacePackages) {
   const unexpectedPackage = workspacePackages.find(
     (packageInfo, index) => packageInfo.name !== packages[index].name
@@ -669,12 +675,17 @@ export async function publishWorkspacePackages(options) {
   const [paratixPackage, createParatixPackage] = await readWorkspacePackages(fs)
   validateWorkspacePackages([paratixPackage, createParatixPackage])
 
-  // R-0000661: verify every package's dist artefacts before issuing the
-  // first pnpm publish. Splitting the verification out of `publishPackage`
-  // keeps the abort point well before any registry side effects so a
-  // missing or stale artefact never produces a half-published workspace.
-  await verifyDistributionArtefacts(paratixPackage, filesystem)
-  await verifyDistributionArtefacts(createParatixPackage, filesystem)
+  // R-0000661: verify the dist artefacts before issuing the first pnpm
+  // publish. Splitting the verification out of `publishPackage` keeps the
+  // abort point well before any registry side effects so a missing or stale
+  // artefact never produces a half-published workspace. Recovery mode only
+  // publishes create-paratix; the paratix package is protected by registry
+  // availability checks below instead of local artefact freshness.
+  await Promise.all(
+    packageArtefactsForMode({ createParatixPackage, paratixPackage, publishMode }).map(
+      (packageInfo) => verifyDistributionArtefacts(packageInfo, filesystem)
+    )
+  )
 
   if (
     (await isPublished({

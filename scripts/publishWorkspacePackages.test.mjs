@@ -426,6 +426,27 @@ describe("publishWorkspacePackages recovery mode", () => {
     assert.deepEqual(publishDirectories(commandRunner.calls), [ABSOLUTE_CREATE_PARATIX_DIRECTORY])
   })
 
+  it("does not check paratix build artefacts when recovering create-paratix", async () => {
+    const commandRunner = createCommandRunner(new Set([PARATIX_SPECIFIER]))
+
+    await publishWorkspacePackages({
+      availabilityDelayMilliseconds: 0,
+      commandRunner,
+      fs: createFs({
+        mtimes: {
+          "packages/paratix/dist": 500,
+          "packages/paratix/dist/index.js": 500,
+          "packages/paratix/llm-guide.md": 500,
+          "packages/paratix/src": 5000,
+          "packages/paratix/src/index.ts": 5000,
+        },
+      }),
+      mode: RECOVER_CREATE_PARATIX_MODE,
+    })
+
+    assert.deepEqual(publishDirectories(commandRunner.calls), [ABSOLUTE_CREATE_PARATIX_DIRECTORY])
+  })
+
   it("rejects recovery mode when paratix is not already published", async () => {
     const commandRunner = createCommandRunner()
 
