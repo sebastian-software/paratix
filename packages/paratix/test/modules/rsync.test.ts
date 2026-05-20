@@ -547,6 +547,26 @@ describe("rsync.sync — argument building", () => {
     )
   })
 
+  it("cleans up the temporary verified known_hosts file when mutated options break argument building", async () => {
+    const options = { dest: "/remote/dest", exclude: ["*.log"], src: "/local/src" }
+    const mod = rsync.sync(options)
+    options.exclude = ["bad\npattern"]
+
+    const result = await mod.apply(createMockSsh(), emptyEnv)
+
+    expect(result.status).toBe("failed")
+    expect(result.error?.message).toContain(
+      "exclude pattern must not contain ASCII control characters"
+    )
+    expect(mockWriteFileSync).toHaveBeenCalledOnce()
+    const knownHostsPath = mockWriteFileSync.mock.calls[0]?.[0] as string
+    expect(knownHostsPath).toStrictEqual(
+      expect.stringContaining(`/paratix-rsync-known-hosts-${KNOWN_HOSTS_TEST_UUID}`)
+    )
+    expect(mockUnlinkSync).toHaveBeenCalledWith(knownHostsPath)
+    expect(mockSpawn).not.toHaveBeenCalled()
+  })
+
   it("wraps privateKeyPath with single quotes to prevent shell expansion of special characters", async () => {
     const mockSsh = createMockSsh()
     vi.spyOn(mockSsh, "getConnectionInfo").mockReturnValue({
