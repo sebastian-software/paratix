@@ -166,6 +166,43 @@ describe("net.request — check", () => {
     expect(result).toBe("ok")
   })
 
+  it.each(["PATCH", "M-SEARCH", "PURGE"])("allows valid HTTP token method %s", (method) => {
+    expect(() => net.request("https://example.com/api", { method })).not.toThrow()
+  })
+
+  it.each([
+    ["empty", ""],
+    ["space", "POST GET"],
+    ["tab", "POST\tGET"],
+    ["CRLF", "POST\r\nInjected: true"],
+    ["LF", "POST\nInjected: true"],
+    ["NUL", "POST\0GET"],
+    ["separator", "POST:GET"],
+  ])("rejects invalid HTTP method with %s", (_label, method) => {
+    expect(() => net.request("https://example.com/api", { method })).toThrow(
+      "[net.request] invalid method: value must be a non-empty HTTP token without whitespace, control characters, or separators"
+    )
+  })
+
+  it("does not echo an injected method in the validation error", () => {
+    const injectedMethod = "POST\r\nInjected: true"
+
+    expect(() => net.request("https://example.com/api", { method: injectedMethod })).toThrow(
+      /invalid method: value must be a non-empty HTTP token/v
+    )
+
+    const thrown = (() => {
+      try {
+        net.request("https://example.com/api", { method: injectedMethod })
+      } catch (error) {
+        return error
+      }
+      throw new Error("Expected net.request to reject the injected method")
+    })()
+    expect(thrown).toBeInstanceOf(Error)
+    expect((thrown as Error).message).not.toContain(injectedMethod)
+  })
+
   it("has correct name format: net.request: GET <url>", async () => {
     const mod = net.request("https://example.com/health")
     expect(mod.name).toBe("net.request: GET https://example.com/health")

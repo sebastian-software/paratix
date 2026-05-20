@@ -28,6 +28,7 @@ import {
   checkHttpCondition,
   delay,
   type HttpCheckParameters,
+  validateHttpMethod,
   validateHttpUrl,
   validateWaitForHost,
   type WaitForOptions,
@@ -1946,6 +1947,7 @@ export const net = {
     )
     rejectSensitiveUrlSecretsOverHttp(url)
     const method = resolvedOptions.method ?? "GET"
+    validateHttpMethod(method)
     const parameters: HttpCheckParameters = buildHttpCheckParameters({
       body: resolvedOptions.body,
       connectTimeout: resolvedOptions.connectTimeout,

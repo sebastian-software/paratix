@@ -63,6 +63,13 @@ const DEFAULT_CURL_CONNECT_TIMEOUT_MS = 10_000
 const DEFAULT_CURL_TIMEOUT_MS = 300_000
 const MS_PER_SECOND = 1000
 
+export function validateHttpMethod(method: string): void {
+  if (isValidHeaderName(method)) return
+  throw new Error(
+    "[net.request] invalid method: value must be a non-empty HTTP token without whitespace, control characters, or separators"
+  )
+}
+
 export function validateWaitForHost(host: string): void {
   if (host.length === 0 || host.startsWith("-") || hasWaitForHostUnsafeCharacter(host)) {
     throw new Error(
@@ -220,6 +227,7 @@ export function buildHttpCheckParameters(options: {
 }): HttpCheckParameters {
   const headers = options.headers ?? {}
   const method = options.method ?? "GET"
+  validateHttpMethod(method)
   const parsedUrl = new URL(options.url)
   const urlIsSensitive = hasSensitiveQueryParameters(parsedUrl) || hasUrlCredentials(parsedUrl)
   const timing = resolveCurlTimingOptions(options)
