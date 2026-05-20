@@ -947,6 +947,115 @@ describe("Paratix integration", () => {
     }
   })
 
+  it("runs the built apply CLI with dist modules and mutates the integration server", async () => {
+    const environment = getEnvironment()
+    const packageDirectory = resolve(import.meta.dirname, "../..")
+    const remoteBase = `/root/dist-cli-apply-${randomUUID()}`
+    const remoteApp = `${remoteBase}/app`
+    const copiedPath = `${remoteApp}/copied.txt`
+    const templatedPath = `${remoteApp}/templated.txt`
+    const distCliPath = resolve(packageDirectory, "dist/cli.js")
+    const distIndexUrl = pathToFileURL(resolve(packageDirectory, "dist/index.js")).href
+    const distModulesUrl = pathToFileURL(resolve(packageDirectory, "dist/modules/index.js")).href
+    const ssh = await connectSsh([environment.primaryPort], {}, "root")
+    let localDirectory: string | undefined
+
+    let primaryError: unknown
+    try {
+      localDirectory = mkdtempSync(join(tmpdir(), "paratix-dist-cli-apply-playbook-"))
+      const localSourcePath = join(localDirectory, "source.txt")
+      const localTemplatePath = join(localDirectory, "template.tmpl")
+      const playbookPath = join(localDirectory, "playbook.mjs")
+
+      writeFileSync(localSourcePath, "copied through dist CLI\n", "utf8")
+      writeFileSync(localTemplatePath, "Rendered for {{TARGET|raw}}\n", "utf8")
+      writeFileSync(
+        playbookPath,
+        [
+          `import { server } from ${JSON.stringify(distIndexUrl)}`,
+          `import { file } from ${JSON.stringify(distModulesUrl)}`,
+          "",
+          "export default server({",
+          "  env: { TARGET: 'docker-sshd' },",
+          "  name: 'dist-cli-apply-integration',",
+          `  host: ${JSON.stringify(environment.host)},`,
+          "  ssh: {",
+          `    expectedHostPublicKey: ${JSON.stringify(environment.hostPublicKey)},`,
+          `    ports: [${String(environment.primaryPort)}],`,
+          `    privateKey: ${JSON.stringify(environment.clientPrivateKeyPath)},`,
+          "    strictHostKeyChecking: 'yes',",
+          "    user: 'root',",
+          "  },",
+          "  run: [",
+          `    file.directory(${JSON.stringify(remoteApp)}, {`,
+          "      mode: '0750',",
+          "      owner: 'root:root',",
+          "    }),",
+          `    file.copy(${JSON.stringify(copiedPath)}, ${JSON.stringify(localSourcePath)}, {`,
+          "      mode: '0640',",
+          "      owner: 'root:root',",
+          "    }),",
+          `    file.template(${JSON.stringify(templatedPath)}, ${JSON.stringify(localTemplatePath)}, {`,
+          "      mode: '0644',",
+          "      owner: 'root:root',",
+          "    }),",
+          "  ],",
+          "})",
+          "",
+        ].join("\n")
+      )
+
+      const firstOutput = await execFileText(
+        process.execPath,
+        [distCliPath, "apply", playbookPath],
+        {
+          cwd: packageDirectory,
+          env: { ...process.env, HOME: testHome },
+        }
+      )
+
+      expect(firstOutput).toContain("dist-cli-apply-integration")
+      expect(firstOutput).toContain("file.copy")
+      expect(await ssh.readFile(copiedPath)).toBe("copied through dist CLI")
+      expect(await ssh.readFile(templatedPath)).toBe("Rendered for docker-sshd")
+      expect(await readRemoteStat(ssh, remoteApp)).toStrictEqual({
+        group: "root",
+        mode: "750",
+        owner: "root",
+      })
+      expect(await readRemoteStat(ssh, copiedPath)).toStrictEqual({
+        group: "root",
+        mode: "640",
+        owner: "root",
+      })
+
+      const secondOutput = await execFileText(
+        process.execPath,
+        [distCliPath, "apply", playbookPath],
+        {
+          cwd: packageDirectory,
+          env: { ...process.env, HOME: testHome },
+        }
+      )
+
+      expect(secondOutput).toContain("dist-cli-apply-integration")
+      expect(await ssh.readFile(copiedPath)).toBe("copied through dist CLI")
+      expect(await ssh.readFile(templatedPath)).toBe("Rendered for docker-sshd")
+    } catch (error) {
+      primaryError = error
+      throw error
+    } finally {
+      await runCleanupSteps(
+        [
+          removeRemoteDirectoryStep(ssh, remoteBase, "remove remote dist CLI apply test directory"),
+          disconnectSshStep(ssh),
+          removeCreatedLocalDirectoryStep(() => localDirectory),
+        ],
+        primaryError
+      )
+    }
+  })
+
   it("converges file and command modules to verifiable remote state", async () => {
     const ssh = await connectSsh([getEnvironment().primaryPort], {}, "root")
     const remoteBase = `/root/integration-${randomUUID()}`
