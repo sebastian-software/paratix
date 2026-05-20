@@ -1,27 +1,14 @@
-/* oxlint-disable no-unused-vars -- shared fixtures are duplicated by the mechanical test split */
-
-import { describe, expect, it } from "vitest"
+import { afterEach, describe, expect, it } from "vitest"
 
 import { net } from "../../../src/index.js"
 import { sha256String } from "../../../src/modules/fileHelpers.js"
 import { createMockSsh as createBaseMockSsh } from "../../helpers/mockSsh.js"
 
-const NET_WRITE_ALLOWLIST = [
-  { options: { mode: "0644" }, remotePath: "/etc/hosts" },
-  { options: { mode: "0644" }, remotePath: "/etc/resolv.conf" },
-  { options: { mode: "0644" }, remotePath: /^\/etc\/netplan\/60-paratix-.+\.yaml$/v },
-  {
-    options: { mode: "0644" },
-    remotePath:
-      /^\/etc\/systemd\/network\/60-paratix-[^\/]+\.network\.d\/50-paratix-route-.+\.conf$/v,
-  },
-  { options: { mode: "0644" }, remotePath: /^\/etc\/systemd\/network\/60-paratix-.+\.network$/v },
-] as const
+const mockSshInstances: Array<ReturnType<typeof createBaseMockSsh>> = []
 
-const createMockSsh: typeof createBaseMockSsh = (responses, options) =>
-  createBaseMockSsh(responses, {
+const createMockSsh: typeof createBaseMockSsh = (responses, options) => {
+  const mockSsh = createBaseMockSsh(responses, {
     ...options,
-    allowWrites: [...NET_WRITE_ALLOWLIST, ...(options?.allowWrites ?? [])],
     responseStubs: [
       {
         command: /^\[ -L '\/etc\/systemd\/network\/.+(?:\.conf|\.network)' \]$/v,
@@ -30,6 +17,18 @@ const createMockSsh: typeof createBaseMockSsh = (responses, options) =>
       ...(options?.responseStubs ?? []),
     ],
   })
+  mockSshInstances.push(mockSsh)
+  return mockSsh
+}
+
+function assertNoWriteFileCalls() {
+  for (const mockSsh of mockSshInstances) {
+    if (mockSsh.writeFileCalls.length > 0) {
+      throw new Error(`Expected net.route check to perform no writes`)
+    }
+  }
+  mockSshInstances.length = 0
+}
 
 const emptyEnv = {}
 
@@ -58,50 +57,6 @@ const routeDropinPath = buildRouteDropinPath({
   gateway: "192.168.1.1",
 })
 const legacyRouteDropinPath = "/etc/systemd/network/50-paratix-route-10.0.0.0-24.network"
-const SUCCESSFUL_ROUTE_APPLY_OPTIONS = {
-  responseStubs: [
-    { command: /^ip -4 route replace '[^']+' via '[^']+'$/v, result: { code: 0 } },
-    { command: /^ip -4 route replace '[^']+' via '[^']+' dev '[^']+'$/v, result: { code: 0 } },
-    { command: /^ip -6 route replace '[^']+' via '[^']+'$/v, result: { code: 0 } },
-    { command: /^ip -6 route replace '[^']+' via '[^']+' dev '[^']+'$/v, result: { code: 0 } },
-    { command: /^ip -4 route del '[^']+' via '[^']+'$/v, result: { code: 0 } },
-    { command: /^ip -4 route del '[^']+' via '[^']+' dev '[^']+'$/v, result: { code: 0 } },
-    { command: /^ip -6 route del '[^']+' via '[^']+'$/v, result: { code: 0 } },
-    { command: /^ip -6 route del '[^']+' via '[^']+' dev '[^']+'$/v, result: { code: 0 } },
-    {
-      command: /^rm -f '\/etc\/systemd\/network\/50-paratix-route-[^']+\.network'$/v,
-      result: { code: 0 },
-    },
-    { command: "networkctl reload", result: { code: 0 } },
-    { command: "mkdir -p /var/lib/paratix/flags", result: { code: 0 } },
-    {
-      command:
-        /^find \/var\/lib\/paratix\/flags -maxdepth 1 -type f -name 'net-route-[^']+-\*' ! -name '\*\.lock' -delete && touch \/var\/lib\/paratix\/flags\/'net-route-[^']+'$/v,
-      result: { code: 0 },
-    },
-    { command: /^ip -4 route show '[^']+'$/v, result: { code: 0, stdout: "" } },
-    { command: /^ip -6 route show '[^']+'$/v, result: { code: 0, stdout: "" } },
-  ],
-} satisfies NonNullable<Parameters<typeof createMockSsh>[1]>
-const APPLY_TO_NEW_FILE_OPTIONS = {
-  responseStubs: [
-    { command: /^test -f '\/etc\/netplan\/60-paratix-[^']+\.yaml'$/v, result: { code: 1 } },
-    {
-      command: /^test -f '\/etc\/systemd\/network\/60-paratix-[^']+\.network'$/v,
-      result: { code: 1 },
-    },
-    { command: "netplan apply", result: { code: 0 } },
-    { command: "networkctl reload", result: { code: 0 } },
-    {
-      command: /^rm -f '\/etc\/netplan\/60-paratix-[^']+\.yaml'$/v,
-      result: { code: 0 },
-    },
-    {
-      command: /^rm -f '\/etc\/systemd\/network\/60-paratix-[^']+\.network'$/v,
-      result: { code: 0 },
-    },
-  ],
-} satisfies NonNullable<Parameters<typeof createMockSsh>[1]>
 
 function buildRouteReloadFlagCheck(input: {
   destination: string
@@ -114,16 +69,9 @@ function buildRouteReloadFlagCheck(input: {
   return `[ -f /var/lib/paratix/flags/'${flagName}' ]`
 }
 
-function getFirstCurlExecCall(mockSsh: ReturnType<typeof createMockSsh>) {
-  const curlCall = mockSsh.execCalls.find((entry) => entry.command.startsWith("curl "))
-  expect(curlCall).toBeDefined()
-  if (curlCall == null) throw new Error("Expected a curl exec call")
-  return curlCall
-}
-
-// ─── net.hosts ────────────────────────────────────────────────────────────────
-
 describe("net.route — check", () => {
+  afterEach(assertNoWriteFileCalls)
+
   it("returns needs-apply when conn is null", async () => {
     // R-0000486: `net.route` now requires `options.device` at construction
     // time when `state` defaults to "present", so this conn-null fixture
