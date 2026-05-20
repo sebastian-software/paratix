@@ -11,6 +11,7 @@ import {
   NEEDS_APPLY,
   type SshConnection,
 } from "../types.js"
+import { renderGuardedChownCommand } from "./fileMetadataHelpers.js"
 import { isRegularFileWithoutSymlink, isSymlink } from "./remoteFileChecks.js"
 
 const EXEC_OPTS = { ignoreExitCode: true, silent: true } as const
@@ -578,12 +579,11 @@ async function applyComposeSystemdUnit(parameters: {
   }
 
   // R-0000164: writeFile sets the file mode but not its owner/group, so an
-  // owner drift introduced by a previous manual `chown` would persist. The
-  // shell-fallback path already runs `chown root:root`, but the happy path
-  // goes through writeFile and never runs that command. Always re-set owner
-  // to root:root after a successful write so check and apply stay symmetric.
+  // owner drift introduced by a previous manual `chown` would persist.
+  // R-0000988: guard the post-write chown because a symlink swap after
+  // writeFile would otherwise make chown follow the attacker-controlled link.
   const ownerResult = await parameters.connection.exec(
-    `chown ${shellQuote("root:root")} ${shellQuote(parameters.filePath)}`,
+    renderGuardedChownCommand("root:root", parameters.filePath),
     EXEC_OPTS
   )
   if (ownerResult.code !== 0) {
@@ -801,7 +801,7 @@ async function restoreComposeSystemdUnitFileSnapshot(parameters: {
       mode: parameters.snapshot.mode,
     })
     const ownerResult = await parameters.connection.exec(
-      `chown ${shellQuote(parameters.snapshot.owner)} ${shellQuote(parameters.filePath)}`,
+      renderGuardedChownCommand(parameters.snapshot.owner, parameters.filePath),
       EXEC_OPTS
     )
     if (ownerResult.code !== 0) {

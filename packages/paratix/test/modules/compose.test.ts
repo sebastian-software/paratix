@@ -5,6 +5,7 @@ import { describe, expect, it, vi } from "vitest"
 import type { SshConnection } from "../../src/types.js"
 
 import { compose } from "../../src/index.js"
+import { renderGuardedChownCommand as buildGuardedChownCommand } from "../../src/modules/fileMetadataHelpers.js"
 import { createStrictMockSsh } from "../helpers/mockSsh.js"
 
 vi.mock("node:fs/promises", async (importOriginal) => {
@@ -1233,6 +1234,7 @@ const systemdUnitFallbackTempPath =
   "/etc/systemd/system/.compose-systemd-unit.paratix-staging.ABCDEF"
 const systemdUnitFallbackMktempCommand =
   "mktemp -p '/etc/systemd/system' -- '.compose-systemd-unit.paratix-staging.XXXXXX'"
+const rootUnitChownCommand = buildGuardedChownCommand("root:root", unitFilePath)
 
 function composeSystemdRecoveryResponses(
   serviceName = defaultServiceName,
@@ -1242,12 +1244,12 @@ function composeSystemdRecoveryResponses(
     [`[ -e '${filePath}' ]`]: { code: 0 },
     [`[ -L '${filePath}' ]`]: { code: 1 },
     [`cat '${filePath}'`]: { code: 0, stdout: "[Unit]\nDescription=previous\n" },
-    [`chown 'root:root' '${filePath}'`]: { code: 0 },
     [`rm -f -- '${filePath}'`]: { code: 0 },
     [`stat -c '%a' '${filePath}'`]: { code: 0, stdout: "644" },
     [`stat -c '%U:%G' '${filePath}'`]: { code: 0, stdout: "root:root" },
     [`systemctl is-enabled -- '${serviceName}.service'`]: { code: 0, stdout: "masked\n" },
     [`systemctl unmask -- '${serviceName}.service'`]: { code: 0 },
+    [buildGuardedChownCommand("root:root", filePath)]: { code: 0 },
   }
 }
 
@@ -1425,7 +1427,7 @@ describe("compose.systemd — apply", () => {
     // R-0000164: apply must run `chown root:root` on the unit after the
     // writeFile, because the writeFile path only sets the mode and would
     // otherwise leave any pre-existing owner drift in place.
-    expect(mockSsh.calls).toContain(`chown 'root:root' '${unitFilePath}'`)
+    expect(mockSsh.calls).toContain(rootUnitChownCommand)
   })
 
   // R-0000164: when the explicit chown after writeFile fails (e.g. invalid
@@ -1438,7 +1440,7 @@ describe("compose.systemd — apply", () => {
         code: 0,
         stdout: expectedPodmanUnit(projectDirectory, defaultServiceName),
       },
-      [`chown 'root:root' '${unitFilePath}'`]: {
+      [rootUnitChownCommand]: {
         code: 1,
         stderr: "chown: invalid user: 'root:root'",
       },
@@ -1454,6 +1456,33 @@ describe("compose.systemd — apply", () => {
     expect(result.status).toBe("failed")
     expect(String(result.error)).toContain("failed to set owner root:root")
     // daemon-reload must not run when ownership could not be enforced.
+    expect(mockSsh.calls).not.toContain("systemctl daemon-reload")
+  })
+
+  it("returns failed when the unit path is swapped to a symlink before chown", async () => {
+    const expectedUnit = expectedPodmanUnit(projectDirectory, defaultServiceName)
+    const mockSsh = createComposeMockSsh({
+      ...composeSystemdRecoveryResponses(),
+      [`cat '${unitFilePath}'`]: {
+        code: 0,
+        stdout: expectedUnit,
+      },
+      [rootUnitChownCommand]: {
+        code: 1,
+        stderr: "refuses to operate through symlink",
+      },
+    })
+    mockSsh.writeFile = async (): Promise<void> => {
+      await Promise.resolve()
+    }
+
+    const mod = compose.systemd({ projectDirectory })
+    const result = await mod.apply(mockSsh, emptyEnv)
+
+    expect(result.status).toBe("failed")
+    expect(String(result.error)).toContain("failed to set owner root:root")
+    expect(mockSsh.calls).toContain(rootUnitChownCommand)
+    expect(mockSsh.calls).not.toContain(`chown 'root:root' '${unitFilePath}'`)
     expect(mockSsh.calls).not.toContain("systemctl daemon-reload")
   })
 
@@ -1503,14 +1532,14 @@ describe("compose.systemd — apply", () => {
     const writtenFiles: Array<{ content: string; mode?: string; path: string }> = []
     const mockSsh = createComposeMockSsh({
       ...composeSystemdRecoveryResponses(),
-      [`chown 'root:root' '${unitFilePath}'`]: {
-        code: 1,
-        stderr: "chown failed",
-      },
-      [`chown 'svc:svc' '${unitFilePath}'`]: { code: 0 },
       [`stat -c '%a' '${unitFilePath}'`]: { code: 0, stdout: "600" },
       [`stat -c '%U:%G' '${unitFilePath}'`]: { code: 0, stdout: "svc:svc" },
       [`systemctl mask -- '${defaultServiceName}.service'`]: { code: 0 },
+      [buildGuardedChownCommand("svc:svc", unitFilePath)]: { code: 0 },
+      [rootUnitChownCommand]: {
+        code: 1,
+        stderr: "chown failed",
+      },
     })
     vi.spyOn(mockSsh, "readFile")
       .mockResolvedValueOnce(previousUnit)
@@ -1529,7 +1558,7 @@ describe("compose.systemd — apply", () => {
       mode: "600",
       path: unitFilePath,
     })
-    expect(mockSsh.calls).toContain(`chown 'svc:svc' '${unitFilePath}'`)
+    expect(mockSsh.calls).toContain(buildGuardedChownCommand("svc:svc", unitFilePath))
     expect(mockSsh.calls).toContain(`systemctl mask -- '${defaultServiceName}.service'`)
     expect(mockSsh.calls.filter((call) => call === "systemctl daemon-reload")).toHaveLength(1)
   })
@@ -1540,10 +1569,10 @@ describe("compose.systemd — apply", () => {
     const writtenFiles: Array<{ content: string; mode?: string; path: string }> = []
     const mockSsh = createComposeMockSsh({
       ...composeSystemdRecoveryResponses(),
-      [`chown 'svc:svc' '${unitFilePath}'`]: { code: 0 },
       [`stat -c '%a' '${unitFilePath}'`]: { code: 0, stdout: "600" },
       [`stat -c '%U:%G' '${unitFilePath}'`]: { code: 0, stdout: "svc:svc" },
       [`systemctl mask -- '${defaultServiceName}.service'`]: { code: 0 },
+      [buildGuardedChownCommand("svc:svc", unitFilePath)]: { code: 0 },
       "systemctl daemon-reload": { code: 1, stderr: "reload failed" },
     })
     vi.spyOn(mockSsh, "readFile")
@@ -1563,9 +1592,38 @@ describe("compose.systemd — apply", () => {
       mode: "600",
       path: unitFilePath,
     })
-    expect(mockSsh.calls).toContain(`chown 'svc:svc' '${unitFilePath}'`)
+    expect(mockSsh.calls).toContain(buildGuardedChownCommand("svc:svc", unitFilePath))
     expect(mockSsh.calls).toContain(`systemctl mask -- '${defaultServiceName}.service'`)
     expect(mockSsh.calls.filter((call) => call === "systemctl daemon-reload")).toHaveLength(2)
+  })
+
+  it("returns failed when rollback restore is swapped to a symlink before chown", async () => {
+    const previousUnit = "[Unit]\nDescription=previous\n"
+    const expectedUnit = expectedPodmanUnit(projectDirectory, defaultServiceName)
+    const restoreOwnerCommand = buildGuardedChownCommand("svc:svc", unitFilePath)
+    const mockSsh = createComposeMockSsh({
+      ...composeSystemdRecoveryResponses(),
+      [`stat -c '%a' '${unitFilePath}'`]: { code: 0, stdout: "600" },
+      [`stat -c '%U:%G' '${unitFilePath}'`]: { code: 0, stdout: "svc:svc" },
+      [restoreOwnerCommand]: {
+        code: 1,
+        stderr: "refuses to operate through symlink",
+      },
+      "systemctl daemon-reload": { code: 1, stderr: "reload failed" },
+    })
+    vi.spyOn(mockSsh, "readFile")
+      .mockResolvedValueOnce(previousUnit)
+      .mockResolvedValue(expectedUnit)
+    vi.spyOn(mockSsh, "writeFile").mockResolvedValue(undefined)
+
+    const mod = compose.systemd({ projectDirectory })
+    const result = await mod.apply(mockSsh, emptyEnv)
+
+    expect(result.status).toBe("failed")
+    expect(String(result.error)).toContain("rollback failed")
+    expect(String(result.error)).toContain("rollback chown failed")
+    expect(mockSsh.calls).toContain(restoreOwnerCommand)
+    expect(mockSsh.calls).not.toContain(`chown 'svc:svc' '${unitFilePath}'`)
   })
 
   it("returns failed when daemon-reload fails", async () => {
