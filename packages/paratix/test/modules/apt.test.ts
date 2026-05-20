@@ -3,7 +3,7 @@ import { describe, expect, it } from "vitest"
 
 import { apt } from "../../src/modules/apt.js"
 import { sha256String } from "../../src/modules/fileHelpers.js"
-import { createMockSsh as createBaseMockSsh } from "../helpers/mockSsh.js"
+import { createMockSsh as createBaseMockSsh, type ExecCall } from "../helpers/mockSsh.js"
 import { MOCK_FLAG_LOCK_HOLDER_TOKEN } from "../helpers/mockSshFlagLock.js"
 
 const aptKeyringDirectoryRealpathCommand = "command -p realpath -m -- '/etc/apt/keyrings'"
@@ -26,7 +26,6 @@ const createMockSsh: typeof createBaseMockSsh = (responses, options) =>
   })
 
 const emptyEnv = {}
-const SUCCESSFUL_EXEC_DEFAULT = { code: 0 } as const
 const DIST_UPGRADE_FLAG = "apt-dist-upgrade-2024-01-15"
 
 function distUpgradeApplyLockResponses(): Record<string, { code?: number; stdout?: string }> {
@@ -80,6 +79,31 @@ function installSequencedOutputForExec(
     return originalExec(nextCommand, options)
   }
   return () => calls
+}
+
+function expectDebconfSetSelectionsExecCall(
+  execCalls: ExecCall[],
+  expectedInput: string,
+  secrets: string[]
+): void {
+  const debconfSetSelectionsCalls = execCalls.filter(
+    (call) => call.command === "debconf-set-selections"
+  )
+  expect(debconfSetSelectionsCalls).toHaveLength(1)
+  expect(debconfSetSelectionsCalls[0]?.options).toStrictEqual({
+    ignoreExitCode: true,
+    input: expectedInput,
+    secrets,
+    silent: true,
+  })
+}
+
+function expectNoExecCommandLeaksSecrets(execCalls: ExecCall[], secrets: string[]): void {
+  for (const call of execCalls) {
+    for (const secret of secrets) {
+      expect(call.command).not.toContain(secret)
+    }
+  }
 }
 
 // R-0000163 helper: build an `exec` override whose first invocation of
@@ -1572,52 +1596,51 @@ describe("apt.debconf", () => {
   })
 
   it("apply passes selections starting with a dash through stdin", async () => {
-    const ssh = createMockSsh(
-      {
-        "debconf-set-selections": { code: 0 },
-        "echo 'METAGET pkg/dash-value type' | debconf-communicate": {
-          code: 0,
-          stdout: "0 string\n",
-        },
+    const secretValue = "-n"
+    const selectionsText = "pkg pkg/dash-value string -n"
+    const packageHash = sha256String("pkg").slice(0, 16)
+    const selectionsHash = sha256String(`pkg\n${selectionsText}`).slice(0, 16)
+    const flagPath = `/var/lib/paratix/flags/'apt-debconf-${packageHash}-${selectionsHash}'`
+    const ssh = createMockSsh({
+      [`find /var/lib/paratix/flags -maxdepth 1 -type f -name 'apt-debconf-${packageHash}-*' ! -name '*.lock' -delete && touch ${flagPath}`]:
+        { code: 0 },
+      "debconf-set-selections": { code: 0 },
+      "echo 'METAGET pkg/dash-value type' | debconf-communicate": {
+        code: 0,
+        stdout: "0 string\n",
       },
-      { allowUnstubbedDefaults: true, defaultExecResult: SUCCESSFUL_EXEC_DEFAULT }
-    )
-    const mod = apt.debconf("pkg", { "pkg/dash-value": "-n" })
+      "mkdir -p /var/lib/paratix/flags": { code: 0 },
+    })
+    const mod = apt.debconf("pkg", { "pkg/dash-value": secretValue })
     const result = await mod.apply(ssh, emptyEnv)
-    const debconfSetSelections = ssh.execCalls.find(
-      (call) => call.command === "debconf-set-selections"
-    )
 
     expect(result).toStrictEqual({ status: "changed" })
-    expect(debconfSetSelections?.options).toMatchObject({
-      input: "pkg pkg/dash-value string -n",
-      secrets: ["-n"],
-    })
+    expectDebconfSetSelectionsExecCall(ssh.execCalls, selectionsText, [secretValue])
     expect(ssh.calls).not.toContain("echo 'pkg pkg/dash-value string -n' | debconf-set-selections")
   })
 
   it("apply passes backslash sequences to debconf-set-selections through stdin", async () => {
-    const ssh = createMockSsh(
-      {
-        "debconf-set-selections": { code: 0 },
-        "echo 'METAGET pkg/backslash-value type' | debconf-communicate": {
-          code: 0,
-          stdout: "0 string\n",
-        },
+    const secretValue = String.raw`a\tb\nc`
+    const selectionsText = "pkg pkg/backslash-value string a\\tb\\nc"
+    const packageHash = sha256String("pkg").slice(0, 16)
+    const selectionsHash = sha256String(`pkg\n${selectionsText}`).slice(0, 16)
+    const flagPath = `/var/lib/paratix/flags/'apt-debconf-${packageHash}-${selectionsHash}'`
+    const ssh = createMockSsh({
+      [`find /var/lib/paratix/flags -maxdepth 1 -type f -name 'apt-debconf-${packageHash}-*' ! -name '*.lock' -delete && touch ${flagPath}`]:
+        { code: 0 },
+      "debconf-set-selections": { code: 0 },
+      "echo 'METAGET pkg/backslash-value type' | debconf-communicate": {
+        code: 0,
+        stdout: "0 string\n",
       },
-      { allowUnstubbedDefaults: true, defaultExecResult: SUCCESSFUL_EXEC_DEFAULT }
-    )
-    const mod = apt.debconf("pkg", { "pkg/backslash-value": String.raw`a\tb\nc` })
+      "mkdir -p /var/lib/paratix/flags": { code: 0 },
+    })
+    const mod = apt.debconf("pkg", { "pkg/backslash-value": secretValue })
     const result = await mod.apply(ssh, emptyEnv)
-    const debconfSetSelections = ssh.execCalls.find(
-      (call) => call.command === "debconf-set-selections"
-    )
 
     expect(result).toStrictEqual({ status: "changed" })
-    expect(debconfSetSelections?.options).toMatchObject({
-      input: "pkg pkg/backslash-value string a\\tb\\nc",
-      secrets: [String.raw`a\tb\nc`],
-    })
+    expectDebconfSetSelectionsExecCall(ssh.execCalls, selectionsText, [secretValue])
+    expectNoExecCommandLeaksSecrets(ssh.execCalls, [secretValue])
     expect(ssh.calls).not.toContain(
       "echo 'pkg pkg/backslash-value string a\\tb\\nc' | debconf-set-selections"
     )
@@ -1638,8 +1661,16 @@ describe("apt.debconf", () => {
     const result = await mod.apply(ssh, emptyEnv)
 
     expect(result.status).toBe("failed")
+    expectDebconfSetSelectionsExecCall(ssh.execCalls, "pkg pkg/secret string super-secret-answer", [
+      "super-secret-answer",
+    ])
+    expectNoExecCommandLeaksSecrets(ssh.execCalls, ["super-secret-answer"])
     expect(String(result.error)).toContain("invalid value [REDACTED]")
     expect(String(result.error)).not.toContain("super-secret-answer")
+    expect(result.error).toMatchObject({
+      fullStderr: "invalid value [REDACTED]",
+      fullStdout: "",
+    })
   })
 
   // R-0000104 regression: when the package is not yet installed, the
@@ -1669,18 +1700,20 @@ describe("apt.debconf", () => {
 
     // Apply: package still not installed, debconf-set-selections
     // succeeds, marker flag is written via setVersionedFlag.
-    const ssh2 = createMockSsh(
-      {
-        "debconf-set-selections": { code: 0 },
-        [dpkgQuery]: dpkgNotInstalled,
-        "echo 'METAGET postfix/main_mailer_type type' | debconf-communicate": {
-          code: 0,
-          stdout: "0 string\n",
-        },
+    const ssh2 = createMockSsh({
+      [`find /var/lib/paratix/flags -maxdepth 1 -type f -name 'apt-debconf-${packageHash}-*' ! -name '*.lock' -delete && touch ${flagPath}`]:
+        { code: 0 },
+      "debconf-set-selections": { code: 0 },
+      [dpkgQuery]: dpkgNotInstalled,
+      "echo 'METAGET postfix/main_mailer_type type' | debconf-communicate": {
+        code: 0,
+        stdout: "0 string\n",
       },
-      { allowUnstubbedDefaults: true, defaultExecResult: SUCCESSFUL_EXEC_DEFAULT }
-    )
+      "mkdir -p /var/lib/paratix/flags": { code: 0 },
+    })
     expect(await mod.apply(ssh2, emptyEnv)).toStrictEqual({ status: "changed" })
+    expectDebconfSetSelectionsExecCall(ssh2.execCalls, selectionsText, ["Internet Site"])
+    expectNoExecCommandLeaksSecrets(ssh2.execCalls, ["Internet Site"])
     expect(ssh2.calls).toContain(
       `find /var/lib/paratix/flags -maxdepth 1 -type f -name 'apt-debconf-${packageHash}-*' ! -name '*.lock' -delete && touch ${flagPath}`
     )
