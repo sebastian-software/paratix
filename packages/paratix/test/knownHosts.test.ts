@@ -672,6 +672,55 @@ describe("buildHostVerifier", () => {
     expect(appendFileMock).not.toHaveBeenCalled()
   })
 
+  it("mode 'yes' with unknown host and matching double pins: hostVerifier returns true", async () => {
+    readFileSyncMock.mockReturnValue("")
+
+    const { hostVerifier } = await buildHostVerifier(
+      "yes",
+      { host: "newhost.com", port: 22 },
+      {
+        expectedHostFingerprint: computeFingerprint(ed25519Key),
+        expectedHostPublicKey: `ssh-ed25519 ${ed25519Key.toString("base64")}`,
+      }
+    )
+
+    expect(hostVerifier).toBeDefined()
+    expect(hostVerifier!(ed25519Key)).toBe(true)
+    expect(appendFileMock).not.toHaveBeenCalled()
+  })
+
+  it("mode 'yes' with matching public key and mismatching fingerprint: hostVerifier throws", async () => {
+    readFileSyncMock.mockReturnValue("")
+
+    const { hostVerifier } = await buildHostVerifier(
+      "yes",
+      { host: "newhost.com", port: 22 },
+      {
+        expectedHostFingerprint: computeFingerprint(rsaKey),
+        expectedHostPublicKey: `ssh-ed25519 ${ed25519Key.toString("base64")}`,
+      }
+    )
+
+    expect(hostVerifier).toBeDefined()
+    expect(() => hostVerifier!(ed25519Key)).toThrow(/configured trust anchor/v)
+  })
+
+  it("mode 'yes' with matching fingerprint and mismatching public key: hostVerifier throws", async () => {
+    readFileSyncMock.mockReturnValue("")
+
+    const { hostVerifier } = await buildHostVerifier(
+      "yes",
+      { host: "newhost.com", port: 22 },
+      {
+        expectedHostFingerprint: computeFingerprint(ed25519Key),
+        expectedHostPublicKey: `ssh-rsa ${rsaKey.toString("base64")}`,
+      }
+    )
+
+    expect(hostVerifier).toBeDefined()
+    expect(() => hostVerifier!(ed25519Key)).toThrow(/configured trust anchor/v)
+  })
+
   it("mode 'yes' with unknown host and mismatching expected fingerprint: hostVerifier throws verification error", async () => {
     readFileSyncMock.mockReturnValue("")
 

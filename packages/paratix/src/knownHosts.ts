@@ -654,12 +654,14 @@ function verifyPinnedHostKey(host: string, key: Buffer, options: HostVerifierOpt
   const expectedFingerprint = options.expectedHostFingerprint ?? null
   const presentedPublicKey = formatPresentedPublicKey(key)
   const presentedFingerprint = computeFingerprint(key)
+  const publicKeyMatches =
+    normalizedExpectedPublicKey == null ||
+    (presentedPublicKey != null && normalizedExpectedPublicKey === presentedPublicKey)
+  const fingerprintMatches =
+    expectedFingerprint == null || expectedFingerprint === presentedFingerprint
 
   // R-0000210: treat null (malformed wire format) as "does not match".
-  if (
-    (presentedPublicKey != null && normalizedExpectedPublicKey === presentedPublicKey) ||
-    expectedFingerprint === presentedFingerprint
-  ) {
+  if (publicKeyMatches && fingerprintMatches) {
     return
   }
 
