@@ -172,6 +172,8 @@ export const setEncodingNoop = (): void => {
   /* setEncoding is a no-op on the simulated streams in runner tests */
 }
 
+const SSHD_DRY_RUN_TEMP_PATH = "/tmp/paratix-sshd-dry-run.ABCDEF"
+
 // R-0000766: sshd dry-run now allocates its tmpfile via
 // `mktemp -p /tmp -- paratix-sshd-dry-run.XXXXXX`. The successful-dry-run
 // mock therefore needs to recognise that command and answer with a valid
@@ -181,9 +183,18 @@ export const setEncodingNoop = (): void => {
 export function createSuccessfulSshdDryRunExecMock(): ReturnType<typeof vi.fn> {
   return vi.fn().mockImplementation(async (command: string) => {
     await Promise.resolve()
-    if (command === "mktemp -p /tmp -- 'paratix-sshd-dry-run.XXXXXX'") {
-      return { code: 0, stderr: "", stdout: "/tmp/paratix-sshd-dry-run.ABCDEF" }
+    if (command === "test -d '/run/sshd'") {
+      return { code: 0, stderr: "", stdout: "" }
     }
-    return { code: 0, stderr: "", stdout: "" }
+    if (command === "mktemp -p /tmp -- 'paratix-sshd-dry-run.XXXXXX'") {
+      return { code: 0, stderr: "", stdout: SSHD_DRY_RUN_TEMP_PATH }
+    }
+    if (command === `sshd -t -f '${SSHD_DRY_RUN_TEMP_PATH}'`) {
+      return { code: 0, stderr: "", stdout: "" }
+    }
+    if (command === `rm -f '${SSHD_DRY_RUN_TEMP_PATH}'`) {
+      return { code: 0, stderr: "", stdout: "" }
+    }
+    throw new Error(`Unexpected sshd dry-run exec command: ${command}`)
   })
 }

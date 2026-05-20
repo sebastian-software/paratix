@@ -14,6 +14,18 @@ import {
 
 installRunnerTestHooks()
 
+const expectedSuccessfulSshdDryRunExecCommands = [
+  "test -d '/run/sshd'",
+  "mktemp -p /tmp -- 'paratix-sshd-dry-run.XXXXXX'",
+  "sshd -t -f '/tmp/paratix-sshd-dry-run.ABCDEF'",
+  "rm -f '/tmp/paratix-sshd-dry-run.ABCDEF'",
+]
+
+function expectSuccessfulSshdDryRunExecCommands(exec: ReturnType<typeof vi.fn>): void {
+  const calls = exec.mock.calls as Array<[string, ...unknown[]]>
+  expect(calls.map(([command]) => command)).toStrictEqual(expectedSuccessfulSshdDryRunExecCommands)
+}
+
 describe("runPlaybook dry-run recipe behaviour", () => {
   beforeEach(() => {
     vi.spyOn(console, "log").mockImplementation(() => {
@@ -234,6 +246,7 @@ describe("runPlaybook dry-run recipe behaviour", () => {
 
     const output = consoleLogs.join("\n")
     expect(output).toContain("(dry-run, sshd -t ok; reload not executed)")
+    expectSuccessfulSshdDryRunExecCommands(exec)
   })
 
   it("prints verbose diagnostics for failed dry-run recipe children when --verbose is enabled", async () => {
@@ -596,6 +609,7 @@ describe("runPlaybook dry-run recipe behaviour", () => {
     expect(output).toContain(
       "(dry-run, sshd -t ok; restart, port switch, firewall and reconnect not verified)"
     )
+    expectSuccessfulSshdDryRunExecCommands(exec)
     expect(addPort).not.toHaveBeenCalled()
     expect(reconnect).not.toHaveBeenCalled()
   })
