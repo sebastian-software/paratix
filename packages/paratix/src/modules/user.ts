@@ -32,6 +32,7 @@ const HOME_MODE_PATTERN = /^0?[0-7]{3}$/v
 const DEFAULT_HOME_MODE = "0700"
 
 const ID_CMD = "id"
+const ID_USER_NOT_FOUND_EXIT_CODE = 1
 
 // R-0000120: validate the `uid` and `groups` options at construction time so
 // numeric drift (NaN, negative, fractional, > 2^32) and group-name injection
@@ -424,6 +425,28 @@ type UserMutationContext = {
   ssh: SshConnection
 }
 
+type UserExistenceProbe =
+  | { kind: "exists" }
+  | { kind: "failure"; result: ModuleResult }
+  | { kind: "missing" }
+
+async function probeUserExists(
+  ssh: SshConnection,
+  parameters: { moduleName: "user.absent" | "user.present"; name: string }
+): Promise<UserExistenceProbe> {
+  const { moduleName, name } = parameters
+  const result = await ssh.exec(`${ID_CMD} -u ${shellQuote(name)}`, {
+    ignoreExitCode: true,
+    silent: true,
+  })
+  if (result.code === 0) return { kind: "exists" }
+  if (result.code === ID_USER_NOT_FOUND_EXIT_CODE) return { kind: "missing" }
+  return {
+    kind: "failure",
+    result: failedCommand(`[${moduleName}: ${name}] id -u failed during user lookup`, result),
+  }
+}
+
 type UserMutationOutcome =
   | { kind: "changed" }
   | { kind: "failed"; result: ModuleResult }
@@ -669,7 +692,9 @@ async function runUserMutationStep(
   parameters: { name: string; options: undefined | UserOptions }
 ): Promise<PresentMutationStep> {
   const { name, options } = parameters
-  const exists = await ssh.test(`${ID_CMD} ${shellQuote(name)}`)
+  const existence = await probeUserExists(ssh, { moduleName: "user.present", name })
+  if (existence.kind === "failure") return { failure: existence.result, kind: "failed" }
+  const exists = existence.kind === "exists"
   const flags = buildUserArguments(exists ? "usermod" : "useradd", options)
   const outcome = await applyUserMutation({ exists, flags, name, ssh })
   if (outcome.kind === "failed") return { failure: outcome.result, kind: "failed" }
@@ -756,7 +781,9 @@ export const user = {
     return {
       async apply(ssh: null | SshConnection): Promise<ModuleResult> {
         if (!ssh) return failed(`[user.absent: ${name}] SSH connection is required`)
-        if (!(await ssh.test(`${ID_CMD} ${shellQuote(name)}`))) return { status: "ok" }
+        const existence = await probeUserExists(ssh, { moduleName: "user.absent", name })
+        if (existence.kind === "failure") return existence.result
+        if (existence.kind === "missing") return { status: "ok" }
         const removeFlag = options?.removeHome ? "--remove" : ""
         const result = await ssh.exec(`userdel ${removeFlag} ${shellQuote(name)}`, {
           ignoreExitCode: true,
@@ -774,7 +801,8 @@ export const user = {
       },
       async check(ssh: null | SshConnection): Promise<"needs-apply" | "ok"> {
         if (!ssh) return NEEDS_APPLY
-        return (await ssh.test(`${ID_CMD} ${shellQuote(name)}`)) ? NEEDS_APPLY : "ok"
+        const existence = await probeUserExists(ssh, { moduleName: "user.absent", name })
+        return existence.kind === "missing" ? "ok" : NEEDS_APPLY
       },
       name: `user.absent: ${name}`,
     }
@@ -827,7 +855,8 @@ export const user = {
       },
       async check(ssh: null | SshConnection): Promise<"needs-apply" | "ok"> {
         if (!ssh) return NEEDS_APPLY
-        if (!(await ssh.test(`${ID_CMD} ${shellQuote(name)}`))) return NEEDS_APPLY
+        const existence = await probeUserExists(ssh, { moduleName: "user.present", name })
+        if (existence.kind !== "exists") return NEEDS_APPLY
         if (options != null) {
           const outcome = await attributesMatch(ssh, name, options)
           // R-0000657: surface a shadow-hash comparison toolchain failure

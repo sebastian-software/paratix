@@ -30,7 +30,16 @@ function buildSequentialHomeIdentityExec(input: {
 describe("user.present check", () => {
   it("returns needs-apply when the user does not exist", async () => {
     const ssh = createMockSsh({
-      "id 'alice'": { code: 1 },
+      "id -u 'alice'": { code: 1 },
+    })
+    const mod = user.present("alice")
+    const result = await mod.check(ssh, emptyEnv)
+    expect(result).toBe("needs-apply")
+  })
+
+  it("returns needs-apply when the id -u probe fails", async () => {
+    const ssh = createMockSsh({
+      "id -u 'alice'": { code: 2, stderr: "id: cannot read user database" },
     })
     const mod = user.present("alice")
     const result = await mod.check(ssh, emptyEnv)
@@ -39,7 +48,7 @@ describe("user.present check", () => {
 
   it("returns ok when the user exists and no options are given", async () => {
     const ssh = createMockSsh({
-      "id 'alice'": { code: 0 },
+      "id -u 'alice'": { code: 0 },
     })
     const mod = user.present("alice")
     const result = await mod.check(ssh, emptyEnv)
@@ -56,7 +65,7 @@ describe("user.present check", () => {
   it("returns needs-apply when uid does not match", async () => {
     const ssh = createMockSsh({
       "getent passwd 'alice'": { code: 0, stdout: "alice:x:1001:1001::/home/alice:/bin/sh" },
-      "id 'alice'": { code: 0 },
+      "id -u 'alice'": { code: 0 },
     })
     const mod = user.present("alice", { uid: 9999 })
     const result = await mod.check(ssh, emptyEnv)
@@ -66,7 +75,7 @@ describe("user.present check", () => {
   it("returns ok when uid matches", async () => {
     const ssh = createMockSsh({
       "getent passwd 'alice'": { code: 0, stdout: "alice:x:1001:1001::/home/alice:/bin/sh" },
-      "id 'alice'": { code: 0 },
+      "id -u 'alice'": { code: 0 },
     })
     const mod = user.present("alice", { uid: 1001 })
     const result = await mod.check(ssh, emptyEnv)
@@ -77,7 +86,7 @@ describe("user.present check", () => {
   it("returns needs-apply when shell does not match", async () => {
     const ssh = createMockSsh({
       "getent passwd 'alice'": { code: 0, stdout: "alice:x:1001:1001::/home/alice:/bin/sh" },
-      "id 'alice'": { code: 0 },
+      "id -u 'alice'": { code: 0 },
     })
     const mod = user.present("alice", { shell: "/bin/bash" })
     const result = await mod.check(ssh, emptyEnv)
@@ -87,7 +96,7 @@ describe("user.present check", () => {
   it("returns ok when shell matches", async () => {
     const ssh = createMockSsh({
       "getent passwd 'alice'": { code: 0, stdout: "alice:x:1001:1001::/home/alice:/bin/bash" },
-      "id 'alice'": { code: 0 },
+      "id -u 'alice'": { code: 0 },
     })
     const mod = user.present("alice", { shell: "/bin/bash" })
     const result = await mod.check(ssh, emptyEnv)
@@ -98,7 +107,7 @@ describe("user.present check", () => {
   it("returns needs-apply when home directory does not match", async () => {
     const ssh = createMockSsh({
       "getent passwd 'alice'": { code: 0, stdout: "alice:x:1001:1001::/home/alice:/bin/sh" },
-      "id 'alice'": { code: 0 },
+      "id -u 'alice'": { code: 0 },
     })
     const mod = user.present("alice", { home: "/srv/alice" })
     const result = await mod.check(ssh, emptyEnv)
@@ -113,7 +122,7 @@ describe("user.present check", () => {
         stdout: "700",
       },
       "getent passwd 'alice'": { code: 0, stdout: "alice:x:1001:1001::/home/alice:/bin/sh" },
-      "id 'alice'": { code: 0 },
+      "id -u 'alice'": { code: 0 },
     })
     const mod = user.present("alice", { home: "/home/alice" })
     const result = await mod.check(ssh, emptyEnv)
@@ -125,7 +134,7 @@ describe("user.present check", () => {
     const ssh = createMockSsh({
       "id -Gn 'alice'": { code: 0, stdout: "alice sudo" },
       "id -gn 'alice'": { code: 0, stdout: "alice" },
-      "id 'alice'": { code: 0 },
+      "id -u 'alice'": { code: 0 },
     })
     const mod = user.present("alice", { groups: ["alice", "docker"] })
     const result = await mod.check(ssh, emptyEnv)
@@ -136,7 +145,7 @@ describe("user.present check", () => {
     const ssh = createMockSsh({
       "id -Gn 'alice'": { code: 0, stdout: "alice sudo" },
       "id -gn 'alice'": { code: 0, stdout: "alice" },
-      "id 'alice'": { code: 0 },
+      "id -u 'alice'": { code: 0 },
     })
     const mod = user.present("alice", { groups: ["sudo"] })
     const result = await mod.check(ssh, emptyEnv)
@@ -150,7 +159,7 @@ describe("user.present check", () => {
     const ssh = createMockSsh({
       "id -Gn 'alice'": { code: 0, stdout: "alice sudo docker" },
       "id -gn 'alice'": { code: 0, stdout: "alice" },
-      "id 'alice'": { code: 0 },
+      "id -u 'alice'": { code: 0 },
     })
     const mod = user.present("alice", { groups: ["sudo"] })
     const result = await mod.check(ssh, emptyEnv)
@@ -161,7 +170,7 @@ describe("user.present check", () => {
     const ssh = createMockSsh({
       "id -Gn 'alice'": { code: 0, stdout: "alice sudo" },
       "id -gn 'alice'": { code: 0, stdout: "alice" },
-      "id 'alice'": { code: 0 },
+      "id -u 'alice'": { code: 0 },
     })
     const mod = user.present("alice", { groups: ["sudo", "docker"] })
     const result = await mod.check(ssh, emptyEnv)
@@ -176,7 +185,7 @@ describe("user.present check", () => {
       "bash -c 'set -o pipefail\ncmp -s <(getent shadow '\\''alice'\\'' | cut -d: -f2) -'"
     const ssh = createMockSsh({
       [compareCommand]: { code: 1 },
-      "id 'alice'": { code: 0 },
+      "id -u 'alice'": { code: 0 },
     })
     const mod = user.present("alice", { password: "$6$newhash" })
     const result = await mod.check(ssh, emptyEnv)
@@ -188,7 +197,7 @@ describe("user.present check", () => {
       "bash -c 'set -o pipefail\ncmp -s <(getent shadow '\\''alice'\\'' | cut -d: -f2) -'"
     const ssh = createMockSsh({
       [compareCommand]: { code: 0 },
-      "id 'alice'": { code: 0 },
+      "id -u 'alice'": { code: 0 },
     })
     const mod = user.present("alice", { password: "$6$hash" })
     const result = await mod.check(ssh, emptyEnv)
@@ -202,7 +211,7 @@ describe("user.present check", () => {
       "bash -c 'set -o pipefail\ncmp -s <(getent shadow '\\''alice'\\'' | cut -d: -f2) -'"
     const ssh = createMockSsh({
       [compareCommand]: { code: 1 },
-      "id 'alice'": { code: 0 },
+      "id -u 'alice'": { code: 0 },
     })
     const mod = user.present("alice", { password: "$6$hash" })
     const result = await mod.check(ssh, emptyEnv)
@@ -219,7 +228,7 @@ describe("user.present check", () => {
       "bash -c 'set -o pipefail\ncmp -s <(getent shadow '\\''alice'\\'' | cut -d: -f2) -'"
     const ssh = createMockSsh({
       [compareCommand]: { code: 2, stderr: "cmp: invalid option" },
-      "id 'alice'": { code: 0 },
+      "id -u 'alice'": { code: 0 },
     })
     const mod = user.present("alice", { password: "$6$hash" })
     await expect(mod.check(ssh, emptyEnv)).rejects.toThrow(
@@ -234,7 +243,7 @@ describe("user.present check", () => {
       "bash -c 'set -o pipefail\ncmp -s <(getent shadow '\\''alice'\\'' | cut -d: -f2) -'"
     const ssh = createMockSsh({
       [compareCommand]: { code: 127, stderr: "bash: cmp: command not found" },
-      "id 'alice'": { code: 0 },
+      "id -u 'alice'": { code: 0 },
     })
     const mod = user.present("alice", { password: "$6$hash" })
     await expect(mod.check(ssh, emptyEnv)).rejects.toThrow(
@@ -251,7 +260,7 @@ describe("user.present apply", () => {
   it("uses chpasswd -e via stdin when setting a pre-hashed password", async () => {
     const ssh = createMockSsh({
       "chpasswd -e": { code: 0 },
-      "id 'alice'": { code: 0 },
+      "id -u 'alice'": { code: 0 },
     })
     const mod = user.present("alice", { password: "$6$hash" })
     await mod.apply(ssh, emptyEnv)
@@ -271,7 +280,7 @@ describe("user.present apply", () => {
   it("apply returns failed and masks the hash when chpasswd -e fails", async () => {
     const ssh = createMockSsh({
       "chpasswd -e": { code: 1, stderr: "stderr referencing $6$hash" },
-      "id 'alice'": { code: 0 },
+      "id -u 'alice'": { code: 0 },
     })
     const mod = user.present("alice", { password: "$6$hash" })
     const result = await mod.apply(ssh, emptyEnv)
@@ -288,7 +297,7 @@ describe("user.present apply", () => {
 
   it("does not call chpasswd when no password is set", async () => {
     const ssh = createMockSsh({
-      "id 'alice'": { code: 0 },
+      "id -u 'alice'": { code: 0 },
     })
     const mod = user.present("alice")
     await mod.apply(ssh, emptyEnv)
@@ -302,7 +311,7 @@ describe("user.present apply", () => {
   it("skips the usermod call when only the password changes", async () => {
     const ssh = createMockSsh({
       "chpasswd -e": { code: 0 },
-      "id 'alice'": { code: 0 },
+      "id -u 'alice'": { code: 0 },
     })
     const mod = user.present("alice", { password: "$6$hash" })
     const result = await mod.apply(ssh, emptyEnv)
@@ -317,7 +326,7 @@ describe("user.present apply", () => {
   // memberships (sudo, docker, manually added groups) are preserved.
   it("emits usermod --append --groups so existing supplementary groups are preserved", async () => {
     const ssh = createMockSsh({
-      "id 'alice'": { code: 0 },
+      "id -u 'alice'": { code: 0 },
       "usermod --append --groups 'docker,wheel' 'alice'": { code: 0 },
     })
     const mod = user.present("alice", { groups: ["docker", "wheel"] })
@@ -335,7 +344,7 @@ describe("user.present apply", () => {
   // supplementary memberships to preserve anyway).
   it("does not emit --append when creating a new account with groups via useradd", async () => {
     const ssh = createMockSsh({
-      "id 'bob'": { code: 1 },
+      "id -u 'bob'": { code: 1 },
       "useradd --groups 'docker' --create-home 'bob'": { code: 0 },
     })
     const mod = user.present("bob", { groups: ["docker"] })
@@ -348,12 +357,25 @@ describe("user.present apply", () => {
 
   it("apply returns changed when user is created successfully", async () => {
     const ssh = createMockSsh({
-      "id 'alice'": { code: 1 },
+      "id -u 'alice'": { code: 1 },
       "useradd  --create-home 'alice'": { code: 0 },
     })
     const mod = user.present("alice")
     const result = await mod.apply(ssh, emptyEnv)
     expect(result.status).toBe("changed")
+  })
+
+  it("apply returns failed when the id -u probe fails", async () => {
+    const ssh = createMockSsh({
+      "id -u 'alice'": { code: 2, stderr: "id: cannot read user database" },
+    })
+    const mod = user.present("alice")
+    const result = await mod.apply(ssh, emptyEnv)
+    expect(result.status).toBe("failed")
+    expect(result.error).toBeInstanceOf(CommandError)
+    expect(result.error?.message).toContain("id -u failed during user lookup")
+    expect(ssh.calls.some((c) => c.startsWith("useradd"))).toBe(false)
+    expect(ssh.calls.some((c) => c.startsWith("usermod"))).toBe(false)
   })
 
   it("apply returns needs-apply when ssh is null", async () => {
@@ -371,7 +393,7 @@ describe("user.present apply", () => {
   // exists.
   it("returns ok and skips usermod when user exists and no options are given", async () => {
     const ssh = createMockSsh({
-      "id 'alice'": { code: 0 },
+      "id -u 'alice'": { code: 0 },
     })
     const mod = user.present("alice")
     const result = await mod.apply(ssh, emptyEnv)
@@ -384,7 +406,7 @@ describe("user.present apply", () => {
   // and `apply` must return "changed".
   it("returns changed and invokes useradd when user does not exist", async () => {
     const ssh = createMockSsh({
-      "id 'alice'": { code: 1 },
+      "id -u 'alice'": { code: 1 },
       "useradd  --create-home 'alice'": { code: 0 },
     })
     const mod = user.present("alice")
@@ -397,7 +419,7 @@ describe("user.present apply", () => {
   // must run and `apply` must return "changed".
   it("returns changed and invokes usermod when user exists and flags differ", async () => {
     const ssh = createMockSsh({
-      "id 'alice'": { code: 0 },
+      "id -u 'alice'": { code: 0 },
       "usermod --shell '/bin/bash' 'alice'": { code: 0 },
     })
     const mod = user.present("alice", { shell: "/bin/bash" })
@@ -412,7 +434,7 @@ describe("user.present apply", () => {
   it("returns changed when only the password is set on an existing user", async () => {
     const ssh = createMockSsh({
       "chpasswd -e": { code: 0 },
-      "id 'alice'": { code: 0 },
+      "id -u 'alice'": { code: 0 },
     })
     const mod = user.present("alice", { password: "$6$hash" })
     const result = await mod.apply(ssh, emptyEnv)
@@ -425,7 +447,7 @@ describe("user.present apply", () => {
 describe("user.absent check", () => {
   it("returns needs-apply when the user exists", async () => {
     const ssh = createMockSsh({
-      "id 'alice'": { code: 0 },
+      "id -u 'alice'": { code: 0 },
     })
     const mod = user.absent("alice")
     const result = await mod.check(ssh, emptyEnv)
@@ -434,11 +456,20 @@ describe("user.absent check", () => {
 
   it("returns ok when the user does not exist", async () => {
     const ssh = createMockSsh({
-      "id 'alice'": { code: 1 },
+      "id -u 'alice'": { code: 1 },
     })
     const mod = user.absent("alice")
     const result = await mod.check(ssh, emptyEnv)
     expect(result).toBe("ok")
+  })
+
+  it("returns needs-apply when the id -u probe fails", async () => {
+    const ssh = createMockSsh({
+      "id -u 'alice'": { code: 2, stderr: "id: cannot read user database" },
+    })
+    const mod = user.absent("alice")
+    const result = await mod.check(ssh, emptyEnv)
+    expect(result).toBe("needs-apply")
   })
 })
 
@@ -449,7 +480,7 @@ describe("user.absent apply", () => {
   // failedCommand for an already-satisfied state.
   it("returns ok and skips userdel when the user does not exist", async () => {
     const ssh = createMockSsh({
-      "id 'alice'": { code: 1 },
+      "id -u 'alice'": { code: 1 },
     })
     const mod = user.absent("alice")
     const result = await mod.apply(ssh, emptyEnv)
@@ -458,9 +489,22 @@ describe("user.absent apply", () => {
     expect(ssh.calls).not.toContain("userdel --remove 'alice'")
   })
 
+  it("returns failed and skips userdel when the id -u probe fails", async () => {
+    const ssh = createMockSsh({
+      "id -u 'alice'": { code: 2, stderr: "id: cannot read user database" },
+    })
+    const mod = user.absent("alice")
+    const result = await mod.apply(ssh, emptyEnv)
+    expect(result.status).toBe("failed")
+    expect(result.error).toBeInstanceOf(CommandError)
+    expect(result.error?.message).toContain("id -u failed during user lookup")
+    expect(ssh.calls).not.toContain("userdel  'alice'")
+    expect(ssh.calls).not.toContain("userdel --remove 'alice'")
+  })
+
   it("returns changed when userdel succeeds", async () => {
     const ssh = createMockSsh({
-      "id 'alice'": { code: 0 },
+      "id -u 'alice'": { code: 0 },
       "userdel  'alice'": { code: 0 },
     })
     const mod = user.absent("alice")
@@ -474,7 +518,7 @@ describe("user.absent apply", () => {
   // ("specified user doesn't exist"). Treat that as idempotent success.
   it("returns ok when userdel exits with code 6 (user already gone)", async () => {
     const ssh = createMockSsh({
-      "id 'alice'": { code: 0 },
+      "id -u 'alice'": { code: 0 },
       "userdel  'alice'": { code: 6 },
     })
     const mod = user.absent("alice")
@@ -484,7 +528,7 @@ describe("user.absent apply", () => {
 
   it("returns failed when userdel exits with a non-6 non-zero code", async () => {
     const ssh = createMockSsh({
-      "id 'alice'": { code: 0 },
+      "id -u 'alice'": { code: 0 },
       "userdel  'alice'": { code: 1 },
     })
     const mod = user.absent("alice")
@@ -692,7 +736,7 @@ describe("user.present home migration and mode (R-0000656)", () => {
         code: 0,
         stdout: "64769:1234\n",
       },
-      "id 'alice'": { code: 0 },
+      "id -u 'alice'": { code: 0 },
       "usermod --home '/srv/alice' --move-home 'alice'": { code: 0 },
     })
     const mod = user.present("alice", { home: "/srv/alice" })
@@ -713,7 +757,7 @@ describe("user.present home migration and mode (R-0000656)", () => {
         code: 0,
         stdout: "64769:2345\n",
       },
-      "id 'bob'": { code: 1 },
+      "id -u 'bob'": { code: 1 },
       "useradd --home '/srv/bob' --create-home 'bob'": { code: 0 },
     })
     const mod = user.present("bob", { home: "/srv/bob" })
@@ -736,7 +780,7 @@ describe("user.present home migration and mode (R-0000656)", () => {
         code: 0,
         stdout: "64769:3456\n",
       },
-      "id 'alice'": { code: 1 },
+      "id -u 'alice'": { code: 1 },
       "useradd --home '/home/alice' --create-home 'alice'": { code: 0 },
     })
     const mod = user.present("alice", { home: "/home/alice" })
@@ -759,7 +803,7 @@ describe("user.present home migration and mode (R-0000656)", () => {
         code: 0,
         stdout: "64769:4567\n",
       },
-      "id 'alice'": { code: 1 },
+      "id -u 'alice'": { code: 1 },
       "useradd --home '/home/alice' --create-home 'alice'": { code: 0 },
     })
     const mod = user.present("alice", { home: "/home/alice", homeMode: "0750" })
@@ -782,7 +826,7 @@ describe("user.present home migration and mode (R-0000656)", () => {
         code: 0,
         stdout: "64769:5678\n",
       },
-      "id 'alice'": { code: 1 },
+      "id -u 'alice'": { code: 1 },
       "useradd --home '/home/alice' --create-home 'alice'": { code: 0 },
     })
     const mod = user.present("alice", { home: "/home/alice" })
@@ -801,7 +845,7 @@ describe("user.present home migration and mode (R-0000656)", () => {
         code: 0,
         stdout: "700",
       },
-      "id 'alice'": { code: 0 },
+      "id -u 'alice'": { code: 0 },
       "usermod --home '/home/alice' --move-home 'alice'": { code: 0 },
     })
     const mod = user.present("alice", { home: "/home/alice" })
@@ -817,7 +861,7 @@ describe("user.present home migration and mode (R-0000656)", () => {
         stdout: "755",
       },
       "getent passwd 'alice'": { code: 0, stdout: "alice:x:1001:1001::/home/alice:/bin/sh" },
-      "id 'alice'": { code: 0 },
+      "id -u 'alice'": { code: 0 },
     })
     const mod = user.present("alice", { home: "/home/alice" })
     const result = await mod.check(ssh, emptyEnv)
@@ -831,7 +875,7 @@ describe("user.present home migration and mode (R-0000656)", () => {
         stdout: "700",
       },
       "getent passwd 'alice'": { code: 0, stdout: "alice:x:1001:1001::/home/alice:/bin/sh" },
-      "id 'alice'": { code: 0 },
+      "id -u 'alice'": { code: 0 },
     })
     const mod = user.present("alice", { home: "/home/alice" })
     const result = await mod.check(ssh, emptyEnv)
@@ -845,7 +889,7 @@ describe("user.present home migration and mode (R-0000656)", () => {
         stderr: "No such file",
       },
       "getent passwd 'alice'": { code: 0, stdout: "alice:x:1001:1001::/home/alice:/bin/sh" },
-      "id 'alice'": { code: 0 },
+      "id -u 'alice'": { code: 0 },
     })
     const mod = user.present("alice", { home: "/home/alice" })
     const result = await mod.check(ssh, emptyEnv)
@@ -862,7 +906,7 @@ describe("user.present home migration and mode (R-0000656)", () => {
         code: 1,
       },
       "getent passwd 'alice'": { code: 0, stdout: "alice:x:1001:1001::/home/alice:/bin/sh" },
-      "id 'alice'": { code: 0 },
+      "id -u 'alice'": { code: 0 },
     })
     const mod = user.present("alice", { home: "/home/alice" })
     const result = await mod.check(ssh, emptyEnv)
@@ -889,7 +933,7 @@ describe("user.present home migration and mode (R-0000656)", () => {
         code: 1,
         stderr: "[: not a directory",
       },
-      "id 'alice'": { code: 0 },
+      "id -u 'alice'": { code: 0 },
       "usermod --home '/home/alice' --move-home 'alice'": { code: 0 },
     })
     const mod = user.present("alice", { home: "/home/alice" })
@@ -909,7 +953,7 @@ describe("user.present home migration and mode (R-0000656)", () => {
         code: 0,
         stdout: "755",
       },
-      "id 'alice'": { code: 0 },
+      "id -u 'alice'": { code: 0 },
       "usermod --home '/home/alice' --move-home 'alice'": { code: 0 },
     })
     const originalExec = ssh.exec
