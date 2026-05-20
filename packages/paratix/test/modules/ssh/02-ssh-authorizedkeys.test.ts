@@ -199,6 +199,8 @@ describe("ssh.authorizedKeys", () => {
   const aliceHome = "/home/alice"
   const aliceDir = `'/home/alice/.ssh'`
   const aliceKeys = `'/home/alice/.ssh/authorized_keys'`
+  const aliceKeysExistsOrSymlinkProbe =
+    "[ -e '/home/alice/.ssh/authorized_keys' ] || [ -L '/home/alice/.ssh/authorized_keys' ]"
   // R-0000181: temp file lives in <home>/.ssh on the destination filesystem
   // so `mv -T` is atomic (single rename(2)) and avoids cross-FS copies.
   const aliceMktempPattern = "mktemp -p '/home/alice/.ssh' -- '.paratix-authorized-keys.XXXXXX'"
@@ -225,6 +227,7 @@ describe("ssh.authorizedKeys", () => {
   ) {
     return {
       "[ -L '/home/alice/.ssh' ]": { code: 1 },
+      [aliceKeysExistsOrSymlinkProbe]: { code: 0 },
       [getentAlice]: { stdout: aliceHome },
       [idGroupAlice]: { stdout: "alice" },
       ...extra,
@@ -660,6 +663,27 @@ describe("ssh.authorizedKeys", () => {
     const result = await mod.apply(mockSsh, emptyEnv)
 
     expect(result.status).toBe("ok")
+    expect(mockSsh.calls).not.toContain(aliceMktempPattern)
+    expect(mockSsh.calls).not.toContain(
+      absentAuthorizedKeysRewriteCommand(aliceKeys, tempPath, testKey)
+    )
+    expect(mockSsh.calls).not.toContain(aliceFinalReplaceCommand)
+  })
+
+  it("regression: absent apply returns ok before preparing .ssh when authorized_keys is missing", async () => {
+    const mockSsh = createSshApplyMockSsh(
+      aliceResponses({
+        [aliceKeysExistsOrSymlinkProbe]: { code: 1 },
+      })
+    )
+    const mod = ssh.authorizedKeys("alice", testKey, { state: "absent" })
+
+    const result = await mod.apply(mockSsh, emptyEnv)
+
+    expect(result.status).toBe("ok")
+    expect(mockSsh.calls).toContain(aliceKeysExistsOrSymlinkProbe)
+    expect(mockSsh.calls).not.toContain(idGroupAlice)
+    expect(mockSsh.calls).not.toContain(aliceSshDirectoryGuard)
     expect(mockSsh.calls).not.toContain(aliceMktempPattern)
     expect(mockSsh.calls).not.toContain(
       absentAuthorizedKeysRewriteCommand(aliceKeys, tempPath, testKey)

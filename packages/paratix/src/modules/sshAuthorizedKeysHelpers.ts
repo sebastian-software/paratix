@@ -446,6 +446,14 @@ async function rewriteAuthorizedKeysWhenNeeded(
   return { status: "changed" }
 }
 
+async function absentAuthorizedKeysPathNeedsGuard(
+  conn: SshConnection,
+  authorizedKeysPath: string
+): Promise<boolean> {
+  const quotedAuthorizedKeysPath = shellQuote(authorizedKeysPath)
+  return conn.test(`[ -e ${quotedAuthorizedKeysPath} ] || [ -L ${quotedAuthorizedKeysPath} ]`)
+}
+
 export async function applyAuthorizedKeys(
   conn: null | SshConnection,
   parameters: {
@@ -463,12 +471,18 @@ export async function applyAuthorizedKeys(
   if (homeFailure) return homeFailure
   if (home == null) return { status: "ok" }
 
+  const sshDirectoryPath = `${home}/.ssh`
+  const authorizedKeysPath = `${home}/.ssh/authorized_keys`
+
+  if (state === "absent") {
+    const needsGuard = await absentAuthorizedKeysPathNeedsGuard(conn, authorizedKeysPath)
+    if (!needsGuard) return { status: "ok" }
+  }
+
   // R-0000065: resolve the primary group exactly once for the duration of
   // this apply so the directory chown, the authorized_keys chown and the
   // matching `stat` comparison all reference the same group identity.
   const primaryGroup = await resolvePrimaryGroup(conn, user)
-  const sshDirectoryPath = `${home}/.ssh`
-  const authorizedKeysPath = `${home}/.ssh/authorized_keys`
 
   // R-0000765: prepare `.ssh` and probe `authorized_keys` in a single
   // `set -e` shell pipeline instead of two sequential SSH execs. Halves the
