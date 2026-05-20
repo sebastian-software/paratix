@@ -141,13 +141,13 @@ describe("net.interface — check", () => {
     ].join("\n")
     const mockSsh = createMockSsh({
       "cat '/etc/systemd/network/60-paratix-eth0.network'": { stdout: `${expectedConfig}\n` },
+      "ip -4 route show default dev 'eth0'": {
+        stdout: "default via 192.168.1.1 dev eth0 proto static\n",
+      },
       "ip -o addr show dev 'eth0'": {
         stdout: "2: eth0    inet 192.168.1.10/24 brd 192.168.1.255 scope global eth0\n",
       },
       "ip link show dev 'eth0'": { code: 0 },
-      "ip route show default dev 'eth0'": {
-        stdout: "default via 192.168.1.1 dev eth0 proto static\n",
-      },
       [regularFileCheck("/etc/systemd/network/60-paratix-eth0.network")]: { code: 0 },
       "test -d '/etc/netplan'": { code: 1 },
     })
@@ -157,6 +157,42 @@ describe("net.interface — check", () => {
     })
     const result = await mod.check(mockSsh, emptyEnv)
     expect(result).toBe("ok")
+  })
+
+  it("returns ok when IPv6 static config and live interface state match", async () => {
+    const expectedConfig = [
+      "[Match]",
+      "Name=eth0",
+      "",
+      "[Network]",
+      "DHCP=no",
+      "Address=2001:db8::10/64",
+      "",
+      "[Route]",
+      "Gateway=fe80::1",
+    ].join("\n")
+    const mockSsh = createMockSsh({
+      "cat '/etc/systemd/network/60-paratix-eth0.network'": { stdout: `${expectedConfig}\n` },
+      "ip -6 route show default dev 'eth0'": {
+        stdout: "default via fe80::1 dev eth0 proto static\n",
+      },
+      "ip -o addr show dev 'eth0'": {
+        stdout: "2: eth0    inet6 2001:db8::10/64 scope global\n",
+      },
+      "ip link show dev 'eth0'": { code: 0 },
+      [regularFileCheck("/etc/systemd/network/60-paratix-eth0.network")]: { code: 0 },
+      "test -d '/etc/netplan'": { code: 1 },
+    })
+    const mod = net.interface("eth0", {
+      addresses: ["2001:db8::10/64"],
+      gateway: "fe80::1",
+    })
+
+    const result = await mod.check(mockSsh, emptyEnv)
+
+    expect(result).toBe("ok")
+    expect(mockSsh.calls).toContain("ip -6 route show default dev 'eth0'")
+    expect(mockSsh.calls).not.toContain("ip -4 route show default dev 'eth0'")
   })
 
   it("returns needs-apply when live gateway only matches as a prefix", async () => {
@@ -173,13 +209,13 @@ describe("net.interface — check", () => {
     ].join("\n")
     const mockSsh = createMockSsh({
       "cat '/etc/systemd/network/60-paratix-eth0.network'": { stdout: `${expectedConfig}\n` },
+      "ip -4 route show default dev 'eth0'": {
+        stdout: "default via 10.0.0.10 dev eth0 proto static\n",
+      },
       "ip -o addr show dev 'eth0'": {
         stdout: "2: eth0    inet 10.0.0.20/24 brd 10.0.0.255 scope global eth0\n",
       },
       "ip link show dev 'eth0'": { code: 0 },
-      "ip route show default dev 'eth0'": {
-        stdout: "default via 10.0.0.10 dev eth0 proto static\n",
-      },
       [regularFileCheck("/etc/systemd/network/60-paratix-eth0.network")]: { code: 0 },
       "test -d '/etc/netplan'": { code: 1 },
     })

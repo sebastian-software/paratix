@@ -753,7 +753,11 @@ async function interfaceGatewayMatches(
   gateway = ""
 ): Promise<boolean> {
   if (gateway === "") return true
-  const defaultRoute = await conn.exec(`ip route show default dev ${shellQuote(name)}`, EXEC_OPTS)
+  const routeFamily = isIP(gateway) === IPV6_IS_IP_VERSION ? IPV6_ROUTE_FAMILY : IPV4_ROUTE_FAMILY
+  const defaultRoute = await conn.exec(
+    `ip -${routeFamily} route show default dev ${shellQuote(name)}`,
+    EXEC_OPTS
+  )
   return defaultRoute.code === 0 && defaultRouteGatewayMatches(defaultRoute.stdout, gateway)
 }
 
