@@ -5,16 +5,9 @@ import type { ExecOptions } from "../../src/types.js"
 
 import { detectPackageManager, pkg } from "../../src/modules/package.js"
 import { CommandError } from "../../src/sshHelpers.js"
-import { createMockSsh as createBaseMockSsh } from "../helpers/mockSsh.js"
+import { createMockSsh } from "../helpers/mockSsh.js"
 
 const emptyEnv = {}
-
-const createMockSsh: typeof createBaseMockSsh = (responses, options) =>
-  createBaseMockSsh(responses, {
-    allowUnstubbedDefaults: true,
-    defaultTestResult: false,
-    ...options,
-  })
 
 // ---------------------------------------------------------------------------
 // Helpers: mock responses for package manager detection
@@ -113,11 +106,6 @@ function makeOneShotTransportFailureExec(ssh: MockSsh): MockSsh["exec"] {
 // `await Promise.resolve()` in each branch satisfies @typescript-eslint/require-await
 // and yields once to the microtask queue, matching the original mocks' timing.
 
-const reportMissingProbe = async () => {
-  await Promise.resolve()
-  return false
-}
-
 // Build paired exec()/test() overrides that record install execution and flip
 // the listed package-status probes from "missing" to "installed" once the
 // install command has run.
@@ -145,7 +133,10 @@ function makeInstallTrackingOverrides(
         : originalExec(command, options)
     },
     async test(command) {
-      return tracked.has(command) && !installExecuted ? reportMissingProbe() : originalTest(command)
+      if (!tracked.has(command)) return originalTest(command)
+      await Promise.resolve()
+      ssh.calls.push(command)
+      return installExecuted
     },
   }
 }
@@ -158,11 +149,17 @@ function makeOneShotMissingTest(ssh: MockSsh, missingCommand: string): MockSsh["
   let consumed = false
   const reportMissingOnce = async () => {
     await Promise.resolve()
+    ssh.calls.push(missingCommand)
     consumed = true
     return false
   }
-  return async (command) =>
-    command === missingCommand && !consumed ? reportMissingOnce() : originalTest(command)
+  return async (command) => {
+    if (command !== missingCommand) return originalTest(command)
+    if (!consumed) return reportMissingOnce()
+    await Promise.resolve()
+    ssh.calls.push(command)
+    return true
+  }
 }
 
 function makeAlwaysMissingPackageTest(
@@ -264,14 +261,11 @@ describe("pkg.installed", () => {
       "dpkg-query -W -f='${Status}' 'nginx' 2>/dev/null | grep -q 'install ok installed'"
     const dpkgCurl =
       "dpkg-query -W -f='${Status}' 'curl' 2>/dev/null | grep -q 'install ok installed'"
-    const ssh = createMockSsh(
-      {
-        ...APT_FOUND,
-      },
-      { defaultTestResult: true }
-    )
-    // Override exec()/test() so that probes report "missing" until the install
-    // command has run, then report "installed" via the underlying defaults.
+    const ssh = createMockSsh({
+      ...APT_FOUND,
+    })
+    // Override exec()/test() so that tracked probes report "missing" until the
+    // install command has run, then report "installed" explicitly.
     const overrides = makeInstallTrackingOverrides(
       ssh,
       "DEBIAN_FRONTEND=noninteractive apt-get install -y -- 'nginx' 'curl'",
@@ -310,13 +304,10 @@ describe("pkg.installed", () => {
     // R-0000535: runInstallAndVerify re-checks each package after install.
     const dpkgTexlive =
       "dpkg-query -W -f='${Status}' 'texlive-full' 2>/dev/null | grep -q 'install ok installed'"
-    const ssh = createMockSsh(
-      {
-        ...APT_FOUND,
-        "DEBIAN_FRONTEND=noninteractive apt-get install -y -- 'texlive-full'": { code: 0 },
-      },
-      { defaultTestResult: true }
-    )
+    const ssh = createMockSsh({
+      ...APT_FOUND,
+      "DEBIAN_FRONTEND=noninteractive apt-get install -y -- 'texlive-full'": { code: 0 },
+    })
     ssh.test = makeOneShotMissingTest(ssh, dpkgTexlive)
     const mod = pkg.installed("texlive-full", { timeout: 600_000 })
     const result = await mod.apply(ssh, emptyEnv)
@@ -329,10 +320,13 @@ describe("pkg.installed", () => {
   })
 
   it("apply without options does not set a timeout key (installed)", async () => {
+    const dpkgNginx =
+      "dpkg-query -W -f='${Status}' 'nginx' 2>/dev/null | grep -q 'install ok installed'"
     const ssh = createMockSsh({
       ...APT_FOUND,
       "DEBIAN_FRONTEND=noninteractive apt-get install -y -- 'nginx'": { code: 0 },
     })
+    ssh.test = makeOneShotMissingTest(ssh, dpkgNginx)
     const mod = pkg.installed("nginx")
     await mod.apply(ssh, emptyEnv)
     const installCall = ssh.execCalls.find(
@@ -373,9 +367,12 @@ describe("pkg.installed", () => {
   })
 
   it("apply returns failed when install command fails", async () => {
+    const dpkgNginx =
+      "dpkg-query -W -f='${Status}' 'nginx' 2>/dev/null | grep -q 'install ok installed'"
     const ssh = createMockSsh({
       ...APT_FOUND,
       "DEBIAN_FRONTEND=noninteractive apt-get install -y -- 'nginx'": { code: 1 },
+      [dpkgNginx]: { code: 1 },
     })
     const mod = pkg.installed("nginx")
     const result = await mod.apply(ssh, emptyEnv)
@@ -595,6 +592,7 @@ describe("pkg.update", () => {
       "apt-get update": { code: 0 },
       "find /var/lib/paratix/flags -maxdepth 1 -type f -name 'package-update-*' ! -name '*.lock' -delete && touch /var/lib/paratix/flags/'package-update-2024-01-15'":
         { code: 0 },
+      [FLAG]: { code: 1 },
       "mkdir -p /var/lib/paratix/flags": { code: 0 },
     })
     const mod = pkg.update("2024-01-15")
@@ -612,6 +610,7 @@ describe("pkg.update", () => {
       "apt-get update": { code: 0 },
       "find /var/lib/paratix/flags -maxdepth 1 -type f -name 'package-update-*' ! -name '*.lock' -delete && touch /var/lib/paratix/flags/'package-update-2024-01-15'":
         { code: 0 },
+      [FLAG]: { code: 1 },
       "mkdir -p /var/lib/paratix/flags": { code: 0 },
     })
     const mod = pkg.update("2024-01-15", { timeout: 450_000 })
@@ -640,7 +639,7 @@ describe("pkg.update", () => {
   })
 
   it("apply returns failed when no package manager is found", async () => {
-    const ssh = createMockSsh({ ...NO_PM })
+    const ssh = createMockSsh({ ...NO_PM, [FLAG]: { code: 1 } })
     const mod = pkg.update("2024-01-15")
     const result = await mod.apply(ssh, emptyEnv)
     expect(result.status).toBe("failed")
@@ -695,6 +694,7 @@ describe("pkg.upgrade", () => {
       "DEBIAN_FRONTEND=noninteractive dpkg --configure -a": { code: 0 },
       "find /var/lib/paratix/flags -maxdepth 1 -type f -name 'package-upgrade-*' ! -name '*.lock' -delete && touch /var/lib/paratix/flags/'package-upgrade-2024-01-15'":
         { code: 0 },
+      [FLAG]: { code: 1 },
       "mkdir -p /var/lib/paratix/flags": { code: 0 },
     })
     const mod = pkg.upgrade("2024-01-15")
@@ -719,6 +719,7 @@ describe("pkg.upgrade", () => {
       "DEBIAN_FRONTEND=noninteractive dpkg --configure -a": { code: 0 },
       "find /var/lib/paratix/flags -maxdepth 1 -type f -name 'package-upgrade-*' ! -name '*.lock' -delete && touch /var/lib/paratix/flags/'package-upgrade-2024-01-15'":
         { code: 0 },
+      [FLAG]: { code: 1 },
       "mkdir -p /var/lib/paratix/flags": { code: 0 },
     })
     const mod = pkg.upgrade("2024-01-15")
@@ -734,6 +735,7 @@ describe("pkg.upgrade", () => {
   it("apply forwards options.timeout to every step of the upgrade pipeline (apt)", async () => {
     const ssh = createMockSsh({
       ...APT_FOUND,
+      "[ -f /var/lib/paratix/flags/'package-upgrade-2026-05-01' ]": { code: 1 },
       "DEBIAN_FRONTEND=noninteractive apt-get update": { code: 0 },
       "DEBIAN_FRONTEND=noninteractive apt-get upgrade -y": { code: 0 },
       "DEBIAN_FRONTEND=noninteractive dpkg --configure -a": { code: 0 },
@@ -765,6 +767,7 @@ describe("pkg.upgrade", () => {
       "DEBIAN_FRONTEND=noninteractive dpkg --configure -a": { code: 0 },
       "find /var/lib/paratix/flags -maxdepth 1 -type f -name 'package-upgrade-*' ! -name '*.lock' -delete && touch /var/lib/paratix/flags/'package-upgrade-2024-01-15'":
         { code: 0 },
+      [FLAG]: { code: 1 },
       "mkdir -p /var/lib/paratix/flags": { code: 0 },
     })
     const mod = pkg.upgrade("2024-01-15", { timeout: undefined })
@@ -802,6 +805,7 @@ describe("pkg.upgrade", () => {
         stderr: "E: dpkg was interrupted",
       },
       "DEBIAN_FRONTEND=noninteractive dpkg --configure -a": { code: 0 },
+      [FLAG]: { code: 1 },
     })
     const mod = pkg.upgrade("2024-01-15")
     const result = await mod.apply(ssh, emptyEnv)
@@ -947,6 +951,7 @@ describe("package manager detection", () => {
   it("uses correct update command for dnf (makecache)", async () => {
     const ssh = createMockSsh({
       ...DNF_FOUND,
+      "[ -f /var/lib/paratix/flags/'package-update-2024-01-15' ]": { code: 1 },
       "dnf makecache": { code: 0 },
       "find /var/lib/paratix/flags -maxdepth 1 -type f -name 'package-update-*' ! -name '*.lock' -delete && touch /var/lib/paratix/flags/'package-update-2024-01-15'":
         { code: 0 },
@@ -960,6 +965,7 @@ describe("package manager detection", () => {
   it("uses correct update command for apk", async () => {
     const ssh = createMockSsh({
       ...APK_FOUND,
+      "[ -f /var/lib/paratix/flags/'package-update-2024-01-15' ]": { code: 1 },
       "apk update": { code: 0 },
       "find /var/lib/paratix/flags -maxdepth 1 -type f -name 'package-update-*' ! -name '*.lock' -delete && touch /var/lib/paratix/flags/'package-update-2024-01-15'":
         { code: 0 },
@@ -973,6 +979,7 @@ describe("package manager detection", () => {
   it("uses split upgrade pipeline for apk", async () => {
     const ssh = createMockSsh({
       ...APK_FOUND,
+      "[ -f /var/lib/paratix/flags/'package-upgrade-2024-01-15' ]": { code: 1 },
       "apk update": { code: 0 },
       "apk upgrade": { code: 0 },
       "find /var/lib/paratix/flags -maxdepth 1 -type f -name 'package-upgrade-*' ! -name '*.lock' -delete && touch /var/lib/paratix/flags/'package-upgrade-2024-01-15'":
