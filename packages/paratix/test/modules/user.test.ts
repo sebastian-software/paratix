@@ -129,6 +129,49 @@ describe("user.present check", () => {
     expect(result).toBe("ok")
   })
 
+  it("throws a toolchain failure when getent passwd exits non-zero", async () => {
+    const ssh = createMockSsh({
+      "getent passwd 'alice'": { code: 1, stderr: "getent: database unavailable" },
+      "id -u 'alice'": { code: 0 },
+    })
+    const mod = user.present("alice", { uid: 1001 })
+    await expect(mod.check(ssh, emptyEnv)).rejects.toThrow(
+      "getent passwd failed during attribute comparison"
+    )
+  })
+
+  it("throws a toolchain failure when getent passwd returns a malformed field count", async () => {
+    const ssh = createMockSsh({
+      "getent passwd 'alice'": {
+        code: 0,
+        stdout: "alice:x:1001:1001::/home/alice:/bin/sh:extra",
+      },
+      "id -u 'alice'": { code: 0 },
+    })
+    const mod = user.present("alice", { uid: 1001 })
+    await expect(mod.check(ssh, emptyEnv)).rejects.toThrow(
+      "getent passwd returned a malformed entry"
+    )
+  })
+
+  it.each([
+    ["uid", "alice:x:not-a-uid:1001::/home/alice:/bin/sh"],
+    ["home", "alice:x:1001:1001::home/alice:/bin/sh"],
+    ["shell", "alice:x:1001:1001::/home/alice:bin/sh"],
+  ])(
+    "throws a toolchain failure when getent passwd returns an invalid %s",
+    async (_field, entry) => {
+      const ssh = createMockSsh({
+        "getent passwd 'alice'": { code: 0, stdout: entry },
+        "id -u 'alice'": { code: 0 },
+      })
+      const mod = user.present("alice", { uid: 1001 })
+      await expect(mod.check(ssh, emptyEnv)).rejects.toThrow(
+        "getent passwd returned a passwd entry with invalid uid/home/shell fields"
+      )
+    }
+  )
+
   // Bug #7 regression: check must compare supplementary groups via id -Gn/id -gn
   it("returns needs-apply when groups do not match", async () => {
     const ssh = createMockSsh({
@@ -175,6 +218,25 @@ describe("user.present check", () => {
     const mod = user.present("alice", { groups: ["sudo", "docker"] })
     const result = await mod.check(ssh, emptyEnv)
     expect(result).toBe("needs-apply")
+  })
+
+  it("throws a toolchain failure when id -Gn exits non-zero", async () => {
+    const ssh = createMockSsh({
+      "id -Gn 'alice'": { code: 1, stderr: "id: cannot print groups" },
+      "id -u 'alice'": { code: 0 },
+    })
+    const mod = user.present("alice", { groups: ["sudo"] })
+    await expect(mod.check(ssh, emptyEnv)).rejects.toThrow("id -Gn failed during group comparison")
+  })
+
+  it("throws a toolchain failure when id -gn exits non-zero", async () => {
+    const ssh = createMockSsh({
+      "id -Gn 'alice'": { code: 0, stdout: "alice sudo" },
+      "id -gn 'alice'": { code: 1, stderr: "id: cannot print primary group" },
+      "id -u 'alice'": { code: 0 },
+    })
+    const mod = user.present("alice", { groups: ["sudo"] })
+    await expect(mod.check(ssh, emptyEnv)).rejects.toThrow("id -gn failed during group comparison")
   })
 
   // R-0000544: shadow hash comparison is now done server-side via bash -c with
