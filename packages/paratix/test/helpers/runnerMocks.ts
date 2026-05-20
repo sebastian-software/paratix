@@ -1,8 +1,14 @@
 import { EventEmitter } from "node:events"
-import { afterEach, beforeEach, vi } from "vitest"
+import { afterEach, beforeEach, type MockInstance, vi } from "vitest"
 
 import type { TestSignalBus } from "../../src/signalBus.js"
-import type { Module, ModuleMetaEntry, ModuleResult } from "../../src/types.js"
+import type {
+  ExecResult,
+  Module,
+  ModuleMetaEntry,
+  ModuleResult,
+  SshConnection,
+} from "../../src/types.js"
 
 import { createTestSignalBus, resetSignalBus, setSignalBus } from "../../src/signalBus.js"
 
@@ -172,7 +178,45 @@ export const setEncodingNoop = (): void => {
   /* setEncoding is a no-op on the simulated streams in runner tests */
 }
 
-const SSHD_DRY_RUN_TEMP_PATH = "/tmp/paratix-sshd-dry-run.ABCDEF"
+export const SSHD_DRY_RUN_MKTEMP = "mktemp -p /tmp -- 'paratix-sshd-dry-run.XXXXXX'"
+export const SSHD_DRY_RUN_TEMP_PATH = "/tmp/paratix-sshd-dry-run.ABCDEF"
+
+type SshdDryRunAllowedCommand = {
+  command: RegExp | string
+  result: ExecResult
+}
+
+type SshdDryRunExecMockOptions = {
+  extraAllowedCommands?: readonly SshdDryRunAllowedCommand[]
+  validationResult?: ExecResult
+}
+
+function sshdDryRunCommandMatches(command: string, matcher: RegExp | string): boolean {
+  return typeof matcher === "string" ? command === matcher : matcher.test(command)
+}
+
+function createSshdDryRunExecImplementation(options: SshdDryRunExecMockOptions = {}) {
+  const validationResult = options.validationResult ?? { code: 0, stderr: "", stdout: "" }
+  const allowedCommands: readonly SshdDryRunAllowedCommand[] = [
+    { command: "test -d '/run/sshd'", result: { code: 0, stderr: "", stdout: "" } },
+    {
+      command: SSHD_DRY_RUN_MKTEMP,
+      result: { code: 0, stderr: "", stdout: SSHD_DRY_RUN_TEMP_PATH },
+    },
+    { command: `sshd -t -f '${SSHD_DRY_RUN_TEMP_PATH}'`, result: validationResult },
+    { command: `rm -f '${SSHD_DRY_RUN_TEMP_PATH}'`, result: { code: 0, stderr: "", stdout: "" } },
+    ...(options.extraAllowedCommands ?? []),
+  ]
+
+  return async (command: string): Promise<ExecResult> => {
+    await Promise.resolve()
+    const allowedCommand = allowedCommands.find((entry) =>
+      sshdDryRunCommandMatches(command, entry.command)
+    )
+    if (allowedCommand) return allowedCommand.result
+    throw new Error(`Unexpected sshd dry-run exec command: ${command}`)
+  }
+}
 
 // R-0000766: sshd dry-run now allocates its tmpfile via
 // `mktemp -p /tmp -- paratix-sshd-dry-run.XXXXXX`. The successful-dry-run
@@ -181,20 +225,16 @@ const SSHD_DRY_RUN_TEMP_PATH = "/tmp/paratix-sshd-dry-run.ABCDEF"
 // validateProspectiveSshdConfig as an empty allocation and made the dry-run
 // fail before sshd -t ever ran.
 export function createSuccessfulSshdDryRunExecMock(): ReturnType<typeof vi.fn> {
-  return vi.fn().mockImplementation(async (command: string) => {
-    await Promise.resolve()
-    if (command === "test -d '/run/sshd'") {
-      return { code: 0, stderr: "", stdout: "" }
-    }
-    if (command === "mktemp -p /tmp -- 'paratix-sshd-dry-run.XXXXXX'") {
-      return { code: 0, stderr: "", stdout: SSHD_DRY_RUN_TEMP_PATH }
-    }
-    if (command === `sshd -t -f '${SSHD_DRY_RUN_TEMP_PATH}'`) {
-      return { code: 0, stderr: "", stdout: "" }
-    }
-    if (command === `rm -f '${SSHD_DRY_RUN_TEMP_PATH}'`) {
-      return { code: 0, stderr: "", stdout: "" }
-    }
-    throw new Error(`Unexpected sshd dry-run exec command: ${command}`)
+  return vi.fn().mockImplementation(createSshdDryRunExecImplementation())
+}
+
+export function spyOnFailClosedSshdDryRunExec(
+  mockSsh: { calls: string[] } & Pick<SshConnection, "exec">,
+  options?: SshdDryRunExecMockOptions
+): MockInstance<SshConnection["exec"]> {
+  const implementation = createSshdDryRunExecImplementation(options)
+  return vi.spyOn(mockSsh, "exec").mockImplementation(async (command) => {
+    mockSsh.calls.push(command)
+    return implementation(command)
   })
 }

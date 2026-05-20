@@ -4,6 +4,7 @@ import { describe, expect, it, vi } from "vitest"
 
 import { sshd } from "../../../src/modules/sshd.js"
 import { createMockSsh as createBaseMockSsh } from "../../helpers/mockSsh.js"
+import { spyOnFailClosedSshdDryRunExec } from "../../helpers/runnerMocks.js"
 
 const createMockSsh: typeof createBaseMockSsh = (responses, options) =>
   createBaseMockSsh(responses, {
@@ -51,34 +52,13 @@ function trackWriteFile(
   return writtenFiles
 }
 
-// R-0000766: route the dry-run mktemp call to a fixed stub path so the
-// validateProspectiveSshdConfig pipeline can proceed without the helper
-// having to anticipate the exact call order.
-const SSHD_DRY_RUN_MKTEMP = "mktemp -p /tmp -- 'paratix-sshd-dry-run.XXXXXX'"
-const SSHD_DRY_RUN_TEMP_PATH = "/tmp/paratix-sshd-dry-run.ABCDEF"
-
 function mockSshdDryRunExecSuccess(mockSsh: ReturnType<typeof createMockSsh>) {
-  return vi.spyOn(mockSsh, "exec").mockImplementation(async (command) => {
-    mockSsh.calls.push(command)
-    await Promise.resolve()
-    if (command === SSHD_DRY_RUN_MKTEMP) {
-      return { code: 0, stderr: "", stdout: SSHD_DRY_RUN_TEMP_PATH }
-    }
-    return { code: 0, stderr: "", stdout: "" }
-  })
+  return spyOnFailClosedSshdDryRunExec(mockSsh)
 }
 
 function mockSshdDryRunExecValidationFailure(mockSsh: ReturnType<typeof createMockSsh>) {
-  return vi.spyOn(mockSsh, "exec").mockImplementation(async (command) => {
-    mockSsh.calls.push(command)
-    await Promise.resolve()
-    if (command === SSHD_DRY_RUN_MKTEMP) {
-      return { code: 0, stderr: "", stdout: SSHD_DRY_RUN_TEMP_PATH }
-    }
-    if (command.startsWith("sshd -t -f ")) {
-      return { code: 1, stderr: "Bad configuration option", stdout: "" }
-    }
-    return { code: 0, stderr: "", stdout: "" }
+  return spyOnFailClosedSshdDryRunExec(mockSsh, {
+    validationResult: { code: 1, stderr: "Bad configuration option", stdout: "" },
   })
 }
 
@@ -106,6 +86,18 @@ describe("sshd.config — dry-run", () => {
     expect(execCommands.some((command) => command.startsWith("sshd -t -f "))).toBe(true)
     expect(execCommands.some((command) => command.startsWith("rm -f "))).toBe(true)
     expect(execCommands).not.toContain("systemctl reload sshd")
+  })
+
+  it("fails closed when dry-run tries an unexpected mutating command", async () => {
+    const mockSsh = createMockSsh({
+      [CAT_SSHD]: { stdout: "PasswordAuthentication yes\n" },
+    })
+    const execSpy = mockSshdDryRunExecSuccess(mockSsh)
+
+    await expect(mockSsh.exec("systemctl reload sshd")).rejects.toThrow(
+      "Unexpected sshd dry-run exec command: systemctl reload sshd"
+    )
+    expect(execSpy).toHaveBeenCalledWith("systemctl reload sshd")
   })
 
   it("returns failed when sshd -t rejects the prospective config in dry-run", async () => {
