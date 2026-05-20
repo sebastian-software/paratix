@@ -1,6 +1,7 @@
 import { execFile, type ExecFileOptionsWithStringEncoding, execFileSync } from "node:child_process"
 import { generateKeyPairSync } from "node:crypto"
 import {
+  existsSync,
   mkdirSync,
   mkdtempSync,
   readdirSync,
@@ -294,6 +295,92 @@ export default {
       expect(stdout).toContain("changed")
       expect(readFileSync(markerPath, "utf8")).toBe("changed\n")
       expect(seenCommands).toStrictEqual([checkCommand, applyCommand])
+      expect(unexpectedCommands).toStrictEqual([])
+    } finally {
+      await testServer.close()
+      rmSync(tempDirectory, { force: true, recursive: true })
+    }
+  })
+
+  it("loads a TypeScript playbook through the published apply CLI in dry-run mode", async () => {
+    const packageJson = JSON.parse(
+      readFileSync(join(packageRootDirectory, "package.json"), "utf8")
+    ) as {
+      bin: { paratix: string }
+    }
+    const distCliPath = resolve(packageRootDirectory, packageJson.bin.paratix)
+    const tempDirectory = mkdtempSync(join(tmpdir(), "paratix-cli-ts-dist-"))
+    const nodeModulesDirectory = join(tempDirectory, "node_modules")
+    const privateKeyPath = join(tempDirectory, "id_rsa")
+    const playbookPath = join(tempDirectory, "valid-playbook.ts")
+    const markerPath = join(tempDirectory, "remote-marker.txt")
+    const seenCommands: string[] = []
+    const unexpectedCommands: string[] = []
+    const checkCommand = `test -f ${JSON.stringify(markerPath)}`
+    const applyCommand = `printf 'changed\\n' > ${JSON.stringify(markerPath)}`
+    const commandHandlers = new Map<string, CommandHandler>([
+      [
+        applyCommand,
+        () => {
+          writeFileSync(markerPath, "changed\n")
+          return { code: 0 }
+        },
+      ],
+      [checkCommand, () => ({ code: 1 })],
+    ])
+
+    const testServer = await startTestSshServer((command) => {
+      seenCommands.push(command)
+      return handlePostbuildCommand({ command, commandHandlers, unexpectedCommands })
+    })
+
+    try {
+      mkdirSync(nodeModulesDirectory)
+      symlinkSync(packageRootDirectory, join(nodeModulesDirectory, "paratix"))
+      writeFileSync(privateKeyPath, testServer.privateKey, { mode: 0o600 })
+      writeFileSync(join(tempDirectory, "package.json"), `${JSON.stringify({ type: "module" })}\n`)
+      writeFileSync(
+        playbookPath,
+        `
+import { server } from "paratix"
+import { command } from "paratix/modules"
+
+export default server({
+  name: "dist-ts-dry-run",
+  host: "127.0.0.1",
+  ssh: {
+    ports: [${String(testServer.port)}],
+    privateKey: ${JSON.stringify(privateKeyPath)},
+    strictHostKeyChecking: "no",
+    user: "root",
+  },
+  run: [
+    command.shell(${JSON.stringify(applyCommand)}, {
+      check: ${JSON.stringify(checkCommand)},
+      name: "dist TypeScript dry-run module",
+    }),
+  ],
+})
+`
+      )
+
+      const stdout = await execFileBuffered(
+        process.execPath,
+        [distCliPath, "apply", playbookPath, "--dry-run"],
+        {
+          cwd: tempDirectory,
+          encoding: "utf8",
+          env: { ...process.env, SSH_AUTH_SOCK: "" },
+          killSignal: "SIGTERM",
+          maxBuffer: CLI_COMMAND_MAX_BUFFER,
+          timeout: CLI_COMMAND_TIMEOUT_MS,
+        }
+      )
+
+      expect(stdout).toContain("dist TypeScript dry-run module")
+      expect(stdout).toContain("(dry-run)")
+      expect(existsSync(markerPath)).toBe(false)
+      expect(seenCommands).toStrictEqual([checkCommand])
       expect(unexpectedCommands).toStrictEqual([])
     } finally {
       await testServer.close()
