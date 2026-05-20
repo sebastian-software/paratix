@@ -23,6 +23,8 @@ function readEnvironmentAvailabilityRetries() {
 // PARATIX_PUBLISH_AVAILABILITY_RETRIES when the registry is unusually slow.
 const DEFAULT_AVAILABILITY_RETRIES = readEnvironmentAvailabilityRetries() ?? 24
 const DEFAULT_AVAILABILITY_DELAY_MS = 10_000
+const PACKAGE_JSON_FILE = "package.json"
+const TSUP_CONFIG_FILE = "tsup.config.ts"
 
 // R-0000740: the publish order between paratix and create-paratix is
 // load-bearing (paratix must be available on the registry before
@@ -117,7 +119,7 @@ function sleep(milliseconds) {
 }
 
 async function readPackageJson(directory, fs = { readFile }) {
-  const rawPackageJson = await fs.readFile(join(directory, "package.json"), "utf8")
+  const rawPackageJson = await fs.readFile(join(directory, PACKAGE_JSON_FILE), "utf8")
   const packageJson = JSON.parse(rawPackageJson)
 
   if (
@@ -374,27 +376,63 @@ async function assertFilesEntryIsPublishable(packageInfo, fileEntry, filesystem)
   }
 }
 
-// R-0000685: translate raw filesystem failures from the source-tree
-// walk into an operator-friendly hint. The pre-existing handler only
-// covered the case where `files` referenced a missing path; a missing
-// `src/` directory leaked the bare ENOENT from `readdir`, which is not
-// obvious unless the operator already knows that the freshness check
-// walks `src/`. Map every error from the source walk to the same
-// build-before-publishing remediation so the message is consistent.
-//
-// R-0000727: the underlying walker now translates failures inline via
-// `rethrowWalkerError`, so this wrapper only needs to invoke the
-// recursion. Keeping the helper around documents the intent and gives
-// the verifyDistributionArtefacts call site a recognisable seam.
-async function readSourceMtime(packageInfo, sourceDirectory, filesystem) {
-  return maxMtimeMillisecondsUnder(packageInfo.name, sourceDirectory, filesystem)
+function isTypeScriptConfigFile(fileName) {
+  return (
+    fileName === "tsconfig.json" || (fileName.startsWith("tsconfig.") && fileName.endsWith(".json"))
+  )
+}
+
+async function typeScriptConfigFilesUnder(packageName, directory, filesystem) {
+  let entries
+  try {
+    entries = await filesystem.readdir(directory, { withFileTypes: true })
+  } catch (error) {
+    rethrowWalkerError(packageName, directory, error)
+  }
+  return entries
+    .filter((entry) => entry.isFile() && isTypeScriptConfigFile(entry.name))
+    .map((entry) => join(directory, entry.name))
+}
+
+async function mtimeMillisecondsForFile(packageName, path, filesystem) {
+  let stats
+  try {
+    stats = await filesystem.lstat(path)
+  } catch (error) {
+    rethrowWalkerError(packageName, path, error)
+  }
+  if (stats.isSymbolicLink()) return 0
+  if (!stats.isFile()) return 0
+  return stats.mtimeMs
+}
+
+async function readBuildInputMtime(packageInfo, sourceDirectory, filesystem) {
+  const packageConfigPaths = [
+    join(packageInfo.directory, PACKAGE_JSON_FILE),
+    join(packageInfo.directory, TSUP_CONFIG_FILE),
+  ]
+  const rootBuildInputPaths = [
+    join(REPOSITORY_ROOT, PACKAGE_JSON_FILE),
+    join(REPOSITORY_ROOT, "pnpm-lock.yaml"),
+  ]
+  const buildInputPaths = [
+    ...packageConfigPaths,
+    ...(await typeScriptConfigFilesUnder(packageInfo.name, packageInfo.directory, filesystem)),
+    ...rootBuildInputPaths,
+    ...(await typeScriptConfigFilesUnder(packageInfo.name, REPOSITORY_ROOT, filesystem)),
+  ]
+  const inputMtimes = await Promise.all(
+    buildInputPaths.map((path) => mtimeMillisecondsForFile(packageInfo.name, path, filesystem))
+  )
+  const sourceMtime = await maxMtimeMillisecondsUnder(packageInfo.name, sourceDirectory, filesystem)
+  return Math.max(sourceMtime, ...inputMtimes)
 }
 
 // R-0000661: confirm every artefact npm would ship actually exists and is
-// at least as fresh as the source tree before pnpm publish runs. Without
-// this guard a skipped build would publish empty or stale dist files under
-// `--provenance`, which cannot easily be retracted from the registry once
-// the manifest is signed.
+// at least as fresh as the source tree and build inputs before pnpm
+// publish runs. Without this guard a skipped build would publish empty
+// or stale dist files under `--provenance`, which cannot easily be
+// retracted from the registry once the manifest is signed.
 async function verifyDistributionArtefacts(packageInfo, filesystem) {
   if (packageInfo.files.length === 0) {
     throw new Error(
@@ -409,7 +447,7 @@ async function verifyDistributionArtefacts(packageInfo, filesystem) {
   )
 
   const sourceDirectory = join(packageInfo.directory, "src")
-  const sourceMtime = await readSourceMtime(packageInfo, sourceDirectory, filesystem)
+  const sourceMtime = await readBuildInputMtime(packageInfo, sourceDirectory, filesystem)
   const {
     minMtime: buildArtefactsMtime,
     regularFileCount,
@@ -449,7 +487,7 @@ function buildStaleArtefactMessage({
 }) {
   const baseMessage =
     `${packageInfo.name}: build artefact mtime (${new Date(buildArtefactsMtime).toISOString()}) is ` +
-    `older than ${packageInfo.displayDirectory}/src mtime (${new Date(sourceMtime).toISOString()}). ` +
+    `older than ${packageInfo.displayDirectory} build input mtime (${new Date(sourceMtime).toISOString()}). ` +
     `Run the build before publishing.`
   if (symlinkedEntries.length === 0) return baseMessage
   const formattedEntries = symlinkedEntries.join(", ")

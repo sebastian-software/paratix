@@ -22,6 +22,20 @@ const PARATIX_SPECIFIER = `${PARATIX_NAME}@${DEFAULT_STABLE_VERSION}`
 const BOTH_PACKAGE_SPECIFIERS = [CREATE_PARATIX_SPECIFIER, PARATIX_SPECIFIER]
 const BETA_PRERELEASE_VERSION = `${DEFAULT_STABLE_VERSION}-beta.1`
 const STABLE_BUILD_METADATA_VERSION = `${DEFAULT_STABLE_VERSION}+build.5`
+const PACKAGE_JSON_FILE = "package.json"
+const PNPM_LOCK_FILE = "pnpm-lock.yaml"
+const TSCONFIG_JSON_FILE = "tsconfig.json"
+const TSCONFIG_ROOT_JSON_FILE = "tsconfig.root.json"
+const TSCONFIG_TYPECHECK_JSON_FILE = "tsconfig.typecheck.json"
+const TSUP_CONFIG_FILE = "tsup.config.ts"
+const CREATE_PARATIX_TSCONFIG_PATH = `${CREATE_PARATIX_DIRECTORY}/${TSCONFIG_JSON_FILE}`
+const CREATE_PARATIX_TSCONFIG_TYPECHECK_PATH = `${CREATE_PARATIX_DIRECTORY}/${TSCONFIG_TYPECHECK_JSON_FILE}`
+const CREATE_PARATIX_TSUP_CONFIG_PATH = `${CREATE_PARATIX_DIRECTORY}/${TSUP_CONFIG_FILE}`
+const PARATIX_DIST_DIRECTORY = `${PARATIX_DIRECTORY}/dist`
+const PARATIX_TSCONFIG_PATH = `${PARATIX_DIRECTORY}/${TSCONFIG_JSON_FILE}`
+const PARATIX_TSCONFIG_TYPECHECK_PATH = `${PARATIX_DIRECTORY}/${TSCONFIG_TYPECHECK_JSON_FILE}`
+const PARATIX_TSUP_CONFIG_PATH = `${PARATIX_DIRECTORY}/${TSUP_CONFIG_FILE}`
+const STALE_ARTEFACT_MESSAGE_FRAGMENT = "is older than"
 
 // R-0000661: the publish flow now reads package.json#files and verifies
 // that each entry exists with an mtime newer than the src/ tree. Default
@@ -54,38 +68,76 @@ function createFs(options) {
     symlinks: symlinkPaths = [],
   } = options ?? {}
   const defaultMtimes = {
+    [CREATE_PARATIX_TSCONFIG_PATH]: STALE_SOURCE_MTIME,
+    [CREATE_PARATIX_TSCONFIG_TYPECHECK_PATH]: STALE_SOURCE_MTIME,
+    [CREATE_PARATIX_TSUP_CONFIG_PATH]: STALE_SOURCE_MTIME,
+    [PACKAGE_JSON_FILE]: STALE_SOURCE_MTIME,
     "packages/create-paratix/dist": FRESH_DIST_MTIME,
     "packages/create-paratix/dist/index.js": FRESH_DIST_MTIME,
+    "packages/create-paratix/package.json": STALE_SOURCE_MTIME,
     "packages/create-paratix/src": STALE_SOURCE_MTIME,
     "packages/create-paratix/src/index.ts": STALE_SOURCE_MTIME,
-    "packages/paratix/dist": FRESH_DIST_MTIME,
     "packages/paratix/dist/index.js": FRESH_DIST_MTIME,
     "packages/paratix/llm-guide.md": FRESH_DIST_MTIME,
+    "packages/paratix/package.json": STALE_SOURCE_MTIME,
     "packages/paratix/src": STALE_SOURCE_MTIME,
     "packages/paratix/src/index.ts": STALE_SOURCE_MTIME,
+    [PARATIX_DIST_DIRECTORY]: FRESH_DIST_MTIME,
+    [PARATIX_TSCONFIG_PATH]: STALE_SOURCE_MTIME,
+    [PARATIX_TSCONFIG_TYPECHECK_PATH]: STALE_SOURCE_MTIME,
+    [PARATIX_TSUP_CONFIG_PATH]: STALE_SOURCE_MTIME,
+    [PNPM_LOCK_FILE]: STALE_SOURCE_MTIME,
+    [TSCONFIG_JSON_FILE]: STALE_SOURCE_MTIME,
+    [TSCONFIG_ROOT_JSON_FILE]: STALE_SOURCE_MTIME,
   }
   const mtimes = { ...defaultMtimes, ...mtimeOverrides }
   const directories = {
+    "": [
+      PACKAGE_JSON_FILE,
+      "packages",
+      PNPM_LOCK_FILE,
+      TSCONFIG_JSON_FILE,
+      TSCONFIG_ROOT_JSON_FILE,
+    ],
     // R-0000740: the publish flow now performs a drift assertion against
     // the `packages/` directory at startup, so the mock has to surface
     // the workspace package directories alongside the per-package dist/
     // and src/ trees.
     packages: ["create-paratix", "paratix"],
+    "packages/create-paratix": [
+      "dist",
+      PACKAGE_JSON_FILE,
+      "src",
+      TSCONFIG_JSON_FILE,
+      TSCONFIG_TYPECHECK_JSON_FILE,
+      TSUP_CONFIG_FILE,
+    ],
     "packages/create-paratix/dist": ["index.js"],
     "packages/create-paratix/src": ["index.ts"],
+    "packages/paratix": [
+      "dist",
+      "llm-guide.md",
+      PACKAGE_JSON_FILE,
+      "src",
+      TSCONFIG_JSON_FILE,
+      TSCONFIG_TYPECHECK_JSON_FILE,
+      TSUP_CONFIG_FILE,
+    ],
     "packages/paratix/dist": ["index.js"],
     "packages/paratix/src": ["index.ts"],
   }
   const symlinkSet = new Set(symlinkPaths)
   const calls = []
-  const toMockPath = (path) =>
-    path.startsWith(`${REPOSITORY_ROOT}/`) ? path.slice(REPOSITORY_ROOT.length + 1) : path
+  const toMockPath = (path) => {
+    if (path === REPOSITORY_ROOT) return ""
+    return path.startsWith(`${REPOSITORY_ROOT}/`) ? path.slice(REPOSITORY_ROOT.length + 1) : path
+  }
   // R-0000740: the drift assertion calls `readdir(path, { withFileTypes: true })`
   // for the `packages/` directory and expects entries whose
   // `isDirectory()` returns true. The default Dirent factory below
   // reports all entries as files, so callers tracking package-level
   // directories register them here.
-  const directoryEntries = new Set([CREATE_PARATIX_DIRECTORY, PARATIX_DIRECTORY])
+  const directoryEntries = new Set(Object.keys(directories).filter((path) => path !== ""))
   return {
     calls,
     // R-0000685: lstat reports symbolic-link status without following the
@@ -565,7 +617,29 @@ describe("publishWorkspacePackages release validations", () => {
         commandRunner,
         fs,
       }),
-      "is older than"
+      STALE_ARTEFACT_MESSAGE_FRAGMENT
+    )
+
+    assert.equal(hasCommandCall(commandRunner.calls, "pnpm"), false)
+  })
+
+  it("aborts when dist output is older than a build configuration input", async () => {
+    const commandRunner = createCommandRunner()
+    const fs = createFs({
+      mtimes: {
+        "packages/paratix/dist/index.js": 500,
+        [PARATIX_DIST_DIRECTORY]: 500,
+        [PARATIX_TSUP_CONFIG_PATH]: 5000,
+      },
+    })
+
+    await assertRejectsWithMessage(
+      publishWorkspacePackages({
+        availabilityDelayMilliseconds: 0,
+        commandRunner,
+        fs,
+      }),
+      STALE_ARTEFACT_MESSAGE_FRAGMENT
     )
 
     assert.equal(hasCommandCall(commandRunner.calls, "pnpm"), false)
