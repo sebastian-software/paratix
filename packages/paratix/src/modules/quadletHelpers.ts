@@ -101,12 +101,15 @@ const QUADLET_PULL_CHANGED_OUTPUT_PATTERNS = [
   "Writing manifest",
 ] as const
 
-function sanitizeQuadletValue(value: string): string {
-  return value.replaceAll(/[\n\r]/gv, "")
+function assertQuadletLineValue(key: string, value: string): void {
+  if (QUADLET_CONTROL_CHARACTER_PATTERN.test(value)) {
+    throw new Error(`quadlet.container ${key} values must not contain control characters`)
+  }
 }
 
 function renderQuadletLine(key: string, value: string): string {
-  return `${key}=${sanitizeQuadletValue(value)}`
+  assertQuadletLineValue(key, value)
+  return `${key}=${value}`
 }
 
 function renderQuadletRepeated(key: string, values: string[]): string[] {

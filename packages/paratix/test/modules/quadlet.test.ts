@@ -733,6 +733,23 @@ describe("quadlet.container", () => {
     }).toThrow("environment values must not contain newlines")
   })
 
+  it.each([
+    ["WorkingDir", { workingDir: "/srv/app\nprod" }],
+    ["Volume", { volumes: ["/srv/app:/app\nro"] }],
+    ["Label", { label: { "com.example.role": "web\nadmin" } }],
+    ["Label key", { label: { "com.example.\nrole": "web" } }],
+    ["PodmanArgs", { podmanArgs: ["--log-driver\njournald"] }],
+    ["HealthCmd", { healthCmd: "curl -f http://localhost/\nstatus" }],
+  ])("rejects control characters in %s", (_field, options) => {
+    expect(() => {
+      quadlet.container({
+        image: "docker.io/library/nginx:latest",
+        name: "invalid-control-character",
+        ...options,
+      })
+    }).toThrow("values must not contain control characters")
+  })
+
   it("renders Restart in [Service] section, not [Container]", async () => {
     const mod = quadlet.container({
       image: "docker.io/library/nginx:latest",
