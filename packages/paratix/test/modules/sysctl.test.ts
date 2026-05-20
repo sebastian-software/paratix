@@ -693,9 +693,16 @@ describe("sysctl.set — config path", () => {
 // ─── sysctl.set — name ────────────────────────────────────────────────────────
 
 describe("sysctl.set — name", () => {
-  it("has descriptive name for present state", () => {
+  it("has descriptive name for present state without exposing the value", () => {
     const mod = sysctl.set(KEY, VALUE)
-    expect(mod.name).toBe(`sysctl.set: ${KEY}=${VALUE}`)
+    expect(mod.name).toBe(`sysctl.set: ${KEY}`)
+  })
+
+  it("does not leak sensitive values through the present-state module name", () => {
+    const sensitiveValue = "module-name-secret-sentinel-0000992"
+    const mod = sysctl.set(KEY, sensitiveValue)
+    expect(mod.name).toBe(`sysctl.set: ${KEY}`)
+    expect(mod.name).not.toContain(sensitiveValue)
   })
 
   it("has descriptive name for absent state", () => {

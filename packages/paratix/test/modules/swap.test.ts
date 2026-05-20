@@ -1515,11 +1515,11 @@ describe("swap.file — option validation", () => {
 describe("swap tuning wrappers", () => {
   it("uses sysctl.set for swappiness", () => {
     const mod = swap.swappiness(10)
-    expect(mod.name).toBe("sysctl.set: vm.swappiness=10")
+    expect(mod.name).toBe("sysctl.set: vm.swappiness")
   })
 
   it("uses sysctl.set for vfs cache pressure", () => {
     const mod = swap.vfsCachePressure(50)
-    expect(mod.name).toBe("sysctl.set: vm.vfs_cache_pressure=50")
+    expect(mod.name).toBe("sysctl.set: vm.vfs_cache_pressure")
   })
 })

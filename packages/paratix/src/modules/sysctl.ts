@@ -572,7 +572,7 @@ export const sysctl = {
         }
         return checkAbsentState(conn, { configPath, key, resetValue })
       },
-      name: state === "present" ? `sysctl.set: ${key}=${value}` : `sysctl.set: absent ${key}`,
+      name: state === "present" ? `sysctl.set: ${key}` : `sysctl.set: absent ${key}`,
     }
   },
 }
