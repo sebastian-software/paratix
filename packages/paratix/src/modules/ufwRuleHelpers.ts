@@ -342,7 +342,7 @@ function assertTcpPortForRegex(port: number): void {
   }
 }
 
-function hasAddedUfwRule(output: string, action: UfwRuleAction, port: number): boolean {
+export function hasAddedUfwRule(output: string, action: UfwRuleAction, port: number): boolean {
   assertTcpPortForRegex(port)
   // `ufw show added` emits commands like `ufw allow 22` or `ufw deny 22/tcp`.
   // Match the action keyword followed by the bare port (protocol-agnostic) at

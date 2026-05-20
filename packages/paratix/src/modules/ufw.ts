@@ -8,6 +8,7 @@ import {
   applyUfwRulePortsForApply,
   checkInactiveUfwRulePort,
   checkUfwRulePort,
+  hasAddedUfwRule,
   readUfwRuleStatusForApply,
   readUfwShowAddedDetailed,
   rejectWhenDenyingCurrentSshPort,
@@ -85,11 +86,11 @@ async function deleteDenyRulesForCurrentSshPort(
 // `allowed` according to `classifyUfwStatusTcpAccess`. A `blocked`
 // classification means a concurrent process re-inserted a contradictory
 // deny rule (or our allow did not land); fail before flipping ufw active
-// so the runner does not lock itself out. An `inactive` classification is
-// expected when the firewall is still off — the enable that follows is
-// the activating step and there is no race window with already-enforced
-// rules. An `unknown`/`null` status (transient `ufw status` failure) is
-// also treated as fail-closed because we cannot prove the rule landed.
+// so the runner does not lock itself out. An `inactive` classification
+// must be checked against `ufw show added`, because queued rules are not
+// visible in `ufw status` but become enforced by `ufw --force enable`.
+// An `unknown`/`null` status (transient `ufw status` failure) is also
+// treated as fail-closed because we cannot prove the rule landed.
 async function reverifyCurrentSshAllowedBeforeEnable(
   ssh: SshConnection
 ): Promise<ModuleResult | null> {
@@ -105,12 +106,44 @@ async function reverifyCurrentSshAllowedBeforeEnable(
     )
   }
   const access = classifyUfwStatusTcpAccess(status, port)
-  if (access === "allowed" || access === "inactive") return null
+  if (access === "allowed") return null
+  if (access === "inactive") return rejectInactiveQueuedDenyForCurrentSshPort(ssh, port)
   return failed(
     `[ufw.enabled] re-verification before enable: current SSH port ${String(port)} ` +
       `is not allowed (classification: ${access}); a concurrent deny rule may have ` +
       "been inserted, refusing to enable to avoid locking the runner out"
   )
+}
+
+async function rejectInactiveQueuedDenyForCurrentSshPort(
+  ssh: SshConnection,
+  port: number
+): Promise<ModuleResult | null> {
+  const addedOutput = await readUfwShowAddedDetailed(ssh)
+  if (addedOutput.kind !== "ok") {
+    const detail =
+      addedOutput.kind === "unreadable"
+        ? `: ${addedOutput.detail}`
+        : " because the ufw binary could not be found"
+    return failed(
+      `[ufw.enabled] could not verify queued ufw rules while ufw is inactive${detail}; ` +
+        `refusing to enable to avoid locking out the current SSH port ${String(port)}`
+    )
+  }
+  if (!hasAddedUfwRule(addedOutput.output, "deny", port)) return null
+  return failed(
+    `[ufw.enabled] queued deny rule for current SSH port ${String(port)} exists while ufw is inactive; ` +
+      "refusing to enable to avoid locking the runner out"
+  )
+}
+
+async function rejectCurrentSshPortDenyRules(
+  ssh: SshConnection,
+  status: string,
+  port: number
+): Promise<ModuleResult | null> {
+  if (statusReportsActive(status)) return deleteDenyRulesForCurrentSshPort(ssh, status, port)
+  return rejectInactiveQueuedDenyForCurrentSshPort(ssh, port)
 }
 
 async function allowCurrentSshPort(ssh: SshConnection): Promise<ModuleResult | null> {
@@ -120,8 +153,8 @@ async function allowCurrentSshPort(ssh: SshConnection): Promise<ModuleResult | n
   }
   const status = await readUfwStatus(ssh)
   if (status != null) {
-    const deleteFailure = await deleteDenyRulesForCurrentSshPort(ssh, status, port)
-    if (deleteFailure !== null) return deleteFailure
+    const denyRuleFailure = await rejectCurrentSshPortDenyRules(ssh, status, port)
+    if (denyRuleFailure !== null) return denyRuleFailure
   }
   const result = await ssh.exec(`${UFW} allow ${shellQuote(String(port))}`, {
     ignoreExitCode: true,

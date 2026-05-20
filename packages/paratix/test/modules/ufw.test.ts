@@ -115,6 +115,22 @@ function ufwStatusSequenceStub(
   }
 }
 
+function ufwShowAddedSequenceStub(
+  initial: string,
+  beforeEnable: string
+): { command: RegExp; result: { stdout: string } } {
+  let callCount = 0
+  return {
+    command: /^ufw show added$/v,
+    result: {
+      get stdout(): string {
+        callCount += 1
+        return callCount === 1 ? initial : beforeEnable
+      },
+    },
+  }
+}
+
 describe("ufw.enabled", () => {
   it("check returns ok when ufw is active and the current SSH port is allowed", async () => {
     const ssh = createMockSshOnPort(
@@ -380,6 +396,7 @@ describe("ufw.enabled", () => {
     const ssh = createMockSsh({
       "ufw --force enable": { code: 0 },
       "ufw allow '22'": { code: 0 },
+      "ufw show added": { stdout: "" },
       "ufw status": { stdout: "Status: inactive" },
     })
     const mod = ufw.enabled()
@@ -390,9 +407,13 @@ describe("ufw.enabled", () => {
     expect(ufwCalls(ssh.calls)).toStrictEqual([
       "command -v ufw",
       "ufw status",
+      "command -v ufw",
+      "ufw show added",
       "ufw allow '22'",
       "command -v ufw",
       "ufw status",
+      "command -v ufw",
+      "ufw show added",
       "ufw --force enable",
     ])
     expect(ssh.calls).toContain("ufw --force enable")
@@ -404,6 +425,7 @@ describe("ufw.enabled", () => {
       {
         "ufw --force enable": { code: 0 },
         "ufw allow '2222'": { code: 0 },
+        "ufw show added": { stdout: "" },
         "ufw status": { stdout: "Status: inactive" },
       },
       2222
@@ -417,9 +439,13 @@ describe("ufw.enabled", () => {
     expect(ufwCalls(ssh.calls)).toStrictEqual([
       "command -v ufw",
       "ufw status",
+      "command -v ufw",
+      "ufw show added",
       "ufw allow '2222'",
       "command -v ufw",
       "ufw status",
+      "command -v ufw",
+      "ufw show added",
       "ufw --force enable",
     ])
   })
@@ -428,6 +454,7 @@ describe("ufw.enabled", () => {
     const ssh = createMockSsh({
       "ufw --force enable": { code: 0 },
       "ufw allow '22'": { code: 1, stderr: "bad port" },
+      "ufw show added": { stdout: "" },
       "ufw status": { stdout: "Status: inactive" },
     })
 
@@ -435,13 +462,20 @@ describe("ufw.enabled", () => {
     const result = await mod.apply(ssh, emptyEnv)
 
     expect(result.status).toBe("failed")
-    expect(ufwCalls(ssh.calls)).toStrictEqual(["command -v ufw", "ufw status", "ufw allow '22'"])
+    expect(ufwCalls(ssh.calls)).toStrictEqual([
+      "command -v ufw",
+      "ufw status",
+      "command -v ufw",
+      "ufw show added",
+      "ufw allow '22'",
+    ])
   })
 
   it("apply returns failed when ufw --force enable exits with non-zero code", async () => {
     const ssh = createMockSsh({
       "ufw --force enable": { code: 1 },
       "ufw allow '22'": { code: 0 },
+      "ufw show added": { stdout: "" },
       // R-0000653: inactive on both reads -> re-verify accepts and enable is attempted.
       "ufw status": { stdout: "Status: inactive" },
     })
@@ -675,6 +709,7 @@ describe("ufw.enabled", () => {
       {
         "ufw --force enable": { code: 0 },
         "ufw allow '22'": { code: 0 },
+        "ufw show added": { stdout: "" },
       },
       {
         // The first read shows a clean ALLOW (no deletes needed), but the
@@ -718,6 +753,7 @@ describe("ufw.enabled", () => {
       {
         "ufw --force enable": { code: 0 },
         "ufw allow '22'": { code: 0 },
+        "ufw show added": { stdout: "" },
       },
       {
         responseStubs: [
@@ -742,6 +778,59 @@ describe("ufw.enabled", () => {
     const result = await mod.apply(ssh, emptyEnv)
     expect(result.status).toBe("failed")
     expect(result.error?.message).toContain("could not re-read ufw status")
+    expect(ssh.calls).not.toContain("ufw --force enable")
+  })
+
+  it("apply refuses to enable inactive ufw when a queued deny targets the current SSH port", async () => {
+    const ssh = createMockSsh({
+      "ufw --force enable": { code: 0 },
+      "ufw allow '22'": { code: 0 },
+      "ufw show added": {
+        stdout: ["ufw deny 22", "ufw allow 80"].join("\n"),
+      },
+      "ufw status": { stdout: "Status: inactive" },
+    })
+    const mod = ufw.enabled()
+    const result = await mod.apply(ssh, emptyEnv)
+    expect(result.status).toBe("failed")
+    expect(result.error?.message).toContain("queued deny rule")
+    expect(result.error?.message).toContain("current SSH port 22")
+    expect(ufwCalls(ssh.calls)).toStrictEqual([
+      "command -v ufw",
+      "ufw status",
+      "command -v ufw",
+      "ufw show added",
+    ])
+    expect(ssh.calls).not.toContain("ufw allow '22'")
+    expect(ssh.calls).not.toContain("ufw --force enable")
+  })
+
+  it("apply rechecks inactive queued rules before enabling ufw", async () => {
+    const ssh = createMockSsh(
+      {
+        "ufw --force enable": { code: 0 },
+        "ufw allow '22'": { code: 0 },
+        "ufw status": { stdout: "Status: inactive" },
+      },
+      {
+        responseStubs: [ufwShowAddedSequenceStub("", ["ufw allow 22", "ufw deny 22"].join("\n"))],
+      }
+    )
+    const mod = ufw.enabled()
+    const result = await mod.apply(ssh, emptyEnv)
+    expect(result.status).toBe("failed")
+    expect(result.error?.message).toContain("queued deny rule")
+    expect(ufwCalls(ssh.calls)).toStrictEqual([
+      "command -v ufw",
+      "ufw status",
+      "command -v ufw",
+      "ufw show added",
+      "ufw allow '22'",
+      "command -v ufw",
+      "ufw status",
+      "command -v ufw",
+      "ufw show added",
+    ])
     expect(ssh.calls).not.toContain("ufw --force enable")
   })
 })
