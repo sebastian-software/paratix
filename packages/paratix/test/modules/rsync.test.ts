@@ -474,6 +474,14 @@ describe("rsync.sync — path validation", () => {
   })
 })
 
+describe("rsync.sync — timeout validation", () => {
+  it.each([0, -1, Number.NaN])("rejects invalid timeout %s at module construction", (timeout) => {
+    expect(() => {
+      rsync.sync({ dest: "/remote/dest", src: "/local/src", timeout })
+    }).toThrow("[rsync.sync] invalid timeout: value must be a finite positive number")
+  })
+})
+
 // ---------------------------------------------------------------------------
 // Argument building
 // ---------------------------------------------------------------------------

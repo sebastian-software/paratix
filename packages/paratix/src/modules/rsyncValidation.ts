@@ -11,6 +11,13 @@ export function validateStrictHostKeyChecking(value: unknown): void {
   )
 }
 
+export function validateRsyncTimeout(value: unknown): void {
+  if (value == null) return
+  if (typeof value === "number" && Number.isFinite(value) && value > 0) return
+
+  throw new Error("[rsync.sync] invalid timeout: value must be a finite positive number")
+}
+
 /**
  * R-0000179: reject `src`/`dest` values that contain ASCII control characters.
  *

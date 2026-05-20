@@ -12,6 +12,7 @@ import { DEFAULT_RSYNC_TIMEOUT_MILLISECONDS, runRsyncProcess } from "./rsyncProc
 import {
   validateRsyncFilterPattern,
   validateRsyncPath,
+  validateRsyncTimeout,
   validateStrictHostKeyChecking,
 } from "./rsyncValidation.js"
 
@@ -428,6 +429,7 @@ export const rsync = {
    */
   sync(options: SyncOptions): Module {
     validateStrictHostKeyChecking(options.strictHostKeyChecking)
+    validateRsyncTimeout(options.timeout)
     validateRsyncPath(options.src, "src")
     validateRsyncPath(options.dest, "dest")
     // R-0000536: surface filter-pattern validation errors at module
