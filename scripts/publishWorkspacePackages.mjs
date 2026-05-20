@@ -177,6 +177,84 @@ async function isPublished({ commandRunner, packageName, repositoryRoot, version
   }
 }
 
+async function gitStdout(commandRunner, commandArguments, repositoryRoot) {
+  const { stdout } = await commandRunner.execFile("git", commandArguments, {
+    cwd: repositoryRoot,
+  })
+  return stdout.trim()
+}
+
+async function assertPublishGitRoot(commandRunner, repositoryRoot) {
+  const actualRepositoryRoot = await gitStdout(
+    commandRunner,
+    ["rev-parse", "--show-toplevel"],
+    repositoryRoot
+  )
+  if (normalizeExecutionPath(actualRepositoryRoot) === normalizeExecutionPath(repositoryRoot))
+    return
+  throw new Error(
+    `Refusing to publish from ${actualRepositoryRoot}; expected repository root ${repositoryRoot}.`
+  )
+}
+
+async function assertPublishGitCleanTree(commandRunner, repositoryRoot) {
+  const status = await gitStdout(
+    commandRunner,
+    ["status", "--porcelain=v1", "--untracked-files=normal"],
+    repositoryRoot
+  )
+  if (status === "") return
+  throw new Error("Refusing to publish from a dirty Git working tree.")
+}
+
+function isGithubActions(environment) {
+  return environment.GITHUB_ACTIONS === "true"
+}
+
+async function assertGithubActionsPublishReference(commandRunner, environment, repositoryRoot) {
+  const expectedReference = "refs/heads/main"
+  if (environment.GITHUB_REF !== expectedReference) {
+    throw new Error(
+      `Refusing to publish from GitHub ref ${environment.GITHUB_REF}; expected ${expectedReference}.`
+    )
+  }
+
+  const headSha = await gitStdout(commandRunner, ["rev-parse", "HEAD"], repositoryRoot)
+  if (environment.GITHUB_SHA === headSha) return
+  throw new Error(
+    `Refusing to publish from GitHub SHA ${environment.GITHUB_SHA}; expected checked-out HEAD ${headSha}.`
+  )
+}
+
+async function assertLocalPublishReference(commandRunner, repositoryRoot) {
+  let branchName
+  try {
+    branchName = await gitStdout(
+      commandRunner,
+      ["symbolic-ref", "--quiet", "--short", "HEAD"],
+      repositoryRoot
+    )
+  } catch (error) {
+    throw new Error("Refusing to publish from a detached HEAD outside GitHub Actions.", {
+      cause: error,
+    })
+  }
+
+  if (branchName === "main") return
+  throw new Error(`Refusing to publish from Git branch ${branchName}; expected main.`)
+}
+
+async function assertPublishGitPreflight({ commandRunner, environment, repositoryRoot }) {
+  await assertPublishGitRoot(commandRunner, repositoryRoot)
+  await assertPublishGitCleanTree(commandRunner, repositoryRoot)
+  if (isGithubActions(environment)) {
+    await assertGithubActionsPublishReference(commandRunner, environment, repositoryRoot)
+    return
+  }
+
+  await assertLocalPublishReference(commandRunner, repositoryRoot)
+}
+
 async function waitForPublishedPackage(parameters, attempt = 1) {
   const { commandRunner, packageName, repositoryRoot, version } = parameters
   const retries = parameters.retries ?? DEFAULT_AVAILABILITY_RETRIES
@@ -661,6 +739,7 @@ export async function publishWorkspacePackages(options) {
           })
         }),
     },
+    environment = process.env,
     fs = { lstat, readdir, readFile, stat },
     filesystem = fs,
     mode = "release",
@@ -686,6 +765,11 @@ export async function publishWorkspacePackages(options) {
       (packageInfo) => verifyDistributionArtefacts(packageInfo, filesystem)
     )
   )
+  await assertPublishGitPreflight({
+    commandRunner,
+    environment,
+    repositoryRoot: REPOSITORY_ROOT,
+  })
 
   if (
     (await isPublished({

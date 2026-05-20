@@ -20,6 +20,12 @@ const RECOVER_CREATE_PARATIX_MODE = "recover-create-paratix"
 const CREATE_PARATIX_SPECIFIER = `${CREATE_PARATIX_NAME}@${DEFAULT_STABLE_VERSION}`
 const PARATIX_SPECIFIER = `${PARATIX_NAME}@${DEFAULT_STABLE_VERSION}`
 const BOTH_PACKAGE_SPECIFIERS = [CREATE_PARATIX_SPECIFIER, PARATIX_SPECIFIER]
+const GIT_HEAD_SHA = "1234567890abcdef"
+const GIT_PREFLIGHT_CALLS = [
+  ["git", "rev-parse", "--show-toplevel"],
+  ["git", "status", "--porcelain=v1", "--untracked-files=normal"],
+  ["git", "symbolic-ref", "--quiet", "--short", "HEAD"],
+]
 const BETA_PRERELEASE_VERSION = `${DEFAULT_STABLE_VERSION}-beta.1`
 const STABLE_BUILD_METADATA_VERSION = `${DEFAULT_STABLE_VERSION}+build.5`
 const PACKAGE_JSON_FILE = "package.json"
@@ -227,18 +233,50 @@ function createMissingPackageError() {
   return Object.assign(new Error("missing"), { stderr: "npm ERR! code E404" })
 }
 
-function createCommandRunner(initiallyPublished, publishedVersions) {
+function createGitCommandHandler({ gitBranch, gitHeadSha, gitRepositoryRoot, gitStatus }) {
+  const stdoutByCommand = new Map([
+    ["rev-parse --show-toplevel", `${gitRepositoryRoot}\n`],
+    ["rev-parse HEAD", `${gitHeadSha}\n`],
+    ["status --porcelain=v1 --untracked-files=normal", gitStatus],
+    ["symbolic-ref --quiet --short HEAD", `${gitBranch}\n`],
+  ])
+
+  return (commandArguments) => {
+    const gitCommand = commandArguments.join(" ")
+    const stdout = stdoutByCommand.get(gitCommand)
+    if (stdout !== undefined) return { stdout }
+    throw new Error(`Unexpected git command: ${gitCommand}`)
+  }
+}
+
+function createCommandRunner(initiallyPublished, publishedVersions, options) {
   const published = new Set(initiallyPublished ?? [])
   const publishedVersionOverrides = publishedVersions ?? {}
+  const {
+    gitBranch = "main",
+    gitHeadSha = GIT_HEAD_SHA,
+    gitRepositoryRoot = REPOSITORY_ROOT,
+    gitStatus = "",
+  } = options ?? {}
   const calls = []
   const execFileOptions = []
   const spawnOptions = []
+  const runGitCommand = createGitCommandHandler({
+    gitBranch,
+    gitHeadSha,
+    gitRepositoryRoot,
+    gitStatus,
+  })
 
   return {
     calls,
     async execFile(command, commandArguments, options) {
       calls.push([command, ...commandArguments])
-      execFileOptions.push(options)
+      execFileOptions.push({ command, options })
+
+      if (command === "git") {
+        return runGitCommand(commandArguments)
+      }
 
       const packageSpecifier = commandArguments[1]
       if (published.has(packageSpecifier)) {
@@ -280,12 +318,18 @@ function hasCommandCall(calls, command) {
   return false
 }
 
+function hasGitCommandCall(calls, gitCommand) {
+  return calls.some((call) => call[0] === "git" && call.slice(1).join(" ") === gitCommand)
+}
+
 function publishDirectories(calls) {
   return calls.filter((call) => call[0] === "pnpm").map((call) => call[2])
 }
 
 function npmViewOptions(commandRunner) {
   return commandRunner.execFileOptions
+    .filter(({ command }) => command === "npm")
+    .map(({ options }) => options)
 }
 
 function areAllFilesystemCallsRepositoryAnchored(calls) {
@@ -321,6 +365,7 @@ describe("publishWorkspacePackages", () => {
     })
 
     assert.deepEqual(commandRunner.calls, [
+      ...GIT_PREFLIGHT_CALLS,
       ["npm", "view", CREATE_PARATIX_SPECIFIER, "version", "--json"],
       ["npm", "view", PARATIX_SPECIFIER, "version", "--json"],
       [
@@ -409,6 +454,61 @@ describe("publishWorkspacePackages", () => {
       }),
       "create-paratix@1.2.3 is already published, but paratix@1.2.3 is not available"
     )
+  })
+
+  it("rejects a dirty Git working tree before registry lookups", async () => {
+    const commandRunner = createCommandRunner(undefined, undefined, {
+      gitStatus: " M scripts/publishWorkspacePackages.mjs\n",
+    })
+
+    await assertRejectsWithMessage(
+      publishWorkspacePackages({
+        availabilityDelayMilliseconds: 0,
+        commandRunner,
+        fs: createFs(),
+      }),
+      "dirty Git working tree"
+    )
+
+    assert.equal(hasCommandCall(commandRunner.calls, "npm"), false)
+    assert.equal(hasCommandCall(commandRunner.calls, "pnpm"), false)
+  })
+
+  it("rejects a non-main local Git branch before registry lookups", async () => {
+    const commandRunner = createCommandRunner(undefined, undefined, {
+      gitBranch: "release-candidate",
+    })
+
+    await assertRejectsWithMessage(
+      publishWorkspacePackages({
+        availabilityDelayMilliseconds: 0,
+        commandRunner,
+        fs: createFs(),
+      }),
+      "expected main"
+    )
+
+    assert.equal(hasCommandCall(commandRunner.calls, "npm"), false)
+    assert.equal(hasCommandCall(commandRunner.calls, "pnpm"), false)
+  })
+
+  it("allows a GitHub Actions detached checkout when the ref and SHA match", async () => {
+    const commandRunner = createCommandRunner(new Set(BOTH_PACKAGE_SPECIFIERS))
+
+    await publishWorkspacePackages({
+      availabilityDelayMilliseconds: 0,
+      commandRunner,
+      environment: {
+        GITHUB_ACTIONS: "true",
+        GITHUB_REF: "refs/heads/main",
+        GITHUB_SHA: GIT_HEAD_SHA,
+      },
+      fs: createFs(),
+    })
+
+    assert.equal(hasGitCommandCall(commandRunner.calls, "rev-parse HEAD"), true)
+    assert.equal(hasGitCommandCall(commandRunner.calls, "symbolic-ref --quiet --short HEAD"), false)
+    assert.equal(hasCommandCall(commandRunner.calls, "pnpm"), false)
   })
 })
 
@@ -530,9 +630,12 @@ describe("publishWorkspacePackages release validations", () => {
   // hard failure.
   it("R-0000861: retries registry propagation after pnpm publish", async () => {
     const commandRunner = createCommandRunner()
+    const defaultExecFile = commandRunner.execFile
     const publishedBySpawn = new Set()
     const viewCounts = new Map()
-    commandRunner.execFile = async (command, commandArguments) => {
+    commandRunner.execFile = async (command, commandArguments, options) => {
+      if (command === "git") return defaultExecFile(command, commandArguments, options)
+
       commandRunner.calls.push([command, ...commandArguments])
       const packageSpecifier = commandArguments[1]
       const viewCount = (viewCounts.get(packageSpecifier) ?? 0) + 1
