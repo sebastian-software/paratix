@@ -12,8 +12,8 @@ import {
 } from "node:fs"
 import { createRequire } from "node:module"
 import { tmpdir } from "node:os"
-import { delimiter, join, resolve } from "node:path"
-import { describe, expect, it } from "vitest"
+import { delimiter, dirname, join, resolve } from "node:path"
+import { afterAll, beforeAll, describe, expect, it } from "vitest"
 
 import { TEST_ADMIN_PUBLIC_KEY, TEST_HOST_FINGERPRINT } from "../helpers.js"
 
@@ -22,16 +22,95 @@ const packageRootDirectory = resolve(import.meta.dirname, "../..")
 const CLI_COMMAND_TIMEOUT_MS = 30_000
 
 describe("dist CLI", () => {
+  let packedPackageRootDirectory: string
+  let packedTarballEntries: string[]
+  let packedTempDirectory: string
+
+  beforeAll(() => {
+    packedTempDirectory = mkdtempSync(join(tmpdir(), "create-paratix-packed-package-"))
+    packedPackageRootDirectory = join(packedTempDirectory, "node_modules", "create-paratix")
+    mkdirSync(packedPackageRootDirectory, { recursive: true })
+    linkRuntimeDependencies(packedTempDirectory)
+
+    const packResult = spawnSync(
+      "npm",
+      ["pack", "--pack-destination", packedTempDirectory, "--json"],
+      {
+        cwd: packageRootDirectory,
+        encoding: "utf8",
+        env: {
+          ...process.env,
+          npm_config_cache: join(packedTempDirectory, "npm-cache"),
+          npm_config_logs_dir: join(packedTempDirectory, "npm-logs"),
+        },
+        killSignal: "SIGTERM",
+        timeout: CLI_COMMAND_TIMEOUT_MS,
+      }
+    )
+    if (packResult.status !== 0) {
+      throw new Error(`npm pack failed:\n${packResult.stderr}`)
+    }
+
+    const packEntries = JSON.parse(packResult.stdout) as Array<{ filename: string }>
+    if (packEntries.length !== 1) {
+      throw new Error(`Expected npm pack to produce one tarball, got ${packEntries.length}`)
+    }
+    const packedTarballPath = join(packedTempDirectory, packEntries[0].filename)
+
+    const listResult = spawnSync("tar", ["-tzf", packedTarballPath], {
+      cwd: packedTempDirectory,
+      encoding: "utf8",
+      killSignal: "SIGTERM",
+      timeout: CLI_COMMAND_TIMEOUT_MS,
+    })
+    if (listResult.status !== 0) {
+      throw new Error(`tar listing failed:\n${listResult.stderr}`)
+    }
+    packedTarballEntries = listResult.stdout.trim().split("\n").sort()
+
+    const extractResult = spawnSync(
+      "tar",
+      ["-xzf", packedTarballPath, "--strip-components", "1", "-C", packedPackageRootDirectory],
+      {
+        cwd: packedTempDirectory,
+        encoding: "utf8",
+        killSignal: "SIGTERM",
+        timeout: CLI_COMMAND_TIMEOUT_MS,
+      }
+    )
+    if (extractResult.status !== 0) {
+      throw new Error(`tar extraction failed:\n${extractResult.stderr}`)
+    }
+  })
+
+  afterAll(() => {
+    rmSync(packedTempDirectory, { force: true, recursive: true })
+  })
+
+  it("packs the required published files and excludes source-only files", () => {
+    expect(packedTarballEntries).toStrictEqual(
+      expect.arrayContaining([
+        "package/LICENSE",
+        "package/README.md",
+        "package/dist/index.d.ts",
+        "package/dist/index.js",
+        "package/package.json",
+      ])
+    )
+    expect(packedTarballEntries.some((entry) => entry.startsWith("package/src/"))).toBe(false)
+    expect(packedTarballEntries.some((entry) => entry.startsWith("package/test/"))).toBe(false)
+  })
+
   it("runs the published binary target for an early usage error", () => {
     const packageJson = readPackageJson()
     expect(packageJson.bin["create-paratix"]).toBe("./dist/index.js")
 
-    const distCliPath = resolve(packageRootDirectory, packageJson.bin["create-paratix"])
+    const distCliPath = resolve(packedPackageRootDirectory, packageJson.bin["create-paratix"])
     const firstLine = readFileSync(distCliPath, "utf8").split("\n")[0]
     expect(firstLine).toBe("#!/usr/bin/env node")
 
     const result = spawnSync(process.execPath, [distCliPath], {
-      cwd: packageRootDirectory,
+      cwd: packedPackageRootDirectory,
       encoding: "utf8",
       killSignal: "SIGTERM",
       timeout: CLI_COMMAND_TIMEOUT_MS,
@@ -56,7 +135,7 @@ describe("dist CLI", () => {
 
     try {
       mkdirSync(nodeModulesDirectory)
-      symlinkSync(packageRootDirectory, join(nodeModulesDirectory, "create-paratix"))
+      symlinkSync(packedPackageRootDirectory, join(nodeModulesDirectory, "create-paratix"))
 
       const result = spawnSync(
         process.execPath,
@@ -88,7 +167,7 @@ describe("dist CLI", () => {
 
     try {
       mkdirSync(nodeModulesDirectory)
-      symlinkSync(packageRootDirectory, join(nodeModulesDirectory, "create-paratix"))
+      symlinkSync(packedPackageRootDirectory, join(nodeModulesDirectory, "create-paratix"))
       writeFileSync(
         join(tempDirectory, "package.json"),
         `${JSON.stringify({ private: true, type: "module" }, null, 2)}\n`
@@ -139,14 +218,14 @@ describe("dist CLI", () => {
 
   it("runs when invoked through an npm-style bin symlink", () => {
     const packageJson = readPackageJson()
-    const distCliPath = resolve(packageRootDirectory, packageJson.bin["create-paratix"])
+    const distCliPath = resolve(packedPackageRootDirectory, packageJson.bin["create-paratix"])
     const tempDirectory = mkdtempSync(join(tmpdir(), "create-paratix-bin-smoke-"))
     const linkedCliPath = join(tempDirectory, "create-paratix")
 
     try {
       symlinkSync(distCliPath, linkedCliPath)
       const result = spawnSync(linkedCliPath, [], {
-        cwd: packageRootDirectory,
+        cwd: packedPackageRootDirectory,
         encoding: "utf8",
         killSignal: "SIGTERM",
         timeout: CLI_COMMAND_TIMEOUT_MS,
@@ -162,7 +241,7 @@ describe("dist CLI", () => {
 
   it("scaffolds a project through the published dist CLI in non-interactive mode", () => {
     const packageJson = readPackageJson()
-    const distCliPath = resolve(packageRootDirectory, packageJson.bin["create-paratix"])
+    const distCliPath = resolve(packedPackageRootDirectory, packageJson.bin["create-paratix"])
     const tempDirectory = mkdtempSync(join(tmpdir(), "create-paratix-dist-success-"))
     const binDirectory = join(tempDirectory, "bin")
     const scaffoldCwd = join(tempDirectory, "cwd")
@@ -255,14 +334,26 @@ describe("dist CLI", () => {
 
 function readPackageJson(): {
   bin: { "create-paratix": string }
+  dependencies: Record<string, string>
   exports: { ".": { import: string; types: string } }
   main: string
   types: string
 } {
   return JSON.parse(readFileSync(resolve(packageRootDirectory, "package.json"), "utf8")) as {
     bin: { "create-paratix": string }
+    dependencies: Record<string, string>
     exports: { ".": { import: string; types: string } }
     main: string
     types: string
+  }
+}
+
+function linkRuntimeDependencies(tempDirectory: string): void {
+  const packageJson = readPackageJson()
+  for (const dependencyName of Object.keys(packageJson.dependencies)) {
+    const dependencyRootDirectory = dirname(require.resolve(`${dependencyName}/package.json`))
+    const dependencyInstallPath = join(tempDirectory, "node_modules", dependencyName)
+    mkdirSync(dirname(dependencyInstallPath), { recursive: true })
+    symlinkSync(dependencyRootDirectory, dependencyInstallPath)
   }
 }
