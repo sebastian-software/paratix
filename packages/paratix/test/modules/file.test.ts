@@ -2811,7 +2811,11 @@ describe("file.block", () => {
       { content: "content", name: `bad${String.fromCharCode(0)}name` },
       "file.block name must not contain NUL, CR, or LF",
     ],
-    ["empty prefix", { content: "content", name: "block", prefix: "" }, "file.block prefix must not be empty"],
+    [
+      "empty prefix",
+      { content: "content", name: "block", prefix: "" },
+      "file.block prefix must not be empty",
+    ],
     [
       "multiline prefix",
       { content: "content", name: "block", prefix: "#\n#" },
