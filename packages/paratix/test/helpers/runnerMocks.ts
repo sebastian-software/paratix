@@ -37,6 +37,7 @@ export function makeMockSshClass(
     connect?: ReturnType<typeof vi.fn>
     disconnect?: ReturnType<typeof vi.fn>
     exec?: ReturnType<typeof vi.fn>
+    forceDestroy?: ReturnType<typeof vi.fn>
     getConnectionInfo?: ReturnType<typeof vi.fn>
     lifecycle?: "fail-closed" | "permissive"
     output?: ReturnType<typeof vi.fn>
@@ -74,6 +75,13 @@ export function makeMockSshClass(
     public downloadFile = vi.fn().mockRejectedValue(rejectUnstubbedSshMethod("downloadFile"))
     public exec = overrides?.exec ?? vi.fn().mockRejectedValue(rejectUnstubbedSshMethod("exec"))
     public exists = vi.fn().mockRejectedValue(rejectUnstubbedSshMethod("exists"))
+    public forceDestroy =
+      overrides?.forceDestroy ??
+      (hasPermissiveLifecycle
+        ? vi.fn()
+        : vi.fn(() => {
+            throw rejectUnstubbedSshMethod("forceDestroy")
+          }))
     public getConnectionInfo =
       overrides?.getConnectionInfo ??
       vi.fn(() => ({

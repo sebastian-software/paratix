@@ -154,6 +154,92 @@ describe("runPlaybook signal handling", () => {
     expect(disconnect).toHaveBeenCalled()
   })
 
+  it("performs best-effort cleanup and force-destroys SSH synchronously before exiting on a second SIGINT during runPlaybook", async () => {
+    const calls: string[] = []
+    const stopLiveModuleOutputSpy = vi.fn((clearCurrentLine?: boolean) => {
+      calls.push(`stopLiveModuleOutput:${String(clearCurrentLine)}`)
+    })
+    const clearRegisteredSecretsSpy = vi.fn(() => {
+      calls.push("clearRegisteredSecrets")
+    })
+    const disconnect = vi.fn(() => {
+      calls.push("disconnect")
+    })
+    const forceDestroy = vi.fn(() => {
+      calls.push("forceDestroy")
+    })
+    const processExitSpy = vi.spyOn(process, "exit").mockImplementation((code) => {
+      calls.push(`process.exit:${String(code)}`)
+      return undefined as never
+    })
+    const stdoutWriteSpy = vi.spyOn(process.stdout, "write").mockImplementation(() => true)
+
+    vi.doMock("../src/output.js", async () => {
+      const actual = await vi.importActual<typeof OutputModule>("../src/output.js")
+      return {
+        ...actual,
+        stopLiveModuleOutput: stopLiveModuleOutputSpy,
+      }
+    })
+    vi.doMock("../src/secretSink.js", async () => {
+      const actual = await vi.importActual<typeof SecretSinkModule>("../src/secretSink.js")
+      return {
+        ...actual,
+        clearRegisteredSecrets: clearRegisteredSecretsSpy,
+      }
+    })
+    vi.doMock("../src/ssh.js", () => ({
+      shellQuote: (s: string) => `'${s}'`,
+      SshConnectionImpl: makeMockSshClass(capturedConfigs, {
+        disconnect,
+        forceDestroy,
+        lifecycle: "permissive",
+      }),
+    }))
+
+    try {
+      const { runPlaybook } = await import("../src/runner.js")
+
+      const interruptingModule: Module = {
+        apply: vi.fn().mockResolvedValue({ status: "changed" } satisfies ModuleResult),
+        check: vi.fn().mockImplementationOnce(() => {
+          getSignalBus().emit("SIGINT")
+          expect(forceDestroy).not.toHaveBeenCalled()
+          getSignalBus().emit("SIGINT")
+          return "needs-apply" as const
+        }),
+        name: "second-interrupting-module",
+      }
+
+      const definition: ServerDefinition = {
+        host: "1.2.3.4",
+        name: "test-server",
+        run: [interruptingModule],
+        ssh: { ports: [22], privateKey: "~/.ssh/id", user: "root" },
+      }
+
+      await runPlaybook(definition)
+
+      const clearSecretsIndex = calls.indexOf("clearRegisteredSecrets")
+      const cleanupStopIndex = calls
+        .slice(0, clearSecretsIndex)
+        .lastIndexOf("stopLiveModuleOutput:true")
+      const forceDestroyIndex = calls.indexOf("forceDestroy")
+      const processExitIndex = calls.indexOf("process.exit:130")
+
+      expect(stopLiveModuleOutputSpy).toHaveBeenCalledWith(true)
+      expect(clearRegisteredSecretsSpy).toHaveBeenCalledOnce()
+      expect(forceDestroy).toHaveBeenCalledOnce()
+      expect(processExitSpy).toHaveBeenCalledWith(130)
+      expect(cleanupStopIndex).toBeGreaterThan(-1)
+      expect(cleanupStopIndex).toBeLessThan(clearSecretsIndex)
+      expect(clearSecretsIndex).toBeLessThan(forceDestroyIndex)
+      expect(forceDestroyIndex).toBeLessThan(processExitIndex)
+    } finally {
+      stdoutWriteSpy.mockRestore()
+    }
+  })
+
   it("sets exitCode to 143 when SIGTERM is received during runPlaybook", async () => {
     vi.doMock("../src/ssh.js", () => ({
       shellQuote: (s: string) => `'${s}'`,
