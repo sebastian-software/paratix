@@ -51,11 +51,10 @@ export async function resolveEnvironment(
   environment: Environment,
   key: string
 ): Promise<boolean | number | string> {
-  const value = environment[key]
-  // eslint-disable-next-line @typescript-eslint/no-unnecessary-condition -- Record index may be undefined at runtime
-  if (value === undefined) {
+  if (!Object.hasOwn(environment, key)) {
     throw new Error(`Env key "${key}" is not defined`)
   }
+  const value = environment[key]
   if (typeof value === "function") {
     return value()
   }

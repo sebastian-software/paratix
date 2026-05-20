@@ -57,6 +57,22 @@ describe("resolveEnvironment", () => {
       'Env key "MISSING_KEY" is not defined'
     )
   })
+
+  it("throws an error when the key exists only on the prototype", async () => {
+    const env: Environment = {}
+    Object.setPrototypeOf(env, { INHERITED_KEY: "prototype-value" })
+
+    await expect(resolveEnvironment(env, "INHERITED_KEY")).rejects.toThrow(
+      'Env key "INHERITED_KEY" is not defined'
+    )
+  })
+
+  it("returns an own key even when the environment has inherited keys", async () => {
+    const env: Environment = { OWN_KEY: "own-value" }
+    Object.setPrototypeOf(env, { INHERITED_KEY: "prototype-value" })
+
+    await expect(resolveEnvironment(env, "OWN_KEY")).resolves.toBe("own-value")
+  })
 })
 
 describe("loadDotEnvironment", () => {

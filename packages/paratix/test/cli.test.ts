@@ -13,6 +13,9 @@ import { join, resolve } from "node:path"
 import { pathToFileURL } from "node:url"
 import { afterEach, beforeEach, describe, expect, it, type MockInstance, vi } from "vitest"
 
+import type { RunOptions } from "../src/runner.js"
+import type { Environment } from "../src/types.js"
+
 import {
   applyCliEnvironmentOverrides,
   collectDefinitionErrors,
@@ -319,10 +322,26 @@ describe("applyCliEnvironmentOverrides", () => {
   })
 
   it("adds PARATIX_FIRST_RUN=true when --first-run is enabled", () => {
-    expect(applyCliEnvironmentOverrides({ EXISTING: "value" }, { firstRun: true })).toStrictEqual({
+    const result = applyCliEnvironmentOverrides({ EXISTING: "value" }, { firstRun: true })
+
+    expect({ ...result }).toStrictEqual({
       EXISTING: "value",
       PARATIX_FIRST_RUN: "true",
     })
+    expect(Object.getPrototypeOf(result)).toBeNull()
+  })
+
+  it("does not copy inherited keys when --first-run is enabled", () => {
+    const environment: Environment = { EXISTING: "value" }
+    Object.setPrototypeOf(environment, { INHERITED: "prototype-value" })
+
+    const result = applyCliEnvironmentOverrides(environment, { firstRun: true })
+
+    expect({ ...result }).toStrictEqual({
+      EXISTING: "value",
+      PARATIX_FIRST_RUN: "true",
+    })
+    expect(Object.getPrototypeOf(result)).toBeNull()
   })
 })
 
@@ -2151,7 +2170,7 @@ describe("CLI entrypoint", () => {
     const envFilePath = join(tempDirectory, ".env")
     const calls: Array<{
       definition: unknown
-      options: unknown
+      options: RunOptions
     }> = []
     const logSpy = vi.spyOn(console, "log").mockImplementation(() => {
       /* suppress CLI header */
@@ -2199,13 +2218,18 @@ describe("CLI entrypoint", () => {
         name: "test-server",
         run: ["true"],
       })
-      expect(calls[0]?.options).toStrictEqual({
+      const capturedOptions = calls[0].options
+      expect({
+        ...capturedOptions,
+        envOverrides: { ...capturedOptions.envOverrides },
+      }).toStrictEqual({
         dryRun: true,
         envFile: envFilePath,
         envOverrides: { INLINE_ENV: "inline", PARATIX_FIRST_RUN: "true" },
         reconnectTimeout: 12_500,
         verbose: true,
       })
+      expect(Object.getPrototypeOf(capturedOptions.envOverrides)).toBeNull()
     } finally {
       logSpy.mockRestore()
       rmSync(tempDirectory, { force: true, recursive: true })

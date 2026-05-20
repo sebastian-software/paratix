@@ -9,7 +9,7 @@ import pc from "picocolors"
 import type { Environment, ServerDefinition } from "./types.js"
 
 import { isMissingTsxDependencyError } from "./cliTsxHelpers.js"
-import { ENVIRONMENT_FORBIDDEN_KEYS } from "./environment.js"
+import { createNullPrototypeEnvironment, ENVIRONMENT_FORBIDDEN_KEYS } from "./environment.js"
 import { inspectRedactedBinaryValue } from "./errorRedaction.js"
 import { runWithFirstRunFlag, runWithoutFirstRunFlag } from "./firstRunContext.js"
 import { describeHostValidationFailure, validateHostLabel } from "./hostValidation.js"
@@ -380,7 +380,9 @@ export function applyCliEnvironmentOverrides(
   options: { firstRun: boolean }
 ): Environment {
   if (!options.firstRun) return environment
-  return { ...environment, [FIRST_RUN_ENV_NAME]: "true" }
+  return Object.assign(createNullPrototypeEnvironment(), environment, {
+    [FIRST_RUN_ENV_NAME]: "true",
+  })
 }
 
 /**
