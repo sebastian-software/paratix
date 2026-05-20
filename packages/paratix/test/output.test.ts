@@ -589,6 +589,26 @@ describe("printCommandFailure", () => {
     expect(output).toContain("root cause")
   })
 
+  it("redacts credential-named fields in plain object causes", () => {
+    const error = new Error("outer failure", {
+      cause: {
+        authorization: "Bearer unregistered-authorization",
+        headers: {
+          cookie: "session=unregistered-cookie",
+        },
+        safe: "visible-diagnostic",
+      },
+    })
+
+    printCommandFailure(error, false)
+
+    const output = consoleErrors.join("\n")
+    expect(output).toContain("visible-diagnostic")
+    expect(output).toContain("[REDACTED]")
+    expect(output).not.toContain("unregistered-authorization")
+    expect(output).not.toContain("unregistered-cookie")
+  })
+
   it("breaks out of a cyclic cause chain in verbose mode without recursing forever", () => {
     const inner = new Error("inner cause")
     inner.stack = "Error: inner cause\n    at inner.ts:2:2"

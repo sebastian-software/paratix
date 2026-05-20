@@ -10,7 +10,7 @@ import type { Environment, ServerDefinition } from "./types.js"
 
 import { isMissingTsxDependencyError } from "./cliTsxHelpers.js"
 import { createNullPrototypeEnvironment, ENVIRONMENT_FORBIDDEN_KEYS } from "./environment.js"
-import { inspectRedactedBinaryValue } from "./errorRedaction.js"
+import { inspectRedactedDiagnosticValue } from "./errorRedaction.js"
 import { runWithFirstRunFlag, runWithoutFirstRunFlag } from "./firstRunContext.js"
 import { describeHostValidationFailure, validateHostLabel } from "./hostValidation.js"
 import { printCliHeader } from "./output.js"
@@ -230,7 +230,7 @@ function errorToString(value: unknown): string {
     // cause / data field. The pre-pass clones the graph defensively so
     // the original error object stays untouched for downstream consumers.
     return maskRegisteredSecrets(
-      inspectRedactedBinaryValue(value, {
+      inspectRedactedDiagnosticValue(value, {
         breakLength: Infinity,
         compact: true,
         depth: ERROR_INSPECT_DEPTH,

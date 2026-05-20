@@ -18,6 +18,7 @@
 
 import type { ModuleResult } from "./types.js"
 
+import { isSecretDiagnosticField, REDACTED_SECRET_FIELD_PLACEHOLDER } from "./errorRedaction.js"
 import { CommandError, maskSecrets } from "./sshHelpers.js"
 
 /**
@@ -26,39 +27,8 @@ import { CommandError, maskSecrets } from "./sshHelpers.js"
  * the value once the last registration goes out of scope.
  */
 const secretCounts = new Map<string, number>()
-const REDACTED_PLACEHOLDER = "[REDACTED]"
+const REDACTED_PLACEHOLDER = REDACTED_SECRET_FIELD_PLACEHOLDER
 const CIRCULAR_PLACEHOLDER = "[Circular]"
-// R-0000744: cover the common synonyms that operators and third-party
-// libraries use for credential-bearing fields. The set is intentionally
-// over-inclusive: false positives only over-mask diagnostic output, while a
-// miss leaks a real credential into stderr. The suffix-based checks in
-// `isSecretCauseField` keep handling compound names like `userPassword` or
-// `apiToken` without bloating this enumeration.
-const SECRET_CAUSE_FIELD_NAMES = new Set([
-  "apikey",
-  "auth",
-  "authorization",
-  "bearer",
-  "cookie",
-  "cred",
-  "credential",
-  "credentials",
-  "jwt",
-  "key",
-  "mfa",
-  "otp",
-  "pass",
-  "passphrase",
-  "passwd",
-  "password",
-  "pin",
-  "privatekey",
-  "pwd",
-  "secret",
-  "sessionkey",
-  "signature",
-  "token",
-])
 
 function assertRegistrableSecret(secret: string): void {
   if (secret.includes(REDACTED_PLACEHOLDER)) {
@@ -292,7 +262,7 @@ function normalizeObjectCause(cause: object, secretList: string[], seen: WeakSet
 
     const normalized: Record<string, unknown> = {}
     for (const [key, value] of Object.entries(cause)) {
-      if (isSecretCauseField(key)) {
+      if (isSecretDiagnosticField(key)) {
         normalized[key] = REDACTED_PLACEHOLDER
         continue
       }
@@ -317,41 +287,6 @@ function normalizeCausePropertyValue(
 
 function isBinaryCauseValue(value: object): boolean {
   return value instanceof ArrayBuffer || ArrayBuffer.isView(value)
-}
-
-/**
- * R-0000744 / R-0000844: suffixes that mark a credential-bearing field even
- * when nested inside a compound name (e.g. `userPassword`, `apiToken`,
- * `awsSessionKey`). The historic four entries (`token`, `password`, `secret`,
- * `privatekey`) were extended with `sessionkey`, `signature`, `jwt`, `pin`,
- * `mfa`, `otp`, and `cookie` so additional credential synonyms used by
- * third-party SDK error causes are masked at the same precedence.
- */
-const SECRET_CAUSE_FIELD_SUFFIXES = [
-  "token",
-  "password",
-  "secret",
-  "privatekey",
-  "sessionkey",
-  "signature",
-  "jwt",
-  "pin",
-  "mfa",
-  "otp",
-  "cookie",
-]
-
-function isSecretCauseField(key: string): boolean {
-  let normalized = ""
-  for (const character of key.toLowerCase()) {
-    if (isAsciiAlphaNumeric(character)) normalized += character
-  }
-  if (SECRET_CAUSE_FIELD_NAMES.has(normalized)) return true
-  return SECRET_CAUSE_FIELD_SUFFIXES.some((suffix) => normalized.endsWith(suffix))
-}
-
-function isAsciiAlphaNumeric(character: string): boolean {
-  return (character >= "0" && character <= "9") || (character >= "a" && character <= "z")
 }
 
 /**

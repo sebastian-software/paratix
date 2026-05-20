@@ -1709,6 +1709,25 @@ describe("printExceptionError", () => {
     expect(output).not.toContain("cli-object-secret")
   })
 
+  it("redacts credential-named fields in non-Error object output", () => {
+    printExceptionError(
+      {
+        apiToken: "unregistered-api-token",
+        nested: {
+          password: "unregistered-password",
+        },
+        safe: "diagnostic-context",
+      },
+      false
+    )
+
+    const output = errorSpy.mock.calls.map((args) => String(args[0])).join("\n")
+    expect(output).toContain("diagnostic-context")
+    expect(output).toContain("[REDACTED]")
+    expect(output).not.toContain("unregistered-api-token")
+    expect(output).not.toContain("unregistered-password")
+  })
+
   it("redacts registered secrets in verbose stack traces", () => {
     registerSecret("cli-stack-secret")
     const error = new Error("top-level")

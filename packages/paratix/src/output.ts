@@ -3,7 +3,7 @@ import pc from "picocolors"
 
 import type { ModuleStatus } from "./types.js"
 
-import { inspectRedactedBinaryValue } from "./errorRedaction.js"
+import { inspectRedactedDiagnosticValue } from "./errorRedaction.js"
 import { fitAnimatedModuleLine, formatDisplayModule } from "./outputFormatting.js"
 import { maskRegisteredSecrets } from "./secretSink.js"
 import { CommandError } from "./sshHelpers.js"
@@ -478,7 +478,7 @@ function formatCauseValue(cause: unknown): string {
   // R-0000580: replace `String(cause)` with `util.inspect` so plain objects
   // produce useful output ("[object Object]" → `{ key: "…" }`) and the result
   // is capped via depth/string-length bounds.
-  return inspectRedactedBinaryValue(cause, {
+  return inspectRedactedDiagnosticValue(cause, {
     depth: CAUSE_INSPECT_DEPTH,
     maxStringLength: CAUSE_INSPECT_MAX_STRING_LENGTH,
     redactMaxDepth: CAUSE_REDACT_BINARY_MAX_DEPTH,

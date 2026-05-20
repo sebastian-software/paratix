@@ -6,6 +6,7 @@ import { inspect, type InspectOptions } from "node:util"
  * for "[REDACTED" and find every sensitive payload that was elided.
  */
 export const REDACTED_BINARY_PLACEHOLDER = "[REDACTED Buffer]"
+export const REDACTED_SECRET_FIELD_PLACEHOLDER = "[REDACTED]"
 
 /**
  * Keys we must skip even if they appear as own properties so an
@@ -15,11 +16,65 @@ export const REDACTED_BINARY_PLACEHOLDER = "[REDACTED Buffer]"
  * gets re-rooted onto a non-null prototype downstream.
  */
 const REDACT_FORBIDDEN_KEYS = new Set(["__proto__", "constructor", "prototype"])
+// Cover common credential-bearing field names that may appear in plain object
+// diagnostics from SDKs, HTTP clients, and module wrappers.
+const SECRET_FIELD_NAMES = new Set([
+  "apikey",
+  "auth",
+  "authorization",
+  "bearer",
+  "cookie",
+  "cred",
+  "credential",
+  "credentials",
+  "jwt",
+  "key",
+  "mfa",
+  "otp",
+  "pass",
+  "passphrase",
+  "passwd",
+  "password",
+  "pin",
+  "privatekey",
+  "pwd",
+  "secret",
+  "sessionkey",
+  "signature",
+  "token",
+])
+
+const SECRET_FIELD_SUFFIXES = [
+  "token",
+  "password",
+  "secret",
+  "privatekey",
+  "sessionkey",
+  "signature",
+  "jwt",
+  "pin",
+  "mfa",
+  "otp",
+  "cookie",
+]
 
 function isBufferLikeView(value: unknown): boolean {
   if (Buffer.isBuffer(value)) return true
   if (value instanceof ArrayBuffer) return true
   return ArrayBuffer.isView(value)
+}
+
+function isAsciiAlphaNumeric(character: string): boolean {
+  return (character >= "0" && character <= "9") || (character >= "a" && character <= "z")
+}
+
+export function isSecretDiagnosticField(key: string): boolean {
+  let normalized = ""
+  for (const character of key.toLowerCase()) {
+    if (isAsciiAlphaNumeric(character)) normalized += character
+  }
+  if (SECRET_FIELD_NAMES.has(normalized)) return true
+  return SECRET_FIELD_SUFFIXES.some((suffix) => normalized.endsWith(suffix))
 }
 
 function copyRedactedProperty(parameters: {
@@ -39,6 +94,10 @@ function copyRedactedProperty(parameters: {
     return
   }
   const descriptorValue: unknown = descriptor.value
+  if (isSecretDiagnosticField(destinationKey) && !isBufferLikeView(descriptorValue)) {
+    redacted[destinationKey] = REDACTED_SECRET_FIELD_PLACEHOLDER
+    return
+  }
   redacted[destinationKey] = redactBinaryValues(descriptorValue, {
     depth: depth + 1,
     maxDepth,
@@ -99,7 +158,7 @@ export function redactBinaryValues(
   return redactObjectProperties({ depth, maxDepth, seen, sourceRecord })
 }
 
-export function inspectRedactedBinaryValue(
+export function inspectRedactedDiagnosticValue(
   value: unknown,
   options: { redactMaxDepth: number } & InspectOptions
 ): string {
