@@ -3,7 +3,7 @@ import { describe, expect, it } from "vitest"
 
 import type { ExecOptions } from "../../src/types.js"
 
-import { pkg } from "../../src/modules/package.js"
+import { detectPackageManager, pkg } from "../../src/modules/package.js"
 import { CommandError } from "../../src/sshHelpers.js"
 import { createMockSsh as createBaseMockSsh } from "../helpers/mockSsh.js"
 
@@ -68,6 +68,46 @@ type MockSsh = ReturnType<typeof createMockSsh>
 type InstallTrackingOverrides = {
   exec: MockSsh["exec"]
   test: MockSsh["test"]
+}
+
+function makePackageManagerAppearsExec(ssh: MockSsh): {
+  exec: MockSsh["exec"]
+  setAptAvailable: () => void
+} {
+  let aptAvailable = false
+  const recordProbe = (command: string, options?: ExecOptions) => {
+    ssh.calls.push(command)
+    ssh.execCalls.push({ command, options })
+  }
+  return {
+    async exec(command, options) {
+      await Promise.resolve()
+      recordProbe(command, options)
+      return {
+        code: command === "which apt-get" && aptAvailable ? 0 : 1,
+        stderr: "",
+        stdout: "",
+      }
+    },
+    setAptAvailable() {
+      aptAvailable = true
+    },
+  }
+}
+
+function makeOneShotTransportFailureExec(ssh: MockSsh): MockSsh["exec"] {
+  let transportFailurePending = true
+  const transportError = new Error("SSH transport failed")
+  return async (command, options) => {
+    await Promise.resolve()
+    ssh.calls.push(command)
+    ssh.execCalls.push({ command, options })
+    if (transportFailurePending) {
+      transportFailurePending = false
+      throw transportError
+    }
+    return { code: command === "which apt-get" ? 0 : 1, stderr: "", stdout: "" }
+  }
 }
 
 // `await Promise.resolve()` in each branch satisfies @typescript-eslint/require-await
@@ -791,6 +831,41 @@ describe("package manager detection", () => {
     const mod = pkg.installed("nginx")
     await mod.apply(ssh, emptyEnv)
     expect(ssh.calls).toContain("DEBIAN_FRONTEND=noninteractive apt-get install -y -- 'nginx'")
+  })
+
+  it("retries detection after no package manager was found", async () => {
+    const ssh = createMockSsh()
+    const managerProbe = makePackageManagerAppearsExec(ssh)
+    ssh.exec = managerProbe.exec
+
+    await expect(detectPackageManager(ssh)).resolves.toBeNull()
+    managerProbe.setAptAvailable()
+    await expect(detectPackageManager(ssh)).resolves.toBe("apt")
+    await expect(detectPackageManager(ssh)).resolves.toBe("apt")
+
+    expect(ssh.calls).toStrictEqual([
+      "which apt-get",
+      "which dnf",
+      "which yum",
+      "which apk",
+      "which apt-get",
+    ])
+    expect(ssh.execCalls.map((call) => call.command)).toStrictEqual(ssh.calls)
+    expect(ssh.execCalls.filter((call) => call.command === "which apt-get")).toHaveLength(2)
+    expect(ssh.execCalls.every((call) => call.options?.ignoreExitCode === true)).toBe(true)
+  })
+
+  it("retries detection after an ssh transport failure", async () => {
+    const ssh = createMockSsh()
+    ssh.exec = makeOneShotTransportFailureExec(ssh)
+
+    await expect(detectPackageManager(ssh)).rejects.toThrow("SSH transport failed")
+    await expect(detectPackageManager(ssh)).resolves.toBe("apt")
+    await expect(detectPackageManager(ssh)).resolves.toBe("apt")
+
+    expect(ssh.calls).toStrictEqual(["which apt-get", "which apt-get"])
+    expect(ssh.execCalls.map((call) => call.command)).toStrictEqual(ssh.calls)
+    expect(ssh.execCalls.every((call) => call.options?.ignoreExitCode === true)).toBe(true)
   })
 
   it("uses dnf when apt-get is absent but dnf is present", async () => {
