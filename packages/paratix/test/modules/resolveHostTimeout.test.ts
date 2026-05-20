@@ -138,6 +138,21 @@ describe("resolveHostWithTimeout — happy path", () => {
     await expect(resolveHostWithTimeout(resolveImmediately)).resolves.toBe("10.0.0.42")
   })
 
+  it("R-0000973: passes an AbortSignal to the resolver", async () => {
+    let capturedSignal: AbortSignal | undefined
+
+    await expect(
+      resolveHostWithTimeout(async (signal) => {
+        capturedSignal = signal
+        await Promise.resolve()
+        return "10.0.0.42"
+      })
+    ).resolves.toBe("10.0.0.42")
+
+    expect(capturedSignal).toBeInstanceOf(AbortSignal)
+    expect(capturedSignal?.aborted).toBe(false)
+  })
+
   it("propagates resolver errors unchanged", async () => {
     await expect(resolveHostWithTimeout(resolveWithError)).rejects.toThrow("dns failure")
   })
@@ -161,6 +176,29 @@ describe("resolveHostWithTimeout — timeout", () => {
     // intermediate rejection as unhandled while the fake timer advances.
     const asserted = promise.catch((error: unknown) => error)
     await vi.advanceTimersByTimeAsync(50)
+    const captured = await asserted
+    expect(String(captured)).toMatch(/timed out after 50ms/v)
+  })
+
+  it("R-0000973: aborts the resolver signal when the timeout fires", async () => {
+    let capturedSignal: AbortSignal | undefined
+    const promise = resolveHostWithTimeout(async (signal) => {
+      capturedSignal = signal
+      await Promise.resolve()
+      return new Promise<string>(() => {
+        // never settles
+      })
+    }, 50)
+    // Attach a noop catch synchronously so vitest does not flag the
+    // intermediate rejection as unhandled while the fake timer advances.
+    const asserted = promise.catch((error: unknown) => error)
+
+    expect(capturedSignal).toBeInstanceOf(AbortSignal)
+    expect(capturedSignal?.aborted).toBe(false)
+
+    await vi.advanceTimersByTimeAsync(50)
+
+    expect(capturedSignal?.aborted).toBe(true)
     const captured = await asserted
     expect(String(captured)).toMatch(/timed out after 50ms/v)
   })
