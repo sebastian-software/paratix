@@ -824,13 +824,19 @@ describe("pkg.upgrade", () => {
 
 describe("package manager detection", () => {
   it("uses apt when which apt-get succeeds", async () => {
+    const dpkgNginx =
+      "dpkg-query -W -f='${Status}' 'nginx' 2>/dev/null | grep -q 'install ok installed'"
+    const installCommand = "DEBIAN_FRONTEND=noninteractive apt-get install -y -- 'nginx'"
     const ssh = createMockSsh({
       ...APT_FOUND,
-      "DEBIAN_FRONTEND=noninteractive apt-get install -y -- 'nginx'": { code: 0 },
+      [dpkgNginx]: { code: 0 },
     })
+    const overrides = makeInstallTrackingOverrides(ssh, installCommand, [dpkgNginx])
+    ssh.exec = overrides.exec
+    ssh.test = overrides.test
     const mod = pkg.installed("nginx")
-    await mod.apply(ssh, emptyEnv)
-    expect(ssh.calls).toContain("DEBIAN_FRONTEND=noninteractive apt-get install -y -- 'nginx'")
+    expect(await mod.apply(ssh, emptyEnv)).toStrictEqual({ status: "changed" })
+    expect(ssh.calls).toContain(installCommand)
   })
 
   it("retries detection after no package manager was found", async () => {
@@ -869,35 +875,50 @@ describe("package manager detection", () => {
   })
 
   it("uses dnf when apt-get is absent but dnf is present", async () => {
+    const rpmNginx = "rpm -q 'nginx'"
+    const installCommand = "dnf install -y -- 'nginx'"
     const ssh = createMockSsh({
       ...DNF_FOUND,
-      "dnf install -y -- 'nginx'": { code: 0 },
+      [rpmNginx]: { code: 0 },
     })
+    const overrides = makeInstallTrackingOverrides(ssh, installCommand, [rpmNginx])
+    ssh.exec = overrides.exec
+    ssh.test = overrides.test
     const mod = pkg.installed("nginx")
-    await mod.apply(ssh, emptyEnv)
-    expect(ssh.calls).toContain("dnf install -y -- 'nginx'")
+    expect(await mod.apply(ssh, emptyEnv)).toStrictEqual({ status: "changed" })
+    expect(ssh.calls).toContain(installCommand)
   })
 
   it("uses yum when apt-get and dnf are absent but yum is present", async () => {
+    const rpmNginx = "rpm -q 'nginx'"
+    const installCommand = "yum install -y -- 'nginx'"
     const ssh = createMockSsh({
       ...YUM_FOUND,
-      "yum install -y -- 'nginx'": { code: 0 },
+      [rpmNginx]: { code: 0 },
     })
+    const overrides = makeInstallTrackingOverrides(ssh, installCommand, [rpmNginx])
+    ssh.exec = overrides.exec
+    ssh.test = overrides.test
     const mod = pkg.installed("nginx")
-    await mod.apply(ssh, emptyEnv)
-    expect(ssh.calls).toContain("yum install -y -- 'nginx'")
+    expect(await mod.apply(ssh, emptyEnv)).toStrictEqual({ status: "changed" })
+    expect(ssh.calls).toContain(installCommand)
   })
 
   it("uses apk when apt-get, dnf and yum are absent but apk is present", async () => {
     // R-0000: apk add now uses the argument terminator `--` to prevent
     // package names starting with `-` from being interpreted as flags.
+    const apkNginx = "apk info -e 'nginx'"
+    const installCommand = "apk add -- 'nginx'"
     const ssh = createMockSsh({
       ...APK_FOUND,
-      "apk add -- 'nginx'": { code: 0 },
+      [apkNginx]: { code: 0 },
     })
+    const overrides = makeInstallTrackingOverrides(ssh, installCommand, [apkNginx])
+    ssh.exec = overrides.exec
+    ssh.test = overrides.test
     const mod = pkg.installed("nginx")
-    await mod.apply(ssh, emptyEnv)
-    expect(ssh.calls).toContain("apk add -- 'nginx'")
+    expect(await mod.apply(ssh, emptyEnv)).toStrictEqual({ status: "changed" })
+    expect(ssh.calls).toContain(installCommand)
   })
 
   it("uses correct remove command for dnf", async () => {
