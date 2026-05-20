@@ -12,6 +12,7 @@ import { isMissingTsxDependencyError } from "./cliTsxHelpers.js"
 import { ENVIRONMENT_FORBIDDEN_KEYS } from "./environment.js"
 import { inspectRedactedBinaryValue } from "./errorRedaction.js"
 import { runWithFirstRunFlag, runWithoutFirstRunFlag } from "./firstRunContext.js"
+import { describeHostValidationFailure, validateHostLabel } from "./hostValidation.js"
 import { printCliHeader } from "./output.js"
 import { type RunOptions, runPlaybook } from "./runner.js"
 import { maskRegisteredSecrets } from "./secretSink.js"
@@ -123,6 +124,17 @@ function collectSshErrors(value: Record<string, unknown>, errors: string[]): voi
   errors.push(...collectSshConfigErrors(value.ssh))
 }
 
+function collectHostErrors(object: Record<string, unknown>, errors: string[]): void {
+  const previousErrorCount = errors.length
+  collectStringErrors(object, { key: "host" }, errors)
+  if (errors.length !== previousErrorCount) return
+
+  const failure = validateHostLabel(object.host)
+  if (failure != null) {
+    errors.push(`Invalid property 'host' (${describeHostValidationFailure(failure)})`)
+  }
+}
+
 /**
  * Collects human-readable error messages for every property of `value` that
  * does not conform to the `ServerDefinition` shape.
@@ -139,7 +151,7 @@ export function collectDefinitionErrors(value: unknown): string[] {
   // eslint-disable-next-line @typescript-eslint/no-unsafe-type-assertion -- narrowed by typeof/null checks above
   const object = value as Record<string, unknown>
   collectStringErrors(object, { key: "name" }, errors)
-  collectStringErrors(object, { key: "host" }, errors)
+  collectHostErrors(object, errors)
   collectSshErrors(object, errors)
   collectArrayErrors(object, { key: "run" }, errors)
   return errors

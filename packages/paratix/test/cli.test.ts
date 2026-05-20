@@ -639,6 +639,44 @@ describe("collectDefinitionErrors", () => {
     expect(errors).toHaveLength(2)
   })
 
+  it.each([
+    ["whitespace", "example .com", "must not contain whitespace"],
+    ["control character", "example.com\u0007", "must not contain control characters"],
+    [
+      "OpenSSH wildcard",
+      "*.example.com",
+      "must not contain OpenSSH known_hosts pattern metacharacters",
+    ],
+    [
+      "OpenSSH single-character wildcard",
+      "host?.example.com",
+      "must not contain OpenSSH known_hosts pattern metacharacters",
+    ],
+    [
+      "OpenSSH negation",
+      "!example.com",
+      "must not contain OpenSSH known_hosts pattern metacharacters",
+    ],
+  ])("returns an error when host contains %s", (_label, host, reason) => {
+    const errors = collectDefinitionErrors({
+      host,
+      name: "test",
+      run: ["echo hello"],
+      ssh: validSsh,
+    })
+    expect(errors).toStrictEqual([`Invalid property 'host' (${reason})`])
+  })
+
+  it("allows an IPv6 literal host", () => {
+    const errors = collectDefinitionErrors({
+      host: "[2001:db8::1]",
+      name: "test",
+      run: ["echo hello"],
+      ssh: validSsh,
+    })
+    expect(errors).toStrictEqual([])
+  })
+
   it("returns an empty array for a valid ServerDefinition shape", () => {
     const errors = collectDefinitionErrors({
       host: "example.com",
