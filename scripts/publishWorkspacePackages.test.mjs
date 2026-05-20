@@ -238,8 +238,8 @@ function createMissingPackageError() {
 function createGitCommandHandler({ gitBranch, gitHeadSha, gitRepositoryRoot, gitStatus }) {
   const stdoutByCommand = new Map([
     ["rev-parse --show-toplevel", `${gitRepositoryRoot}\n`],
-    [GIT_REV_PARSE_HEAD_COMMAND, `${gitHeadSha}\n`],
     ["status --porcelain=v1 --untracked-files=normal", gitStatus],
+    [GIT_REV_PARSE_HEAD_COMMAND, `${gitHeadSha}\n`],
     [GIT_SYMBOLIC_REF_BRANCH_COMMAND, `${gitBranch}\n`],
   ])
 
