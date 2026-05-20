@@ -20,6 +20,8 @@ const COMPOSE_CONFIG_MODE = "0600"
 const COMPOSE_CONFIG_STAGING_PREFIX = ".compose.yml.paratix-staging"
 const SYSTEMD_UNIT_MODE = "0644"
 const SYSTEMD_UNIT_STAGING_PREFIX = ".compose-systemd-unit.paratix-staging"
+const C0_CONTROL_MAX_CODE_POINT = 31
+const DELETE_CONTROL_CODE_POINT = 127
 
 type ComposeSystemdMaskSnapshot = "masked" | "unmasked"
 
@@ -375,7 +377,12 @@ function sanitizeUnitValue(value: string): string {
 function hasControlCharacter(value: string): boolean {
   for (const character of value) {
     const codePoint = character.codePointAt(0)
-    if (codePoint != null && (codePoint <= 0x1f || codePoint === 0x7f)) return true
+    if (
+      codePoint != null &&
+      (codePoint <= C0_CONTROL_MAX_CODE_POINT || codePoint === DELETE_CONTROL_CODE_POINT)
+    ) {
+      return true
+    }
   }
   return false
 }
