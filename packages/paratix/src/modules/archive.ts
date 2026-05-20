@@ -87,6 +87,8 @@ type ExtractedArchiveMember = {
   path: string
 }
 
+type MembersMarkerReadResult = "invalid" | ExtractedArchiveMember[] | null
+
 /**
  * Build the extract command based on the file extension of the original source.
  *
@@ -814,16 +816,16 @@ function isExtractedArchiveMember(value: unknown): value is ExtractedArchiveMemb
 async function readMembersMarker(
   conn: SshConnection,
   marker: string
-): Promise<ExtractedArchiveMember[] | null> {
+): Promise<MembersMarkerReadResult> {
   const markerResult = await conn.exec(`cat ${shellQuote(membersMarkerPath(marker))}`, EXEC_OPTS)
   if (markerResult.code !== 0) return null
   try {
     const members: unknown = JSON.parse(markerResult.stdout)
     return Array.isArray(members) && members.every((member) => isExtractedArchiveMember(member))
       ? members
-      : []
+      : "invalid"
   } catch {
-    return []
+    return "invalid"
   }
 }
 
@@ -846,6 +848,7 @@ function memberTypeCheckCommand(member: ExtractedArchiveMember): string {
 async function extractedMembersMatch(conn: SshConnection, marker: string): Promise<boolean> {
   const members = await readMembersMarker(conn, marker)
   if (members === null) return true
+  if (members === "invalid") return false
   const matches = await mapWithConcurrencyLimit(
     members,
     ARCHIVE_OWNER_MEMBER_CONCURRENCY,

@@ -383,6 +383,37 @@ describe("archive.extract — check", () => {
     expect(result).toBe("ok")
   })
 
+  it("returns needs-apply when the members marker contains invalid JSON", async () => {
+    const mockSsh = createMockSsh({
+      [`cat '${marker}'`]: { code: 0, stdout: archiveSha },
+      [`cat '${membersMarker}'`]: { code: 0, stdout: "{not-json" },
+      [`test -d '${destination}'`]: { code: 0 },
+      [`test -f '${marker}'`]: { code: 0 },
+    })
+    vi.spyOn(mockSsh, "sha256").mockResolvedValue(archiveSha)
+    const mod = archive.extract(src, destination)
+    const result = await mod.check(mockSsh, emptyEnv)
+    expect(result).toBe("needs-apply")
+    expect(mockSsh.calls).not.toContain(`cat '${marker}'`)
+  })
+
+  it("returns needs-apply when the members marker has an invalid schema", async () => {
+    const mockSsh = createMockSsh({
+      [`cat '${marker}'`]: { code: 0, stdout: archiveSha },
+      [`cat '${membersMarker}'`]: {
+        code: 0,
+        stdout: JSON.stringify([{ kind: "socket", path: `${destination}/app/file` }]),
+      },
+      [`test -d '${destination}'`]: { code: 0 },
+      [`test -f '${marker}'`]: { code: 0 },
+    })
+    vi.spyOn(mockSsh, "sha256").mockResolvedValue(archiveSha)
+    const mod = archive.extract(src, destination)
+    const result = await mod.check(mockSsh, emptyEnv)
+    expect(result).toBe("needs-apply")
+    expect(mockSsh.calls).not.toContain(`cat '${marker}'`)
+  })
+
   it("returns ok when marker matches and extracted owner matches", async () => {
     const ownerPathsMarker = `${marker}.owner-paths`
     const mockSsh = createMockSsh({
