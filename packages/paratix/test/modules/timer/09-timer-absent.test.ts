@@ -132,6 +132,58 @@ describe("timer.absent", () => {
     expect(result.status).toBe("changed")
   })
 
+  // R-0000977: apply reads the activation snapshot before mutating timer
+  // state. A toolchain error from `is-enabled` must abort the apply with a
+  // structured failure instead of being coerced to disabled/inactive and
+  // allowing disable/rm/daemon-reload to run.
+  it("R-0000977: apply fails before mutations when is-enabled snapshot probe reports a toolchain error", async () => {
+    const ssh = createTimerApplyMockSsh({
+      [`[ -e '${SERVICE_PATH}' ]`]: { code: 0 },
+      [`[ -e '${TIMER_PATH}' ]`]: { code: 0 },
+      "systemctl is-enabled --quiet -- 'backup.timer'": {
+        code: 4,
+        stderr: "Failed to connect to bus",
+      },
+    })
+    const mod = timer.absent("backup")
+    const result = await mod.apply(ssh, emptyEnv)
+
+    expect(result.status).toBe("failed")
+    expect(result.error?.message).toContain(
+      "[timer.absent: backup] systemctl is-enabled failed while probing timer state"
+    )
+    expect(result.error?.message).toContain("Failed to connect to bus")
+    expect(ssh.calls).not.toContain("systemctl disable --now -- 'backup.timer'")
+    expect(ssh.calls).not.toContain(`rm -f '${TIMER_PATH}' '${SERVICE_PATH}'`)
+    expect(ssh.calls).not.toContain("systemctl daemon-reload")
+  })
+
+  // R-0000977: when `is-enabled` succeeds, an `is-active` toolchain error
+  // is the second half of the same activation-snapshot guard. It must also
+  // fail before any absent-path mutation.
+  it("R-0000977: apply fails before mutations when is-active snapshot probe reports a toolchain error", async () => {
+    const ssh = createTimerApplyMockSsh({
+      [`[ -e '${SERVICE_PATH}' ]`]: { code: 0 },
+      [`[ -e '${TIMER_PATH}' ]`]: { code: 0 },
+      "systemctl is-active --quiet -- 'backup.timer'": {
+        code: 5,
+        stderr: "Internal systemctl error",
+      },
+      "systemctl is-enabled --quiet -- 'backup.timer'": { code: 0 },
+    })
+    const mod = timer.absent("backup")
+    const result = await mod.apply(ssh, emptyEnv)
+
+    expect(result.status).toBe("failed")
+    expect(result.error?.message).toContain(
+      "[timer.absent: backup] systemctl is-active failed while probing timer state"
+    )
+    expect(result.error?.message).toContain("Internal systemctl error")
+    expect(ssh.calls).not.toContain("systemctl disable --now -- 'backup.timer'")
+    expect(ssh.calls).not.toContain(`rm -f '${TIMER_PATH}' '${SERVICE_PATH}'`)
+    expect(ssh.calls).not.toContain("systemctl daemon-reload")
+  })
+
   // R-0000780: a "no such unit" diagnostic from `disable --now` can mask
   // a real stop failure. When systemd reports the unit file as missing
   // but `is-enabled` / `is-active` still report the timer as live, the
