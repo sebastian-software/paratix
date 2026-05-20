@@ -47,6 +47,33 @@ function createMockChild(stdout: string, exitCode = 0, stderr = ""): MockChildPr
   return child
 }
 
+function createHangingMockChild(killCalls: NodeJS.Signals[]): MockChildProcess {
+  const child = new EventEmitter() as MockChildProcess
+  Object.defineProperty(child, "stdout", { value: new EventEmitter() })
+  Object.defineProperty(child, "stderr", { value: new EventEmitter() })
+  Object.defineProperty(child, "exitCode", { value: null })
+  Object.defineProperty(child, "signalCode", { value: null })
+  Object.defineProperty(child, "killed", { value: false })
+  ;(child as unknown as { kill: (signal: NodeJS.Signals) => void }).kill = (
+    signal: NodeJS.Signals
+  ) => {
+    killCalls.push(signal)
+  }
+  child.stdin = Object.assign(new EventEmitter(), {
+    end: vi.fn(),
+    once: vi.fn(function once(
+      this: EventEmitter,
+      eventName: string,
+      listener: (...arguments_: unknown[]) => void
+    ) {
+      EventEmitter.prototype.once.call(this, eventName, listener)
+      return this
+    }),
+  })
+
+  return child
+}
+
 type SpawnCall = { args: string[]; command: string }
 
 let spawnCalls: SpawnCall[] = []
@@ -94,12 +121,14 @@ function mockSpawnWithSpawnError(): void {
   })
 }
 
-function mockSpawnWithStdinError(error: Error): void {
+function mockSpawnWithStdinError(error: Error, killCalls: NodeJS.Signals[]): void {
   mockedSpawnFn.mockImplementation((command: string, args?: readonly string[]) => {
     trackSpawn(command, args ?? [])
-    const child = createMockChild("", 0)
+    const child = createHangingMockChild(killCalls)
     child.stdin.end.mockImplementationOnce(() => {
-      child.stdin.emit("error", error)
+      queueMicrotask(() => {
+        child.stdin.emit("error", error)
+      })
     })
     return child as never
   })
@@ -284,7 +313,8 @@ describe("op.resolve — apply", () => {
   })
 
   it("returns failed when op stdin emits an error", async () => {
-    mockSpawnWithStdinError(new Error("write EPIPE"))
+    const killCalls: NodeJS.Signals[] = []
+    mockSpawnWithStdinError(new Error("write EPIPE"), killCalls)
 
     const module_ = op.resolve({ password: "op://vault/item/password" })
     // eslint-disable-next-line prefer-spread
@@ -292,6 +322,7 @@ describe("op.resolve — apply", () => {
 
     expect(result.status).toBe("failed")
     expect(result.error?.message).toContain("write EPIPE")
+    expect(killCalls).toContain("SIGTERM")
   })
 
   it("returns { status: 'failed' } when op read throws", async () => {
