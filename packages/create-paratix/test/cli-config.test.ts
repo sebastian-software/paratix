@@ -676,6 +676,74 @@ describe("admin public key validation", () => {
     expect(console.error).toHaveBeenCalledWith("Error: Failed to read admin public key file.")
   })
 
+  it("rejects a NUL byte in the raw admin public key file path before filesystem access", () => {
+    const fileSystem = {
+      closeSync: vi.fn(),
+      fstatSync: vi.fn(() => {
+        throw new Error("unexpected fstat")
+      }),
+      lstatSync: vi.fn(() => {
+        throw new Error("unexpected lstat")
+      }),
+      openSync: vi.fn(() => {
+        throw new Error("unexpected open")
+      }),
+      readSync: vi.fn(() => {
+        throw new Error("unexpected read")
+      }),
+      realpathSync: vi.fn(() => {
+        throw new Error("unexpected realpath")
+      }),
+    }
+
+    expect(() => {
+      readAdminPublicKeyFile(throwExitError, `admin${String.fromCharCode(0)}.pub`, fileSystem)
+    }).toThrow("admin public key file path contains a NUL byte")
+
+    expect(fileSystem.lstatSync).not.toHaveBeenCalled()
+    expect(fileSystem.realpathSync).not.toHaveBeenCalled()
+    expect(fileSystem.openSync).not.toHaveBeenCalled()
+    expect(fileSystem.fstatSync).not.toHaveBeenCalled()
+    expect(fileSystem.readSync).not.toHaveBeenCalled()
+    expect(fileSystem.closeSync).not.toHaveBeenCalled()
+  })
+
+  it("rejects an oversized UTF-8 admin public key file path before filesystem access", () => {
+    const oversizedPath = "😀".repeat(1025)
+    const fileSystem = {
+      closeSync: vi.fn(),
+      fstatSync: vi.fn(() => {
+        throw new Error("unexpected fstat")
+      }),
+      lstatSync: vi.fn(() => {
+        throw new Error("unexpected lstat")
+      }),
+      openSync: vi.fn(() => {
+        throw new Error("unexpected open")
+      }),
+      readSync: vi.fn(() => {
+        throw new Error("unexpected read")
+      }),
+      realpathSync: vi.fn(() => {
+        throw new Error("unexpected realpath")
+      }),
+    }
+
+    expect(() => {
+      readAdminPublicKeyFile(throwExitError, oversizedPath, fileSystem)
+    }).toThrow("admin public key file path is too long")
+
+    expect(console.error).toHaveBeenCalledWith(
+      "Error: admin public key file path is too long (4100 bytes, limit 4096); provide a shorter path."
+    )
+    expect(fileSystem.lstatSync).not.toHaveBeenCalled()
+    expect(fileSystem.realpathSync).not.toHaveBeenCalled()
+    expect(fileSystem.openSync).not.toHaveBeenCalled()
+    expect(fileSystem.fstatSync).not.toHaveBeenCalled()
+    expect(fileSystem.readSync).not.toHaveBeenCalled()
+    expect(fileSystem.closeSync).not.toHaveBeenCalled()
+  })
+
   // R-0000185: even if a custom exitWithMessage stub does not actually
   // terminate execution (e.g. a test harness that swallows the thrown error
   // upstream), readAdminPublicKeyFile must never read from uninitialised
