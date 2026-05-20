@@ -49,6 +49,9 @@ function bridgeCatSourcesStubsToDdNoFollow(
 ): Record<string, Partial<ExecResult>> | undefined {
   if (!responses) return responses
   const bridged: Record<string, Partial<ExecResult>> = { ...responses }
+  if (FIND_SOURCES_LIST_D_LEGACY_COMMAND in bridged && !(FIND_SOURCES_LIST_D_COMMAND in bridged)) {
+    bridged[FIND_SOURCES_LIST_D_COMMAND] = bridged[FIND_SOURCES_LIST_D_LEGACY_COMMAND]
+  }
   for (const [command, result] of Object.entries(responses)) {
     if (!command.startsWith(CAT_SOURCES_PREFIX)) continue
     const quotedPath = command.slice("cat ".length)
@@ -150,6 +153,10 @@ function debianInReleaseClearsignedBody(codename: string): string {
 // Debian stable codename response from curl
 const DEBIAN_STABLE_RELEASE_CURL = debianInReleaseClearsignedBody("trixie")
 const APT_UPDATE_COMMAND = "DEBIAN_FRONTEND=noninteractive apt-get update"
+const FIND_SOURCES_LIST_D_COMMAND =
+  "if [ ! -d /etc/apt/sources.list.d ]; then exit 0; fi; find /etc/apt/sources.list.d/ \\( -name '*.list' -o -name '*.sources' \\) -type f -print0"
+const FIND_SOURCES_LIST_D_LEGACY_COMMAND =
+  "find /etc/apt/sources.list.d/ \\( -name '*.list' -o -name '*.sources' \\) -type f -print0"
 
 // Default find response for sources.list.d (empty = no extra files)
 const FIND_SOURCES_EMPTY = { code: 0, stdout: "" }
@@ -976,6 +983,42 @@ describe("releaseUpgrade.upgrade — apply (Debian)", () => {
       const sourcesWrites = writes.filter((w) => w.path === "/etc/apt/sources.list")
       expect(sourcesWrites.length).toBeGreaterThan(0)
       expect(sourcesWrites.at(-1)?.content).toBe(originalSources)
+    })
+
+    it("fails and rolls back sources.list when sources.list.d enumeration is denied", async () => {
+      const originalSources = "deb http://deb.debian.org/debian bookworm main\n"
+      const ssh = createMockSsh(
+        debianApplyResponses("bookworm", "trixie", {
+          [FIND_SOURCES_LIST_D_COMMAND]: {
+            code: 1,
+            stderr: "find: '/etc/apt/sources.list.d/': Permission denied\n",
+          },
+        })
+      )
+      const writes = captureWriteFile(ssh)
+      const mod = releaseUpgrade.upgrade()
+      const result = await mod.apply(ssh, emptyEnv)
+
+      expect(result.status).toBe("failed")
+      expect(String(result.error)).toContain("failed to enumerate /etc/apt/sources.list.d")
+      expect(String(result.error)).toContain("Permission denied")
+      const sourcesWrites = writes.filter((w) => w.path === "/etc/apt/sources.list")
+      expect(sourcesWrites.at(-1)?.content).toBe(originalSources)
+      expect(ssh.calls).not.toContain("DEBIAN_FRONTEND=noninteractive apt-get update")
+    })
+
+    it("allows a missing sources.list.d directory as an empty directory", async () => {
+      const ssh = createMockSsh(
+        debianApplyResponses("bookworm", "trixie", {
+          [FIND_SOURCES_LIST_D_COMMAND]: { code: 0, stdout: "" },
+        })
+      )
+      const mod = releaseUpgrade.upgrade()
+      const result = await mod.apply(ssh, emptyEnv)
+
+      expect(result.status).toBe("changed")
+      expect(ssh.calls).toContain(FIND_SOURCES_LIST_D_COMMAND)
+      expect(ssh.calls).toContain("DEBIAN_FRONTEND=noninteractive apt-get update")
     })
 
     it("keeps rollback and restored-cache refresh inside the release-upgrade mutex", async () => {

@@ -736,12 +736,18 @@ async function replaceCodenameInSourcesList(
   // flags), or embedded whitespace. The previous newline-split approach
   // could miss files or corrupt their paths in those edge cases.
   const listFilesResult = await ssh.exec(
-    "find /etc/apt/sources.list.d/ \\( -name '*.list' -o -name '*.sources' \\) -type f -print0",
+    "if [ ! -d /etc/apt/sources.list.d ]; then exit 0; fi; find /etc/apt/sources.list.d/ \\( -name '*.list' -o -name '*.sources' \\) -type f -print0",
     { ignoreExitCode: true, silent: true }
   )
-  if (listFilesResult.code !== 0 || listFilesResult.stdout.length === 0) {
-    return snapshots
+  if (listFilesResult.code !== 0) {
+    throw new Error(
+      failedCommand(
+        "[releaseUpgrade.upgrade] failed to enumerate /etc/apt/sources.list.d",
+        listFilesResult
+      ).error?.message ?? "failed to enumerate /etc/apt/sources.list.d"
+    )
   }
+  if (listFilesResult.stdout.length === 0) return snapshots
 
   // R-0000172: defense-in-depth — paths that escape the sources directory or
   // carry ASCII control characters are skipped before readFile / writeFile.
