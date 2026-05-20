@@ -1821,6 +1821,23 @@ async function applySshdPortWhenConfigUnchanged(
   }
 }
 
+async function rollbackChangedSshdPortAfterUfwGuardFailure(
+  ssh: SshConnection,
+  parameters: { originalConfig: string; ufwGuard: ModuleResult }
+): Promise<ModuleResult> {
+  const rollbackError = await writeSshdRollbackWithRetry(ssh, parameters.originalConfig)
+  const verificationError =
+    rollbackError == null
+      ? await verifySshdConfigMatchesRollback(ssh, parameters.originalConfig)
+      : undefined
+  if (rollbackError == null && verificationError == null) return parameters.ufwGuard
+  return failed(
+    `${parameters.ufwGuard.error?.message ?? "ufw guard failed"}; rollback also failed: ${
+      rollbackError ?? verificationError
+    }`
+  )
+}
+
 async function applyChangedSshdPort(
   ssh: SshConnection,
   parameters: {
@@ -1846,6 +1863,13 @@ async function applyChangedSshdPort(
     settingNames,
   })
   if (writeFailure != null) return writeFailure
+  const ufwGuard = await rejectWhenUfwBlocksTargetPort(ssh, parameters.targetPort)
+  if (ufwGuard != null) {
+    return rollbackChangedSshdPortAfterUfwGuardFailure(ssh, {
+      originalConfig: parameters.originalConfig,
+      ufwGuard,
+    })
+  }
   const verificationFailure = await restartAndVerifySshdPort(ssh, {
     originalConfig: parameters.originalConfig,
     originalPort: parameters.originalPort,

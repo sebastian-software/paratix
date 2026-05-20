@@ -207,6 +207,35 @@ function spyExecSuccessAcceptingSsProbe(mockSsh: ReturnType<typeof createMockSsh
   })
 }
 
+function spyExecForUfwRaceAfterConfigWrite(
+  mockSsh: ReturnType<typeof createMockSsh>,
+  originalConfig: string
+) {
+  return vi.spyOn(mockSsh, "exec").mockImplementation(async (command) => {
+    await Promise.resolve()
+    if (command === CAT_SSHD) return { code: 0, stderr: "", stdout: originalConfig }
+    if (command === SSHD_DRY_RUN_MKTEMP_10) {
+      return { code: 0, stderr: "", stdout: SSHD_DRY_RUN_TEMP_PATH_10 }
+    }
+    const ssProbePort = assertExpectedSsProbe(command, [2222])
+    if (ssProbePort !== undefined) {
+      return { code: 0, stderr: "", stdout: ssProbeListeningStdout(ssProbePort) }
+    }
+    return { code: 0, stderr: "", stdout: "" }
+  })
+}
+
+function sequenceUfwStatus(mockSsh: ReturnType<typeof createMockSsh>, statuses: readonly string[]) {
+  const originalOutput = mockSsh.output.bind(mockSsh)
+  let statusIndex = 0
+  return vi.spyOn(mockSsh, "output").mockImplementation(async (command) => {
+    if (command !== "ufw status") return originalOutput(command)
+    const status = statuses[statusIndex] ?? statuses.at(-1)
+    statusIndex += 1
+    return status
+  })
+}
+
 describe("sshd.port — apply: ufw lockout guard", () => {
   it("fails-closed when ufw is active and the target port has no allow rule", async () => {
     const ssh = createMockSsh({
@@ -358,6 +387,33 @@ describe("sshd.port — apply: ufw lockout guard", () => {
     expect(execCommands).toContain("systemctl restart sshd")
     expect(execCommands).toContain(ssProbeCommand(2222))
     expect(execCommands).not.toContain(ssProbeCommand(22))
+  })
+
+  it("rolls back and fails-closed when ufw starts blocking the target port after the config write", async () => {
+    const originalConfig = "Port 22\n"
+    const targetConfig = "Port 2222\n"
+    const ssh = createMockSsh({
+      [`sshd -t -f '${SSHD_DRY_RUN_TEMP_PATH_10}'`]: { code: 0 },
+      [CAT_SSHD]: { stdout: originalConfig },
+    })
+    sequenceUfwStatus(ssh, [UFW_STATUS_ACTIVE_PORT_2222_ALLOWED, UFW_STATUS_ACTIVE_PORT_22_ONLY])
+    const writtenFiles = trackWriteFile(ssh)
+    const execSpy = spyExecForUfwRaceAfterConfigWrite(ssh, originalConfig)
+    const addPortSpy = vi.spyOn(ssh, "addPort")
+
+    const mod = sshd.port(2222)
+    const result = await mod.apply(ssh, emptyEnv)
+
+    expect(result.status).toBe("failed")
+    expect(result.error?.message).toContain("ufw is active")
+    expect(writtenFiles.filter((write) => write.path === SSHD_CONFIG)).toStrictEqual([
+      { content: targetConfig, path: SSHD_CONFIG },
+      { content: originalConfig, path: SSHD_CONFIG },
+    ])
+    expect(addPortSpy).not.toHaveBeenCalled()
+    const execCommands = execSpy.mock.calls.map((args) => args[0])
+    expect(execCommands).not.toContain("systemctl restart sshd")
+    expect(execCommands).not.toContain(ssProbeCommand(2222))
   })
 
   it("proceeds when ufw is active and the target port is allowed for TCP", async () => {
