@@ -321,6 +321,14 @@ function removeFstabEntry(fstabContent: string, path: string): string {
   return `${result.join("\n")}\n`
 }
 
+async function readFstabForCheck(ssh: SshConnection): Promise<null | string> {
+  try {
+    return await ssh.readFile(FSTAB_PATH)
+  } catch {
+    return null
+  }
+}
+
 async function removePersistedMountIfPresent(
   ssh: SshConnection,
   path: string
@@ -708,7 +716,8 @@ export const mount = {
         if (liveProbe.kind !== LIVE_MOUNT_NOT_MOUNTED) return NEEDS_APPLY
 
         if (persist) {
-          const fstabContent = await ssh.readFile(FSTAB_PATH)
+          const fstabContent = await readFstabForCheck(ssh)
+          if (fstabContent == null) return NEEDS_APPLY
           const entry = findFstabEntry(fstabContent, path)
           if (entry !== null) return NEEDS_APPLY
         }
@@ -789,7 +798,8 @@ export const mount = {
         if (!liveMountMatchesDesired(live, { fstype, opts, src })) return NEEDS_APPLY
 
         if (persist) {
-          const fstabContent = await ssh.readFile(FSTAB_PATH)
+          const fstabContent = await readFstabForCheck(ssh)
+          if (fstabContent == null) return NEEDS_APPLY
           const desiredLine = buildFstabLine({ fstype, opts, path, src })
           const existingEntry = findFstabEntry(fstabContent, path)
           if (existingEntry !== desiredLine) return NEEDS_APPLY

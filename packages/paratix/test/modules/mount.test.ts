@@ -341,6 +341,27 @@ describe("mount.present — check", () => {
     expect(result).toBe("needs-apply")
   })
 
+  it("returns needs-apply when fstab cannot be read", async () => {
+    const mockSsh = createMockSsh({
+      [findmntCheckCmd]: { code: 0, stdout: liveMountStdout },
+    })
+    let readAttempted = false
+    // eslint-disable-next-line @typescript-eslint/require-await -- Mock implementation
+    mockSsh.readFile = async (): Promise<string> => {
+      readAttempted = true
+      throw new Error("permission denied")
+    }
+    const mod = mount.present({
+      fstype: mountFstype,
+      opts: mountOpts,
+      path: mountPath,
+      src: mountSrc,
+    })
+    const result = await mod.check(mockSsh, emptyEnv)
+    expect(result).toBe("needs-apply")
+    expect(readAttempted).toBe(true)
+  })
+
   it("returns ok when mounted (persist: false, no fstab check)", async () => {
     const mockSsh = createMockSsh({
       [findmntCheckCmd]: { code: 0, stdout: liveMountStdout },
@@ -1346,6 +1367,22 @@ describe("mount.absent — check", () => {
     const mod = mount.absent({ path: mountPath })
     const result = await mod.check(mockSsh, emptyEnv)
     expect(result).toBe("needs-apply")
+  })
+
+  it("returns needs-apply when fstab cannot be read", async () => {
+    const mockSsh = createMockSsh({
+      [findmntCheckCmd]: { code: 1 },
+    })
+    let readAttempted = false
+    // eslint-disable-next-line @typescript-eslint/require-await -- Mock implementation
+    mockSsh.readFile = async (): Promise<string> => {
+      readAttempted = true
+      throw new Error("permission denied")
+    }
+    const mod = mount.absent({ path: mountPath })
+    const result = await mod.check(mockSsh, emptyEnv)
+    expect(result).toBe("needs-apply")
+    expect(readAttempted).toBe(true)
   })
 
   it("returns ok when not mounted (persist: false)", async () => {
