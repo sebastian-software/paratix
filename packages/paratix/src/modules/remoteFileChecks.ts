@@ -102,6 +102,21 @@ export async function findSymlinkInAncestorWalk(
   return null
 }
 
+export async function findSymlinkInAncestors(
+  ssh: SshConnection,
+  remotePath: string
+): Promise<null | string> {
+  let ancestor = posix.dirname(remotePath)
+  const seen = new Set<string>()
+  while (ancestor !== "/" && ancestor !== "." && !seen.has(ancestor)) {
+    seen.add(ancestor)
+    // eslint-disable-next-line no-await-in-loop -- ancestor walk is sequential by nature
+    if (await isSymlink(ssh, ancestor)) return ancestor
+    ancestor = posix.dirname(ancestor)
+  }
+  return null
+}
+
 export function verifiedPhysicalDirectoryCommand(directory: string, command: string): string {
   const quotedDirectory = shellQuote(directory)
   return `[ ! -L ${quotedDirectory} ] && [ -d ${quotedDirectory} ] && cd -P -- ${quotedDirectory} && [ "$(pwd -P)" = ${quotedDirectory} ] && ${command}`

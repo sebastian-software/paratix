@@ -26,7 +26,12 @@ import {
   renderGuardedChownCommand,
   resolveWriteMode,
 } from "./fileMetadataHelpers.js"
-import { isRegularFileWithoutSymlink, isSymlink } from "./remoteFileChecks.js"
+import {
+  findSymlinkInAncestors,
+  isRegularFileWithoutSymlink,
+  isSymlink,
+  verifiedPhysicalDirectoryCommand,
+} from "./remoteFileChecks.js"
 
 export type { BlockOptions } from "./fileExtra.js"
 
@@ -75,6 +80,14 @@ function validateAbsentPath(remotePath: string): void {
 async function absentPathExists(ssh: SshConnection, remotePath: string): Promise<boolean> {
   const quotedPath = shellQuote(remotePath)
   return ssh.test(`[ -e ${quotedPath} ] || [ -L ${quotedPath} ]`)
+}
+
+function buildAbsentRemoveCommand(remotePath: string): string {
+  const parent = posix.dirname(remotePath)
+  return verifiedPhysicalDirectoryCommand(
+    parent,
+    `rm -rf -- ${shellQuote(posix.basename(remotePath))}`
+  )
 }
 
 /**
@@ -333,8 +346,14 @@ export const file = {
       async apply(ssh: null | SshConnection): Promise<ModuleResult> {
         if (!ssh) return failed(`[file.absent: ${remotePath}] SSH connection is required`)
         if (!(await absentPathExists(ssh, remotePath))) return { status: "ok" }
+        const symlinkedAncestor = await findSymlinkInAncestors(ssh, remotePath)
+        if (symlinkedAncestor !== null) {
+          return failed(
+            `[file.absent: ${remotePath}] ancestor must not be a symlink: ${symlinkedAncestor}`
+          )
+        }
 
-        const result = await ssh.exec(`rm -rf -- ${shellQuote(remotePath)}`, {
+        const result = await ssh.exec(buildAbsentRemoveCommand(remotePath), {
           ignoreExitCode: true,
           silent: true,
         })
