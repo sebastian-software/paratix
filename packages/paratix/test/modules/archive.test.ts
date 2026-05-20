@@ -19,6 +19,8 @@ const srcHash = "2889be4b654d6b7f7922971e7fb3fdf1c5ebd92b9c52462be2683a735c7562e
 const marker = `/var/lib/paratix/flags/archive-${srcHash}.sha256`
 const membersMarker = `${marker}.members`
 const archiveSha = "abc123def456"
+const extractedFileMember = { kind: "file", path: `${destination}/app/file` } as const
+const extractedFileTypeProbe = `[ -f '${destination}/app/file' ] && [ ! -L '${destination}/app/file' ]`
 
 const archiveSymlinkCheckPaths = [
   "/opt",
@@ -131,6 +133,10 @@ function tarListingForMemberPaths(memberPaths: string[]): string {
   return memberPaths
     .map((memberPath) => `-rw-r--r-- root/root 0 1970-01-01 00:00 ${memberPath}`)
     .join("\n")
+}
+
+function validMembersMarkerResponse(member = extractedFileMember): ExecResult {
+  return { code: 0, stderr: "", stdout: JSON.stringify([member]) }
 }
 
 async function waitForTrackedExecTick(): Promise<void> {
@@ -324,14 +330,11 @@ describe("archive.extract — check", () => {
 
   it("returns ok when marker matches remote archive sha256", async () => {
     const mockSsh = createMockSsh({
-      [`[ -f '${destination}/app/file' ] && [ ! -L '${destination}/app/file' ]`]: { code: 0 },
       [`cat '${marker}'`]: { code: 0, stdout: archiveSha },
-      [`cat '${membersMarker}'`]: {
-        code: 0,
-        stdout: JSON.stringify([{ kind: "file", path: `${destination}/app/file` }]),
-      },
+      [`cat '${membersMarker}'`]: validMembersMarkerResponse(),
       [`test -d '${destination}'`]: { code: 0 },
       [`test -f '${marker}'`]: { code: 0 },
+      [extractedFileTypeProbe]: { code: 0 },
     })
     vi.spyOn(mockSsh, "sha256").mockResolvedValue(archiveSha)
     const mod = archive.extract(src, destination)
@@ -341,13 +344,10 @@ describe("archive.extract — check", () => {
 
   it("returns needs-apply when an extracted member was deleted after extraction", async () => {
     const mockSsh = createMockSsh({
-      [`[ -f '${destination}/app/file' ] && [ ! -L '${destination}/app/file' ]`]: { code: 1 },
-      [`cat '${membersMarker}'`]: {
-        code: 0,
-        stdout: JSON.stringify([{ kind: "file", path: `${destination}/app/file` }]),
-      },
+      [`cat '${membersMarker}'`]: validMembersMarkerResponse(),
       [`test -d '${destination}'`]: { code: 0 },
       [`test -f '${marker}'`]: { code: 0 },
+      [extractedFileTypeProbe]: { code: 1 },
     })
     const mod = archive.extract(src, destination)
     const result = await mod.check(mockSsh, emptyEnv)
@@ -419,12 +419,8 @@ describe("archive.extract — check", () => {
     const ownerPathsMarker = `${marker}.owner-paths`
     const mockSsh = createMockSsh({
       [`[ -e '${destination}/app/file' ] || [ -L '${destination}/app/file' ]`]: { code: 0 },
-      [`[ -f '${destination}/app/file' ] && [ ! -L '${destination}/app/file' ]`]: { code: 0 },
       [`cat '${marker}'`]: { code: 0, stdout: archiveSha },
-      [`cat '${membersMarker}'`]: {
-        code: 0,
-        stdout: JSON.stringify([{ kind: "file", path: `${destination}/app/file` }]),
-      },
+      [`cat '${membersMarker}'`]: validMembersMarkerResponse(),
       [`cat '${ownerPathsMarker}'`]: {
         code: 0,
         stdout: JSON.stringify([`${destination}/app/file`]),
@@ -435,6 +431,7 @@ describe("archive.extract — check", () => {
       },
       [`test -d '${destination}'`]: { code: 0 },
       [`test -f '${marker}'`]: { code: 0 },
+      [extractedFileTypeProbe]: { code: 0 },
     })
     vi.spyOn(mockSsh, "sha256").mockResolvedValue(archiveSha)
     const mod = archive.extract(src, destination, { owner: "www-data:www-data" })
@@ -446,6 +443,7 @@ describe("archive.extract — check", () => {
     const ownerPathsMarker = `${marker}.owner-paths`
     const mockSsh = createMockSsh({
       [`[ -e '${destination}/app/file' ] || [ -L '${destination}/app/file' ]`]: { code: 0 },
+      [`cat '${membersMarker}'`]: validMembersMarkerResponse(),
       [`cat '${ownerPathsMarker}'`]: {
         code: 0,
         stdout: JSON.stringify([`${destination}/app/file`]),
@@ -456,10 +454,13 @@ describe("archive.extract — check", () => {
       },
       [`test -d '${destination}'`]: { code: 0 },
       [`test -f '${marker}'`]: { code: 0 },
+      [extractedFileTypeProbe]: { code: 0 },
     })
     const mod = archive.extract(src, destination, { owner: "www-data:www-data" })
     const result = await mod.check(mockSsh, emptyEnv)
     expect(result).toBe("needs-apply")
+    expect(mockSsh.calls).toContain(`cat '${ownerPathsMarker}'`)
+    expect(mockSsh.calls).toContain(`stat -c '%U %G' -- '${destination}/app/file'`)
     expect(mockSsh.calls).not.toContain(`cat '${marker}'`)
   })
 
@@ -508,13 +509,17 @@ describe("archive.extract — check", () => {
   it("returns needs-apply when marker does not match remote archive sha256", async () => {
     const mockSsh = createMockSsh({
       [`cat '${marker}'`]: { code: 0, stdout: "old-hash" },
+      [`cat '${membersMarker}'`]: validMembersMarkerResponse(),
       [`test -d '${destination}'`]: { code: 0 },
       [`test -f '${marker}'`]: { code: 0 },
+      [extractedFileTypeProbe]: { code: 0 },
     })
-    vi.spyOn(mockSsh, "sha256").mockResolvedValue("new-hash")
+    const sha256Spy = vi.spyOn(mockSsh, "sha256").mockResolvedValue("new-hash")
     const mod = archive.extract(src, destination)
     const result = await mod.check(mockSsh, emptyEnv)
     expect(result).toBe("needs-apply")
+    expect(mockSsh.calls).toContain(`cat '${marker}'`)
+    expect(sha256Spy).toHaveBeenCalledWith(src)
   })
 
   it("uses a distinct marker for a second destination with the same archive", async () => {
@@ -539,12 +544,15 @@ describe("archive.extract — check", () => {
     // past the runner.
     const mockSsh = createMockSsh({
       [`cat '${marker}'`]: { code: 1, stderr: `cat: '${marker}': Permission denied` },
+      [`cat '${membersMarker}'`]: validMembersMarkerResponse(),
       [`test -d '${destination}'`]: { code: 0 },
       [`test -f '${marker}'`]: { code: 0 },
+      [extractedFileTypeProbe]: { code: 0 },
     })
     const mod = archive.extract(src, destination)
     const result = await mod.check(mockSsh, emptyEnv)
     expect(result).toBe("needs-apply")
+    expect(mockSsh.calls).toContain(`cat '${marker}'`)
   })
 
   it("R-0000105: returns needs-apply when marker cat reports 'No such file'", async () => {
@@ -553,12 +561,15 @@ describe("archive.extract — check", () => {
     // test -f already failed.
     const mockSsh = createMockSsh({
       [`cat '${marker}'`]: { code: 1, stderr: `cat: '${marker}': No such file or directory` },
+      [`cat '${membersMarker}'`]: validMembersMarkerResponse(),
       [`test -d '${destination}'`]: { code: 0 },
       [`test -f '${marker}'`]: { code: 0 },
+      [extractedFileTypeProbe]: { code: 0 },
     })
     const mod = archive.extract(src, destination)
     const result = await mod.check(mockSsh, emptyEnv)
     expect(result).toBe("needs-apply")
+    expect(mockSsh.calls).toContain(`cat '${marker}'`)
   })
 
   it("R-0000276: returns needs-apply when owner-paths marker cat fails with permission denied", async () => {
@@ -570,6 +581,7 @@ describe("archive.extract — check", () => {
     const ownerPathsMarker = `${marker}.owner-paths`
     const mockSsh = createMockSsh({
       [`[ -e '${destination}/app/file' ] || [ -L '${destination}/app/file' ]`]: { code: 0 },
+      [`cat '${membersMarker}'`]: validMembersMarkerResponse(),
       [`cat '${ownerPathsMarker}'`]: {
         code: 1,
         stderr: `cat: '${ownerPathsMarker}': Permission denied`,
@@ -581,10 +593,14 @@ describe("archive.extract — check", () => {
       [`tar -tvzf '${src}'`]: { code: 0, stdout: safeTarListing },
       [`test -d '${destination}'`]: { code: 0 },
       [`test -f '${marker}'`]: { code: 0 },
+      [extractedFileTypeProbe]: { code: 0 },
     })
     const mod = archive.extract(src, destination, { owner: "www-data:www-data" })
     const result = await mod.check(mockSsh, emptyEnv)
     expect(result).toBe("needs-apply")
+    expect(mockSsh.calls).toContain(`cat '${ownerPathsMarker}'`)
+    expect(mockSsh.calls).toContain(`tar -tvzf '${src}'`)
+    expect(mockSsh.calls).toContain(`stat -c '%U %G' -- '${destination}/app/file'`)
   })
 
   it("computes local sha256 when upload is true without uploading", async () => {
@@ -667,6 +683,7 @@ describe("archive.extract — check", () => {
 
     const mockSsh = createMockSsh({
       [`[ -e '${destination}/app/file' ] || [ -L '${destination}/app/file' ]`]: { code: 0 },
+      [`cat '${localMarker}.members'`]: validMembersMarkerResponse(),
       [`cat '${ownerPathsMarker}'`]: {
         code: 0,
         stdout: JSON.stringify([`${destination}/app/file`]),
@@ -677,6 +694,7 @@ describe("archive.extract — check", () => {
       },
       [`test -d '${destination}'`]: { code: 0 },
       [`test -f '${localMarker}'`]: { code: 0 },
+      [extractedFileTypeProbe]: { code: 0 },
     })
     vi.spyOn(mockSsh, "uploadFile").mockResolvedValue()
 
@@ -686,6 +704,8 @@ describe("archive.extract — check", () => {
     })
     const result = await mod.check(mockSsh, emptyEnv)
     expect(result).toBe("needs-apply")
+    expect(mockSsh.calls).toContain(`cat '${ownerPathsMarker}'`)
+    expect(mockSsh.calls).toContain(`stat -c '%U %G' -- '${destination}/app/file'`)
     expect(mockSsh.calls).not.toContain(`cat '${localMarker}'`)
     expect(mockSsh.uploadFile).not.toHaveBeenCalled()
   })
