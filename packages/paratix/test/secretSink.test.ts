@@ -359,12 +359,13 @@ describe("withRunScopedSecrets", () => {
       registerRunScopedSecret("outer-run-secret")
       await withRunScopedSecrets(async () => {
         registerRunScopedSecret("inner-run-secret")
+        await Promise.resolve()
       })
       observedAfterNestedScope = getRegisteredSecrets()
     })
 
     expect(new Set(observedAfterNestedScope)).toStrictEqual(
-      new Set(["outer-run-secret", "inner-run-secret"])
+      new Set(["inner-run-secret", "outer-run-secret"])
     )
     expect(getRegisteredSecrets()).toStrictEqual([])
   })

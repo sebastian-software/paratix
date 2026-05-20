@@ -21,10 +21,12 @@ const CREATE_PARATIX_SPECIFIER = `${CREATE_PARATIX_NAME}@${DEFAULT_STABLE_VERSIO
 const PARATIX_SPECIFIER = `${PARATIX_NAME}@${DEFAULT_STABLE_VERSION}`
 const BOTH_PACKAGE_SPECIFIERS = [CREATE_PARATIX_SPECIFIER, PARATIX_SPECIFIER]
 const GIT_HEAD_SHA = "1234567890abcdef"
+const GIT_REV_PARSE_HEAD_COMMAND = "rev-parse HEAD"
+const GIT_SYMBOLIC_REF_BRANCH_COMMAND = "symbolic-ref --quiet --short HEAD"
 const GIT_PREFLIGHT_CALLS = [
   ["git", "rev-parse", "--show-toplevel"],
   ["git", "status", "--porcelain=v1", "--untracked-files=normal"],
-  ["git", "symbolic-ref", "--quiet", "--short", "HEAD"],
+  ["git", ...GIT_SYMBOLIC_REF_BRANCH_COMMAND.split(" ")],
 ]
 const BETA_PRERELEASE_VERSION = `${DEFAULT_STABLE_VERSION}-beta.1`
 const STABLE_BUILD_METADATA_VERSION = `${DEFAULT_STABLE_VERSION}+build.5`
@@ -236,9 +238,9 @@ function createMissingPackageError() {
 function createGitCommandHandler({ gitBranch, gitHeadSha, gitRepositoryRoot, gitStatus }) {
   const stdoutByCommand = new Map([
     ["rev-parse --show-toplevel", `${gitRepositoryRoot}\n`],
-    ["rev-parse HEAD", `${gitHeadSha}\n`],
+    [GIT_REV_PARSE_HEAD_COMMAND, `${gitHeadSha}\n`],
     ["status --porcelain=v1 --untracked-files=normal", gitStatus],
-    ["symbolic-ref --quiet --short HEAD", `${gitBranch}\n`],
+    [GIT_SYMBOLIC_REF_BRANCH_COMMAND, `${gitBranch}\n`],
   ])
 
   return (commandArguments) => {
@@ -506,8 +508,8 @@ describe("publishWorkspacePackages", () => {
       fs: createFs(),
     })
 
-    assert.equal(hasGitCommandCall(commandRunner.calls, "rev-parse HEAD"), true)
-    assert.equal(hasGitCommandCall(commandRunner.calls, "symbolic-ref --quiet --short HEAD"), false)
+    assert.equal(hasGitCommandCall(commandRunner.calls, GIT_REV_PARSE_HEAD_COMMAND), true)
+    assert.equal(hasGitCommandCall(commandRunner.calls, GIT_SYMBOLIC_REF_BRANCH_COMMAND), false)
     assert.equal(hasCommandCall(commandRunner.calls, "pnpm"), false)
   })
 
@@ -549,8 +551,8 @@ describe("publishWorkspacePackages", () => {
       "expected checked-out HEAD"
     )
 
-    assert.equal(hasGitCommandCall(commandRunner.calls, "rev-parse HEAD"), true)
-    assert.equal(hasGitCommandCall(commandRunner.calls, "symbolic-ref --quiet --short HEAD"), false)
+    assert.equal(hasGitCommandCall(commandRunner.calls, GIT_REV_PARSE_HEAD_COMMAND), true)
+    assert.equal(hasGitCommandCall(commandRunner.calls, GIT_SYMBOLIC_REF_BRANCH_COMMAND), false)
     assert.equal(hasCommandCall(commandRunner.calls, "npm"), false)
     assert.equal(hasCommandCall(commandRunner.calls, "pnpm"), false)
   })
