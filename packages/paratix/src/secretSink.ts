@@ -91,6 +91,17 @@ export function registerRunScopedSecret(secret: string): void {
 }
 
 /**
+ * Check whether long-lived secret registrations can currently be tied to a
+ * run-scoped cleanup boundary.
+ *
+ * @returns `true` when {@link registerRunScopedSecret} can attach cleanup to
+ *   the active playbook or direct-apply run scope.
+ */
+export function hasActiveRunScopedSecretScope(): boolean {
+  return runScopedSecretCounts.getStore() != null
+}
+
+/**
  * Decrement the registration count for a previously registered secret. When
  * the counter reaches zero the value is forgotten so the sink does not grow
  * unboundedly across long-running CLI sessions.

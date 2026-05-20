@@ -270,6 +270,24 @@ describe("op.resolve — apply", () => {
     expect(getRegisteredSecrets()).not.toContain(code)
   })
 
+  it("does not persist direct-apply 8-digit OTP codes after resolving OTP meta", async () => {
+    const otpauthUri =
+      "otpauth://totp/Test?secret=GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ&period=30&digits=8"
+    mockSpawnWith(`${otpauthUri}\n`)
+
+    const module_ = op.resolve({ token: "op://vault/item/one-time-password" })
+    // eslint-disable-next-line prefer-spread
+    const result = await module_.apply(null, emptyEnv)
+
+    expect(result.status).toBe("ok")
+    const metaEnvironment = await mergeEnvironmentFromMeta({}, result.meta)
+    const code = await resolveEnvironment(metaEnvironment, "token")
+
+    expect(code).toMatch(/^\d{8}$/v)
+    expect(getRegisteredSecrets()).not.toContain(otpauthUri)
+    expect(getRegisteredSecrets()).not.toContain(code)
+  })
+
   it("recognises OTP fields by /one-time-password suffix", async () => {
     const otpauthUri =
       "otpauth://totp/Test?secret=GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ&period=30&digits=6"

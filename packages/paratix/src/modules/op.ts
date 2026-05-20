@@ -5,7 +5,11 @@ import type { Environment, Module, ModuleResult } from "../types.js"
 import { environmentToMetaEntries } from "../meta.js"
 import { failed } from "../moduleFailure.js"
 import { getRunnerAbortSignal } from "../runnerAbortSignal.js"
-import { registerRunScopedSecret, withRunScopedSecrets } from "../secretSink.js"
+import {
+  hasActiveRunScopedSecretScope,
+  registerRunScopedSecret,
+  withRunScopedSecrets,
+} from "../secretSink.js"
 import { maskSecrets } from "../sshHelpers.js"
 import { generateTotpCode } from "../totp.js"
 import {
@@ -373,7 +377,9 @@ async function resolveOtpReferences(
       // top-level message stays free of the secret.
       try {
         const code = generateTotpCode(otpauthUri)
-        registerRunScopedSecret(code)
+        if (hasActiveRunScopedSecretScope()) {
+          registerRunScopedSecret(code)
+        }
         return code
       } catch (error) {
         throw new Error(`Failed to generate TOTP code for ${JSON.stringify(name)}`, {
