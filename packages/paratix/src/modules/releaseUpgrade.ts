@@ -66,6 +66,10 @@ type ReleaseUpgradeOptions = {
   timeout?: number
 }
 
+type DebianCurrentCodenameResult =
+  | { codename: string; status: "ok" }
+  | { failure: ModuleResult; status: "failed" }
+
 /**
  * Detect the Linux distribution of the remote host by reading
  * `/etc/os-release`. See {@link parseOsReleaseDistro} for the comparison
@@ -84,14 +88,26 @@ async function detectDistro(ssh: SshConnection): Promise<Distro | null> {
  * Return the current Debian/Ubuntu release codename via `lsb_release -cs`.
  *
  * @param ssh - Active SSH connection to the remote host.
- * @returns The codename string (e.g. `"bookworm"` or `"noble"`).
+ * @returns A structured result containing the codename or failure details.
  */
-async function getDebianCurrentCodename(ssh: SshConnection): Promise<string> {
-  const codename = await ssh.output("lsb_release -cs")
-  if (!CODENAME_RE.test(codename)) {
-    throw new Error(`Invalid codename from lsb_release: ${JSON.stringify(codename)}`)
+async function readDebianCurrentCodename(ssh: SshConnection): Promise<DebianCurrentCodenameResult> {
+  const result = await ssh.exec("lsb_release -cs", { ignoreExitCode: true, silent: true })
+  if (result.code !== 0) {
+    return {
+      failure: failedCommand("[releaseUpgrade.upgrade] lsb_release -cs failed", result),
+      status: "failed",
+    }
   }
-  return codename
+  const codename = result.stdout.trim()
+  if (!CODENAME_RE.test(codename)) {
+    return {
+      failure: failed(
+        `[releaseUpgrade.upgrade] invalid codename from lsb_release: ${JSON.stringify(codename)}`
+      ),
+      status: "failed",
+    }
+  }
+  return { codename, status: "ok" }
 }
 
 /**
@@ -1064,7 +1080,9 @@ async function runDebianUpgradeCriticalSection(parameters: {
   targetCodename: string
 }): Promise<ModuleResult> {
   const { options, ssh, targetCodename } = parameters
-  const currentCodename = await getDebianCurrentCodename(ssh)
+  const currentCodenameResult = await readDebianCurrentCodename(ssh)
+  if (currentCodenameResult.status === "failed") return currentCodenameResult.failure
+  const { codename: currentCodename } = currentCodenameResult
   if (currentCodename === targetCodename) return { status: "ok" }
 
   if (!isSupportedDebianUpgradePath(currentCodename, targetCodename)) {
@@ -1142,7 +1160,9 @@ async function applyDebian(
   ssh: SshConnection,
   options: ReleaseUpgradeOptions
 ): Promise<ModuleResult> {
-  const currentCodename = await getDebianCurrentCodename(ssh)
+  const currentCodenameResult = await readDebianCurrentCodename(ssh)
+  if (currentCodenameResult.status === "failed") return currentCodenameResult.failure
+  const { codename: currentCodename } = currentCodenameResult
   // R-0000715: `getDebianStableCodename` now enforces the allowlist directly
   // (see `isAllowedDebianStableTargetCodename` inside that helper). A
   // rejected codename surfaces here as a thrown error, which we convert into
@@ -1241,7 +1261,9 @@ export const releaseUpgrade = {
 
         // Debian: compare current codename to stable
         try {
-          const currentCodename = await getDebianCurrentCodename(ssh)
+          const currentCodenameResult = await readDebianCurrentCodename(ssh)
+          if (currentCodenameResult.status === "failed") return NEEDS_APPLY
+          const { codename: currentCodename } = currentCodenameResult
           const targetCodename = await getDebianStableCodename(ssh)
           return currentCodename === targetCodename ? "ok" : NEEDS_APPLY
         } catch {

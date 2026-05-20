@@ -186,23 +186,6 @@ function installSequencedExec(
   return { callCount: () => calls }
 }
 
-function installSequencedOutput(
-  ssh: ReturnType<typeof createMockSsh>,
-  command: string,
-  outputs: string[]
-): { callCount: () => number } {
-  const originalOutput = ssh.output.bind(ssh)
-  let calls = 0
-  const output: typeof ssh.output = async (nextCommand) => {
-    if (nextCommand !== command) return originalOutput(nextCommand)
-    const response = outputs[calls] ?? outputs.at(-1)!
-    calls += 1
-    return response
-  }
-  Object.assign(ssh, { output })
-  return { callCount: () => calls }
-}
-
 // Helper: build responses for Ubuntu check/apply
 function ubuntuResponses(
   upgradeCheckCode: number,
@@ -669,11 +652,84 @@ describe("releaseUpgrade.upgrade — apply (Debian)", () => {
 
   it("rechecks the Debian codename after acquiring the mutex and skips stale work", async () => {
     const ssh = createMockSsh(debianApplyResponses("bookworm", "trixie"))
-    const codenameProbe = installSequencedOutput(ssh, "lsb_release -cs", ["bookworm", "trixie"])
+    const codenameProbe = installSequencedExec(ssh, "lsb_release -cs", [
+      { code: 0, stdout: "bookworm\n" },
+      { code: 0, stdout: "trixie\n" },
+    ])
     const mod = releaseUpgrade.upgrade()
     const result = await mod.apply(ssh, emptyEnv)
 
     expect(result.status).toBe("ok")
+    expect(codenameProbe.callCount()).toBe(2)
+    expect(ssh.calls).toContain("mkdir /var/lib/paratix/flags/'release-upgrade-mutex'")
+    expect(ssh.calls).not.toContain(readSourcesCommand("/etc/apt/sources.list"))
+    expect(ssh.calls).not.toContain("DEBIAN_FRONTEND=noninteractive apt-get update")
+    expect(ssh.calls.some((call) => isReleaseUpgradeVerifiedRelease(call))).toBe(true)
+  })
+
+  it("returns failed when the initial Debian codename command fails", async () => {
+    const ssh = createMockSsh(
+      debianApplyResponses("bookworm", "trixie", {
+        "lsb_release -cs": { code: 1, stderr: "lsb_release: command not found\n" },
+      })
+    )
+    const mod = releaseUpgrade.upgrade()
+    const result = await mod.apply(ssh, emptyEnv)
+
+    expect(result.status).toBe("failed")
+    expect(String(result.error)).toContain("lsb_release -cs failed")
+    expect(String(result.error)).toContain("command not found")
+    expect(ssh.calls).not.toContain(DEBIAN_INRELEASE_VERIFY_COMMAND)
+    expect(ssh.calls).not.toContain("mkdir /var/lib/paratix/flags/'release-upgrade-mutex'")
+  })
+
+  it("returns failed when the initial Debian codename output is invalid", async () => {
+    const ssh = createMockSsh(
+      debianApplyResponses("bookworm", "trixie", {
+        "lsb_release -cs": { code: 0, stdout: "book worm\n" },
+      })
+    )
+    const mod = releaseUpgrade.upgrade()
+    const result = await mod.apply(ssh, emptyEnv)
+
+    expect(result.status).toBe("failed")
+    expect(String(result.error)).toContain("invalid codename from lsb_release")
+    expect(String(result.error)).toContain('"book worm"')
+    expect(ssh.calls).not.toContain(DEBIAN_INRELEASE_VERIFY_COMMAND)
+    expect(ssh.calls).not.toContain("mkdir /var/lib/paratix/flags/'release-upgrade-mutex'")
+  })
+
+  it("returns failed when the Debian mutex recheck codename command fails", async () => {
+    const ssh = createMockSsh(debianApplyResponses("bookworm", "trixie"))
+    const codenameProbe = installSequencedExec(ssh, "lsb_release -cs", [
+      { code: 0, stdout: "bookworm\n" },
+      { code: 1, stderr: "lsb_release: failed during recheck\n" },
+    ])
+    const mod = releaseUpgrade.upgrade()
+    const result = await mod.apply(ssh, emptyEnv)
+
+    expect(result.status).toBe("failed")
+    expect(String(result.error)).toContain("lsb_release -cs failed")
+    expect(String(result.error)).toContain("failed during recheck")
+    expect(codenameProbe.callCount()).toBe(2)
+    expect(ssh.calls).toContain("mkdir /var/lib/paratix/flags/'release-upgrade-mutex'")
+    expect(ssh.calls).not.toContain(readSourcesCommand("/etc/apt/sources.list"))
+    expect(ssh.calls).not.toContain("DEBIAN_FRONTEND=noninteractive apt-get update")
+    expect(ssh.calls.some((call) => isReleaseUpgradeVerifiedRelease(call))).toBe(true)
+  })
+
+  it("returns failed when the Debian mutex recheck codename output is invalid", async () => {
+    const ssh = createMockSsh(debianApplyResponses("bookworm", "trixie"))
+    const codenameProbe = installSequencedExec(ssh, "lsb_release -cs", [
+      { code: 0, stdout: "bookworm\n" },
+      { code: 0, stdout: "book worm\n" },
+    ])
+    const mod = releaseUpgrade.upgrade()
+    const result = await mod.apply(ssh, emptyEnv)
+
+    expect(result.status).toBe("failed")
+    expect(String(result.error)).toContain("invalid codename from lsb_release")
+    expect(String(result.error)).toContain('"book worm"')
     expect(codenameProbe.callCount()).toBe(2)
     expect(ssh.calls).toContain("mkdir /var/lib/paratix/flags/'release-upgrade-mutex'")
     expect(ssh.calls).not.toContain(readSourcesCommand("/etc/apt/sources.list"))
