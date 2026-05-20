@@ -4,6 +4,7 @@ import { appendFile, mkdir, readFile, stat } from "node:fs/promises"
 import { homedir } from "node:os"
 import { join } from "node:path"
 
+import { describeHostValidationFailure, validateHostLabel } from "./hostValidation.js"
 import { matchesKnownHostPatternList } from "./knownHostPatterns.js"
 import { shellQuote } from "./sshHelpers.js"
 
@@ -212,6 +213,14 @@ function formatHostNeedle(host: string, port: number): string {
   return port === DEFAULT_SSH_PORT ? host : `[${host}]:${port}`
 }
 
+function assertSafeHostForKnownHosts(host: string): void {
+  const hostValidationFailure = validateHostLabel(host)
+  if (hostValidationFailure == null) return
+  throw new Error(
+    `Refusing to persist known_hosts entry: host label ${describeHostValidationFailure(hostValidationFailure)}`
+  )
+}
+
 function matchesKnownHostEntry(entry: KnownHostEntry, needle: string): boolean {
   return matchesKnownHostPatternList(entry.hostPatterns ?? [entry.host], needle)
 }
@@ -389,6 +398,7 @@ export function computeFingerprint(key: Buffer): string {
  * @param keyBuffer - The raw public key buffer.
  */
 export async function appendHostKey(host: string, port: number, keyBuffer: Buffer): Promise<void> {
+  assertSafeHostForKnownHosts(host)
   const hostLabel = formatHostNeedle(host, port)
   const algo = extractAlgoFromKey(keyBuffer)
   const base64Key = keyBuffer.toString("base64")

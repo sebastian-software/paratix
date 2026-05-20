@@ -49,6 +49,31 @@ describe("meta builders and guards", () => {
     expect(isSystemHostMetaEntry(hostEntry)).toBe(true)
     expect(isSystemRebootMetaEntry(rebootEntry)).toBe(true)
   })
+
+  it.each(["*.example.com", "host?.example.com", "!host.example.com", "host,alias"])(
+    "rejects system.host entries with OpenSSH known_hosts metacharacters (%s)",
+    (host) => {
+      expect(() => meta.systemHost(host)).toThrow(
+        "Meta entry system.host invalid host: must not contain OpenSSH known_hosts pattern metacharacters"
+      )
+    }
+  )
+
+  it.each([
+    ["bad host", "whitespace"],
+    ["bad\nhost", "control characters"],
+  ])("rejects system.host entries with %s", (host, message) => {
+    expect(() => meta.systemHost(host)).toThrow(
+      `Meta entry system.host invalid host: must not contain ${message}`
+    )
+  })
+
+  it("accepts an IPv6 system.host entry", () => {
+    expect(meta.systemHost("2001:db8::1")).toStrictEqual({
+      host: "2001:db8::1",
+      kind: "system.host",
+    })
+  })
 })
 
 describe("mergeEnvironmentFromMeta", () => {
@@ -310,6 +335,12 @@ describe("meta runtime validation", () => {
     }).toThrow("Invalid sshd.port meta entry")
     expect(() => {
       assertValidModuleMetaEntry({ host: "", kind: "system.host" })
+    }).toThrow("Invalid system.host meta entry")
+    expect(() => {
+      assertValidModuleMetaEntry({ host: "*.example.com", kind: "system.host" })
+    }).toThrow("Invalid system.host meta entry")
+    expect(() => {
+      assertValidModuleMetaEntry({ host: "bad\nhost", kind: "system.host" })
     }).toThrow("Invalid system.host meta entry")
     expect(() => {
       assertValidModuleMetaEntry({ kind: "env", name: "", value: "x" })

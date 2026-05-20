@@ -1,5 +1,6 @@
 import type { ServerDefinition } from "./types.js"
 
+import { describeHostValidationFailure, validateHostLabel } from "./hostValidation.js"
 import { validateSshConfig } from "./serverDefinitionValidation.js"
 
 function isModuleLike(value: unknown): boolean {
@@ -39,8 +40,14 @@ export function validateServerDefinition(
   config: ServerDefinition,
   options?: { allowEmptyRun?: boolean }
 ): void {
-  if (config.host.length === 0) {
+  const hostValidationFailure = validateHostLabel(config.host)
+  if (hostValidationFailure === "empty") {
     throw new Error("ServerDefinition: host is required")
+  }
+  if (hostValidationFailure != null) {
+    throw new Error(
+      `ServerDefinition: host ${describeHostValidationFailure(hostValidationFailure)}`
+    )
   }
   if (config.name.length === 0) {
     throw new Error("ServerDefinition: name is required")

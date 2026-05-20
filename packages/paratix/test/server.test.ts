@@ -41,6 +41,30 @@ describe("server", () => {
     )
   })
 
+  it.each(["*.example.com", "host?.example.com", "!host.example.com", "host,alias"])(
+    "throws when host contains an OpenSSH known_hosts metacharacter (%s)",
+    (host) => {
+      expect(() => server(validConfig({ host }) as Parameters<typeof server>[0])).toThrow(
+        "ServerDefinition: host must not contain OpenSSH known_hosts pattern metacharacters"
+      )
+    }
+  )
+
+  it.each([
+    ["bad host", "whitespace"],
+    ["bad\nhost", "control characters"],
+  ])("throws when host contains %s", (host, message) => {
+    expect(() => server(validConfig({ host }) as Parameters<typeof server>[0])).toThrow(
+      `ServerDefinition: host must not contain ${message}`
+    )
+  })
+
+  it("accepts an IPv6 host literal", () => {
+    expect(() =>
+      server(validConfig({ host: "2001:db8::1" }) as Parameters<typeof server>[0])
+    ).not.toThrow()
+  })
+
   it("throws when name is empty", () => {
     expect(() => server(validConfig({ name: "" }) as Parameters<typeof server>[0])).toThrow(
       "ServerDefinition: name is required"

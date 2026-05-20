@@ -551,6 +551,42 @@ describe("appendHostKey", () => {
     const thirdArg = (appendFileMock.mock.calls[0] as [string, string, { mode: number }])[2]
     expect(thirdArg.mode).toBe(0o600)
   })
+
+  it.each(["*.example.com", "host?.example.com", "!host.example.com", "host,alias"])(
+    "refuses to persist hosts with OpenSSH known_hosts metacharacters (%s)",
+    async (host) => {
+      const keyBuf = makeKeyBuffer("ssh-ed25519")
+
+      await expect(appendHostKey(host, 22, keyBuf)).rejects.toThrow(
+        "Refusing to persist known_hosts entry: host label must not contain OpenSSH known_hosts pattern metacharacters"
+      )
+
+      expect(appendFileMock).not.toHaveBeenCalled()
+    }
+  )
+
+  it.each([
+    ["bad host", "whitespace"],
+    ["bad\nhost", "control characters"],
+  ])("refuses to persist hosts with %s", async (host, message) => {
+    const keyBuf = makeKeyBuffer("ssh-ed25519")
+
+    await expect(appendHostKey(host, 22, keyBuf)).rejects.toThrow(
+      `Refusing to persist known_hosts entry: host label must not contain ${message}`
+    )
+
+    expect(appendFileMock).not.toHaveBeenCalled()
+  })
+
+  it("persists IPv6 host literals without treating ':' as a metacharacter", async () => {
+    const keyBuf = makeKeyBuffer("ssh-ed25519")
+    await appendHostKey("2001:db8::1", 2222, keyBuf)
+
+    const expectedLine = `[2001:db8::1]:2222 ssh-ed25519 ${keyBuf.toString("base64")}\n`
+    expect(appendFileMock).toHaveBeenCalledOnce()
+    const [, content] = appendFileMock.mock.calls[0] as [string, string, unknown]
+    expect(content).toBe(expectedLine)
+  })
 })
 
 // ---------------------------------------------------------------------------

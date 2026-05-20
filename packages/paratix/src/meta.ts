@@ -9,6 +9,7 @@ import type {
 } from "./types.js"
 
 import { createNullPrototypeEnvironment, ENVIRONMENT_FORBIDDEN_KEYS } from "./environment.js"
+import { describeHostValidationFailure, validateHostLabel } from "./hostValidation.js"
 import { isValidTcpPort } from "./serverDefinitionValidation.js"
 
 const SYSTEM_HOST_KIND = "system.host"
@@ -101,8 +102,11 @@ function assertValidSshdPortMetaEntry(candidate: Record<string, unknown>): void 
 }
 
 function assertValidSystemHostMetaEntry(candidate: Record<string, unknown>): void {
-  if (typeof candidate.host !== "string" || candidate.host.length === 0) {
-    throw new TypeError("Invalid system.host meta entry: host must be a non-empty string")
+  const hostValidationFailure = validateHostLabel(candidate.host)
+  if (hostValidationFailure != null) {
+    throw new TypeError(
+      `Invalid system.host meta entry: host ${describeHostValidationFailure(hostValidationFailure)}`
+    )
   }
 }
 
@@ -131,8 +135,11 @@ export function sshdPortMeta(port: number): SshdPortMetaEntry {
 }
 
 export function systemHostMeta(host: string): SystemHostMetaEntry {
-  if (host.length === 0) {
-    throw new TypeError("Meta entry system.host requires a non-empty host")
+  const hostValidationFailure = validateHostLabel(host)
+  if (hostValidationFailure != null) {
+    throw new TypeError(
+      `Meta entry system.host invalid host: ${describeHostValidationFailure(hostValidationFailure)}`
+    )
   }
   return { host, kind: SYSTEM_HOST_KIND }
 }
