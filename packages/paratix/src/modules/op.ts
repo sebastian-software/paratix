@@ -5,7 +5,7 @@ import type { Environment, Module, ModuleResult } from "../types.js"
 import { environmentToMetaEntries } from "../meta.js"
 import { failed } from "../moduleFailure.js"
 import { getRunnerAbortSignal } from "../runnerAbortSignal.js"
-import { registerSecret } from "../secretSink.js"
+import { registerRunScopedSecret } from "../secretSink.js"
 import { maskSecrets } from "../sshHelpers.js"
 import { generateTotpCode } from "../totp.js"
 import {
@@ -306,7 +306,7 @@ async function resolveRegularReferences(
       // crash, op CLI timeout, unhandled rejection) before the caller's
       // post-loop registration would let the value leak through stack
       // traces and shared logger trap output in plaintext.
-      registerSecret(value)
+      registerRunScopedSecret(value)
     }
     result[name] = value
   }
@@ -362,7 +362,7 @@ async function resolveOtpReferences(
       // sink is already populated when the lazy callback runs. A third-party
       // catch site that stringifies the thrown error would otherwise see the
       // raw URI before the sink masks it.
-      registerSecret(otpauthUri)
+      registerRunScopedSecret(otpauthUri)
     }
     result[name] = () => {
       // R-0000576: the captured `otpauthUri` is closed over and would show
@@ -373,7 +373,7 @@ async function resolveOtpReferences(
       // top-level message stays free of the secret.
       try {
         const code = generateTotpCode(otpauthUri)
-        registerSecret(code)
+        registerRunScopedSecret(code)
         return code
       } catch (error) {
         throw new Error(`Failed to generate TOTP code for ${JSON.stringify(name)}`, {

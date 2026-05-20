@@ -29,7 +29,7 @@ import {
 } from "./output.js"
 import { withRunnerAbortSignal } from "./runnerAbortSignal.js"
 import { resolveExitCode, signalExitCode } from "./runnerHelpers.js"
-import { clearRegisteredSecrets } from "./secretSink.js"
+import { clearRegisteredSecrets, withRunScopedSecrets } from "./secretSink.js"
 import { validateServerDefinition } from "./server.js"
 import { getSignalBus } from "./signalBus.js"
 import { runSignalModules, type SignalRunStatus } from "./signalOrchestration.js"
@@ -1166,16 +1166,18 @@ export async function runPlaybook(
         },
         shutdownSignal,
       })
-      await executeRun({
-        definition,
-        dryRun,
-        environment,
-        rebootGrace,
-        shutdownSignal,
-        ssh,
-        stats,
-        verbose,
-      })
+      await withRunScopedSecrets(async () =>
+        executeRun({
+          definition,
+          dryRun,
+          environment,
+          rebootGrace,
+          shutdownSignal,
+          ssh,
+          stats,
+          verbose,
+        })
+      )
     } catch (error) {
       rethrowIfNotShutdown(error, shutdownSignal)
     } finally {

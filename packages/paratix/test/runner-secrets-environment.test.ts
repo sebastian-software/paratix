@@ -146,9 +146,10 @@ describe("runPlaybook op.resolve integration", () => {
       SshConnectionImpl: makeMockSshClass(capturedConfigs, { lifecycle: "permissive" }),
     }))
 
-    const [{ runPlaybook }, { op }] = await Promise.all([
+    const [{ runPlaybook }, { op }, { getRegisteredSecrets }] = await Promise.all([
       import("../src/runner.js"),
       import("../src/modules/op.js"),
+      import("../src/secretSink.js"),
     ])
 
     let receivedEnvInCheck: Environment | undefined
@@ -174,6 +175,7 @@ describe("runPlaybook op.resolve integration", () => {
     expect(receivedEnvInCheck).toBeDefined()
     await expect(resolveEnvironment(receivedEnvInCheck!, "SECRET")).resolves.toBe("resolved-secret")
     expect(dependentModule.apply).not.toHaveBeenCalled()
+    expect(getRegisteredSecrets()).not.toContain("resolved-secret")
   })
 })
 

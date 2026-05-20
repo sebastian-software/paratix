@@ -16,6 +16,8 @@
  * registered secret material is masked before it reaches stderr.
  */
 
+import { AsyncLocalStorage } from "node:async_hooks"
+
 import type { ModuleResult } from "./types.js"
 
 import { isSecretDiagnosticField, REDACTED_SECRET_FIELD_PLACEHOLDER } from "./errorRedaction.js"
@@ -27,6 +29,7 @@ import { CommandError, maskSecrets } from "./sshHelpers.js"
  * the value once the last registration goes out of scope.
  */
 const secretCounts = new Map<string, number>()
+const runScopedSecretCounts = new AsyncLocalStorage<Map<string, number>>()
 const REDACTED_PLACEHOLDER = REDACTED_SECRET_FIELD_PLACEHOLDER
 const CIRCULAR_PLACEHOLDER = "[Circular]"
 
@@ -67,6 +70,24 @@ export function registerSecret(secret: string): void {
   if (secret.length < MINIMUM_SECRET_LENGTH) return
   assertRegistrableSecret(secret)
   secretCounts.set(secret, (secretCounts.get(secret) ?? 0) + 1)
+}
+
+/**
+ * Register a secret and attach that registration to the active run scope.
+ *
+ * This is intentionally separate from {@link registerSecret}: most callers
+ * already balance their own registration with {@link unregisterSecret}. Values
+ * produced by `op.resolve` must stay redacted for the whole playbook run, then
+ * be released when that run finishes.
+ *
+ * @param secret - The sensitive value to mask for the active run.
+ */
+export function registerRunScopedSecret(secret: string): void {
+  registerSecret(secret)
+  if (secret.length < MINIMUM_SECRET_LENGTH) return
+  const scopedSecrets = runScopedSecretCounts.getStore()
+  if (scopedSecrets == null) return
+  scopedSecrets.set(secret, (scopedSecrets.get(secret) ?? 0) + 1)
 }
 
 /**
@@ -133,6 +154,27 @@ export async function withRegisteredSecrets<T>(
   } finally {
     for (const secret of registered) {
       unregisterSecret(secret)
+    }
+  }
+}
+
+/**
+ * Execute a playbook run with a cleanup scope for long-lived secret
+ * registrations. Each scoped secret is released exactly as often as it was
+ * registered in this run, preserving reference counts for concurrent runs.
+ *
+ * @param body - The async run body.
+ * @returns Whatever `body` resolves to.
+ */
+export async function withRunScopedSecrets<T>(body: () => Promise<T>): Promise<T> {
+  const scopedSecrets = new Map<string, number>()
+  try {
+    return await runScopedSecretCounts.run(scopedSecrets, body)
+  } finally {
+    for (const [secret, count] of scopedSecrets) {
+      for (let index = 0; index < count; index += 1) {
+        unregisterSecret(secret)
+      }
     }
   }
 }
