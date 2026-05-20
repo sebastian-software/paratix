@@ -17,8 +17,8 @@ import { promptForHostFingerprint, promptForInitialUserConfig } from "./interact
 import {
   createStagedProjectDirectory,
   finalizeStagedProjectDirectory,
-  isSameProjectDirectoryIdentity,
   type ProjectDirectoryIdentity,
+  removePublishedProjectDirectory,
   removeReservedProjectDirectoryIfEmpty,
   type StagedProjectDirectory,
 } from "./projectDirectory.js"
@@ -251,13 +251,14 @@ function runScaffoldOrCleanup(
     return installer(prepared.projectDirectory, pm)
   } catch (error) {
     rmSync(stagingDirectory, { force: true, recursive: true })
-    if (
-      publishedProjectIdentity != null &&
-      isSameProjectDirectoryIdentity(prepared.projectDirectory, publishedProjectIdentity)
-    ) {
-      rmSync(prepared.projectDirectory, { force: true, recursive: true })
-    } else if (publishedProjectIdentity == null) {
+    if (publishedProjectIdentity == null) {
       removeReservedProjectDirectoryIfEmpty(prepared.stagedProjectDirectory)
+    } else {
+      removePublishedProjectDirectory(
+        prepared.projectDirectory,
+        publishedProjectIdentity,
+        prepared.normalizedProjectName
+      )
     }
     throw error
   }

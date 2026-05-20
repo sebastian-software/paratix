@@ -344,12 +344,56 @@ describe("scaffoldProject", () => {
     expect(existsSync(join(projectDirectory, "staged.txt"))).toBe(false)
   })
 
-  it("rolls staged entries back when publishing fails after a partial move", async () => {
+  it("rejects a replacement quarantined during staged publish", async () => {
     vi.resetModules()
     vi.doMock("node:fs", async (importOriginal) => {
       const actual = await importOriginal<typeof NodeFs>()
       const renameSync = vi.fn(actual.renameSync)
-      renameSync.mockImplementationOnce(function renameFirstStagedEntry(oldPath, newPath) {
+      renameSync.mockImplementationOnce(function replaceReservedTarget(oldPath, newPath) {
+        actual.rmSync(projectDirectory, { force: true, recursive: true })
+        actual.mkdirSync(projectDirectory)
+        actual.writeFileSync(join(projectDirectory, "sentinel.txt"), "FOREIGN_CONTENT")
+        actual.renameSync(oldPath, newPath)
+      })
+      return {
+        ...actual,
+        renameSync,
+      }
+    })
+    try {
+      const {
+        createStagedProjectDirectory: createStagedProjectDirectoryWithMockedFs,
+        finalizeStagedProjectDirectory: finalizeStagedProjectDirectoryWithMockedFs,
+      } = await import("../src/projectDirectory.js")
+      const stagedProjectDirectory = createStagedProjectDirectoryWithMockedFs(
+        projectDirectory,
+        projectName
+      )
+      writeFileSync(join(stagedProjectDirectory.stagingDirectory, "staged.txt"), "STAGED_CONTENT")
+
+      await expectProcessExit(() => {
+        finalizeStagedProjectDirectoryWithMockedFs(stagedProjectDirectory, projectName)
+      })
+
+      expect(console.error).toHaveBeenCalledWith(
+        `Error: Directory "${projectName}" already exists.`
+      )
+      expect(readFileSync(join(projectDirectory, "sentinel.txt"), "utf8")).toBe("FOREIGN_CONTENT")
+      expect(
+        readFileSync(join(stagedProjectDirectory.stagingDirectory, "staged.txt"), "utf8")
+      ).toBe("STAGED_CONTENT")
+    } finally {
+      vi.doUnmock("node:fs")
+      vi.resetModules()
+    }
+  })
+
+  it("restores the reserved target when whole-tree staged publish fails", async () => {
+    vi.resetModules()
+    vi.doMock("node:fs", async (importOriginal) => {
+      const actual = await importOriginal<typeof NodeFs>()
+      const renameSync = vi.fn(actual.renameSync)
+      renameSync.mockImplementationOnce(function quarantineReservedTarget(oldPath, newPath) {
         actual.renameSync(oldPath, newPath)
       })
       renameSync.mockImplementationOnce(() => {
@@ -381,8 +425,64 @@ describe("scaffoldProject", () => {
       }).toThrow("simulated publish rename failure")
 
       expect(existsSync(join(projectDirectory, "01-first.txt"))).toBe(false)
+      expect(existsSync(projectDirectory)).toBe(true)
       expect(readFileSync(firstEntry, "utf8")).toBe("FIRST_CONTENT")
       expect(readFileSync(blockedEntry, "utf8")).toBe("BLOCKED_CONTENT")
+    } finally {
+      vi.doUnmock("node:fs")
+      vi.resetModules()
+    }
+  })
+
+  it("does not remove a replacement path quarantined during installer cleanup", async () => {
+    vi.resetModules()
+    vi.doMock("node:fs", async (importOriginal) => {
+      const actual = await importOriginal<typeof NodeFs>()
+      const renameSync = vi.fn(actual.renameSync)
+      renameSync.mockImplementationOnce(function quarantineReservedTarget(oldPath, newPath) {
+        actual.renameSync(oldPath, newPath)
+      })
+      renameSync.mockImplementationOnce(function publishStagedTarget(oldPath, newPath) {
+        actual.renameSync(oldPath, newPath)
+      })
+      renameSync.mockImplementationOnce(function replacePublishedTarget(oldPath, newPath) {
+        actual.rmSync(projectDirectory, { force: true, recursive: true })
+        actual.mkdirSync(projectDirectory)
+        actual.writeFileSync(join(projectDirectory, "sentinel.txt"), "FOREIGN_CONTENT")
+        actual.renameSync(oldPath, newPath)
+      })
+      const mockedRmSync = vi.fn(actual.rmSync)
+      return {
+        ...actual,
+        renameSync,
+        rmSync: mockedRmSync,
+      }
+    })
+    try {
+      const { scaffoldProject: scaffoldProjectWithMockedFs } = await import("../src/index.js")
+      const mockedFs = await import("node:fs")
+      const installer = vi.fn(() => {
+        throw new Error("install failed")
+      })
+
+      expect(() => {
+        scaffoldProjectWithMockedFs(
+          projectName,
+          { command: { args: ["install"], executable: "pnpm" }, name: "pnpm" },
+          {
+            adminPublicKey: TEST_ADMIN_PUBLIC_KEY,
+            host: "example.com",
+            initialUser: { kind: "root" },
+            installer,
+          }
+        )
+      }).toThrow("install failed")
+
+      expect(readFileSync(join(projectDirectory, "sentinel.txt"), "utf8")).toBe("FOREIGN_CONTENT")
+      expect(mockedFs.rmSync).not.toHaveBeenCalledWith(projectDirectory, {
+        force: true,
+        recursive: true,
+      })
     } finally {
       vi.doUnmock("node:fs")
       vi.resetModules()

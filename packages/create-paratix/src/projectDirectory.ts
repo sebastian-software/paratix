@@ -5,6 +5,7 @@ import {
   readdirSync,
   renameSync,
   rmdirSync,
+  rmSync,
   type Stats,
 } from "node:fs"
 import { dirname, join } from "node:path"
@@ -97,33 +98,69 @@ function assertReservedProjectDirectory(
   }
 }
 
-function publishStagedProjectDirectory({
-  projectDirectory,
-  stagingDirectory,
-}: StagedProjectDirectory): void {
-  const publishedEntries: string[] = []
+function createQuarantinePath(parentDirectory: string, normalizedProjectName: string): string {
+  const quarantineDirectory = mkdtempSync(
+    join(parentDirectory, `.${normalizedProjectName}-quarantine-`)
+  )
   // eslint-disable-next-line security/detect-non-literal-fs-filename
-  const entries = readdirSync(stagingDirectory)
+  rmdirSync(quarantineDirectory)
+  return quarantineDirectory
+}
+
+function restoreQuarantinedDirectory(quarantineDirectory: string, projectDirectory: string): void {
   try {
-    for (const entry of entries) {
-      // eslint-disable-next-line security/detect-non-literal-fs-filename
-      renameSync(join(stagingDirectory, entry), join(projectDirectory, entry))
-      publishedEntries.push(entry)
-    }
+    // eslint-disable-next-line security/detect-non-literal-fs-filename
+    renameSync(quarantineDirectory, projectDirectory)
+  } catch {
+    // Preserve the original publish or cleanup failure. The quarantined path is
+    // intentionally left in place if the requested project path was replaced.
+  }
+}
+
+function quarantineReservedProjectDirectory(
+  {
+    projectDirectory,
+    projectDirectoryIdentity,
+  }: Pick<StagedProjectDirectory, "projectDirectory" | "projectDirectoryIdentity">,
+  normalizedProjectName: string
+): string {
+  const quarantineDirectory = createQuarantinePath(dirname(projectDirectory), normalizedProjectName)
+  // eslint-disable-next-line security/detect-non-literal-fs-filename
+  renameSync(projectDirectory, quarantineDirectory)
+
+  if (!isSameProjectDirectoryIdentity(quarantineDirectory, projectDirectoryIdentity)) {
+    restoreQuarantinedDirectory(quarantineDirectory, projectDirectory)
+    exitWithDirectoryAlreadyExists(normalizedProjectName)
+  }
+
+  // eslint-disable-next-line security/detect-non-literal-fs-filename
+  if (readdirSync(quarantineDirectory).length > 0) {
+    restoreQuarantinedDirectory(quarantineDirectory, projectDirectory)
+    exitWithDirectoryAlreadyExists(normalizedProjectName)
+  }
+
+  return quarantineDirectory
+}
+
+function publishStagedProjectDirectory(
+  stagedProjectDirectory: StagedProjectDirectory,
+  normalizedProjectName: string
+): void {
+  const { projectDirectory, stagingDirectory } = stagedProjectDirectory
+  const quarantineDirectory = quarantineReservedProjectDirectory(
+    stagedProjectDirectory,
+    normalizedProjectName
+  )
+  try {
+    // eslint-disable-next-line security/detect-non-literal-fs-filename
+    renameSync(stagingDirectory, projectDirectory)
   } catch (error: unknown) {
-    for (const entry of publishedEntries.toReversed()) {
-      try {
-        // eslint-disable-next-line security/detect-non-literal-fs-filename
-        renameSync(join(projectDirectory, entry), join(stagingDirectory, entry))
-      } catch {
-        // Preserve the original publish failure; cleanup in the caller still
-        // removes any staging content that could not be restored.
-      }
-    }
+    restoreQuarantinedDirectory(quarantineDirectory, projectDirectory)
     throw error
   }
+
   // eslint-disable-next-line security/detect-non-literal-fs-filename
-  rmdirSync(stagingDirectory)
+  rmdirSync(quarantineDirectory)
 }
 
 export function finalizeStagedProjectDirectory(
@@ -132,7 +169,7 @@ export function finalizeStagedProjectDirectory(
 ): ProjectDirectoryIdentity {
   try {
     assertReservedProjectDirectory(stagedProjectDirectory, normalizedProjectName)
-    publishStagedProjectDirectory(stagedProjectDirectory)
+    publishStagedProjectDirectory(stagedProjectDirectory, normalizedProjectName)
   } catch (error: unknown) {
     const errorCode = isErrnoException(error) ? error.code : undefined
     if (errorCode === "EEXIST" || errorCode === "ENOTEMPTY") {
@@ -180,4 +217,29 @@ export function removeReservedProjectDirectoryIfEmpty({
 
     throw error
   }
+}
+
+export function removePublishedProjectDirectory(
+  projectDirectory: string,
+  projectDirectoryIdentity: ProjectDirectoryIdentity,
+  normalizedProjectName: string
+): void {
+  const quarantineDirectory = createQuarantinePath(dirname(projectDirectory), normalizedProjectName)
+  try {
+    // eslint-disable-next-line security/detect-non-literal-fs-filename
+    renameSync(projectDirectory, quarantineDirectory)
+  } catch (error: unknown) {
+    if (isErrnoException(error) && error.code === "ENOENT") {
+      return
+    }
+
+    throw error
+  }
+
+  if (!isSameProjectDirectoryIdentity(quarantineDirectory, projectDirectoryIdentity)) {
+    restoreQuarantinedDirectory(quarantineDirectory, projectDirectory)
+    return
+  }
+
+  rmSync(quarantineDirectory, { force: true, recursive: true })
 }
