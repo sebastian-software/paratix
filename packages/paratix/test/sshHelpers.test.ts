@@ -768,6 +768,73 @@ describe("live-output masking via process.stdout/stderr.write", () => {
     expect(stdoutWrites.join("")).toContain("[REDACTED]")
   })
 
+  it("sanitizes split terminal control sequences in live stdout without changing captured stdout", async () => {
+    const { stream } = createMockChannel()
+    const chunks = ["before \u001B]0;bad", "-title\u0007 after \u001B[31", "mred\u0007"]
+
+    const result = await new Promise<{ stderr: string; stdout: string }>((resolve, reject) => {
+      const timer = setTimeout(() => {
+        /* intentionally never fires in tests */
+      }, 60_000)
+
+      collectStreamOutput({
+        command: "printf",
+        options: { silent: false },
+        reject,
+        resolve(value) {
+          resolve(value)
+        },
+        stream: stream as unknown as StreamOutputParameters["stream"],
+        timer,
+      })
+
+      for (const chunk of chunks) {
+        stream.emit("data", Buffer.from(chunk))
+      }
+      stream.emit("close", 0)
+      clearTimeout(timer)
+    })
+
+    const liveOutput = stdoutWrites.join("")
+    expect(liveOutput).toBe("before  after red")
+    expect(liveOutput).not.toContain("\u001B")
+    expect(liveOutput).not.toContain("\u0007")
+    expect(liveOutput).not.toContain("bad-title")
+    expect(result.stdout).toBe(chunks.join(""))
+  })
+
+  it("masks secrets before sanitizing live stdout", async () => {
+    const secret = "sanitize-secret"
+    const { stream } = createMockChannel()
+
+    await new Promise<void>((resolve, reject) => {
+      const timer = setTimeout(() => {
+        /* intentionally never fires in tests */
+      }, 60_000)
+
+      collectStreamOutput({
+        command: "printf",
+        options: { silent: false },
+        reject,
+        resolve() {
+          resolve()
+        },
+        secrets: [secret],
+        stream: stream as unknown as StreamOutputParameters["stream"],
+        timer,
+      })
+
+      stream.emit("data", Buffer.from(`token ${secret}\u001B[31m done`))
+      stream.emit("close", 0)
+      clearTimeout(timer)
+    })
+
+    const liveOutput = stdoutWrites.join("")
+    expect(liveOutput).toBe("token [REDACTED] done")
+    expect(liveOutput).not.toContain(secret)
+    expect(liveOutput).not.toContain("\u001B")
+  })
+
   it("masks shell-quoted secrets split across stdout chunks when silent is false", async () => {
     const secret = "don't split me"
     const escapedSecret = shellQuote(secret)
@@ -832,6 +899,37 @@ describe("live-output masking via process.stdout/stderr.write", () => {
 
     expect(stderrWrites.join("")).not.toContain(secret)
     expect(stderrWrites.join("")).toContain("[REDACTED]")
+  })
+
+  it("sanitizes terminal control sequences in live stderr", async () => {
+    const { stderr, stream } = createMockChannel()
+
+    await new Promise<void>((resolve, reject) => {
+      const timer = setTimeout(() => {
+        /* intentionally never fires in tests */
+      }, 60_000)
+
+      collectStreamOutput({
+        command: "deploy",
+        options: { silent: false },
+        reject,
+        resolve() {
+          resolve()
+        },
+        stream: stream as unknown as StreamOutputParameters["stream"],
+        timer,
+      })
+
+      stderr.emit("data", Buffer.from("error \u001B]0;bad\u0007line\rnext\u001B[2K"))
+      stream.emit("close", 0)
+      clearTimeout(timer)
+    })
+
+    const liveOutput = stderrWrites.join("")
+    expect(liveOutput).toBe("error linenext")
+    expect(liveOutput).not.toContain("\u001B")
+    expect(liveOutput).not.toContain("\r")
+    expect(liveOutput).not.toContain("bad")
   })
 
   it("masks secrets in both stdout and stderr live-output simultaneously", async () => {

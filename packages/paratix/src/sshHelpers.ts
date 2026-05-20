@@ -5,6 +5,8 @@ import { StringDecoder } from "node:string_decoder"
 
 import type { ExecOptions, ExecResult } from "./types.js"
 
+import { createTerminalSanitizer } from "./terminalSanitizer.js"
+
 /**
  * Validate that a file mode string is a valid octal permission (e.g. "644", "0755").
  *
@@ -339,6 +341,29 @@ function writeStderr(t: string): void {
   process.stderr.write(t)
 }
 
+function createSanitizedTerminalWriter(silent: boolean): {
+  flush: () => void
+  stderr: (text: string) => void
+  stdout: (text: string) => void
+} {
+  const stdoutTerminalSanitizer = createTerminalSanitizer()
+  const stderrTerminalSanitizer = createTerminalSanitizer()
+
+  return {
+    flush(): void {
+      if (silent) return
+      writeStdout(stdoutTerminalSanitizer.flush())
+      writeStderr(stderrTerminalSanitizer.flush())
+    },
+    stderr(text: string): void {
+      if (!silent) writeStderr(stderrTerminalSanitizer.push(text))
+    },
+    stdout(text: string): void {
+      if (!silent) writeStdout(stdoutTerminalSanitizer.push(text))
+    },
+  }
+}
+
 /**
  * Normalize ssh2 close-event exit codes. ssh2 may pass `undefined` even though
  * its TypeScript type says `number`; treat that as a successful zero exit code.
@@ -377,14 +402,15 @@ export function collectStreamOutput(parameters: StreamOutputParameters): void {
   const stderr = new CapturedOutput(maxOutputBytes)
   const stdoutDecoder = new StringDecoder("utf8")
   const stderrDecoder = new StringDecoder("utf8")
+  const terminalWriter = createSanitizedTerminalWriter(options.silent === true)
 
   const stdoutMasker = createStreamMasker((text) => {
     stdout.append(text)
-    if (!options.silent) writeStdout(text)
+    terminalWriter.stdout(text)
   }, secrets)
   const stderrMasker = createStreamMasker((text) => {
     stderr.append(text)
-    if (!options.silent) writeStderr(text)
+    terminalWriter.stderr(text)
   }, secrets)
   const finishStdoutDecode = (): void => {
     const text = stdoutDecoder.end()
@@ -407,6 +433,7 @@ export function collectStreamOutput(parameters: StreamOutputParameters): void {
     finishStderrDecode()
     stdoutMasker.flush()
     stderrMasker.flush()
+    terminalWriter.flush()
     reject(error)
   })
   stream.stderr.on("error", (error: Error) => {
@@ -415,6 +442,7 @@ export function collectStreamOutput(parameters: StreamOutputParameters): void {
     finishStderrDecode()
     stdoutMasker.flush()
     stderrMasker.flush()
+    terminalWriter.flush()
     reject(error)
   })
   stream.on("close", (code: null | number | undefined, signal?: null | string) => {
@@ -423,6 +451,7 @@ export function collectStreamOutput(parameters: StreamOutputParameters): void {
     finishStderrDecode()
     stdoutMasker.flush()
     stderrMasker.flush()
+    terminalWriter.flush()
     const capturedStdout = stdout.toString()
     const capturedStderr = stderr.toString()
     const capturedStreams = { capturedStderr, capturedStdout, stderr, stdout }

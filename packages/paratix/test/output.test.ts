@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 
 import {
+  printCommandError,
   printCommandFailure,
   printModuleResult,
   printRecipeHeader,
@@ -491,6 +492,61 @@ describe("printVerboseCommandError", () => {
     expect(output).toContain("line one")
     expect(output).toContain("line two")
     expect(output).toContain("line three")
+  })
+
+  it("sanitizes remote control sequences after masking secrets", () => {
+    const secret = "verbose-secret"
+    registerSecret(secret)
+
+    printVerboseCommandError(
+      `stdout ${secret}\u001B[31m ok`,
+      "stderr \u001B]0;bad-title\u0007line\rnext"
+    )
+
+    const output = consoleErrors.join("\n")
+    expect(output).toContain("[REDACTED] ok")
+    expect(output).toContain("stderr linenext")
+    expect(output).not.toContain(secret)
+    expect(output).not.toContain("\u001B")
+    expect(output).not.toContain("\u0007")
+    expect(output).not.toContain("\r")
+    expect(output).not.toContain("bad-title")
+  })
+})
+
+// ---------------------------------------------------------------------------
+// printCommandError
+// ---------------------------------------------------------------------------
+
+describe("printCommandError", () => {
+  let consoleErrors: string[]
+
+  beforeEach(() => {
+    consoleErrors = []
+    vi.spyOn(console, "error").mockImplementation((...args: unknown[]) => {
+      consoleErrors.push(args.map(String).join(" "))
+    })
+  })
+
+  afterEach(() => {
+    clearRegisteredSecrets()
+    vi.restoreAllMocks()
+  })
+
+  it("sanitizes captured command output before local formatting", () => {
+    const secret = "command-error-secret"
+    registerSecret(secret)
+
+    printCommandError(`stdout ${secret}\u001B[2K`, "stderr \u001B]0;bad-title\u0007ok\u0000")
+
+    const output = consoleErrors.join("\n")
+    expect(output).toContain("Error output:")
+    expect(output).toContain(`stdout [REDACTED]`)
+    expect(output).toContain("stderr ok")
+    expect(output).not.toContain(secret)
+    expect(output).not.toContain("\u0000")
+    expect(output).not.toContain("bad-title")
+    expect(output).not.toContain("\u001B]0")
   })
 })
 

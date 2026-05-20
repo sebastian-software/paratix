@@ -7,6 +7,7 @@ import { inspectRedactedDiagnosticValue } from "./errorRedaction.js"
 import { fitAnimatedModuleLine, formatDisplayModule } from "./outputFormatting.js"
 import { maskRegisteredSecrets } from "./secretSink.js"
 import { CommandError } from "./sshHelpers.js"
+import { sanitizeTerminalText } from "./terminalSanitizer.js"
 
 // R-0000580: bounds for `util.inspect` when rendering non-Error cause values so
 // a runaway plain object cannot dump unbounded text into stderr.
@@ -364,8 +365,8 @@ export function printCommandError(stdout: string, stderr: string): void {
   // documented caller already masks via `maskRegisteredSecrets`, but a
   // future caller that forgets the wrapper would otherwise leak verbatim
   // through this terminal write. The double-masking is idempotent.
-  const maskedStdout = maskRegisteredSecrets(stdout)
-  const maskedStderr = maskRegisteredSecrets(stderr)
+  const maskedStdout = sanitizeTerminalText(maskRegisteredSecrets(stdout))
+  const maskedStderr = sanitizeTerminalText(maskRegisteredSecrets(stderr))
   const lines: string[] = []
   if (maskedStderr.trim()) {
     lines.push(...maskedStderr.trim().split("\n"))
@@ -393,8 +394,8 @@ export function printVerboseCommandError(stdout: string, stderr: string): void {
   // the verbose dump reaches stderr so a caller that forgets to pre-mask the
   // capture buffers still has its output redacted. The double-masking is
   // idempotent for callers that already passed pre-masked strings.
-  const maskedStdout = maskRegisteredSecrets(stdout)
-  const maskedStderr = maskRegisteredSecrets(stderr)
+  const maskedStdout = sanitizeTerminalText(maskRegisteredSecrets(stdout))
+  const maskedStderr = sanitizeTerminalText(maskRegisteredSecrets(stderr))
   if (maskedStderr.trim()) {
     console.error(pc.red(`${getErrorIndent()}Full stderr:`))
     for (const line of maskedStderr.trim().split("\n")) {
