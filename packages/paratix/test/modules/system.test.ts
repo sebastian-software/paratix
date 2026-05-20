@@ -403,6 +403,20 @@ describe("system.facts — apply", () => {
     )
   })
 
+  it("ignores public IP captures with octets greater than 255", async () => {
+    const ssh = createMockSsh({
+      ...FACTS_RESPONSES,
+      "ip -4 route get 1.1.1.1": {
+        code: 0,
+        stdout: "1.1.1.1 via 10.0.1.1 dev eth0 src 999.0.0.10 uid 0\n",
+      },
+    })
+    const mod = system.facts()
+    const result = await mod.apply(ssh, emptyEnv)
+    const metaEnvironment = await mergeEnvironmentFromMeta({}, result.meta)
+    await expect(resolveEnvironment(metaEnvironment, "system.ip.public")).resolves.toBe("")
+  })
+
   it("correctly extracts private IP from ip addr output (RFC-1918)", async () => {
     const ssh = createMockSsh(FACTS_RESPONSES)
     const mod = system.facts()
