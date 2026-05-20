@@ -510,6 +510,50 @@ describe("publishWorkspacePackages", () => {
     assert.equal(hasGitCommandCall(commandRunner.calls, "symbolic-ref --quiet --short HEAD"), false)
     assert.equal(hasCommandCall(commandRunner.calls, "pnpm"), false)
   })
+
+  it("rejects a non-main GitHub Actions ref before registry lookups", async () => {
+    const commandRunner = createCommandRunner()
+
+    await assertRejectsWithMessage(
+      publishWorkspacePackages({
+        availabilityDelayMilliseconds: 0,
+        commandRunner,
+        environment: {
+          GITHUB_ACTIONS: "true",
+          GITHUB_REF: "refs/tags/v1.2.3",
+          GITHUB_SHA: GIT_HEAD_SHA,
+        },
+        fs: createFs(),
+      }),
+      "expected refs/heads/main"
+    )
+
+    assert.equal(hasCommandCall(commandRunner.calls, "npm"), false)
+    assert.equal(hasCommandCall(commandRunner.calls, "pnpm"), false)
+  })
+
+  it("rejects a mismatched GitHub Actions SHA before registry lookups", async () => {
+    const commandRunner = createCommandRunner()
+
+    await assertRejectsWithMessage(
+      publishWorkspacePackages({
+        availabilityDelayMilliseconds: 0,
+        commandRunner,
+        environment: {
+          GITHUB_ACTIONS: "true",
+          GITHUB_REF: "refs/heads/main",
+          GITHUB_SHA: "different-sha",
+        },
+        fs: createFs(),
+      }),
+      "expected checked-out HEAD"
+    )
+
+    assert.equal(hasGitCommandCall(commandRunner.calls, "rev-parse HEAD"), true)
+    assert.equal(hasGitCommandCall(commandRunner.calls, "symbolic-ref --quiet --short HEAD"), false)
+    assert.equal(hasCommandCall(commandRunner.calls, "npm"), false)
+    assert.equal(hasCommandCall(commandRunner.calls, "pnpm"), false)
+  })
 })
 
 describe("publishWorkspacePackages recovery mode", () => {
