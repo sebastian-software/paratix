@@ -15,6 +15,7 @@ import { basename, join, resolve } from "node:path"
 import type { SelectFunction, SelectOption } from "./promptUi.js"
 
 import { CliExitError } from "./cliExitError.js"
+import { escapeCliControlCharacters } from "./cliFormat.js"
 import { hasValidOpenSshPublicKeyWireBlob } from "./openSshPublicKeyWire.js"
 import { isCanonicalBase64 } from "./publicKeyBase64.js"
 import { containsUnsafeCodepoint } from "./unsafeCodepoints.js"
@@ -281,11 +282,15 @@ export function readAdminPublicKeyFile(
     try {
       const realPath = fileSystem.realpathSync(resolvedPath)
       if (realPath !== resolvedPath) {
+        const escapedRealPath = escapeCliControlCharacters(realPath)
+        const escapedResolvedPath = escapeCliControlCharacters(resolvedPath)
         if (linkStat.isSymbolicLink()) {
-          console.log(`Reading public key from ${realPath} (symlink target of ${resolvedPath}).`)
+          console.log(
+            `Reading public key from ${escapedRealPath} (symlink target of ${escapedResolvedPath}).`
+          )
         } else {
           console.log(
-            `Reading public key from ${realPath} (resolved via ancestor symlink of ${resolvedPath}).`
+            `Reading public key from ${escapedRealPath} (resolved via ancestor symlink of ${escapedResolvedPath}).`
           )
         }
       }

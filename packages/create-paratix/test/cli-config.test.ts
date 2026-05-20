@@ -804,6 +804,30 @@ describe("admin public key validation", () => {
     }
   })
 
+  it("escapes control and bidi codepoints in symlink public key provenance logs", () => {
+    mkdirSync(TEST_DIR, { recursive: true })
+    const publicKey = createEd25519PublicKey("user@example")
+    const escapeByte = String.fromCharCode(0x1b)
+    const bidiOverride = String.fromCodePoint(0x20_2e)
+    const targetFile = join(TEST_DIR, `vault${escapeByte}-admin.pub`)
+    const linkFile = join(TEST_DIR, `linked${bidiOverride}-admin-log.pub`)
+    writeFileSync(targetFile, `${publicKey}\n`)
+    symlinkSync(targetFile, linkFile)
+    const logSpy = vi.spyOn(console, "log").mockImplementation(() => {
+      // suppress log output during the test
+    })
+    try {
+      expect(readAdminPublicKeyFile(throwExitError, linkFile)).toBe(publicKey)
+      const logged = logSpy.mock.calls.flat().join(" ")
+      expect(logged).toContain("\\u{001B}")
+      expect(logged).toContain("\\u{202E}")
+      expect(logged).not.toContain(escapeByte)
+      expect(logged).not.toContain(bidiOverride)
+    } finally {
+      logSpy.mockRestore()
+    }
+  })
+
   // R-0000726: closes the R-0000665 gap for ancestor symlinks. The
   // leaf file is a regular `.pub`, but one of its parent directories is
   // a symlink. The previous implementation only consulted the leaf's
@@ -828,6 +852,33 @@ describe("admin public key validation", () => {
       const logged = logSpy.mock.calls.flat().join(" ")
       expect(logged).toContain("Reading public key from")
       expect(logged).toContain("ancestor symlink")
+    } finally {
+      logSpy.mockRestore()
+    }
+  })
+
+  it("escapes control and bidi codepoints in ancestor-symlink public key provenance logs", () => {
+    mkdirSync(TEST_DIR, { recursive: true })
+    const publicKey = createEd25519PublicKey("user@example")
+    const escapeByte = String.fromCharCode(0x1b)
+    const bidiOverride = String.fromCodePoint(0x20_2e)
+    const realDir = join(TEST_DIR, `real${escapeByte}-ssh`)
+    const linkedDir = join(TEST_DIR, `linked${bidiOverride}-ssh`)
+    mkdirSync(realDir, { recursive: true })
+    const targetFile = join(realDir, "admin.pub")
+    writeFileSync(targetFile, `${publicKey}\n`)
+    symlinkSync(realDir, linkedDir)
+    const linkFile = join(linkedDir, "admin.pub")
+    const logSpy = vi.spyOn(console, "log").mockImplementation(() => {
+      // suppress log output during the test
+    })
+    try {
+      expect(readAdminPublicKeyFile(throwExitError, linkFile)).toBe(publicKey)
+      const logged = logSpy.mock.calls.flat().join(" ")
+      expect(logged).toContain("\\u{001B}")
+      expect(logged).toContain("\\u{202E}")
+      expect(logged).not.toContain(escapeByte)
+      expect(logged).not.toContain(bidiOverride)
     } finally {
       logSpy.mockRestore()
     }
