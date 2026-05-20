@@ -1,11 +1,14 @@
 import {
+  closeSync,
+  fstatSync,
   lstatSync,
   mkdirSync,
   mkdtempSync,
+  openSync,
   readFileSync,
+  readSync,
   realpathSync,
   rmSync,
-  statSync,
   symlinkSync,
   unlinkSync,
   writeFileSync,
@@ -777,15 +780,29 @@ describe("admin public key validation", () => {
     writeFileSync(attackerFile, `${attackerKey}\n`)
     symlinkSync(originalFile, linkFile)
     const fileSystem = {
+      closeSync: vi.fn((fd: number) => {
+        closeSync(fd)
+      }),
+      fstatSync: vi.fn((fd: number) => fstatSync(fd)),
       lstatSync: vi.fn((path: string) => lstatSync(path)),
-      readFileSync: vi.fn((path: string, encoding: "utf8") => readFileSync(path, encoding)),
+      openSync: vi.fn((path: string, flags: "r") => openSync(path, flags)),
+      readSync: vi.fn(
+        (
+          ...parameters: [
+            fd: number,
+            buffer: Buffer,
+            offset: number,
+            length: number,
+            position: number,
+          ]
+        ) => readSync(...parameters)
+      ),
       realpathSync: vi.fn((path: string) => {
         const materialisedPath = realpathSync(path)
         unlinkSync(linkFile)
         symlinkSync(attackerFile, linkFile)
         return materialisedPath
       }),
-      statSync: vi.fn((path: string) => statSync(path)),
     }
 
     const logSpy = vi.spyOn(console, "log").mockImplementation(() => {
@@ -794,11 +811,55 @@ describe("admin public key validation", () => {
     try {
       expect(readAdminPublicKeyFile(throwExitError, linkFile, fileSystem)).toBe(originalKey)
       expect(realpathSync(linkFile)).toBe(attackerFile)
-      expect(fileSystem.statSync).toHaveBeenCalledWith(originalFile)
-      expect(fileSystem.readFileSync).toHaveBeenCalledWith(originalFile, "utf8")
+      expect(fileSystem.openSync).toHaveBeenCalledWith(originalFile, "r")
+      expect(fileSystem.fstatSync).toHaveBeenCalled()
+      expect(fileSystem.readSync).toHaveBeenCalled()
     } finally {
       logSpy.mockRestore()
     }
+  })
+
+  // R-0000948: after the file is opened, validation and reading must stay on
+  // the same file descriptor. Replacing the pathname after fstat must not
+  // change the key that is embedded.
+  it("R-0000948: reads the admin public key file from the opened descriptor after fstat", () => {
+    mkdirSync(TEST_DIR, { recursive: true })
+    const originalKey = createEd25519PublicKey("user@original")
+    const attackerKey = createEd25519PublicKey("attacker@example")
+    const publicKeyFile = join(TEST_DIR, "admin-fd.pub")
+    writeFileSync(publicKeyFile, `${originalKey}\n`)
+
+    const fileSystem = {
+      closeSync: vi.fn((fd: number) => {
+        closeSync(fd)
+      }),
+      fstatSync: vi.fn((fd: number) => {
+        const stat = fstatSync(fd)
+        unlinkSync(publicKeyFile)
+        writeFileSync(publicKeyFile, `${attackerKey}\n`)
+        return stat
+      }),
+      lstatSync: vi.fn((path: string) => lstatSync(path)),
+      openSync: vi.fn((path: string, flags: "r") => openSync(path, flags)),
+      readSync: vi.fn(
+        (
+          ...parameters: [
+            fd: number,
+            buffer: Buffer,
+            offset: number,
+            length: number,
+            position: number,
+          ]
+        ) => readSync(...parameters)
+      ),
+      realpathSync: vi.fn((path: string) => realpathSync(path)),
+    }
+
+    expect(readAdminPublicKeyFile(throwExitError, publicKeyFile, fileSystem)).toBe(originalKey)
+    expect(readFileSync(publicKeyFile, "utf8").trim()).toBe(attackerKey)
+    expect(fileSystem.openSync).toHaveBeenCalledWith(publicKeyFile, "r")
+    expect(fileSystem.fstatSync).toHaveBeenCalled()
+    expect(fileSystem.readSync).toHaveBeenCalled()
   })
 
   it("R-0000665: does not log a symlink-target line for a regular admin public key file", () => {
@@ -877,6 +938,49 @@ describe("admin public key validation", () => {
         path: join(TEST_DIR, "id_ed25519.pub"),
       },
     ])
+  })
+
+  it("R-0000948: discovers the public key read from the opened descriptor after fstat", () => {
+    mkdirSync(TEST_DIR, { recursive: true })
+    const originalKey = createEd25519PublicKey("user@original")
+    const attackerKey = createEd25519PublicKey("attacker@example")
+    const publicKeyFile = join(TEST_DIR, "id_ed25519.pub")
+    writeFileSync(publicKeyFile, `${originalKey}\n`)
+
+    const fileSystem = {
+      closeSync: vi.fn((fd: number) => {
+        closeSync(fd)
+      }),
+      fstatSync: vi.fn((fd: number) => {
+        const stat = fstatSync(fd)
+        unlinkSync(publicKeyFile)
+        writeFileSync(publicKeyFile, `${attackerKey}\n`)
+        return stat
+      }),
+      lstatSync: vi.fn((path: string) => lstatSync(path)),
+      openSync: vi.fn((path: string, flags: "r") => openSync(path, flags)),
+      readSync: vi.fn(
+        (
+          ...parameters: [
+            fd: number,
+            buffer: Buffer,
+            offset: number,
+            length: number,
+            position: number,
+          ]
+        ) => readSync(...parameters)
+      ),
+      realpathSync: vi.fn((path: string) => realpathSync(path)),
+    }
+
+    expect(discoverLocalPublicKeys(TEST_DIR, fileSystem)).toStrictEqual([
+      {
+        key: originalKey,
+        label: "id_ed25519.pub",
+        path: publicKeyFile,
+      },
+    ])
+    expect(readFileSync(publicKeyFile, "utf8").trim()).toBe(attackerKey)
   })
 })
 

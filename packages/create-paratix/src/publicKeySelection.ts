@@ -1,6 +1,14 @@
 import type { Stats } from "node:fs"
 
-import { lstatSync, readdirSync, readFileSync, realpathSync, statSync } from "node:fs"
+import {
+  closeSync,
+  fstatSync,
+  lstatSync,
+  openSync,
+  readdirSync,
+  readSync,
+  realpathSync,
+} from "node:fs"
 import { homedir } from "node:os"
 import { basename, join, resolve } from "node:path"
 
@@ -18,11 +26,16 @@ export type LocalPublicKey = {
 }
 
 type ExitWithMessage = (message: string) => never
+type PublicKeyReadSync = (
+  ...parameters: [fd: number, buffer: Buffer, offset: number, length: number, position: number]
+) => number
 type AdminPublicKeyFileSystem = {
+  closeSync: (fd: number) => void
+  fstatSync: (fd: number) => Stats
   lstatSync: (path: string) => Stats
-  readFileSync: (path: string, encoding: "utf8") => string
+  openSync: (path: string, flags: "r") => number
+  readSync: PublicKeyReadSync
   realpathSync: (path: string) => string
-  statSync: (path: string) => Stats
 }
 
 type PublicKeyChoice = "local" | "placeholder"
@@ -32,10 +45,12 @@ type PromptForAdminPublicKeyOptions = {
 }
 
 const adminPublicKeyFileSystem: AdminPublicKeyFileSystem = {
+  closeSync,
+  fstatSync,
   lstatSync,
-  readFileSync,
+  openSync,
+  readSync,
   realpathSync,
-  statSync,
 }
 
 const PUBLIC_KEY_PROMPT_OPTIONS: Array<SelectOption<PublicKeyChoice>> = [
@@ -80,6 +95,37 @@ const PRIVATE_KEY_MARKERS = [
 ]
 
 const MAX_PUBLIC_KEY_FILE_BYTES = 16_384
+
+function readPublicKeyFileContents(
+  path: string,
+  fileSystem: AdminPublicKeyFileSystem = adminPublicKeyFileSystem
+): string {
+  const fd = fileSystem.openSync(path, "r")
+  try {
+    const stat = fileSystem.fstatSync(fd)
+    if (!stat.isFile() || stat.size > MAX_PUBLIC_KEY_FILE_BYTES) {
+      throw new Error("Invalid public key file")
+    }
+
+    const buffer = Buffer.alloc(stat.size)
+    let bytesRead = 0
+    while (bytesRead < buffer.length) {
+      const chunkBytesRead = fileSystem.readSync(
+        fd,
+        buffer,
+        bytesRead,
+        buffer.length - bytesRead,
+        bytesRead
+      )
+      if (chunkBytesRead === 0) break
+      bytesRead += chunkBytesRead
+    }
+
+    return buffer.subarray(0, bytesRead).toString("utf8")
+  } finally {
+    fileSystem.closeSync(fd)
+  }
+}
 
 function containsPrivateKeyMarker(value: string): boolean {
   return PRIVATE_KEY_MARKERS.some((marker) => value.includes(marker))
@@ -202,15 +248,15 @@ export function readAdminPublicKeyFile(
   // enforce that at runtime — a caller may pass a stub that returns or whose
   // thrown error is caught upstream. After every exitWithMessage invocation
   // we therefore guarantee a return/throw locally so we never reach a state
-  // where stat/value are read uninitialised.
+  // where the file contents are read from invalid state.
   const failWithReadError = (): never => {
     exitWithMessage(`Error: Failed to read admin public key file.`)
     throw new Error(`Error: Failed to read admin public key file.`)
   }
 
   // R-0000665: probe with `lstatSync` first so a symlinked path is
-  // detected without following it. `statSync` later follows the link to
-  // validate the eventual file's size/isFile, but the operator-facing
+  // detected without following it. `openSync` later follows the link so
+  // `fstatSync` can validate the eventual file's size/isFile, but the operator-facing
   // log line below names the real target so a planted link in a shared
   // CI home cannot embed a different key into server.ts without the
   // operator noticing.
@@ -227,9 +273,9 @@ export function readAdminPublicKeyFile(
   // is a regular file. The previous implementation only logged when the
   // leaf was a symbolic link, leaving the ancestor-symlink case silent.
   // R-0000731: resolve the realpath once up front and reuse it for the
-  // subsequent stat/readFile calls so the link target cannot be swapped
+  // subsequent FD-based read so the link target cannot be swapped
   // between the steps (TOCTOU). When realpath fails we fall back to the
-  // originally resolved path; the statSync below will then surface any
+  // originally resolved path; the open below will then surface any
   // remaining failure via failWithReadError.
   const materialisedPath = (() => {
     try {
@@ -246,34 +292,19 @@ export function readAdminPublicKeyFile(
       return realPath
     } catch {
       // A dangling or unreadable symlink falls through to the regular
-      // statSync read path, which will surface the failure via
+      // open/fstat/read path, which will surface the failure via
       // failWithReadError below.
       return resolvedPath
     }
   })()
 
-  // R-0000186: statSync follows symbolic links so that legitimate operator
+  // R-0000186: openSync follows symbolic links so that legitimate operator
   // setups (e.g. ~/.ssh/id_ed25519.pub linked into a password-manager vault)
-  // are accepted. The downstream readFileSync also follows the link, so the
-  // size and isFile() guards remain meaningful for the eventual file.
-  // R-0000731: stat/readFile both operate on the already-resolved
-  // materialisedPath so the link target cannot be swapped between
-  // realpath and stat or between stat and readFile.
-  const stat = (() => {
-    try {
-      return fileSystem.statSync(materialisedPath)
-    } catch {
-      return failWithReadError()
-    }
-  })()
-
-  if (!stat.isFile() || stat.size > MAX_PUBLIC_KEY_FILE_BYTES) {
-    failWithReadError()
-  }
-
+  // are accepted. R-0000948: fstat/read operate on the opened descriptor, so
+  // the pathname cannot be exchanged between the size/isFile guard and read.
   const value = (() => {
     try {
-      return fileSystem.readFileSync(materialisedPath, "utf8")
+      return readPublicKeyFileContents(materialisedPath, fileSystem)
     } catch {
       return failWithReadError()
     }
@@ -288,7 +319,7 @@ export function readAdminPublicKeyFile(
 // otherwise show only `id_ed25519.pub` while the underlying file lives
 // in an attacker-controlled directory. R-0000725: the caller resolves
 // the realpath once during discovery and threads it in here so the
-// label and the subsequent stat/readFile reference the same materialised
+// label and the subsequent FD-based read reference the same materialised
 // target — eliminating the TOCTOU window where the label could describe
 // a different file than the one whose contents were embedded.
 function buildLocalPublicKeyLabel(entry: string, path: string, realPath: string): string {
@@ -297,20 +328,22 @@ function buildLocalPublicKeyLabel(entry: string, path: string, realPath: string)
 }
 
 // R-0000725: resolve the entry through `realpathSync` once per discovery
-// loop and reuse the resulting path for stat, readFile and the operator
+// loop and reuse the resulting path for the descriptor read and the operator
 // label. Falls back to the original path when `realpath` is unavailable
-// (dangling link, EACCES) so the downstream statSync still surfaces the
+// (dangling link, EACCES) so the downstream open/fstat/read still surfaces the
 // failure through the regular catch arm.
-function resolveDiscoveredEntryPath(path: string): string {
+function resolveDiscoveredEntryPath(path: string, fileSystem: AdminPublicKeyFileSystem): string {
   try {
-    // eslint-disable-next-line security/detect-non-literal-fs-filename
-    return realpathSync(path)
+    return fileSystem.realpathSync(path)
   } catch {
     return path
   }
 }
 
-export function discoverLocalPublicKeys(sshDirectory = join(homedir(), ".ssh")): LocalPublicKey[] {
+export function discoverLocalPublicKeys(
+  sshDirectory = join(homedir(), ".ssh"),
+  fileSystem: AdminPublicKeyFileSystem = adminPublicKeyFileSystem
+): LocalPublicKey[] {
   try {
     // eslint-disable-next-line security/detect-non-literal-fs-filename
     return readdirSync(sshDirectory)
@@ -328,17 +361,8 @@ export function discoverLocalPublicKeys(sshDirectory = join(homedir(), ".ssh")):
           // surfaces ancestor symlinks (e.g. `~/.ssh -> /tmp/attacker-ssh`)
           // in the operator-facing label even when the leaf entry itself
           // is a regular file.
-          const resolvedPath = resolveDiscoveredEntryPath(path)
-
-          // R-0000186: follow symlinks so ~/.ssh/*.pub entries that point to
-          // a password-manager vault (or similar) are still discovered.
-          // eslint-disable-next-line security/detect-non-literal-fs-filename
-          const stat = statSync(resolvedPath)
-          if (!stat.isFile() || stat.size > MAX_PUBLIC_KEY_FILE_BYTES) {
-            return []
-          }
-          // eslint-disable-next-line security/detect-non-literal-fs-filename
-          const key = readFileSync(resolvedPath, "utf8").trim()
+          const resolvedPath = resolveDiscoveredEntryPath(path, fileSystem)
+          const key = readPublicKeyFileContents(resolvedPath, fileSystem).trim()
           if (!isValidAdminPublicKey(key)) {
             return []
           }
