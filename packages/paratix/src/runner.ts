@@ -1156,7 +1156,7 @@ export async function runPlaybook(
 
     // No catch block: connect errors propagate to cli.ts, which prints them and exits with code 2.
     try {
-      ssh = await connectAndRegister({
+      const connectedSsh = await connectAndRegister({
         definition,
         options,
         promptAbortSignal,
@@ -1166,6 +1166,7 @@ export async function runPlaybook(
         },
         shutdownSignal,
       })
+      ssh = connectedSsh
       await withRunScopedSecrets(async () =>
         executeRun({
           definition,
@@ -1173,7 +1174,7 @@ export async function runPlaybook(
           environment,
           rebootGrace,
           shutdownSignal,
-          ssh,
+          ssh: connectedSsh,
           stats,
           verbose,
         })

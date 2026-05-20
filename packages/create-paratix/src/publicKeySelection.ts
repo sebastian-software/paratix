@@ -15,9 +15,9 @@ import { basename, join, resolve } from "node:path"
 import type { SelectFunction, SelectOption } from "./promptUi.js"
 
 import { CliExitError } from "./cliExitError.js"
-import { escapeCliControlCharacters } from "./cliFormat.js"
 import { hasValidOpenSshPublicKeyWireBlob } from "./openSshPublicKeyWire.js"
 import { isCanonicalBase64 } from "./publicKeyBase64.js"
+import { logAdminPublicKeyRealpath } from "./publicKeyProvenanceLog.js"
 import { containsUnsafeCodepoint } from "./unsafeCodepoints.js"
 
 export type LocalPublicKey = {
@@ -255,12 +255,9 @@ export function readAdminPublicKeyFile(
     throw new Error(`Error: Failed to read admin public key file.`)
   }
 
-  // R-0000665: probe with `lstatSync` first so a symlinked path is
-  // detected without following it. `openSync` later follows the link so
-  // `fstatSync` can validate the eventual file's size/isFile, but the operator-facing
-  // log line below names the real target so a planted link in a shared
-  // CI home cannot embed a different key into server.ts without the
-  // operator noticing.
+  // R-0000665: probe with `lstatSync` first so a symlinked path is detected
+  // before `openSync` follows it. The provenance log below names the real
+  // target so a planted link in shared CI cannot silently embed another key.
   const linkStat = (() => {
     try {
       return fileSystem.lstatSync(resolvedPath)
@@ -268,31 +265,18 @@ export function readAdminPublicKeyFile(
       return failWithReadError()
     }
   })()
-  // R-0000726 (was R-0000665): resolve the realpath unconditionally so
-  // ancestor symlinks (e.g. a planted `~/.ssh -> /tmp/attacker-ssh`)
-  // surface in the operator-facing log even when the leaf entry itself
-  // is a regular file. The previous implementation only logged when the
-  // leaf was a symbolic link, leaving the ancestor-symlink case silent.
-  // R-0000731: resolve the realpath once up front and reuse it for the
-  // subsequent FD-based read so the link target cannot be swapped
-  // between the steps (TOCTOU). When realpath fails we fall back to the
-  // originally resolved path; the open below will then surface any
-  // remaining failure via failWithReadError.
+  // R-0000726/R-0000731: resolve realpath unconditionally so ancestor symlinks
+  // are visible in the log and the later FD-based read uses the same target.
+  // If realpath fails, opening the original path surfaces the read failure.
   const materialisedPath = (() => {
     try {
       const realPath = fileSystem.realpathSync(resolvedPath)
       if (realPath !== resolvedPath) {
-        const escapedRealPath = escapeCliControlCharacters(realPath)
-        const escapedResolvedPath = escapeCliControlCharacters(resolvedPath)
-        if (linkStat.isSymbolicLink()) {
-          console.log(
-            `Reading public key from ${escapedRealPath} (symlink target of ${escapedResolvedPath}).`
-          )
-        } else {
-          console.log(
-            `Reading public key from ${escapedRealPath} (resolved via ancestor symlink of ${escapedResolvedPath}).`
-          )
-        }
+        logAdminPublicKeyRealpath({
+          isLeafSymlink: linkStat.isSymbolicLink(),
+          realPath,
+          resolvedPath,
+        })
       }
       return realPath
     } catch {
