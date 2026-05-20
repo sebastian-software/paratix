@@ -53,16 +53,16 @@ const expectedTimerContent =
   "[Unit]\nDescription=Paratix scheduled task: backup (timer)\n\n[Timer]\nOnCalendar=*-*-* 03:00:00\nPersistent=true\nUnit=backup.service\n\n[Install]\nWantedBy=timers.target\n"
 
 const presentApplyFromMissingUnitsResponses = {
-  [`[ -e '${SERVICE_PATH}' ]`]: { code: 1 },
-  [`[ -e '${TIMER_PATH}' ]`]: { code: 1 },
+  [`[ ! -L '${SERVICE_PATH}' ] && [ -f '${SERVICE_PATH}' ]`]: { code: 1 },
+  [`[ ! -L '${TIMER_PATH}' ] && [ -f '${TIMER_PATH}' ]`]: { code: 1 },
   "systemctl daemon-reload": { code: 0 },
   "systemctl enable --now -- 'backup.timer'": { code: 0 },
   "systemctl restart -- 'backup.timer'": { code: 0 },
 } satisfies MockSshResponses
 
 const absentApplyWithExistingUnitsResponses = {
-  [`[ -e '${SERVICE_PATH}' ]`]: { code: 0 },
-  [`[ -e '${TIMER_PATH}' ]`]: { code: 0 },
+  [`[ ! -L '${SERVICE_PATH}' ] && [ -f '${SERVICE_PATH}' ]`]: { code: 0 },
+  [`[ ! -L '${TIMER_PATH}' ] && [ -f '${TIMER_PATH}' ]`]: { code: 0 },
   [`rm -f '${TIMER_PATH}' '${SERVICE_PATH}'`]: { code: 0 },
   "systemctl daemon-reload": { code: 0 },
   "systemctl disable --now -- 'backup.timer'": { code: 0 },
@@ -73,8 +73,8 @@ const absentApplyWithExistingUnitsResponses = {
 describe("timer.scheduled — check (state: present)", () => {
   it("returns ok when files match and timer is enabled and active", async () => {
     const ssh = createMockSsh({
-      [`[ -e '${SERVICE_PATH}' ]`]: { code: 0 },
-      [`[ -e '${TIMER_PATH}' ]`]: { code: 0 },
+      [`[ ! -L '${SERVICE_PATH}' ] && [ -f '${SERVICE_PATH}' ]`]: { code: 0 },
+      [`[ ! -L '${TIMER_PATH}' ] && [ -f '${TIMER_PATH}' ]`]: { code: 0 },
       [`cat '${SERVICE_PATH}'`]: { code: 0, stdout: expectedServiceContent },
       [`cat '${TIMER_PATH}'`]: { code: 0, stdout: expectedTimerContent },
       [`stat -c '%a' '${SERVICE_PATH}'`]: { code: 0, stdout: "644\n" },
@@ -88,8 +88,8 @@ describe("timer.scheduled — check (state: present)", () => {
 
   it("returns needs-apply when service unit mode drifts to 0600", async () => {
     const ssh = createMockSsh({
-      [`[ -e '${SERVICE_PATH}' ]`]: { code: 0 },
-      [`[ -e '${TIMER_PATH}' ]`]: { code: 0 },
+      [`[ ! -L '${SERVICE_PATH}' ] && [ -f '${SERVICE_PATH}' ]`]: { code: 0 },
+      [`[ ! -L '${TIMER_PATH}' ] && [ -f '${TIMER_PATH}' ]`]: { code: 0 },
       [`cat '${SERVICE_PATH}'`]: { code: 0, stdout: expectedServiceContent },
       [`cat '${TIMER_PATH}'`]: { code: 0, stdout: expectedTimerContent },
       [`stat -c '%a' '${SERVICE_PATH}'`]: { code: 0, stdout: "600\n" },
@@ -103,8 +103,8 @@ describe("timer.scheduled — check (state: present)", () => {
 
   it("returns needs-apply when timer unit mode drifts to 0600", async () => {
     const ssh = createMockSsh({
-      [`[ -e '${SERVICE_PATH}' ]`]: { code: 0 },
-      [`[ -e '${TIMER_PATH}' ]`]: { code: 0 },
+      [`[ ! -L '${SERVICE_PATH}' ] && [ -f '${SERVICE_PATH}' ]`]: { code: 0 },
+      [`[ ! -L '${TIMER_PATH}' ] && [ -f '${TIMER_PATH}' ]`]: { code: 0 },
       [`cat '${SERVICE_PATH}'`]: { code: 0, stdout: expectedServiceContent },
       [`cat '${TIMER_PATH}'`]: { code: 0, stdout: expectedTimerContent },
       [`stat -c '%a' '${SERVICE_PATH}'`]: { code: 0, stdout: "644\n" },
@@ -116,10 +116,31 @@ describe("timer.scheduled — check (state: present)", () => {
     expect(await mod.check(ssh, emptyEnv)).toBe("needs-apply")
   })
 
+  it("returns needs-apply when the service unit path is a symlink", async () => {
+    const ssh = createMockSsh({
+      [`[ ! -L '${SERVICE_PATH}' ] && [ -f '${SERVICE_PATH}' ]`]: { code: 1 },
+    })
+    const mod = timer.scheduled("backup", baseOptions)
+    expect(await mod.check(ssh, emptyEnv)).toBe("needs-apply")
+    expect(ssh.calls).not.toContain(`cat '${SERVICE_PATH}'`)
+  })
+
+  it("returns needs-apply when the timer unit path is a symlink", async () => {
+    const ssh = createMockSsh({
+      [`[ ! -L '${SERVICE_PATH}' ] && [ -f '${SERVICE_PATH}' ]`]: { code: 0 },
+      [`[ ! -L '${TIMER_PATH}' ] && [ -f '${TIMER_PATH}' ]`]: { code: 1 },
+      [`cat '${SERVICE_PATH}'`]: { code: 0, stdout: expectedServiceContent },
+      [`stat -c '%a' '${SERVICE_PATH}'`]: { code: 0, stdout: "644\n" },
+    })
+    const mod = timer.scheduled("backup", baseOptions)
+    expect(await mod.check(ssh, emptyEnv)).toBe("needs-apply")
+    expect(ssh.calls).not.toContain(`cat '${TIMER_PATH}'`)
+  })
+
   it("returns needs-apply when stat for the service unit mode fails", async () => {
     const ssh = createMockSsh({
-      [`[ -e '${SERVICE_PATH}' ]`]: { code: 0 },
-      [`[ -e '${TIMER_PATH}' ]`]: { code: 0 },
+      [`[ ! -L '${SERVICE_PATH}' ] && [ -f '${SERVICE_PATH}' ]`]: { code: 0 },
+      [`[ ! -L '${TIMER_PATH}' ] && [ -f '${TIMER_PATH}' ]`]: { code: 0 },
       [`cat '${SERVICE_PATH}'`]: { code: 0, stdout: expectedServiceContent },
       [`cat '${TIMER_PATH}'`]: { code: 0, stdout: expectedTimerContent },
       [`stat -c '%a' '${SERVICE_PATH}'`]: { code: 1, stdout: "" },
@@ -133,7 +154,7 @@ describe("timer.scheduled — check (state: present)", () => {
 
   it("returns needs-apply when service file is missing", async () => {
     const ssh = createMockSsh({
-      [`[ -e '${SERVICE_PATH}' ]`]: { code: 1 },
+      [`[ ! -L '${SERVICE_PATH}' ] && [ -f '${SERVICE_PATH}' ]`]: { code: 1 },
     })
     const mod = timer.scheduled("backup", baseOptions)
     expect(await mod.check(ssh, emptyEnv)).toBe("needs-apply")
@@ -141,8 +162,8 @@ describe("timer.scheduled — check (state: present)", () => {
 
   it("returns needs-apply when timer file is missing", async () => {
     const ssh = createMockSsh({
-      [`[ -e '${SERVICE_PATH}' ]`]: { code: 0 },
-      [`[ -e '${TIMER_PATH}' ]`]: { code: 1 },
+      [`[ ! -L '${SERVICE_PATH}' ] && [ -f '${SERVICE_PATH}' ]`]: { code: 0 },
+      [`[ ! -L '${TIMER_PATH}' ] && [ -f '${TIMER_PATH}' ]`]: { code: 1 },
       [`cat '${SERVICE_PATH}'`]: { code: 0, stdout: expectedServiceContent },
       [`stat -c '%a' '${SERVICE_PATH}'`]: { code: 0, stdout: "644\n" },
     })
@@ -152,7 +173,7 @@ describe("timer.scheduled — check (state: present)", () => {
 
   it("returns needs-apply when reading the service unit fails", async () => {
     const ssh = createMockSsh({
-      [`[ -e '${SERVICE_PATH}' ]`]: { code: 0 },
+      [`[ ! -L '${SERVICE_PATH}' ] && [ -f '${SERVICE_PATH}' ]`]: { code: 0 },
     })
     vi.spyOn(ssh, "readFile").mockRejectedValueOnce(new Error("SFTP read failed"))
     const mod = timer.scheduled("backup", baseOptions)
@@ -161,8 +182,8 @@ describe("timer.scheduled — check (state: present)", () => {
 
   it("returns needs-apply when reading the timer unit fails", async () => {
     const ssh = createMockSsh({
-      [`[ -e '${SERVICE_PATH}' ]`]: { code: 0 },
-      [`[ -e '${TIMER_PATH}' ]`]: { code: 0 },
+      [`[ ! -L '${SERVICE_PATH}' ] && [ -f '${SERVICE_PATH}' ]`]: { code: 0 },
+      [`[ ! -L '${TIMER_PATH}' ] && [ -f '${TIMER_PATH}' ]`]: { code: 0 },
       [`cat '${SERVICE_PATH}'`]: { code: 0, stdout: expectedServiceContent },
       [`stat -c '%a' '${SERVICE_PATH}'`]: { code: 0, stdout: "644\n" },
     })
@@ -175,7 +196,7 @@ describe("timer.scheduled — check (state: present)", () => {
 
   it("returns needs-apply when service content differs", async () => {
     const ssh = createMockSsh({
-      [`[ -e '${SERVICE_PATH}' ]`]: { code: 0 },
+      [`[ ! -L '${SERVICE_PATH}' ] && [ -f '${SERVICE_PATH}' ]`]: { code: 0 },
       [`cat '${SERVICE_PATH}'`]: { code: 0, stdout: "[Unit]\nDescription=stale\n" },
     })
     const mod = timer.scheduled("backup", baseOptions)
@@ -184,8 +205,8 @@ describe("timer.scheduled — check (state: present)", () => {
 
   it("returns needs-apply when timer is not enabled", async () => {
     const ssh = createMockSsh({
-      [`[ -e '${SERVICE_PATH}' ]`]: { code: 0 },
-      [`[ -e '${TIMER_PATH}' ]`]: { code: 0 },
+      [`[ ! -L '${SERVICE_PATH}' ] && [ -f '${SERVICE_PATH}' ]`]: { code: 0 },
+      [`[ ! -L '${TIMER_PATH}' ] && [ -f '${TIMER_PATH}' ]`]: { code: 0 },
       [`cat '${SERVICE_PATH}'`]: { code: 0, stdout: expectedServiceContent },
       [`cat '${TIMER_PATH}'`]: { code: 0, stdout: expectedTimerContent },
       [`stat -c '%a' '${SERVICE_PATH}'`]: { code: 0, stdout: "644\n" },
@@ -198,8 +219,8 @@ describe("timer.scheduled — check (state: present)", () => {
 
   it("returns needs-apply when timer is enabled but not active", async () => {
     const ssh = createMockSsh({
-      [`[ -e '${SERVICE_PATH}' ]`]: { code: 0 },
-      [`[ -e '${TIMER_PATH}' ]`]: { code: 0 },
+      [`[ ! -L '${SERVICE_PATH}' ] && [ -f '${SERVICE_PATH}' ]`]: { code: 0 },
+      [`[ ! -L '${TIMER_PATH}' ] && [ -f '${TIMER_PATH}' ]`]: { code: 0 },
       [`cat '${SERVICE_PATH}'`]: { code: 0, stdout: expectedServiceContent },
       [`cat '${TIMER_PATH}'`]: { code: 0, stdout: expectedTimerContent },
       [`stat -c '%a' '${SERVICE_PATH}'`]: { code: 0, stdout: "644\n" },

@@ -53,16 +53,16 @@ const expectedTimerContent =
   "[Unit]\nDescription=Paratix scheduled task: backup (timer)\n\n[Timer]\nOnCalendar=*-*-* 03:00:00\nPersistent=true\nUnit=backup.service\n\n[Install]\nWantedBy=timers.target\n"
 
 const presentApplyFromMissingUnitsResponses = {
-  [`[ -e '${SERVICE_PATH}' ]`]: { code: 1 },
-  [`[ -e '${TIMER_PATH}' ]`]: { code: 1 },
+  [`[ ! -L '${SERVICE_PATH}' ] && [ -f '${SERVICE_PATH}' ]`]: { code: 1 },
+  [`[ ! -L '${TIMER_PATH}' ] && [ -f '${TIMER_PATH}' ]`]: { code: 1 },
   "systemctl daemon-reload": { code: 0 },
   "systemctl enable --now -- 'backup.timer'": { code: 0 },
   "systemctl restart -- 'backup.timer'": { code: 0 },
 } satisfies MockSshResponses
 
 const absentApplyWithExistingUnitsResponses = {
-  [`[ -e '${SERVICE_PATH}' ]`]: { code: 0 },
-  [`[ -e '${TIMER_PATH}' ]`]: { code: 0 },
+  [`[ ! -L '${SERVICE_PATH}' ] && [ -f '${SERVICE_PATH}' ]`]: { code: 0 },
+  [`[ ! -L '${TIMER_PATH}' ] && [ -f '${TIMER_PATH}' ]`]: { code: 0 },
   [`rm -f '${TIMER_PATH}' '${SERVICE_PATH}'`]: { code: 0 },
   "systemctl daemon-reload": { code: 0 },
   "systemctl disable --now -- 'backup.timer'": { code: 0 },
@@ -73,8 +73,8 @@ const absentApplyWithExistingUnitsResponses = {
 describe("timer.scheduled — apply (state: present, idempotency)", () => {
   it("returns ok without side effects when files match and timer is already enabled and active", async () => {
     const ssh = createMockSsh({
-      [`[ -e '${SERVICE_PATH}' ]`]: { code: 0 },
-      [`[ -e '${TIMER_PATH}' ]`]: { code: 0 },
+      [`[ ! -L '${SERVICE_PATH}' ] && [ -f '${SERVICE_PATH}' ]`]: { code: 0 },
+      [`[ ! -L '${TIMER_PATH}' ] && [ -f '${TIMER_PATH}' ]`]: { code: 0 },
       [`cat '${SERVICE_PATH}'`]: { code: 0, stdout: expectedServiceContent },
       [`cat '${TIMER_PATH}'`]: { code: 0, stdout: expectedTimerContent },
       [`stat -c '%a' '${SERVICE_PATH}'`]: { code: 0, stdout: "644\n" },
@@ -90,10 +90,53 @@ describe("timer.scheduled — apply (state: present, idempotency)", () => {
     expect(ssh.calls).not.toContain("systemctl enable --now -- 'backup.timer'")
   })
 
+  it("rewrites the service unit when the service unit path is a symlink", async () => {
+    const ssh = createTimerApplyMockSsh({
+      [`[ -e '${SERVICE_PATH}' ]`]: { code: 0 },
+      [`[ ! -L '${SERVICE_PATH}' ] && [ -f '${SERVICE_PATH}' ]`]: { code: 1 },
+      [`[ ! -L '${TIMER_PATH}' ] && [ -f '${TIMER_PATH}' ]`]: { code: 0 },
+      [`cat '${SERVICE_PATH}'`]: { code: 0, stdout: expectedServiceContent },
+      [`cat '${TIMER_PATH}'`]: { code: 0, stdout: expectedTimerContent },
+      [`stat -c '%a' '${SERVICE_PATH}'`]: { code: 0, stdout: "644\n" },
+      [`stat -c '%a' '${TIMER_PATH}'`]: { code: 0, stdout: "644\n" },
+      "systemctl daemon-reload": { code: 0 },
+      "systemctl enable --now -- 'backup.timer'": { code: 0 },
+    })
+    const mod = timer.scheduled("backup", baseOptions)
+    const result = await mod.apply(ssh, emptyEnv)
+    expect(result.status).toBe("changed")
+    expect(ssh.writeFileCalls).toStrictEqual([
+      { content: expectedServiceContent, options: { mode: "0644" }, remotePath: SERVICE_PATH },
+    ])
+    expect(ssh.calls).toContain("systemctl daemon-reload")
+  })
+
+  it("rewrites the timer unit when the timer unit path is a symlink", async () => {
+    const ssh = createTimerApplyMockSsh({
+      [`[ -e '${TIMER_PATH}' ]`]: { code: 0 },
+      [`[ ! -L '${SERVICE_PATH}' ] && [ -f '${SERVICE_PATH}' ]`]: { code: 0 },
+      [`[ ! -L '${TIMER_PATH}' ] && [ -f '${TIMER_PATH}' ]`]: { code: 1 },
+      [`cat '${SERVICE_PATH}'`]: { code: 0, stdout: expectedServiceContent },
+      [`cat '${TIMER_PATH}'`]: { code: 0, stdout: expectedTimerContent },
+      [`stat -c '%a' '${SERVICE_PATH}'`]: { code: 0, stdout: "644\n" },
+      [`stat -c '%a' '${TIMER_PATH}'`]: { code: 0, stdout: "644\n" },
+      "systemctl daemon-reload": { code: 0 },
+      "systemctl enable --now -- 'backup.timer'": { code: 0 },
+      "systemctl restart -- 'backup.timer'": { code: 0 },
+    })
+    const mod = timer.scheduled("backup", baseOptions)
+    const result = await mod.apply(ssh, emptyEnv)
+    expect(result.status).toBe("changed")
+    expect(ssh.writeFileCalls).toStrictEqual([
+      { content: expectedTimerContent, options: { mode: "0644" }, remotePath: TIMER_PATH },
+    ])
+    expect(ssh.calls).toContain("systemctl restart -- 'backup.timer'")
+  })
+
   it("runs enable --now, daemon-reload and restart when files match but timer is not enabled (stale RAM state)", async () => {
     const ssh = createMockSsh({
-      [`[ -e '${SERVICE_PATH}' ]`]: { code: 0 },
-      [`[ -e '${TIMER_PATH}' ]`]: { code: 0 },
+      [`[ ! -L '${SERVICE_PATH}' ] && [ -f '${SERVICE_PATH}' ]`]: { code: 0 },
+      [`[ ! -L '${TIMER_PATH}' ] && [ -f '${TIMER_PATH}' ]`]: { code: 0 },
       [`cat '${SERVICE_PATH}'`]: { code: 0, stdout: expectedServiceContent },
       [`cat '${TIMER_PATH}'`]: { code: 0, stdout: expectedTimerContent },
       [`stat -c '%a' '${SERVICE_PATH}'`]: { code: 0, stdout: "644\n" },
@@ -113,8 +156,8 @@ describe("timer.scheduled — apply (state: present, idempotency)", () => {
 
   it("runs daemon-reload and restart when files match but timer is enabled and inactive (stale RAM state)", async () => {
     const ssh = createMockSsh({
-      [`[ -e '${SERVICE_PATH}' ]`]: { code: 0 },
-      [`[ -e '${TIMER_PATH}' ]`]: { code: 0 },
+      [`[ ! -L '${SERVICE_PATH}' ] && [ -f '${SERVICE_PATH}' ]`]: { code: 0 },
+      [`[ ! -L '${TIMER_PATH}' ] && [ -f '${TIMER_PATH}' ]`]: { code: 0 },
       [`cat '${SERVICE_PATH}'`]: { code: 0, stdout: expectedServiceContent },
       [`cat '${TIMER_PATH}'`]: { code: 0, stdout: expectedTimerContent },
       [`stat -c '%a' '${SERVICE_PATH}'`]: { code: 0, stdout: "644\n" },
@@ -136,7 +179,8 @@ describe("timer.scheduled — apply (state: present, idempotency)", () => {
   it("does not restart when only the service file changed", async () => {
     const ssh = createTimerApplyMockSsh({
       [`[ -e '${SERVICE_PATH}' ]`]: { code: 0 },
-      [`[ -e '${TIMER_PATH}' ]`]: { code: 0 },
+      [`[ ! -L '${SERVICE_PATH}' ] && [ -f '${SERVICE_PATH}' ]`]: { code: 0 },
+      [`[ ! -L '${TIMER_PATH}' ] && [ -f '${TIMER_PATH}' ]`]: { code: 0 },
       [`cat '${SERVICE_PATH}'`]: { code: 0, stdout: "[Unit]\nDescription=stale\n" },
       [`cat '${TIMER_PATH}'`]: { code: 0, stdout: expectedTimerContent },
       [`stat -c '%a' '${SERVICE_PATH}'`]: { code: 0, stdout: "644\n" },
@@ -154,7 +198,8 @@ describe("timer.scheduled — apply (state: present, idempotency)", () => {
   it("rewrites the service unit when its mode drifts to 0600", async () => {
     const ssh = createMockSsh({
       [`[ -e '${SERVICE_PATH}' ]`]: { code: 0 },
-      [`[ -e '${TIMER_PATH}' ]`]: { code: 0 },
+      [`[ ! -L '${SERVICE_PATH}' ] && [ -f '${SERVICE_PATH}' ]`]: { code: 0 },
+      [`[ ! -L '${TIMER_PATH}' ] && [ -f '${TIMER_PATH}' ]`]: { code: 0 },
       [`cat '${SERVICE_PATH}'`]: { code: 0, stdout: expectedServiceContent },
       [`cat '${TIMER_PATH}'`]: { code: 0, stdout: expectedTimerContent },
       [`stat -c '%a' '${SERVICE_PATH}'`]: { code: 0, stdout: "600\n" },
@@ -178,8 +223,9 @@ describe("timer.scheduled — apply (state: present, idempotency)", () => {
 
   it("rewrites the timer unit when its mode drifts to 0600", async () => {
     const ssh = createMockSsh({
-      [`[ -e '${SERVICE_PATH}' ]`]: { code: 0 },
       [`[ -e '${TIMER_PATH}' ]`]: { code: 0 },
+      [`[ ! -L '${SERVICE_PATH}' ] && [ -f '${SERVICE_PATH}' ]`]: { code: 0 },
+      [`[ ! -L '${TIMER_PATH}' ] && [ -f '${TIMER_PATH}' ]`]: { code: 0 },
       [`cat '${SERVICE_PATH}'`]: { code: 0, stdout: expectedServiceContent },
       [`cat '${TIMER_PATH}'`]: { code: 0, stdout: expectedTimerContent },
       [`stat -c '%a' '${SERVICE_PATH}'`]: { code: 0, stdout: "644\n" },
@@ -212,8 +258,8 @@ describe("timer.scheduled — apply (state: present, idempotency)", () => {
   // apply silently re-enabled the timer.
   it("R-0000773: apply returns failed when is-enabled probe reports a toolchain error", async () => {
     const ssh = createMockSsh({
-      [`[ -e '${SERVICE_PATH}' ]`]: { code: 0 },
-      [`[ -e '${TIMER_PATH}' ]`]: { code: 0 },
+      [`[ ! -L '${SERVICE_PATH}' ] && [ -f '${SERVICE_PATH}' ]`]: { code: 0 },
+      [`[ ! -L '${TIMER_PATH}' ] && [ -f '${TIMER_PATH}' ]`]: { code: 0 },
       [`cat '${SERVICE_PATH}'`]: { code: 0, stdout: expectedServiceContent },
       [`cat '${TIMER_PATH}'`]: { code: 0, stdout: expectedTimerContent },
       [`stat -c '%a' '${SERVICE_PATH}'`]: { code: 0, stdout: "644\n" },

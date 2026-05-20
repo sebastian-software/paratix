@@ -58,6 +58,8 @@ const existingTimerContent = "[Timer]\nOnCalendar=hourly\n"
 const presentApplyFromMissingUnitsResponses = {
   [`[ -e '${SERVICE_PATH}' ]`]: { code: 1 },
   [`[ -e '${TIMER_PATH}' ]`]: { code: 1 },
+  [`[ ! -L '${SERVICE_PATH}' ] && [ -f '${SERVICE_PATH}' ]`]: { code: 1 },
+  [`[ ! -L '${TIMER_PATH}' ] && [ -f '${TIMER_PATH}' ]`]: { code: 1 },
   "systemctl daemon-reload": { code: 0 },
   "systemctl enable --now -- 'backup.timer'": { code: 0 },
   "systemctl restart -- 'backup.timer'": { code: 0 },
@@ -84,6 +86,8 @@ describe("timer.absent", () => {
     const ssh = createMockSsh({
       [`[ -e '${SERVICE_PATH}' ]`]: { code: 1 },
       [`[ -e '${TIMER_PATH}' ]`]: { code: 1 },
+      [`[ ! -L '${SERVICE_PATH}' ] && [ -f '${SERVICE_PATH}' ]`]: { code: 1 },
+      [`[ ! -L '${TIMER_PATH}' ] && [ -f '${TIMER_PATH}' ]`]: { code: 1 },
       "systemctl is-active --quiet -- 'backup.timer'": { code: 1 },
       "systemctl is-enabled --quiet -- 'backup.timer'": { code: 1 },
     })
@@ -103,6 +107,7 @@ describe("timer.absent", () => {
     const ssh = createMockSsh({
       [`[ -e '${SERVICE_PATH}' ]`]: { code: 1 },
       [`[ -e '${TIMER_PATH}' ]`]: { code: 0 },
+      [`[ ! -L '${SERVICE_PATH}' ] && [ -f '${SERVICE_PATH}' ]`]: { code: 1 },
     })
     const mod = timer.absent("backup")
     expect(await mod.check(ssh, emptyEnv)).toBe("needs-apply")
@@ -402,6 +407,8 @@ describe("timer.absent", () => {
     const ssh = createMockSsh({
       [`[ -e '${SERVICE_PATH}' ]`]: { code: 1 },
       [`[ -e '${TIMER_PATH}' ]`]: { code: 1 },
+      [`[ ! -L '${SERVICE_PATH}' ] && [ -f '${SERVICE_PATH}' ]`]: { code: 1 },
+      [`[ ! -L '${TIMER_PATH}' ] && [ -f '${TIMER_PATH}' ]`]: { code: 1 },
       "systemctl is-active --quiet -- 'backup.timer'": { code: 1 },
       "systemctl is-enabled --quiet -- 'backup.timer'": { code: 1 },
     })
@@ -416,6 +423,7 @@ describe("timer.absent", () => {
     const ssh = createTimerApplyMockSsh({
       [`[ -e '${SERVICE_PATH}' ]`]: { code: 0 },
       [`[ -e '${TIMER_PATH}' ]`]: { code: 1 },
+      [`[ ! -L '${TIMER_PATH}' ] && [ -f '${TIMER_PATH}' ]`]: { code: 1 },
       [`cat '${SERVICE_PATH}'`]: { stdout: existingServiceContent },
       [`rm -f '${TIMER_PATH}' '${SERVICE_PATH}'`]: { code: 0 },
       [`stat -c '%a' '${SERVICE_PATH}'`]: { stdout: "644\n" },
@@ -526,6 +534,8 @@ describe("timer.absent", () => {
     const ssh = createMockSsh({
       [`[ -e '${SERVICE_PATH}' ]`]: { code: 1 },
       [`[ -e '${TIMER_PATH}' ]`]: { code: 1 },
+      [`[ ! -L '${SERVICE_PATH}' ] && [ -f '${SERVICE_PATH}' ]`]: { code: 1 },
+      [`[ ! -L '${TIMER_PATH}' ] && [ -f '${TIMER_PATH}' ]`]: { code: 1 },
       "systemctl is-enabled --quiet -- 'backup.timer'": {
         code: 4,
         stderr: "Failed to connect to bus",
@@ -542,6 +552,8 @@ describe("timer.absent", () => {
     const ssh = createMockSsh({
       [`[ -e '${SERVICE_PATH}' ]`]: { code: 1 },
       [`[ -e '${TIMER_PATH}' ]`]: { code: 1 },
+      [`[ ! -L '${SERVICE_PATH}' ] && [ -f '${SERVICE_PATH}' ]`]: { code: 1 },
+      [`[ ! -L '${TIMER_PATH}' ] && [ -f '${TIMER_PATH}' ]`]: { code: 1 },
       "systemctl is-active --quiet -- 'backup.timer'": {
         code: 5,
         stderr: "Internal error",

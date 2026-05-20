@@ -57,6 +57,8 @@ const expectedTimerContent =
 const presentApplyFromMissingUnitsResponses = {
   [`[ -e '${SERVICE_PATH}' ]`]: { code: 1 },
   [`[ -e '${TIMER_PATH}' ]`]: { code: 1 },
+  [`[ ! -L '${SERVICE_PATH}' ] && [ -f '${SERVICE_PATH}' ]`]: { code: 1 },
+  [`[ ! -L '${TIMER_PATH}' ] && [ -f '${TIMER_PATH}' ]`]: { code: 1 },
   "systemctl daemon-reload": { code: 0 },
   "systemctl enable --now -- 'backup.timer'": { code: 0 },
   "systemctl restart -- 'backup.timer'": { code: 0 },
@@ -77,6 +79,8 @@ describe("timer.scheduled — apply (state: present)", () => {
     const ssh = createTimerApplyMockSsh({
       [`[ -e '${SERVICE_PATH}' ]`]: { code: 1 },
       [`[ -e '${TIMER_PATH}' ]`]: { code: 1 },
+      [`[ ! -L '${SERVICE_PATH}' ] && [ -f '${SERVICE_PATH}' ]`]: { code: 1 },
+      [`[ ! -L '${TIMER_PATH}' ] && [ -f '${TIMER_PATH}' ]`]: { code: 1 },
       "systemctl daemon-reload": { code: 0 },
       "systemctl enable --now -- 'backup.timer'": { code: 0 },
       "systemctl restart -- 'backup.timer'": { code: 0 },
@@ -93,6 +97,8 @@ describe("timer.scheduled — apply (state: present)", () => {
     const ssh = createTimerApplyMockSsh({
       [`[ -e '${SERVICE_PATH}' ]`]: { code: 1 },
       [`[ -e '${TIMER_PATH}' ]`]: { code: 1 },
+      [`[ ! -L '${SERVICE_PATH}' ] && [ -f '${SERVICE_PATH}' ]`]: { code: 1 },
+      [`[ ! -L '${TIMER_PATH}' ] && [ -f '${TIMER_PATH}' ]`]: { code: 1 },
       [guardedServiceRollbackRemoveCommand]: { code: 0 },
       [guardedTimerRollbackRemoveCommand]: { code: 0 },
       "systemctl daemon-reload": { code: 1, stderr: "boom" },
@@ -108,6 +114,8 @@ describe("timer.scheduled — apply (state: present)", () => {
     const ssh = createTimerApplyMockSsh({
       [`[ -e '${SERVICE_PATH}' ]`]: { code: 1 },
       [`[ -e '${TIMER_PATH}' ]`]: { code: 1 },
+      [`[ ! -L '${SERVICE_PATH}' ] && [ -f '${SERVICE_PATH}' ]`]: { code: 1 },
+      [`[ ! -L '${TIMER_PATH}' ] && [ -f '${TIMER_PATH}' ]`]: { code: 1 },
       [guardedServiceRollbackRemoveCommand]: { code: 1, stderr: "symlink guard tripped" },
       "systemctl daemon-reload": { code: 1, stderr: "boom" },
     })
@@ -125,6 +133,8 @@ describe("timer.scheduled — apply (state: present)", () => {
     const ssh = createTimerApplyMockSsh({
       [`[ -e '${SERVICE_PATH}' ]`]: { code: 0 },
       [`[ -e '${TIMER_PATH}' ]`]: { code: 0 },
+      [`[ ! -L '${SERVICE_PATH}' ] && [ -f '${SERVICE_PATH}' ]`]: { code: 0 },
+      [`[ ! -L '${TIMER_PATH}' ] && [ -f '${TIMER_PATH}' ]`]: { code: 0 },
       [`cat '${SERVICE_PATH}'`]: { stdout: previousService },
       [`cat '${TIMER_PATH}'`]: { stdout: previousTimer },
       [`stat -c '%a' '${SERVICE_PATH}'`]: { stdout: "0644" },
@@ -144,6 +154,8 @@ describe("timer.scheduled — apply (state: present)", () => {
     const ssh = createTimerApplyMockSsh({
       [`[ -e '${SERVICE_PATH}' ]`]: { code: 0 },
       [`[ -e '${TIMER_PATH}' ]`]: { code: 0 },
+      [`[ ! -L '${SERVICE_PATH}' ] && [ -f '${SERVICE_PATH}' ]`]: { code: 0 },
+      [`[ ! -L '${TIMER_PATH}' ] && [ -f '${TIMER_PATH}' ]`]: { code: 0 },
       [`cat '${SERVICE_PATH}'`]: { stdout: previousService },
       [`cat '${TIMER_PATH}'`]: { stdout: previousTimer },
       [`stat -c '%a' '${SERVICE_PATH}'`]: { stdout: "0644" },
@@ -174,6 +186,8 @@ describe("timer.scheduled — apply (state: present)", () => {
       {
         [`[ -e '${SERVICE_PATH}' ]`]: { code: 0 },
         [`[ -e '${TIMER_PATH}' ]`]: { code: 0 },
+        [`[ ! -L '${SERVICE_PATH}' ] && [ -f '${SERVICE_PATH}' ]`]: { code: 0 },
+        [`[ ! -L '${TIMER_PATH}' ] && [ -f '${TIMER_PATH}' ]`]: { code: 0 },
         [`cat '${SERVICE_PATH}'`]: { stdout: previousService },
         [`cat '${TIMER_PATH}'`]: { stdout: previousTimer },
         // Operator hardened service mode to 0600; timer stays at 0644.
@@ -214,6 +228,8 @@ describe("timer.scheduled — apply (state: present)", () => {
     const ssh = createTimerApplyMockSsh({
       [`[ -e '${SERVICE_PATH}' ]`]: { code: 0 },
       [`[ -e '${TIMER_PATH}' ]`]: { code: 0 },
+      [`[ ! -L '${SERVICE_PATH}' ] && [ -f '${SERVICE_PATH}' ]`]: { code: 0 },
+      [`[ ! -L '${TIMER_PATH}' ] && [ -f '${TIMER_PATH}' ]`]: { code: 0 },
       [`cat '${SERVICE_PATH}'`]: { stdout: previousService },
       [`cat '${TIMER_PATH}'`]: { stdout: previousTimer },
       [`stat -c '%a' '${SERVICE_PATH}'`]: { stdout: "0644" },
@@ -249,6 +265,8 @@ describe("timer.scheduled — apply (state: present)", () => {
     const ssh = createTimerApplyMockSsh({
       [`[ -e '${SERVICE_PATH}' ]`]: { code: 0 },
       [`[ -e '${TIMER_PATH}' ]`]: { code: 0 },
+      [`[ ! -L '${SERVICE_PATH}' ] && [ -f '${SERVICE_PATH}' ]`]: { code: 0 },
+      [`[ ! -L '${TIMER_PATH}' ] && [ -f '${TIMER_PATH}' ]`]: { code: 0 },
       [`cat '${SERVICE_PATH}'`]: { stdout: previousService },
       [`cat '${TIMER_PATH}'`]: { stdout: previousTimer },
       [`stat -c '%a' '${SERVICE_PATH}'`]: { stdout: "0644" },
@@ -274,6 +292,8 @@ describe("timer.scheduled — apply (state: present)", () => {
     const ssh = createTimerApplyMockSsh({
       [`[ -e '${SERVICE_PATH}' ]`]: { code: 1 },
       [`[ -e '${TIMER_PATH}' ]`]: { code: 1 },
+      [`[ ! -L '${SERVICE_PATH}' ] && [ -f '${SERVICE_PATH}' ]`]: { code: 1 },
+      [`[ ! -L '${TIMER_PATH}' ] && [ -f '${TIMER_PATH}' ]`]: { code: 1 },
       "systemctl daemon-reload": { code: 0 },
       "systemctl enable --now -- 'backup.timer'": { code: 1, stderr: "denied" },
     })
@@ -286,6 +306,8 @@ describe("timer.scheduled — apply (state: present)", () => {
     const ssh = createTimerApplyMockSsh({
       [`[ -e '${SERVICE_PATH}' ]`]: { code: 1 },
       [`[ -e '${TIMER_PATH}' ]`]: { code: 1 },
+      [`[ ! -L '${SERVICE_PATH}' ] && [ -f '${SERVICE_PATH}' ]`]: { code: 1 },
+      [`[ ! -L '${TIMER_PATH}' ] && [ -f '${TIMER_PATH}' ]`]: { code: 1 },
       "systemctl daemon-reload": { code: 0 },
       "systemctl enable --now -- 'backup.timer'": { code: 0 },
       "systemctl restart -- 'backup.timer'": { code: 1, stderr: "no" },
@@ -311,6 +333,8 @@ describe("timer.scheduled — apply (state: present)", () => {
     const ssh = createTimerApplyMockSsh({
       [`[ -e '${SERVICE_PATH}' ]`]: { code: 0 },
       [`[ -e '${TIMER_PATH}' ]`]: { code: 0 },
+      [`[ ! -L '${SERVICE_PATH}' ] && [ -f '${SERVICE_PATH}' ]`]: { code: 0 },
+      [`[ ! -L '${TIMER_PATH}' ] && [ -f '${TIMER_PATH}' ]`]: { code: 0 },
       [`stat -c '%a' '${SERVICE_PATH}'`]: { code: 0, stdout: "0644" },
       [`stat -c '%a' '${TIMER_PATH}'`]: { code: 0, stdout: "0644" },
     })

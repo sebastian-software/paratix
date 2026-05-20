@@ -40,13 +40,19 @@ type FileMatchSpec = {
 // not propagate read results to apply, and re-reading right before writing
 // avoids acting on stale data when the remote state changes between phases.
 //
+// Unit files only match when the live path is a regular file and not a
+// symlink. `readFile` and `stat -c '%a'` follow symlinks, so the explicit
+// shell guard runs first to keep symlinked unit paths from converging.
+//
 // When `expectedMode` is supplied, the file's current mode is read via
 // `stat -c '%a'` and compared after normalizing leading zeros so that values
 // like `"644"` and `"0644"` compare equal. Any failure to obtain a mode --
-// missing file, stat failure, or empty output -- counts as a mismatch so the
-// caller treats the file as needing apply.
+// non-regular file, symlink, missing file, stat failure, or empty output --
+// counts as a mismatch so the caller treats the file as needing apply.
 async function fileMatches(ssh: SshConnection, spec: FileMatchSpec): Promise<boolean> {
-  if (!(await ssh.exists(spec.path))) return false
+  const quotedPath = shellQuote(spec.path)
+  const regularFile = await ssh.test(`[ ! -L ${quotedPath} ] && [ -f ${quotedPath} ]`)
+  if (!regularFile) return false
   let remote: string
   try {
     remote = await ssh.readFile(spec.path)
@@ -55,7 +61,7 @@ async function fileMatches(ssh: SshConnection, spec: FileMatchSpec): Promise<boo
   }
   if (remote.trim() !== spec.expected.trim()) return false
   if (spec.expectedMode === undefined) return true
-  const modeResult = await ssh.exec(`stat -c '%a' ${shellQuote(spec.path)}`, {
+  const modeResult = await ssh.exec(`stat -c '%a' ${quotedPath}`, {
     ignoreExitCode: true,
     silent: true,
   })

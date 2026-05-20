@@ -55,6 +55,8 @@ const expectedTimerContent =
 const presentApplyFromMissingUnitsResponses = {
   [`[ -e '${SERVICE_PATH}' ]`]: { code: 1 },
   [`[ -e '${TIMER_PATH}' ]`]: { code: 1 },
+  [`[ ! -L '${SERVICE_PATH}' ] && [ -f '${SERVICE_PATH}' ]`]: { code: 1 },
+  [`[ ! -L '${TIMER_PATH}' ] && [ -f '${TIMER_PATH}' ]`]: { code: 1 },
   "systemctl daemon-reload": { code: 0 },
   "systemctl enable --now -- 'backup.timer'": { code: 0 },
   "systemctl restart -- 'backup.timer'": { code: 0 },
