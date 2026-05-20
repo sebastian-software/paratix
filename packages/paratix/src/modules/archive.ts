@@ -847,7 +847,7 @@ function memberTypeCheckCommand(member: ExtractedArchiveMember): string {
 
 async function extractedMembersMatch(conn: SshConnection, marker: string): Promise<boolean> {
   const members = await readMembersMarker(conn, marker)
-  if (members === null) return true
+  if (members === null) return false
   if (members === "invalid") return false
   const matches = await mapWithConcurrencyLimit(
     members,

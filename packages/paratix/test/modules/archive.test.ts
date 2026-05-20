@@ -370,7 +370,7 @@ describe("archive.extract — check", () => {
     expect(result).toBe("needs-apply")
   })
 
-  it("keeps legacy content markers without member metadata compatible", async () => {
+  it("returns needs-apply when the members marker is missing", async () => {
     const mockSsh = createMockSsh({
       [`cat '${marker}'`]: { code: 0, stdout: archiveSha },
       [`cat '${membersMarker}'`]: { code: 1, stderr: "cat: No such file or directory" },
@@ -380,7 +380,8 @@ describe("archive.extract — check", () => {
     vi.spyOn(mockSsh, "sha256").mockResolvedValue(archiveSha)
     const mod = archive.extract(src, destination)
     const result = await mod.check(mockSsh, emptyEnv)
-    expect(result).toBe("ok")
+    expect(result).toBe("needs-apply")
+    expect(mockSsh.calls).not.toContain(`cat '${marker}'`)
   })
 
   it("returns needs-apply when the members marker contains invalid JSON", async () => {
@@ -467,10 +468,22 @@ describe("archive.extract — check", () => {
     const ownerPathsMarker = `${marker}.owner-paths`
     const mockSsh = createMockSsh({
       [`cat '${marker}'`]: { code: 0, stdout: archiveSha },
+      [`cat '${membersMarker}'`]: {
+        code: 0,
+        stdout: JSON.stringify(
+          memberPaths.map((path) => ({ kind: "file", path: `${destination}/${path}` }))
+        ),
+      },
       [`cat '${ownerPathsMarker}'`]: {
         code: 0,
         stdout: JSON.stringify(memberPaths.map((path) => `${destination}/${path}`)),
       },
+      ...Object.fromEntries(
+        memberPaths.map((path) => [
+          `[ -f '${destination}/${path}' ] && [ ! -L '${destination}/${path}' ]`,
+          { code: 0 },
+        ])
+      ),
       [`test -d '${destination}'`]: { code: 0 },
       [`test -f '${marker}'`]: { code: 0 },
     })
@@ -582,6 +595,11 @@ describe("archive.extract — check", () => {
     const localMarker = `/var/lib/paratix/flags/archive-${localSrcHash}.sha256`
 
     const mockSsh = createMockSsh({
+      [`[ -f '${destination}/app/file' ] && [ ! -L '${destination}/app/file' ]`]: { code: 0 },
+      [`cat '${localMarker}.members'`]: {
+        code: 0,
+        stdout: JSON.stringify([{ kind: "file", path: `${destination}/app/file` }]),
+      },
       [`cat '${localMarker}'`]: { code: 0, stdout: localFileHash },
       [`test -d '${destination}'`]: { code: 0 },
       [`test -f '${localMarker}'`]: { code: 0 },
@@ -608,6 +626,11 @@ describe("archive.extract — check", () => {
 
     const mockSsh = createMockSsh({
       [`[ -e '${destination}/app/file' ] || [ -L '${destination}/app/file' ]`]: { code: 0 },
+      [`[ -f '${destination}/app/file' ] && [ ! -L '${destination}/app/file' ]`]: { code: 0 },
+      [`cat '${localMarker}.members'`]: {
+        code: 0,
+        stdout: JSON.stringify([{ kind: "file", path: `${destination}/app/file` }]),
+      },
       [`cat '${localMarker}'`]: { code: 0, stdout: localFileHash },
       [`cat '${ownerPathsMarker}'`]: {
         code: 0,
@@ -2061,7 +2084,12 @@ describe("archive.extract — apply", () => {
     const driftedTarListing = "-rw-r--r-- root/root 0 1970-01-01 00:00 app/replacement"
     const mockSsh = createMockSsh({
       [`[ -e '${destination}/app/file' ] || [ -L '${destination}/app/file' ]`]: { code: 0 },
+      [`[ -f '${destination}/app/file' ] && [ ! -L '${destination}/app/file' ]`]: { code: 0 },
       [`cat '${marker}'`]: { code: 0, stdout: archiveSha },
+      [`cat '${membersMarker}'`]: {
+        code: 0,
+        stdout: JSON.stringify([{ kind: "file", path: `${destination}/app/file` }]),
+      },
       [`cat '${ownerPathsMarker}'`]: {
         code: 0,
         stdout: JSON.stringify([`${destination}/app/file`]),
@@ -2089,7 +2117,12 @@ describe("archive.extract — apply", () => {
     const ownerPathsMarker = `${marker}.owner-paths`
     const mockSsh = createMockSsh({
       [`[ -e '${destination}/app/file' ] || [ -L '${destination}/app/file' ]`]: { code: 0 },
+      [`[ -f '${destination}/app/file' ] && [ ! -L '${destination}/app/file' ]`]: { code: 0 },
       [`cat '${marker}'`]: { code: 0, stdout: archiveSha },
+      [`cat '${membersMarker}'`]: {
+        code: 0,
+        stdout: JSON.stringify([{ kind: "file", path: `${destination}/app/file` }]),
+      },
       [`cat '${ownerPathsMarker}'`]: {
         code: 1,
         stderr: "cat: No such file or directory",
