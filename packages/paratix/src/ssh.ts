@@ -1273,6 +1273,18 @@ export class SshConnectionImpl implements SshConnection {
     this.pendingRejects.clear()
   }
 
+  private endStreamInput(stream: ClientChannel, input?: Exclude<ExecOptions["input"], null>): void {
+    try {
+      if (input === undefined) {
+        stream.end()
+      } else {
+        stream.end(input)
+      }
+    } catch {
+      // Defense in depth: same as writeSudoPassword above.
+    }
+  }
+
   private ensureClient(): Client {
     if (!this.client) throw new Error("SSH not connected")
     return this.client
@@ -2220,7 +2232,8 @@ trap - EXIT
     stream.stderr.once("error", () => {
       // Defensive no-op — collectStreamOutput owns the actual rejection path.
     })
-    if (needsPassword && this.cachedSudoPassword != null) {
+    const writesPassword = needsPassword && this.cachedSudoPassword != null
+    if (writesPassword) {
       try {
         this.writeSudoPassword(stream)
       } catch {
@@ -2229,11 +2242,11 @@ trap - EXIT
       }
     }
     if (input != null) {
-      try {
-        stream.end(input)
-      } catch {
-        // Defense in depth: same as writeSudoPassword above.
-      }
+      this.endStreamInput(stream, input)
+      return
+    }
+    if (writesPassword) {
+      this.endStreamInput(stream)
     }
   }
 

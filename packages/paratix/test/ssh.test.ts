@@ -138,6 +138,7 @@ vi.mock("../src/terminal.js", () => ({
 
 type StreamWithStderr = {
   close: () => void
+  end: (chunk?: Buffer | string) => StreamWithStderr
   stderr: EventEmitter
   write: (chunk: Buffer | string) => boolean
 } & EventEmitter
@@ -151,10 +152,12 @@ function makeStream(): StreamWithStderr {
   stream.close = () => {
     /* noop */
   }
+  stream.end = () => stream
   vi.spyOn(stream, "write").mockImplementation(() => true)
   vi.spyOn(stream, "close").mockImplementation(() => {
     /* noop */
   })
+  vi.spyOn(stream, "end").mockImplementation(() => stream)
   return stream
 }
 
@@ -1949,6 +1952,27 @@ describe("SshConnectionImpl", () => {
       await ssh.exec("whoami")
 
       expect(execSpy).toHaveBeenCalledOnce()
+    })
+
+    it("closes sudo stdin after writing the password when no command input is provided", async () => {
+      let capturedStream: null | StreamWithStderr = null
+      const execSpy = vi.fn().mockImplementation((_command: string, callback: ExecCallback) => {
+        const stream = makeStream()
+        capturedStream = stream
+        callback(undefined, stream)
+        stream.emit("close", 0)
+      })
+      const client = makeClientWithExecSpy(execSpy)
+      const ssh = makeConnectedSsh(client, { sudoPassword: "my-sudo-pass", user: "deploy" })
+
+      await ssh.exec("whoami")
+
+      expect(capturedStream).not.toBeNull()
+      const execStream = capturedStream as unknown as StreamWithStderr
+      expect(execStream.write).toHaveBeenCalledWith(Buffer.from("my-sudo-pass"))
+      expect(execStream.write).toHaveBeenCalledWith("\n")
+      expect(execStream.end).toHaveBeenCalledOnce()
+      expect(execStream.end).toHaveBeenCalledWith()
     })
 
     it("uses passwordless sudo and writes only command input when stdin is provided", async () => {
