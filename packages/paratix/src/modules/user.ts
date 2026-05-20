@@ -339,15 +339,15 @@ async function passwdAttributesMatch(
   return { kind: "match" }
 }
 
-// R-0000657: result of the server-side shadow-hash comparison. `cmp` reports
-// exit 0 when the hashes match byte-for-byte, exit 1 when they differ, and
-// exit ≥ 2 for hard errors (missing input file, unreadable shadow line, etc.).
-// A failed `bash -c` invocation — missing `bash`, broken process substitution,
-// or a permission error reading `/etc/shadow` — manifests as an exit code
-// outside the 0/1 set or as an exception from `ssh.exec`. Treating any
-// non-zero exit as "mismatch" caused the module to re-set the password on
-// every run when the toolchain was broken; differentiate the three outcomes
-// so the caller can react accordingly.
+// R-0000657: result of the server-side shadow-hash comparison. The remote
+// script exits 0 when the hashes match, 1 when they differ, and ≥ 2 for hard
+// errors (missing input, failed getent shadow lookup, etc.). A failed
+// `bash -c` invocation — missing `bash`, permission error reading
+// `/etc/shadow`, or transport failure — manifests as an exit code outside the
+// 0/1 set or as an exception from `ssh.exec`. Treating any non-zero exit as
+// "mismatch" caused the module to re-set the password on every run when the
+// toolchain was broken; differentiate the three outcomes so the caller can
+// react accordingly.
 // R-0000657: shared discriminator for the toolchain-error variant so the
 // literal lives in one place and the sonarjs duplicate-string rule does
 // not flag every occurrence.
@@ -366,25 +366,27 @@ async function shadowHashMatches(
   // R-0000544: compare the shadow hash server-side so the raw hash never
   // travels back as stdout (where it could land in failure snippets or
   // verbose-error output). The new hash is streamed in via stdin (masked as
-  // a secret) and the comparison is performed in a tiny bash script: extract
-  // the stored hash with `getent shadow | cut -d: -f2`, then `cmp -s` it
-  // against the stdin payload via process substitution. Only the exit code
-  // flows back over SSH; the raw hashes never appear in stdout or stderr.
+  // a secret) and the comparison is performed in a tiny bash script: read the
+  // desired hash from stdin, read the stored hash via `getent shadow`, and
+  // compare both values inside the remote shell. Only the exit code flows back
+  // over SSH; the raw hashes never appear in stdout, stderr, or argv.
   //
   // R-0000657: distinguish three exit-code classes — 0 (match), 1 (mismatch),
   // ≥ 2 or spawn error (toolchain problem). For the toolchain class, surface
   // a structured failure instead of silently falling back to "mismatch" so
-  // idempotency is preserved when bash, getent, cmp, or process substitution
-  // is unavailable.
+  // idempotency is preserved when bash or getent is unavailable.
   registerSecret(password)
   try {
-    // Run the comparison through `bash -c` so process substitution `<()` is
-    // available regardless of the login shell of the remote user. `getent
-    // shadow` terminates its line with a newline that `cut` preserves, so
-    // the caller-provided hash is forwarded with a trailing newline to keep
-    // both inputs byte-for-byte comparable.
+    // Run the comparison through `bash -c` so strict shell behaviour is
+    // available regardless of the login shell of the remote user. `getent`
+    // is evaluated before the hash comparison, so NSS or permission failures
+    // cannot be masked as a plain password mismatch.
     const compareScript = `set -o pipefail
-cmp -s <(getent shadow ${shellQuote(name)} | cut -d: -f2) -`
+IFS= read -r expected_hash || exit 2
+shadow_entry=$(getent shadow ${shellQuote(name)}) || exit 2
+stored_hash=\${shadow_entry#*:}
+stored_hash=\${stored_hash%%:*}
+[ "$stored_hash" = "$expected_hash" ]`
     let result: Awaited<ReturnType<typeof ssh.exec>>
     try {
       result = await ssh.exec(`bash -c ${shellQuote(compareScript)}`, {
@@ -860,8 +862,8 @@ export const user = {
         if (options != null) {
           const outcome = await attributesMatch(ssh, name, options)
           // R-0000657: surface a shadow-hash comparison toolchain failure
-          // (missing cmp, broken bash process substitution, permission
-          // error) as a structured runner error instead of looping the
+          // (missing bash, failed getent shadow lookup, permission error) as
+          // a structured runner error instead of looping the
           // module through `needs-apply` -> apply -> setPassword on every
           // run when the compare cannot be executed.
           if (outcome.kind === TOOLCHAIN_ERROR) {

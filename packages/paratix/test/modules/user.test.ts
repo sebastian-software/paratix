@@ -3,11 +3,22 @@ import { describe, expect, it, vi } from "vitest"
 import type { SshConnection } from "../../src/types.js"
 
 import { user } from "../../src/modules/user.js"
+import { shellQuote } from "../../src/ssh.js"
 import { CommandError } from "../../src/sshHelpers.js"
 import { createMockSsh } from "../helpers/mockSsh.js"
 
 const emptyEnv = {}
 type ExecLike = SshConnection["exec"]
+
+function shadowCompareCommand(name: string): string {
+  const compareScript = `set -o pipefail
+IFS= read -r expected_hash || exit 2
+shadow_entry=$(getent shadow ${shellQuote(name)}) || exit 2
+stored_hash=\${shadow_entry#*:}
+stored_hash=\${stored_hash%%:*}
+[ "$stored_hash" = "$expected_hash" ]`
+  return `bash -c ${shellQuote(compareScript)}`
+}
 
 function buildSequentialHomeIdentityExec(input: {
   identityCommand: string
@@ -240,11 +251,11 @@ describe("user.present check", () => {
   })
 
   // R-0000544: shadow hash comparison is now done server-side via bash -c with
-  // cmp -s to avoid sending the raw hash back over stdout. The exec call uses
-  // ignoreExitCode:true and returns code 0 for match, non-zero for mismatch.
+  // an in-shell comparison to avoid sending the raw hash back over stdout. The
+  // exec call uses ignoreExitCode:true and returns code 0 for match, non-zero
+  // for mismatch or toolchain errors.
   it("returns needs-apply when shadow hash does not match password", async () => {
-    const compareCommand =
-      "bash -c 'set -o pipefail\ncmp -s <(getent shadow '\\''alice'\\'' | cut -d: -f2) -'"
+    const compareCommand = shadowCompareCommand("alice")
     const ssh = createMockSsh({
       [compareCommand]: { code: 1 },
       "id -u 'alice'": { code: 0 },
@@ -255,8 +266,7 @@ describe("user.present check", () => {
   })
 
   it("returns ok when shadow hash matches password", async () => {
-    const compareCommand =
-      "bash -c 'set -o pipefail\ncmp -s <(getent shadow '\\''alice'\\'' | cut -d: -f2) -'"
+    const compareCommand = shadowCompareCommand("alice")
     const ssh = createMockSsh({
       [compareCommand]: { code: 0 },
       "id -u 'alice'": { code: 0 },
@@ -264,13 +274,17 @@ describe("user.present check", () => {
     const mod = user.present("alice", { password: "$6$hash" })
     const result = await mod.check(ssh, emptyEnv)
     expect(result).toBe("ok")
+    const compareCall = ssh.execCalls.find((entry) => entry.command === compareCommand)
+    expect(compareCall?.options?.input).toBe("$6$hash\n")
+    expect(compareCall?.options?.secrets).toStrictEqual(["$6$hash"])
+    expect(compareCall?.options?.silent).toBe(true)
+    expect(compareCommand).not.toContain("$6$hash")
   })
 
-  // R-0000657: cmp exits 1 to signal a clean mismatch. That must remain
-  // `needs-apply` so apply runs and updates the hash.
-  it("returns needs-apply when cmp reports exit code 1 (clean mismatch)", async () => {
-    const compareCommand =
-      "bash -c 'set -o pipefail\ncmp -s <(getent shadow '\\''alice'\\'' | cut -d: -f2) -'"
+  // R-0000657: the compare script exits 1 to signal a clean mismatch. That
+  // must remain `needs-apply` so apply runs and updates the hash.
+  it("returns needs-apply when the compare script reports exit code 1 (clean mismatch)", async () => {
+    const compareCommand = shadowCompareCommand("alice")
     const ssh = createMockSsh({
       [compareCommand]: { code: 1 },
       "id -u 'alice'": { code: 0 },
@@ -280,16 +294,26 @@ describe("user.present check", () => {
     expect(result).toBe("needs-apply")
   })
 
-  // R-0000657: cmp/bash exit codes ≥ 2 signal a toolchain or environmental
-  // problem (missing cmp, getent failure, broken process substitution,
-  // permission denial reading /etc/shadow). The check must surface a
-  // structured failure instead of silently re-running setPassword on every
-  // run by reporting `needs-apply`.
-  it("throws a toolchain failure when cmp exits with code 2 (hard error)", async () => {
-    const compareCommand =
-      "bash -c 'set -o pipefail\ncmp -s <(getent shadow '\\''alice'\\'' | cut -d: -f2) -'"
+  // R-0000657: bash exit codes ≥ 2 signal a toolchain or environmental problem
+  // (missing bash, getent failure, permission denial reading /etc/shadow). The
+  // check must surface a structured failure instead of silently re-running
+  // setPassword on every run by reporting `needs-apply`.
+  it("throws a toolchain failure when the compare script exits with code 2 (hard error)", async () => {
+    const compareCommand = shadowCompareCommand("alice")
     const ssh = createMockSsh({
-      [compareCommand]: { code: 2, stderr: "cmp: invalid option" },
+      [compareCommand]: { code: 2, stderr: "getent: shadow unavailable" },
+      "id -u 'alice'": { code: 0 },
+    })
+    const mod = user.present("alice", { password: "$6$hash" })
+    await expect(mod.check(ssh, emptyEnv)).rejects.toThrow(
+      /shadow hash comparison toolchain error/v
+    )
+  })
+
+  it("throws a toolchain failure when getent shadow failure would otherwise look like a mismatch", async () => {
+    const compareCommand = shadowCompareCommand("alice")
+    const ssh = createMockSsh({
+      [compareCommand]: { code: 2, stderr: "" },
       "id -u 'alice'": { code: 0 },
     })
     const mod = user.present("alice", { password: "$6$hash" })
@@ -300,11 +324,10 @@ describe("user.present check", () => {
 
   // R-0000657: a 127 exit (bash: command not found) must also be classified
   // as a toolchain error, not a hash mismatch.
-  it("throws a toolchain failure when bash returns 127 (cmp missing)", async () => {
-    const compareCommand =
-      "bash -c 'set -o pipefail\ncmp -s <(getent shadow '\\''alice'\\'' | cut -d: -f2) -'"
+  it("throws a toolchain failure when bash returns 127", async () => {
+    const compareCommand = shadowCompareCommand("alice")
     const ssh = createMockSsh({
-      [compareCommand]: { code: 127, stderr: "bash: cmp: command not found" },
+      [compareCommand]: { code: 127, stderr: "bash: command not found" },
       "id -u 'alice'": { code: 0 },
     })
     const mod = user.present("alice", { password: "$6$hash" })
