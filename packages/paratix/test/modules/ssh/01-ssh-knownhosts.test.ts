@@ -541,6 +541,40 @@ describe("ssh.knownHosts", () => {
     expect(mockSsh.calls.some(isKnownHostsFinalReplace)).toBe(true)
   })
 
+  it("apply preserves unrelated known_hosts entries when replacing a drifted target", async () => {
+    const driftedKey = makeHostKeyBuffer("ssh-ed25519", Buffer.from("drifted-host-key"))
+    const driftedLine = `|1|hashed-host|hashed-old ssh-ed25519 ${driftedKey.toString("base64")}`
+    const unrelatedLine = "gitlab.com ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIunrelated"
+    const mockSsh = createSshApplyMockSsh({
+      "[ -e '/home/paratix/.ssh/known_hosts' ]": { code: 0 },
+      "ssh-keygen -F 'github.com' -f '/home/paratix/.ssh/known_hosts'": {
+        code: 0,
+        stdout: `${driftedLine}\n`,
+      },
+      "ssh-keyscan -H 'github.com'": { stdout: `${scannedLine}\n` },
+    })
+    const mod = ssh.knownHosts("github.com", { expectedFingerprint: hostFingerprint })
+
+    const result = await mod.apply(mockSsh, emptyEnv)
+
+    expect(result.status).toBe("changed")
+    const stageCommands = mockSsh.calls.filter(isKnownHostsRewriteStage)
+    expect(stageCommands).toHaveLength(1)
+    const [stageCommand] = stageCommands
+    expect(stageCommand).toContain(
+      "dd if='/home/paratix/.ssh/known_hosts' iflag=nofollow status=none of='/home/paratix/.ssh/.paratix-known-hosts.ABC123'"
+    )
+    expect(stageCommand).toContain(
+      "ssh-keygen -R 'github.com' -f '/home/paratix/.ssh/.paratix-known-hosts.ABC123'"
+    )
+    expect(stageCommand).toContain("rm -f -- '/home/paratix/.ssh/.paratix-known-hosts.ABC123.old'")
+    expect(stageCommand).toContain(`printf '%s\\n' '${scannedLine}' >>`)
+    expect(stageCommand).not.toMatch(
+      /printf '%s\\n' '[^']+' > '\/home\/paratix\/\.ssh\/\.paratix-known-hosts\.ABC123'/v
+    )
+    expect(stageCommand).not.toContain(unrelatedLine)
+  })
+
   it("apply skips appending lines already present in known_hosts (R-0000038 idempotency)", async () => {
     // Regression for R-0000038: when the verified line is already in
     // /home/paratix/.ssh/known_hosts (grep -qxF returns code 0), the apply path must not

@@ -598,17 +598,19 @@ async function rewriteReconciledKnownHosts(
   conn: SshConnection,
   parameters: {
     host: string
+    options?: KnownHostsOptions
     paths: KnownHostsPaths
     reconciled: { lines: string[]; mode: "append" | "replace" }
   }
 ): Promise<ModuleResult> {
-  const { host, paths, reconciled } = parameters
+  const { host, options, paths, reconciled } = parameters
   if (reconciled.lines.length === 0) return { status: "ok" }
   return rewriteKnownHostsFile(conn, {
     host,
     knownHostsPath: paths.knownHostsPath,
     lines: reconciled.lines,
     mode: reconciled.mode,
+    options,
     sshDirectoryPath: paths.sshDirectoryPath,
   })
 }
@@ -658,22 +660,33 @@ async function applyKnownHostsPresent(
     verifiedLines: verification.verifiedLines,
   })
   if (reconciled.failure) return reconciled.failure
-  return rewriteReconciledKnownHosts(conn, { host, paths: pathResolution.paths, reconciled })
+  return rewriteReconciledKnownHosts(conn, {
+    host,
+    options,
+    paths: pathResolution.paths,
+    reconciled,
+  })
 }
 
 function knownHostsStageCommand(parameters: {
   knownHostsPath: string
   lines: string[]
+  lookupTarget: string
   mode: "append" | "replace"
   temporaryPath: string
 }): string {
-  const { knownHostsPath, lines, mode, temporaryPath } = parameters
+  const { knownHostsPath, lines, lookupTarget, mode, temporaryPath } = parameters
   const quotedKnownHostsPath = shellQuote(knownHostsPath)
+  const quotedLookupTarget = shellQuote(lookupTarget)
   const quotedTemporaryPath = shellQuote(temporaryPath)
+  const quotedTemporaryBackupPath = shellQuote(`${temporaryPath}.old`)
   const existingKnownHostsGuard = `[ ! -L ${quotedKnownHostsPath} ] || { echo 'known_hosts must not be a symlink' >&2; exit 1; }; [ -f ${quotedKnownHostsPath} ] || { echo 'known_hosts must be a regular file' >&2; exit 1; }`
   const writeLines = `printf '%s\\n' ${lines.map((line) => shellQuote(line)).join(" ")}`
+  const copyExistingKnownHosts = `if [ -e ${quotedKnownHostsPath} ]; then ${existingKnownHostsGuard}; dd if=${quotedKnownHostsPath} iflag=nofollow status=none of=${quotedTemporaryPath} || exit $?; else : > ${quotedTemporaryPath}; fi`
 
-  if (mode === "replace") return `${writeLines} > ${quotedTemporaryPath}`
+  if (mode === "replace") {
+    return `{ ${copyExistingKnownHosts}; ssh-keygen -R ${quotedLookupTarget} -f ${quotedTemporaryPath} >/dev/null || exit $?; rm -f -- ${quotedTemporaryBackupPath} || exit $?; ${writeLines} >> ${quotedTemporaryPath}; }`
+  }
 
   const appendMissingLines = lines
     .map(
@@ -691,7 +704,7 @@ function knownHostsStageCommand(parameters: {
   // would then be staged into the appended known_hosts. `dd iflag=nofollow`
   // fails with ELOOP at open(2) time when the path is a symlink, collapsing
   // the race window (analog R-0000617 for authorized_keys).
-  return `{ if [ -e ${quotedKnownHostsPath} ]; then ${existingKnownHostsGuard}; dd if=${quotedKnownHostsPath} iflag=nofollow status=none of=${quotedTemporaryPath} || exit $?; else : > ${quotedTemporaryPath}; fi; ${appendMissingLines}; }`
+  return `{ ${copyExistingKnownHosts}; ${appendMissingLines}; }`
 }
 
 async function stageKnownHostsContent(
@@ -700,6 +713,7 @@ async function stageKnownHostsContent(
     host: string
     knownHostsPath: string
     lines: string[]
+    lookupTarget: string
     mode: "append" | "replace"
     temporaryPath: string
   }
@@ -750,10 +764,11 @@ async function rewriteKnownHostsFile(
     knownHostsPath: string
     lines: string[]
     mode: "append" | "replace"
+    options?: KnownHostsOptions
     sshDirectoryPath: string
   }
 ): Promise<ModuleResult> {
-  const { host, sshDirectoryPath } = parameters
+  const { host, options, sshDirectoryPath } = parameters
   let temporaryPath: string
   try {
     temporaryPath = await createKnownHostsTemporaryPath(conn, sshDirectoryPath)
@@ -767,6 +782,7 @@ async function rewriteKnownHostsFile(
   try {
     const stageFailure = await stageKnownHostsContent(conn, {
       ...parameters,
+      lookupTarget: knownHostsLookupTarget(host, options),
       temporaryPath,
     })
     if (stageFailure) return stageFailure
