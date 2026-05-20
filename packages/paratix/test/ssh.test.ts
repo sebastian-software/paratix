@@ -4976,6 +4976,34 @@ describe("SshConnectionImpl", () => {
       expect(cleanupFailedSshClient).toHaveBeenCalledOnce()
     })
 
+    it("captures client errors emitted immediately after ready before registration", async () => {
+      const { buildHostVerifier } = await import("../src/knownHosts.js")
+      const transitionError = new Error("socket closed after ready")
+      let emitThrew = false
+      vi.mocked(buildHostVerifier).mockResolvedValue({
+        hostVerifier: vi.fn().mockReturnValue(true),
+      })
+      vi.mocked(tryConnectOnPort)
+        .mockImplementationOnce(async ({ client }) => {
+          try {
+            client.emit("error", transitionError)
+          } catch {
+            emitThrew = true
+          }
+          await Promise.resolve()
+        })
+        .mockResolvedValueOnce()
+      vi.mocked(cleanupFailedSshClient).mockClear()
+
+      const ssh = makeSshInstance({ host: "1.2.3.4", ports: [22, 2222] })
+      await ssh.connect()
+
+      expect(emitThrew).toBe(false)
+      expect(tryConnectOnPort).toHaveBeenCalledTimes(2)
+      expect(cleanupFailedSshClient).toHaveBeenCalledOnce()
+      expect(ssh.getConnectionInfo().port).toBe(2222)
+    })
+
     it("commits host-key trust only for the port that completes the SSH handshake", async () => {
       const firstKey = makeWireHostKey("ssh-ed25519", "failed-port-key")
       const secondKey = makeWireHostKey("ssh-ed25519", "successful-port-key")

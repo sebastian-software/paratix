@@ -1029,23 +1029,16 @@ export class SshConnectionImpl implements SshConnection {
     if (verifier.pendingPersist != null) await verifier.pendingPersist
   }
 
-  private async commitAcceptedHostKeyAndRegisterClient(
-    client: Client,
-    verifier: HostVerifierResult,
+  private async commitAcceptedHostKeyAndRegisterClient(parameters: {
+    client: Client
     port: number
-  ): Promise<void> {
-    const transitionState: { error?: Error } = {}
-    const handleTransitionError = (error: Error): void => {
-      transitionState.error ??= error
-    }
-    client.on("error", handleTransitionError)
-    try {
-      await this.commitAcceptedHostKey(verifier)
-      if (transitionState.error != null) throw transitionState.error
-      this.registerConnectedClient(client, port)
-    } finally {
-      client.removeListener("error", handleTransitionError)
-    }
+    transitionErrorSink: { assertNoError: () => void }
+    verifier: HostVerifierResult
+  }): Promise<void> {
+    const { client, port, transitionErrorSink, verifier } = parameters
+    await this.commitAcceptedHostKey(verifier)
+    transitionErrorSink.assertNoError()
+    this.registerConnectedClient(client, port)
   }
 
   private async connectViaAgent(options?: ConnectOptions): Promise<void> {
@@ -1700,6 +1693,25 @@ trap - EXIT
     }
   }
 
+  private installConnectedClientTransitionErrorSink(client: Client): {
+    assertNoError: () => void
+    dispose: () => void
+  } {
+    const transitionState: { error?: Error } = {}
+    const handleTransitionError = (error: Error): void => {
+      transitionState.error ??= error
+    }
+    client.on("error", handleTransitionError)
+    return {
+      assertNoError() {
+        if (transitionState.error != null) throw transitionState.error
+      },
+      dispose() {
+        client.removeListener("error", handleTransitionError)
+      },
+    }
+  }
+
   private invalidateSudoReadiness(): void {
     this.sudoReady = false
     this.credentialCachePrimed = false
@@ -1754,23 +1766,34 @@ trap - EXIT
     // Without this, disconnectTransport nulled the client while the connect
     // continued and emitted a `ready` event on a no-longer-tracked client.
     const connectAbortSignal = this.buildConnectAbortSignal()
-    await tryConnectOnPort({
-      abortSignal: connectAbortSignal,
-      agent: options.agent,
-      agentForward: this.config.agentForward,
-      client,
-      host: this.runtime.host,
-      hostVerifier: hostKeyAttempt.hostVerifier,
-      password: options.password,
-      port,
-      privateKey: options.privateKey,
-      readyTimeout: getRemainingReconnectTimeout(options.reconnectDeadline),
-      username: this.config.user,
-    })
-    state.tryConnectResolved = true
-    hostKeyAttempt.commit()
-    await this.commitAcceptedHostKeyAndRegisterClient(client, verifier, port)
-    state.registered = true
+    const transitionErrorSink = this.installConnectedClientTransitionErrorSink(client)
+    try {
+      await tryConnectOnPort({
+        abortSignal: connectAbortSignal,
+        agent: options.agent,
+        agentForward: this.config.agentForward,
+        client,
+        host: this.runtime.host,
+        hostVerifier: hostKeyAttempt.hostVerifier,
+        password: options.password,
+        port,
+        privateKey: options.privateKey,
+        readyTimeout: getRemainingReconnectTimeout(options.reconnectDeadline),
+        username: this.config.user,
+      })
+      state.tryConnectResolved = true
+      transitionErrorSink.assertNoError()
+      hostKeyAttempt.commit()
+      await this.commitAcceptedHostKeyAndRegisterClient({
+        client,
+        port,
+        transitionErrorSink,
+        verifier,
+      })
+      state.registered = true
+    } finally {
+      transitionErrorSink.dispose()
+    }
   }
 
   private async promptAndCacheSudoPassword(): Promise<void> {
