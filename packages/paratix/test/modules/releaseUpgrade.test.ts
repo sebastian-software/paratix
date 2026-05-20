@@ -1956,6 +1956,23 @@ describe("releaseUpgrade.upgrade — apply (general)", () => {
     expect(result.meta?.some(isSystemHostMetaEntry)).toBe(false)
   })
 
+  it("returns failed with only system.reboot meta when resolveHost returns a URL-like host", async () => {
+    const ssh = createMockSsh({
+      "cat '/etc/os-release'": { code: 0, stdout: UBUNTU_OS_RELEASE },
+      "DEBIAN_FRONTEND=noninteractive apt-get update": { code: 0 },
+      "do-release-upgrade -f DistUpgradeViewNonInteractive": { code: 0 },
+    })
+    const resolveHost = vi.fn().mockResolvedValue("https://host.example.com")
+    const mod = releaseUpgrade.upgrade({ resolveHost })
+    const result = await mod.apply(ssh, emptyEnv)
+    expect(result.status).toBe("failed")
+    expect(result.error?.message).toContain(
+      "[releaseUpgrade.upgrade] resolveHost returned an invalid host"
+    )
+    expect(result.meta?.some(isSystemRebootMetaEntry)).toBe(true)
+    expect(result.meta?.some(isSystemHostMetaEntry)).toBe(false)
+  })
+
   // R-0000243: a hanging resolver must not stall the playbook indefinitely.
   it("R-0000243: returns failed when resolveHost exceeds the configured timeout", async () => {
     vi.useFakeTimers()

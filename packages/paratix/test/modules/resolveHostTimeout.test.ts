@@ -255,6 +255,21 @@ describe("buildRebootMetaEntriesWithTimeout — meta", () => {
     const hostEntry = result.find((entry) => isSystemHostMetaEntry(entry))
     expect(hostEntry?.host).toBe("10.0.0.99")
   })
+
+  it("returns failed with only system.reboot meta when resolver returns a URL-like host", async () => {
+    const result = await buildRebootMetaEntriesWithTimeout({
+      failurePrefix: "[demo]",
+      async resolveHost() {
+        await Promise.resolve()
+        return "https://host.example.com"
+      },
+    })
+    expectFailure(result)
+    expect(result.status).toBe("failed")
+    expect(result.error?.message).toContain("[demo] resolveHost returned an invalid host")
+    expect(result.meta?.some((entry) => isSystemRebootMetaEntry(entry))).toBe(true)
+    expect(result.meta?.some((entry) => isSystemHostMetaEntry(entry))).toBe(false)
+  })
 })
 
 describe("buildRebootMetaEntriesWithTimeout — failure", () => {

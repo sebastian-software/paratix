@@ -28,6 +28,42 @@ export const RESOLVE_HOST_DEFAULT_TIMEOUT_MS = SECONDS_PER_HALF_MINUTE * MILLISE
  */
 export type ResolveHostCallback = (signal?: AbortSignal) => Promise<string>
 
+// The resolved host flows into SSH reconnect handling after reboot-style
+// modules have already triggered a remote reboot. Keep validation local to
+// this helper so only resolveHost-driven reconnect targets are constrained;
+// do not tighten global `meta.systemHost` emission.
+const REBOOT_HOST_MAX_LENGTH = 253
+const REBOOT_HOST_MAX_LABEL_LENGTH = 63
+const REBOOT_HOST_HOSTNAME_LABEL_PATTERN = /^[a-z0-9\x2d]+$/iv
+const REBOOT_HOST_HOSTNAME_LABEL_EDGE_PATTERN = /^[a-z0-9]$/iv
+const REBOOT_HOST_IPV6_CHARSET_PATTERN = /^[0-9a-f:]+$/iv
+
+function isValidRebootHostLabel(label: string): boolean {
+  if (label === "" || label.length > REBOOT_HOST_MAX_LABEL_LENGTH) return false
+  if (!REBOOT_HOST_HOSTNAME_LABEL_PATTERN.test(label)) return false
+  const first = label.at(0)
+  const last = label.at(-1)
+  return (
+    first !== undefined &&
+    last !== undefined &&
+    REBOOT_HOST_HOSTNAME_LABEL_EDGE_PATTERN.test(first) &&
+    REBOOT_HOST_HOSTNAME_LABEL_EDGE_PATTERN.test(last)
+  )
+}
+
+function isValidRebootHost(host: string): boolean {
+  if (host.length === 0 || host.length > REBOOT_HOST_MAX_LENGTH) return false
+  if (/\s/v.test(host)) return false
+  // IPv6 is identified by the presence of `:`; strip optional brackets
+  // before checking the charset so `[2001:db8::1]` is accepted as well.
+  if (host.includes(":")) {
+    const stripped = host.startsWith("[") && host.endsWith("]") ? host.slice(1, -1) : host
+    return REBOOT_HOST_IPV6_CHARSET_PATTERN.test(stripped)
+  }
+  const labels = host.split(".")
+  return labels.every((label) => isValidRebootHostLabel(label))
+}
+
 /**
  * Run `resolveHost` with a wall-clock timeout. Rejects with a descriptive
  * Error when the resolver does not settle in time so callers can surface a
@@ -102,6 +138,14 @@ export async function buildRebootMetaEntriesWithTimeout(options: {
   if (options.resolveHost == null) return entries
   try {
     const newHost = await resolveHostWithTimeout(options.resolveHost, options.timeoutMs)
+    if (!isValidRebootHost(newHost)) {
+      return {
+        ...failed(
+          `${options.failurePrefix} resolveHost returned an invalid host that cannot be reconnected to: ${newHost}`
+        ),
+        meta: entries,
+      }
+    }
     entries.push(meta.systemHost(newHost))
     return entries
   } catch (error) {
