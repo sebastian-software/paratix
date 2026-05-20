@@ -31,6 +31,7 @@ type SftpMockStream = {
   destroy: ReturnType<typeof vi.fn>
   pipe: ReturnType<typeof vi.fn>
 } & EventEmitter
+type SftpMock = EventEmitter & SFTPWrapper
 
 class MockReadableStream extends EventEmitter {
   public destroy = vi.fn()
@@ -65,15 +66,11 @@ function makeSftpSession() {
   const sftpWriteStream = Object.assign(new EventEmitter(), { destroy: vi.fn() })
   const sftpEnd = vi.fn()
 
-  const sftp = {
-    createReadStream: vi
-      .fn()
-      .mockReturnValue(sftpReadStream) as unknown as SFTPWrapper["createReadStream"],
-    createWriteStream: vi
-      .fn()
-      .mockReturnValue(sftpWriteStream) as unknown as SFTPWrapper["createWriteStream"],
-    end: sftpEnd as unknown as SFTPWrapper["end"],
-  } as unknown as SFTPWrapper
+  const sftp = Object.assign(new EventEmitter(), {
+    createReadStream: vi.fn().mockReturnValue(sftpReadStream),
+    createWriteStream: vi.fn().mockReturnValue(sftpWriteStream),
+    end: sftpEnd,
+  }) as unknown as SftpMock
 
   return { sftp, sftpEnd, sftpReadStream, sftpWriteStream }
 }
@@ -376,6 +373,23 @@ describe("sftpDownload", () => {
 
     // Assert — promise must resolve on successful transfer
     await expect(promise).resolves.toBeUndefined()
+    expect(sftpEnd).toHaveBeenCalledOnce()
+  })
+
+  it("absorbs a late sftp wrapper error after download settles", async () => {
+    const { sftp, sftpEnd } = makeSftpSession()
+    const client = makeClientMock(sftp)
+
+    const localWriteStream = new EventEmitter()
+    vi.mocked(createWriteStream).mockReturnValue(localWriteStream as unknown as WriteStream)
+
+    const promise = sftpDownload(client, "/remote/file.txt", "/local/file.txt")
+    localWriteStream.emit("finish")
+
+    await expect(promise).resolves.toBeUndefined()
+    expect(() => {
+      sftp.emit("error", new Error("late sftp wrapper error"))
+    }).not.toThrow()
     expect(sftpEnd).toHaveBeenCalledOnce()
   })
 
@@ -924,6 +938,23 @@ describe("sftpUpload", () => {
     expect(sftpEnd).toHaveBeenCalledOnce()
   })
 
+  it("absorbs a late sftp wrapper error after upload settles", async () => {
+    const { sftp, sftpEnd, sftpWriteStream } = makeSftpSession()
+    const client = makeClientMock(sftp)
+
+    const localReadStream = makeMockStream()
+    vi.mocked(createReadStream).mockReturnValue(localReadStream as unknown as ReadStream)
+
+    const promise = sftpUpload(client, "/local/file.txt", "/remote/file.txt")
+    sftpWriteStream.emit("finish")
+
+    await expect(promise).resolves.toBeUndefined()
+    expect(() => {
+      sftp.emit("error", new Error("late sftp wrapper error"))
+    }).not.toThrow()
+    expect(sftpEnd).toHaveBeenCalledOnce()
+  })
+
   it("rejects and cleans up when the remote writeStream closes without finish", async () => {
     const { sftp, sftpWriteStream } = makeSftpSession()
     const client = makeClientMock(sftp)
@@ -1164,6 +1195,19 @@ describe("sftpUploadContent", () => {
     ).mock.calls
     expect(createWriteStreamCalls[0]).toStrictEqual(["/remote/secret.txt", { mode: 0o600 }])
     expect(Buffer.concat(remoteWriteStream.chunks).toString("utf8")).toBe("hello üñîçødé")
+    expect(sftpEnd).toHaveBeenCalledOnce()
+  })
+
+  it("absorbs a late sftp wrapper error after content upload settles", async () => {
+    const { sftp, sftpEnd } = makeSftpSession()
+    const client = makeClientMock(sftp)
+    const remoteWriteStream = new CollectingWritableStream()
+    vi.mocked(sftp).createWriteStream.mockReturnValue(remoteWriteStream as never)
+
+    await expect(sftpUploadContent(client, "secret", "/remote/secret.txt")).resolves.toBeUndefined()
+    expect(() => {
+      sftp.emit("error", new Error("late sftp wrapper error"))
+    }).not.toThrow()
     expect(sftpEnd).toHaveBeenCalledOnce()
   })
 
