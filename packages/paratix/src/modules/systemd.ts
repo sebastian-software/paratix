@@ -10,6 +10,7 @@ import {
 } from "../types.js"
 import { sha256String } from "./fileHelpers.js"
 import { hasFlag, setVersionedFlag } from "./moduleHelpers.js"
+import { isRegularFileWithoutSymlink } from "./remoteFileChecks.js"
 import {
   formatCaughtError,
   restoreUnitFileSnapshot,
@@ -381,7 +382,7 @@ export const systemd = {
       },
       async check(ssh: null | SshConnection): Promise<"needs-apply" | "ok"> {
         if (!ssh) return NEEDS_APPLY
-        if (!(await ssh.exists(filePath))) return NEEDS_APPLY
+        if (!(await isRegularFileWithoutSymlink(ssh, filePath))) return NEEDS_APPLY
         let remoteContent: string
         try {
           remoteContent = await ssh.readFile(filePath)

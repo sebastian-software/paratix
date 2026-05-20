@@ -178,6 +178,7 @@ describe("systemd.unit", () => {
   // Content without trailing newline so mock output matches after trim()
   const unitContent = "[Unit]\nDescription=My App\n\n[Service]\nExecStart=/usr/bin/my-app"
   const filePath = `/etc/systemd/system/${unitName}`
+  const regularUnitFileCheck = `[ -f '${filePath}' ] && [ ! -L '${filePath}' ]`
   const reloadFlag = `systemd-unit-${sha256String(unitName).slice(0, 16)}-${sha256String(unitContent).slice(0, 16)}`
   const reloadFlagCheck = `[ -f /var/lib/paratix/flags/'${reloadFlag}' ]`
   const reloadFlagSet =
@@ -187,9 +188,9 @@ describe("systemd.unit", () => {
 
   it("check returns ok when file exists, content matches, and mode is 0644", async () => {
     const ssh = createMockSsh({
-      [`[ -e '${filePath}' ]`]: { code: 0 },
       [`cat '${filePath}'`]: { code: 0, stdout: unitContent },
       [`stat -c '%a' '${filePath}'`]: { code: 0, stdout: "644\n" },
+      [regularUnitFileCheck]: { code: 0 },
       [reloadFlagCheck]: { code: 0 },
     })
     const mod = systemd.unit(unitName, unitContent)
@@ -199,17 +200,30 @@ describe("systemd.unit", () => {
 
   it("check returns needs-apply when file does not exist", async () => {
     const ssh = createMockSsh({
-      [`[ -e '${filePath}' ]`]: { code: 1 },
+      [regularUnitFileCheck]: { code: 1 },
     })
     const mod = systemd.unit(unitName, unitContent)
     const result = await mod.check(ssh, emptyEnv)
     expect(result).toBe("needs-apply")
   })
 
+  it("check returns needs-apply when the unit path is a symlink", async () => {
+    const ssh = createMockSsh({
+      [`cat '${filePath}'`]: { code: 0, stdout: unitContent },
+      [`stat -c '%a' '${filePath}'`]: { code: 0, stdout: "644\n" },
+      [regularUnitFileCheck]: { code: 1 },
+      [reloadFlagCheck]: { code: 0 },
+    })
+    const mod = systemd.unit(unitName, unitContent)
+    const result = await mod.check(ssh, emptyEnv)
+    expect(result).toBe("needs-apply")
+    expect(ssh.calls).not.toContain(`cat '${filePath}'`)
+  })
+
   it("check returns needs-apply when file content differs", async () => {
     const ssh = createMockSsh({
-      [`[ -e '${filePath}' ]`]: { code: 0 },
       [`cat '${filePath}'`]: { code: 0, stdout: "[Unit]\nDescription=Old Content\n" },
+      [regularUnitFileCheck]: { code: 0 },
     })
     const mod = systemd.unit(unitName, unitContent)
     const result = await mod.check(ssh, emptyEnv)
@@ -218,9 +232,9 @@ describe("systemd.unit", () => {
 
   it("check returns needs-apply when content matches but mode drifts to 0600", async () => {
     const ssh = createMockSsh({
-      [`[ -e '${filePath}' ]`]: { code: 0 },
       [`cat '${filePath}'`]: { code: 0, stdout: unitContent },
       [`stat -c '%a' '${filePath}'`]: { code: 0, stdout: "600\n" },
+      [regularUnitFileCheck]: { code: 0 },
     })
     const mod = systemd.unit(unitName, unitContent)
     const result = await mod.check(ssh, emptyEnv)
@@ -229,9 +243,9 @@ describe("systemd.unit", () => {
 
   it("check returns needs-apply when stat for the unit file mode fails", async () => {
     const ssh = createMockSsh({
-      [`[ -e '${filePath}' ]`]: { code: 0 },
       [`cat '${filePath}'`]: { code: 0, stdout: unitContent },
       [`stat -c '%a' '${filePath}'`]: { code: 1, stdout: "" },
+      [regularUnitFileCheck]: { code: 0 },
     })
     const mod = systemd.unit(unitName, unitContent)
     const result = await mod.check(ssh, emptyEnv)
@@ -240,7 +254,7 @@ describe("systemd.unit", () => {
 
   it("check returns needs-apply when reading the unit file fails", async () => {
     const ssh = createMockSsh({
-      [`[ -e '${filePath}' ]`]: { code: 0 },
+      [regularUnitFileCheck]: { code: 0 },
     })
     vi.spyOn(ssh, "readFile").mockRejectedValueOnce(new Error("SFTP read failed"))
     const mod = systemd.unit(unitName, unitContent)
@@ -250,9 +264,9 @@ describe("systemd.unit", () => {
 
   it("check returns needs-apply when daemon-reload marker is missing", async () => {
     const ssh = createMockSsh({
-      [`[ -e '${filePath}' ]`]: { code: 0 },
       [`cat '${filePath}'`]: { code: 0, stdout: unitContent },
       [`stat -c '%a' '${filePath}'`]: { code: 0, stdout: "644\n" },
+      [regularUnitFileCheck]: { code: 0 },
       [reloadFlagCheck]: { code: 1 },
     })
     const mod = systemd.unit(unitName, unitContent)
