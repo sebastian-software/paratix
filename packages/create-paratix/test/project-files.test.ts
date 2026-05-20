@@ -10,7 +10,7 @@ import {
 } from "node:fs"
 import { tmpdir } from "node:os"
 import { join, resolve } from "node:path"
-import { fileURLToPath } from "node:url"
+import { fileURLToPath, pathToFileURL } from "node:url"
 import { afterEach, beforeEach, describe, expect, it } from "vitest"
 
 import { deriveParatixDependencyRange, writeProjectFiles } from "../src/index.js"
@@ -35,6 +35,7 @@ const paratixIndexPath = resolve(
 const paratixModulesPath = resolve(
   fileURLToPath(new URL("../../paratix/src/modules/index.ts", import.meta.url))
 )
+const paratixCliPath = resolve(fileURLToPath(new URL("../../paratix/src/cli.ts", import.meta.url)))
 const tscBinaryPath = resolve(
   fileURLToPath(new URL("../../../node_modules/typescript/bin/tsc", import.meta.url))
 )
@@ -48,6 +49,54 @@ function linkGeneratedProjectDependency(projectDirectory: string, dependencyName
   const dependencyLink = join(nodeModulesDirectory, dependencyName)
   mkdirSync(nodeModulesDirectory, { recursive: true })
   symlinkSync(dependencyTarget, dependencyLink)
+}
+
+function linkGeneratedProjectParatixRuntime(projectDirectory: string): void {
+  const paratixShimDirectory = join(projectDirectory, "node_modules", "paratix")
+  mkdirSync(join(paratixShimDirectory, "modules"), { recursive: true })
+  writeFileSync(
+    join(paratixShimDirectory, "package.json"),
+    `${JSON.stringify(
+      {
+        exports: {
+          ".": "./index.ts",
+          "./modules": "./modules/index.ts",
+        },
+        type: "module",
+      },
+      null,
+      2
+    )}\n`
+  )
+  writeFileSync(
+    join(paratixShimDirectory, "index.ts"),
+    `export * from ${JSON.stringify(pathToFileURL(paratixIndexPath).href)}\n`
+  )
+  writeFileSync(
+    join(paratixShimDirectory, "modules", "index.ts"),
+    `export * from ${JSON.stringify(pathToFileURL(paratixModulesPath).href)}\n`
+  )
+}
+
+async function loadGeneratedServerDefinition(
+  projectDirectory: string,
+  options: { firstRun: boolean }
+) {
+  const { loadServerDefinitionFromFile } = (await import(pathToFileURL(paratixCliPath).href)) as {
+    loadServerDefinitionFromFile: (
+      file: string,
+      options: { firstRun: boolean }
+    ) => Promise<{
+      env?: Record<string, unknown>
+      ssh: {
+        ports: number[]
+        strictHostKeyChecking?: string
+        user: string
+      }
+    }>
+  }
+  linkGeneratedProjectParatixRuntime(projectDirectory)
+  return loadServerDefinitionFromFile(join(projectDirectory, "server.ts"), options)
 }
 
 function expectGeneratedServerToTypecheck(projectDirectory: string): void {
@@ -383,7 +432,7 @@ describe("writeProjectFiles", () => {
     expect(content).toContain(
       'const adminPublicKey = "ssh-ed25519 REPLACE_ME_WITH_YOUR_PUBLIC_KEY";'
     )
-    expect(content).toContain('const FIRST_RUN = process.env["PARATIX_FIRST_RUN"] === "true";')
+    expect(content).toContain("const FIRST_RUN = isFirstRun();")
     expect(content).toContain('host: "1.2.3.4"')
     expect(content).toContain("user: adminUser")
     expect(content).toContain("// Add a valid OpenSSH public key before enabling this line:")
@@ -616,7 +665,7 @@ describe("writeProjectFiles", () => {
 
     const content = readFileSync(join(TEST_DIR, "server.ts"), "utf8")
 
-    expect(content).toContain('const FIRST_RUN = process.env["PARATIX_FIRST_RUN"] === "true";')
+    expect(content).toContain("const FIRST_RUN = isFirstRun();")
     expect(content).toContain("const sshPorts = FIRST_RUN ? [22] : [2222];")
     expect(content).toContain(
       "const firewallTcpPorts = FIRST_RUN ? [22, 2222, 80, 443] : [2222, 80, 443];"
@@ -629,6 +678,47 @@ describe("writeProjectFiles", () => {
     expect(content).toContain(
       "check: \"! ufw status | grep -Eq '^22(/tcp)?[[:space:]]+(\\\\(v6\\\\)[[:space:]]+)?ALLOW'\""
     )
+  })
+
+  it("generated admin server.ts resolves FIRST_RUN from loadServerDefinitionFromFile", async () => {
+    const firstRunDirectory = join(TEST_DIR, "first-run")
+    const regularRunDirectory = join(TEST_DIR, "regular-run")
+    mkdirSync(firstRunDirectory)
+    mkdirSync(regularRunDirectory)
+    writeProjectFiles(firstRunDirectory, {
+      host: "deploy.example.com",
+      initialUser: { kind: "admin", user: "deploy" },
+    })
+    writeProjectFiles(regularRunDirectory, {
+      host: "deploy.example.com",
+      initialUser: { kind: "admin", user: "deploy" },
+    })
+
+    const firstRunDefinition = await loadGeneratedServerDefinition(firstRunDirectory, {
+      firstRun: true,
+    })
+    const regularRunDefinition = await loadGeneratedServerDefinition(regularRunDirectory, {
+      firstRun: false,
+    })
+
+    expect(firstRunDefinition.ssh).toMatchObject({
+      ports: [22],
+      strictHostKeyChecking: "yes",
+      user: "deploy",
+    })
+    expect(firstRunDefinition.env).toMatchObject({
+      FIRST_RUN: true,
+      SSH_PORT: 2222,
+    })
+    expect(regularRunDefinition.ssh).toMatchObject({
+      ports: [2222],
+      strictHostKeyChecking: "yes",
+      user: "deploy",
+    })
+    expect(regularRunDefinition.env).toMatchObject({
+      FIRST_RUN: false,
+      SSH_PORT: 2222,
+    })
   })
 
   it("generated server.ts recognizes protocol-specific port 22 ufw status lines", () => {
@@ -715,7 +805,7 @@ describe("writeProjectFiles", () => {
     expect(content).toContain('host: "203.0.113.10"')
     expect(content).toContain('user: FIRST_RUN ? "root" : adminUser')
     expect(content).toContain('const adminUser = "paratix";')
-    expect(content).toContain('const FIRST_RUN = process.env["PARATIX_FIRST_RUN"] === "true";')
+    expect(content).toContain("const FIRST_RUN = isFirstRun();")
     expect(content).toContain("Transitional bootstrap mode:")
     expect(content).toContain('PasswordAuthentication: "no"')
     expect(content).toContain('PermitRootLogin: FIRST_RUN ? "prohibit-password" : "no"')
@@ -758,6 +848,49 @@ describe("writeProjectFiles", () => {
     expect(content).toContain('PermitRootLogin: FIRST_RUN ? "prohibit-password" : "no"')
     expect(content).not.toContain('user: "root"')
     expect(content).not.toContain('PermitRootLogin: "prohibit-password"')
+  })
+
+  it("generated root-bootstrap server.ts resolves ssh and env for first-run and regular loads", async () => {
+    const firstRunDirectory = join(TEST_DIR, "root-first-run")
+    const regularRunDirectory = join(TEST_DIR, "root-regular-run")
+    mkdirSync(firstRunDirectory)
+    mkdirSync(regularRunDirectory)
+    writeProjectFiles(firstRunDirectory, {
+      adminPublicKey: TEST_ADMIN_PUBLIC_KEY,
+      host: "203.0.113.10",
+      initialUser: { kind: "root" },
+    })
+    writeProjectFiles(regularRunDirectory, {
+      adminPublicKey: TEST_ADMIN_PUBLIC_KEY,
+      host: "203.0.113.10",
+      initialUser: { kind: "root" },
+    })
+
+    const firstRunDefinition = await loadGeneratedServerDefinition(firstRunDirectory, {
+      firstRun: true,
+    })
+    const regularRunDefinition = await loadGeneratedServerDefinition(regularRunDirectory, {
+      firstRun: false,
+    })
+
+    expect(firstRunDefinition.ssh).toMatchObject({
+      ports: [22],
+      strictHostKeyChecking: "yes",
+      user: "root",
+    })
+    expect(firstRunDefinition.env).toMatchObject({
+      FIRST_RUN: true,
+      SSH_PORT: 2222,
+    })
+    expect(regularRunDefinition.ssh).toMatchObject({
+      ports: [2222],
+      strictHostKeyChecking: "yes",
+      user: "paratix",
+    })
+    expect(regularRunDefinition.env).toMatchObject({
+      FIRST_RUN: false,
+      SSH_PORT: 2222,
+    })
   })
 
   it("generated root-bootstrap server.ts provisions passwordless sudo for the bootstrap admin user", () => {
@@ -860,7 +993,9 @@ describe("writeProjectFiles", () => {
     expect(sshHardeningIndex).toBeLessThan(kernelHardeningIndex)
     expect(kernelHardeningIndex).toBeLessThan(automaticUpgradesIndex)
     expect(automaticUpgradesIndex).toBeLessThan(firstRunStopIndex)
-    expect(content).toContain('import { firstRun, recipe, server, when } from "paratix";')
+    expect(content).toContain(
+      'import { firstRun, isFirstRun, recipe, server, when } from "paratix";'
+    )
     expect(content).toContain("// Add application and user-facing services below this line.")
   })
 

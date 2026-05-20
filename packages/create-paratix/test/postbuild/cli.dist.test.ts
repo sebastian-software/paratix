@@ -13,12 +13,22 @@ import {
 import { createRequire } from "node:module"
 import { tmpdir } from "node:os"
 import { delimiter, dirname, join, resolve } from "node:path"
+import { fileURLToPath, pathToFileURL } from "node:url"
 import { afterAll, beforeAll, describe, expect, it } from "vitest"
 
 import { TEST_ADMIN_PUBLIC_KEY, TEST_HOST_FINGERPRINT } from "../helpers.js"
 
 const require = createRequire(import.meta.url)
 const packageRootDirectory = resolve(import.meta.dirname, "../..")
+const paratixIndexPath = resolve(
+  fileURLToPath(new URL("../../../paratix/src/index.ts", import.meta.url))
+)
+const paratixModulesPath = resolve(
+  fileURLToPath(new URL("../../../paratix/src/modules/index.ts", import.meta.url))
+)
+const paratixCliPath = resolve(
+  fileURLToPath(new URL("../../../paratix/src/cli.ts", import.meta.url))
+)
 const CLI_COMMAND_TIMEOUT_MS = 30_000
 
 describe("dist CLI", () => {
@@ -239,7 +249,7 @@ describe("dist CLI", () => {
     }
   })
 
-  it("scaffolds a project through the published dist CLI in non-interactive mode", () => {
+  it("scaffolds a project through the published dist CLI in non-interactive mode", async () => {
     const packageJson = readPackageJson()
     const distCliPath = resolve(packedPackageRootDirectory, packageJson.bin["create-paratix"])
     const tempDirectory = mkdtempSync(join(tmpdir(), "create-paratix-dist-success-"))
@@ -326,6 +336,40 @@ describe("dist CLI", () => {
       expect(serverTemplate).toContain(`expectedHostFingerprint: "${TEST_HOST_FINGERPRINT}"`)
       expect(serverTemplate).toContain(TEST_ADMIN_PUBLIC_KEY)
       expect(serverTemplate).toContain('const adminUser = "deploy"')
+      expect(serverTemplate).toContain("import { firstRun, isFirstRun, recipe, server, when }")
+      expect(serverTemplate).toContain("const FIRST_RUN = isFirstRun();")
+
+      linkGeneratedProjectParatixRuntime(projectDirectory)
+      writeFileSync(join(projectDirectory, "server.first-run.ts"), serverTemplate)
+      writeFileSync(join(projectDirectory, "server.regular-run.ts"), serverTemplate)
+
+      const firstRunDefinition = await loadGeneratedServerDefinitionFromFile(
+        join(projectDirectory, "server.first-run.ts"),
+        { firstRun: true }
+      )
+      const regularRunDefinition = await loadGeneratedServerDefinitionFromFile(
+        join(projectDirectory, "server.regular-run.ts"),
+        { firstRun: false }
+      )
+
+      expect(firstRunDefinition.ssh).toMatchObject({
+        ports: [22],
+        strictHostKeyChecking: "yes",
+        user: "deploy",
+      })
+      expect(firstRunDefinition.env).toMatchObject({
+        FIRST_RUN: true,
+        SSH_PORT: 2222,
+      })
+      expect(regularRunDefinition.ssh).toMatchObject({
+        ports: [2222],
+        strictHostKeyChecking: "yes",
+        user: "deploy",
+      })
+      expect(regularRunDefinition.env).toMatchObject({
+        FIRST_RUN: false,
+        SSH_PORT: 2222,
+      })
     } finally {
       rmSync(tempDirectory, { force: true, recursive: true })
     }
@@ -356,4 +400,58 @@ function linkRuntimeDependencies(tempDirectory: string): void {
     mkdirSync(dirname(dependencyInstallPath), { recursive: true })
     symlinkSync(dependencyRootDirectory, dependencyInstallPath)
   }
+}
+
+function linkGeneratedProjectParatixRuntime(projectDirectory: string): void {
+  const paratixShimDirectory = join(projectDirectory, "node_modules", "paratix")
+  mkdirSync(join(paratixShimDirectory, "modules"), { recursive: true })
+  writeFileSync(
+    join(paratixShimDirectory, "package.json"),
+    `${JSON.stringify(
+      {
+        exports: {
+          ".": "./index.ts",
+          "./modules": "./modules/index.ts",
+        },
+        type: "module",
+      },
+      null,
+      2
+    )}\n`
+  )
+  writeFileSync(
+    join(paratixShimDirectory, "index.ts"),
+    `export * from ${JSON.stringify(pathToFileURL(paratixIndexPath).href)}\n`
+  )
+  writeFileSync(
+    join(paratixShimDirectory, "modules", "index.ts"),
+    `export * from ${JSON.stringify(pathToFileURL(paratixModulesPath).href)}\n`
+  )
+}
+
+async function loadGeneratedServerDefinitionFromFile(
+  file: string,
+  options: { firstRun: boolean }
+): Promise<{
+  env?: Record<string, unknown>
+  ssh: {
+    ports: number[]
+    strictHostKeyChecking?: string
+    user: string
+  }
+}> {
+  const { loadServerDefinitionFromFile } = (await import(pathToFileURL(paratixCliPath).href)) as {
+    loadServerDefinitionFromFile: (
+      file: string,
+      options: { firstRun: boolean }
+    ) => Promise<{
+      env?: Record<string, unknown>
+      ssh: {
+        ports: number[]
+        strictHostKeyChecking?: string
+        user: string
+      }
+    }>
+  }
+  return loadServerDefinitionFromFile(file, options)
 }
