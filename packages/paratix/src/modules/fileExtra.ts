@@ -70,6 +70,15 @@ type ParsedManagedBlock =
   | { reason: string; status: "invalid" }
   | { status: "absent" }
 
+function assertSingleLineBlockMarkerPart(label: string, value: string): void {
+  if (value.length === 0) {
+    throw new Error(`file.block ${label} must not be empty`)
+  }
+  if (value.includes("\0") || value.includes("\r") || value.includes("\n")) {
+    throw new Error(`file.block ${label} must not contain NUL, CR, or LF`)
+  }
+}
+
 function parseManagedBlock(text: string, markers: BlockMarkers): ParsedManagedBlock {
   const lines = text.split("\n")
   const beginIndexes: number[] = []
@@ -288,6 +297,8 @@ export function assemble(
  */
 export function block(remotePath: string, options: BlockOptions): Module {
   const prefix = options.prefix ?? "#"
+  assertSingleLineBlockMarkerPart("name", options.name)
+  assertSingleLineBlockMarkerPart("prefix", prefix)
   const beginMarker = `${prefix} BEGIN paratix: ${options.name}`
   const endMarker = `${prefix} END paratix: ${options.name}`
 

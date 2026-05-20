@@ -2799,6 +2799,28 @@ describe("file.assemble", () => {
 })
 
 describe("file.block", () => {
+  it.each([
+    ["empty name", { content: "content", name: "" }, "file.block name must not be empty"],
+    [
+      "multiline name",
+      { content: "content", name: "bad\nname" },
+      "file.block name must not contain NUL, CR, or LF",
+    ],
+    [
+      "name with NUL",
+      { content: "content", name: `bad${String.fromCharCode(0)}name` },
+      "file.block name must not contain NUL, CR, or LF",
+    ],
+    ["empty prefix", { content: "content", name: "block", prefix: "" }, "file.block prefix must not be empty"],
+    [
+      "multiline prefix",
+      { content: "content", name: "block", prefix: "#\n#" },
+      "file.block prefix must not contain NUL, CR, or LF",
+    ],
+  ])("rejects %s", (_label, options, message) => {
+    expect(() => file.block("/etc/hosts", options)).toThrow(message)
+  })
+
   it("check returns ok when block exists with correct content", async () => {
     const beginMarker = "# BEGIN paratix: myblock"
     const endMarker = "# END paratix: myblock"
