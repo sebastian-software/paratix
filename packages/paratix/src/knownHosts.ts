@@ -63,6 +63,14 @@ export class HostKeyVerificationError extends Error {
   }
 }
 
+class KnownHostsValidationError extends Error {
+  public constructor(message: string) {
+    super(message)
+    this.name = "KnownHostsValidationError"
+    Error.captureStackTrace(this, KnownHostsValidationError)
+  }
+}
+
 /** A parsed entry from a known_hosts file. */
 export type KnownHostEntry = {
   /** Algorithm name as stored in the file (e.g. `"ssh-ed25519"`). */
@@ -216,7 +224,7 @@ function formatHostNeedle(host: string, port: number): string {
 function assertSafeHostForKnownHosts(host: string): void {
   const hostValidationFailure = validateHostLabel(host)
   if (hostValidationFailure == null) return
-  throw new Error(
+  throw new KnownHostsValidationError(
     `Refusing to persist known_hosts entry: host label ${describeHostValidationFailure(hostValidationFailure)}`
   )
 }
@@ -342,7 +350,7 @@ export function extractAlgoFromKey(keyBuffer: Buffer): string {
   // allowlist. Without this, a malicious peer could embed newlines or
   // whitespace into the field and corrupt the known_hosts line shape.
   if (!PINNED_HOST_KEY_ALGORITHM_PATTERN.test(algo)) {
-    throw new Error(`Invalid SSH key buffer: unsupported algorithm '${algo}'`)
+    throw new KnownHostsValidationError(`Invalid SSH key buffer: unsupported algorithm '${algo}'`)
   }
   return algo
 }
@@ -409,13 +417,19 @@ export async function appendHostKey(host: string, port: number, keyBuffer: Buffe
   // malformed hostLabel (e.g. an IPv6 literal smuggled through configuration)
   // must not corrupt the known_hosts line shape.
   if (/\s/v.test(hostLabel)) {
-    throw new Error(`Refusing to persist known_hosts entry: host label contains whitespace`)
+    throw new KnownHostsValidationError(
+      `Refusing to persist known_hosts entry: host label contains whitespace`
+    )
   }
   if (/\s/v.test(algo)) {
-    throw new Error(`Refusing to persist known_hosts entry: algorithm contains whitespace`)
+    throw new KnownHostsValidationError(
+      `Refusing to persist known_hosts entry: algorithm contains whitespace`
+    )
   }
   if (/\s/v.test(base64Key)) {
-    throw new Error(`Refusing to persist known_hosts entry: base64 key contains whitespace`)
+    throw new KnownHostsValidationError(
+      `Refusing to persist known_hosts entry: base64 key contains whitespace`
+    )
   }
 
   const line = `${hostLabel} ${algo} ${base64Key}\n`
@@ -559,7 +573,9 @@ async function acceptAndPersistHostKey(
   try {
     await appendHostKey(host, port, key)
   } catch (error: unknown) {
-    if (error instanceof HostKeyVerificationError) throw error
+    if (error instanceof HostKeyVerificationError || error instanceof KnownHostsValidationError) {
+      throw error
+    }
     cache.set(formatHostNeedle(host, port), key)
     process.stderr.write(acceptedWarning)
     writeHostKeyPersistFallbackWarning(host, port, error)

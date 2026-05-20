@@ -1292,11 +1292,8 @@ describe("buildHostVerifier", () => {
     [22, "ssh-keyscan 'evil'\\''host; rm -rf /' >> ~/.ssh/known_hosts."],
     [2222, "ssh-keyscan -p 2222 'evil'\\''host; rm -rf /' >> ~/.ssh/known_hosts."],
   ] satisfies ReadonlyArray<readonly [number, string]>)(
-    "mode 'accept-new': persist failure ssh-keyscan hint shell-quotes hostname with special chars on port %i",
+    "mode 'accept-new': validation failure rejects hostname with special chars on port %i before persist fallback",
     async (port, expectedKeyscanHint) => {
-      // Regression test: the ssh-keyscan command suggestion in the persist failure warning
-      // must shell-quote the hostname to prevent shell injection when the user copies it.
-      // e.g. "evil'host; rm -rf /" must appear as 'evil'\''host; rm -rf /' in the hint.
       const maliciousHost = "evil'host; rm -rf /"
       readFileSyncMock.mockReturnValue("")
       const accessError = Object.assign(new Error("Permission denied"), { code: "EACCES" })
@@ -1312,23 +1309,71 @@ describe("buildHostVerifier", () => {
         expect(hostVerifier).toBeDefined()
 
         hostVerifier!(ed25519Key)
-        await commitAcceptedHostKey?.()
+        await expect(commitAcceptedHostKey?.()).rejects.toThrow(
+          /Refusing to persist known_hosts entry/v
+        )
 
-        // Wait for the async .catch() to fire and write the second warning
-        await vi.waitFor(() => {
-          expect(stderrSpy).toHaveBeenCalledTimes(2)
-        })
-
-        const persistWarning = (stderrSpy.mock.calls[1] as [string])[0]
-
-        expect(persistWarning).toContain(expectedKeyscanHint)
-        // The raw unquoted form must NOT appear as a standalone shell-injectable sequence
-        expect(persistWarning).not.toContain("ssh-keyscan evil'host; rm -rf /")
+        expect(expectedKeyscanHint).toContain("ssh-keyscan")
+        expect(stderrSpy).not.toHaveBeenCalled()
+        expect(appendFileMock).not.toHaveBeenCalled()
       } finally {
         stderrSpy.mockRestore()
       }
     }
   )
+
+  it("mode 'accept-new': validation failure for an unsafe host does not cache the key", async () => {
+    readFileSyncMock.mockReturnValue("")
+    const stderrSpy = vi.spyOn(process.stderr, "write").mockImplementation(() => true)
+
+    try {
+      const { commitAcceptedHostKey, hostVerifier } = await buildHostVerifier("accept-new", {
+        host: "*.example.com",
+        port: 22,
+      })
+
+      expect(hostVerifier!(ed25519Key)).toBe(true)
+      await expect(commitAcceptedHostKey?.()).rejects.toThrow(
+        /Refusing to persist known_hosts entry/v
+      )
+
+      const { hostVerifier: strictVerifier } = await buildHostVerifier("yes", {
+        host: "*.example.com",
+        port: 22,
+      })
+
+      expect(() => strictVerifier!(ed25519Key)).toThrow(/Host key for \*\.example\.com not found/v)
+      expect(stderrSpy).not.toHaveBeenCalled()
+    } finally {
+      stderrSpy.mockRestore()
+    }
+  })
+
+  it("mode 'accept-new': validation failure for an invalid key does not cache the key", async () => {
+    readFileSyncMock.mockReturnValue("")
+    const invalidKey = makeKeyBuffer("ssh-unsupported", Buffer.from("unsupported-key-material"))
+    const stderrSpy = vi.spyOn(process.stderr, "write").mockImplementation(() => true)
+
+    try {
+      const { commitAcceptedHostKey, hostVerifier } = await buildHostVerifier("accept-new", {
+        host: "newhost.com",
+        port: 22,
+      })
+
+      expect(hostVerifier!(invalidKey)).toBe(true)
+      await expect(commitAcceptedHostKey?.()).rejects.toThrow(/unsupported algorithm/v)
+
+      const { hostVerifier: strictVerifier } = await buildHostVerifier("yes", {
+        host: "newhost.com",
+        port: 22,
+      })
+
+      expect(() => strictVerifier!(invalidKey)).toThrow(/Host key for newhost\.com not found/v)
+      expect(stderrSpy).not.toHaveBeenCalled()
+    } finally {
+      stderrSpy.mockRestore()
+    }
+  })
 
   it("clearHostKeyCache removes cached keys", async () => {
     // Arrange: accept a key so it gets cached
