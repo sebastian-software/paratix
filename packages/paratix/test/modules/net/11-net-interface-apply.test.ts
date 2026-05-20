@@ -132,6 +132,28 @@ describe("net.interface — apply", () => {
     expect(result.error?.message).toContain("symlink")
   })
 
+  it("refuses to write through a symlinked networkd path", async () => {
+    const mockSsh = createMockSsh(
+      {
+        "test -d '/etc/netplan'": { code: 1 },
+      },
+      {
+        responseStubs: [
+          {
+            command: /^\[ -L '\/etc\/systemd\/network\/60-paratix-[^']+\.network' \]$/v,
+            result: { code: 0 },
+          },
+        ],
+      }
+    )
+    const mod = net.interface("eth0", {})
+    const result = await mod.apply(mockSsh, emptyEnv)
+    expect(result.status).toBe("failed")
+    expect(result.error?.message).toContain("symlink")
+    expect(mockSsh.writeFileCalls).toStrictEqual([])
+    expect(mockSsh.calls).not.toContain("networkctl reload")
+  })
+
   it("returns changed in Netplan mode", async () => {
     const mockSsh = createMockSsh(
       {
