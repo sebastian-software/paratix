@@ -5,9 +5,11 @@ import {
   clearRegisteredSecrets,
   getRegisteredSecrets,
   maskRegisteredSecrets,
+  registerRunScopedSecret,
   registerSecret,
   unregisterSecret,
   withRegisteredSecrets,
+  withRunScopedSecrets,
 } from "../src/secretSink.js"
 import { CommandError } from "../src/sshHelpers.js"
 
@@ -328,6 +330,42 @@ describe("withRegisteredSecrets", () => {
 
     setSpy.mockRestore()
 
+    expect(getRegisteredSecrets()).toStrictEqual([])
+  })
+})
+
+describe("withRunScopedSecrets", () => {
+  afterEach(() => {
+    clearRegisteredSecrets()
+  })
+
+  it("releases run-scoped registrations after the body returns", async () => {
+    let observedDuringBody: string[] = []
+
+    await withRunScopedSecrets(async () => {
+      registerRunScopedSecret("run-scoped-secret")
+      observedDuringBody = getRegisteredSecrets()
+      await Promise.resolve()
+    })
+
+    expect(observedDuringBody).toContain("run-scoped-secret")
+    expect(getRegisteredSecrets()).toStrictEqual([])
+  })
+
+  it("keeps nested calls attached to the outer run scope", async () => {
+    let observedAfterNestedScope: string[] = []
+
+    await withRunScopedSecrets(async () => {
+      registerRunScopedSecret("outer-run-secret")
+      await withRunScopedSecrets(async () => {
+        registerRunScopedSecret("inner-run-secret")
+      })
+      observedAfterNestedScope = getRegisteredSecrets()
+    })
+
+    expect(new Set(observedAfterNestedScope)).toStrictEqual(
+      new Set(["outer-run-secret", "inner-run-secret"])
+    )
     expect(getRegisteredSecrets()).toStrictEqual([])
   })
 })

@@ -167,6 +167,10 @@ export async function withRegisteredSecrets<T>(
  * @returns Whatever `body` resolves to.
  */
 export async function withRunScopedSecrets<T>(body: () => Promise<T>): Promise<T> {
+  if (runScopedSecretCounts.getStore() != null) {
+    return body()
+  }
+
   const scopedSecrets = new Map<string, number>()
   try {
     return await runScopedSecretCounts.run(scopedSecrets, body)

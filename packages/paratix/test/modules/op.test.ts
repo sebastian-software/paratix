@@ -248,11 +248,11 @@ describe("op.resolve — apply", () => {
   })
 
   // R-0000576: the otpauth URI carrying the shared `secret=` is registered
-  // in the secret sink up-front so a third-party error renderer cannot leak
-  // it. R-0000583 raised the minimum secret length to 8 characters, so the
-  // 6-digit generated TOTP code is intentionally NOT registered to prevent
-  // a 6-digit substring of unrelated diagnostic text from being masked.
-  it("registers the otpauth URI in the secret sink and intentionally skips the short OTP", async () => {
+  // in the secret sink while `apply` is resolving values so a third-party
+  // error renderer cannot leak it. R-0001011: direct module.apply calls own a
+  // run-scoped cleanup boundary, so the URI must not remain registered after
+  // apply returns.
+  it("releases the direct-apply otpauth URI after resolving OTP meta", async () => {
     const otpauthUri =
       "otpauth://totp/Test?secret=GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ&period=30&digits=6"
     mockSpawnWith(`${otpauthUri}\n`)
@@ -266,7 +266,7 @@ describe("op.resolve — apply", () => {
     const code = await resolveEnvironment(metaEnvironment, "token")
 
     expect(code).toMatch(/^\d{6}$/v)
-    expect(getRegisteredSecrets()).toContain(otpauthUri)
+    expect(getRegisteredSecrets()).not.toContain(otpauthUri)
     expect(getRegisteredSecrets()).not.toContain(code)
   })
 
@@ -467,7 +467,7 @@ describe("op.resolve — error masking", () => {
   // trap masks it. Without immediate registration the regular value would
   // only land in the sink on the post-loop pass, leaving a window where the
   // OTP failure could leak it in plaintext.
-  it("registers regular secrets in the sink before a later OTP resolve throws", async () => {
+  it("masks regular secrets before a later OTP resolve throws without retaining them", async () => {
     const resolvedValue = "early-registered-secret-value"
     mockedSpawnFn.mockImplementationOnce(((command: string, args: readonly string[]) => {
       trackSpawn(command, args)
@@ -486,9 +486,8 @@ describe("op.resolve — error masking", () => {
     const result = await module_.apply(null, emptyEnv)
 
     expect(result.status).toBe("failed")
-    // The regular secret must already be in the process-scoped sink even
-    // though apply never reached the post-loop registerSecret pass.
-    expect(getRegisteredSecrets()).toContain(resolvedValue)
+    expect(result.error?.message).not.toContain(resolvedValue)
+    expect(getRegisteredSecrets()).not.toContain(resolvedValue)
   })
 
   it("masks the resolved regular secret value when it leaks into op stderr", async () => {

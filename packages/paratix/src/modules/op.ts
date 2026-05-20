@@ -5,7 +5,7 @@ import type { Environment, Module, ModuleResult } from "../types.js"
 import { environmentToMetaEntries } from "../meta.js"
 import { failed } from "../moduleFailure.js"
 import { getRunnerAbortSignal } from "../runnerAbortSignal.js"
-import { registerRunScopedSecret } from "../secretSink.js"
+import { registerRunScopedSecret, withRunScopedSecrets } from "../secretSink.js"
 import { maskSecrets } from "../sshHelpers.js"
 import { generateTotpCode } from "../totp.js"
 import {
@@ -423,45 +423,47 @@ export const op = {
     return {
       _dryRunMetaProducer: true,
       async apply(): Promise<ModuleResult> {
-        // Track every secret we observe locally (resolved values + otpauth
-        // URIs) so the failure path can mask them from stderr and stack
-        // traces, not just the op:// reference strings the caller supplied.
-        const leakedValues: string[] = []
-        try {
-          const [regularEntries, otpEntries] = splitReferences(references)
-          // R-0000041 / R-0000850: `resolveRegularReferences` and
-          // `resolveOtpReferences` register every resolved value with the
-          // process-scoped secret sink as soon as they observe it. We
-          // deliberately do not re-register here — keeping the helpers as the
-          // single source of truth for secret registration avoids the risk of
-          // the two sites drifting apart (e.g. when a future helper learns to
-          // register a derived value but the post-loop block is overlooked).
-          const resolvedRegular = await resolveRegularReferences(regularEntries, leakedValues)
-          const resolvedOtp = await resolveOtpReferences(otpEntries, leakedValues)
+        return withRunScopedSecrets(async () => {
+          // Track every secret we observe locally (resolved values + otpauth
+          // URIs) so the failure path can mask them from stderr and stack
+          // traces, not just the op:// reference strings the caller supplied.
+          const leakedValues: string[] = []
+          try {
+            const [regularEntries, otpEntries] = splitReferences(references)
+            // R-0000041 / R-0000850: `resolveRegularReferences` and
+            // `resolveOtpReferences` register every resolved value with the
+            // process-scoped secret sink as soon as they observe it. We
+            // deliberately do not re-register here — keeping the helpers as the
+            // single source of truth for secret registration avoids the risk of
+            // the two sites drifting apart (e.g. when a future helper learns to
+            // register a derived value but the post-loop block is overlooked).
+            const resolvedRegular = await resolveRegularReferences(regularEntries, leakedValues)
+            const resolvedOtp = await resolveOtpReferences(otpEntries, leakedValues)
 
-          return {
-            meta: environmentToMetaEntries({ ...resolvedRegular, ...resolvedOtp }),
-            status: "ok",
+            return {
+              meta: environmentToMetaEntries({ ...resolvedRegular, ...resolvedOtp }),
+              status: "ok",
+            }
+          } catch (error) {
+            const rawDetail = buildOpFailureDetail(error)
+            // R-0000589: also feed the per-line captured stdout/stderr of the
+            // failing op invocation into the secret list. A partial stdout
+            // buffer (e.g. half a secret value) that ended up embedded in the
+            // error message is then redacted as defense-in-depth.
+            const secrets = [
+              ...Object.values(references),
+              ...leakedValues,
+              ...collectOpFailureOutputs(error),
+            ]
+            const detail = maskKnownSecretPrefixes(maskSecrets(rawDetail, secrets), secrets)
+            // R-0000850: every value that ended up in `leakedValues` was already
+            // registered with the secret sink by the helpers above (see
+            // `resolveRegularReferences` / `resolveOtpReferences`). We rely on
+            // that single registration site so the resolve flow has one — and
+            // only one — canonical place that owns secret registration.
+            return failed(`Failed to resolve 1Password references: ${detail}`)
           }
-        } catch (error) {
-          const rawDetail = buildOpFailureDetail(error)
-          // R-0000589: also feed the per-line captured stdout/stderr of the
-          // failing op invocation into the secret list. A partial stdout
-          // buffer (e.g. half a secret value) that ended up embedded in the
-          // error message is then redacted as defense-in-depth.
-          const secrets = [
-            ...Object.values(references),
-            ...leakedValues,
-            ...collectOpFailureOutputs(error),
-          ]
-          const detail = maskKnownSecretPrefixes(maskSecrets(rawDetail, secrets), secrets)
-          // R-0000850: every value that ended up in `leakedValues` was already
-          // registered with the secret sink by the helpers above (see
-          // `resolveRegularReferences` / `resolveOtpReferences`). We rely on
-          // that single registration site so the resolve flow has one — and
-          // only one — canonical place that owns secret registration.
-          return failed(`Failed to resolve 1Password references: ${detail}`)
-        }
+        })
       },
       // eslint-disable-next-line @typescript-eslint/require-await
       async check(): Promise<"needs-apply" | "ok"> {
