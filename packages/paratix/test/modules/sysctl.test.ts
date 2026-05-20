@@ -193,6 +193,28 @@ describe("sysctl.set — apply", () => {
     expect(result.status).toBe("failed")
   })
 
+  it("masks the desired value when sysctl -w fails (state: present)", async () => {
+    const sensitiveValue = "present-secret-sentinel-0000987"
+    const mockSsh = createMockSsh({
+      [`sysctl -n '${KEY}'`]: { code: 0, stdout: "0" },
+      [`sysctl -w '${KEY}=${sensitiveValue}'`]: {
+        code: 1,
+        stderr: `permission denied for ${sensitiveValue}`,
+        stdout: `attempted ${sensitiveValue}`,
+      },
+    })
+    const mod = sysctl.set(KEY, sensitiveValue)
+    const result = await mod.apply(mockSsh, emptyEnv)
+
+    expect(result.status).toBe("failed")
+    expect(String(result.error)).toContain("sysctl -w failed")
+    expect(String(result.error)).not.toContain(sensitiveValue)
+    expect(mockSsh.execCalls.at(-1)).toMatchObject({
+      command: `sysctl -w '${KEY}=${sensitiveValue}'`,
+      options: { ignoreExitCode: true, secrets: [sensitiveValue], silent: true },
+    })
+  })
+
   it("returns failed when the previous live value cannot be read (state: present)", async () => {
     const mockSsh = createMockSsh({
       [`sysctl -n '${KEY}'`]: { code: 255, stderr: "unknown key" },
@@ -346,6 +368,33 @@ describe("sysctl.set — apply", () => {
     expect(String(result.error)).toContain("sysctl -w failed while resetting live value")
   })
 
+  it("masks the resetValue when sysctl -w fails during reset", async () => {
+    const sensitiveResetValue = "reset-secret-sentinel-0000987"
+    const mockSsh = createMockSsh({
+      [`sysctl -w '${KEY}=${sensitiveResetValue}'`]: {
+        code: 1,
+        stderr: `permission denied for ${sensitiveResetValue}`,
+        stdout: `attempted ${sensitiveResetValue}`,
+      },
+      [`test -f '${CONF_PATH}'`]: { code: 1 },
+      [ABSENT_RM_COMMAND]: { code: 0 },
+      [ABSENT_SYMLINK_PROBE]: { code: 1 },
+    })
+    const mod = sysctl.set(KEY, VALUE, {
+      resetValue: sensitiveResetValue,
+      state: "absent",
+    })
+    const result = await mod.apply(mockSsh, emptyEnv)
+
+    expect(result.status).toBe("failed")
+    expect(String(result.error)).toContain("sysctl -w failed while resetting live value")
+    expect(String(result.error)).not.toContain(sensitiveResetValue)
+    expect(mockSsh.execCalls.at(-1)).toMatchObject({
+      command: `sysctl -w '${KEY}=${sensitiveResetValue}'`,
+      options: { ignoreExitCode: true, secrets: [sensitiveResetValue], silent: true },
+    })
+  })
+
   it("returns failed when live value did not converge after reset (state: absent + resetValue)", async () => {
     const mockSsh = createMockSsh({
       [`sysctl -n '${KEY}'`]: { code: 0, stdout: "1" },
@@ -358,6 +407,28 @@ describe("sysctl.set — apply", () => {
     const result = await mod.apply(mockSsh, emptyEnv)
     expect(result.status).toBe("failed")
     expect(String(result.error)).toContain("did not converge")
+  })
+
+  it("does not expose resetValue or actual live value when reset verification mismatches", async () => {
+    const sensitiveResetValue = "reset-verify-secret-sentinel-0000987"
+    const sensitiveActualValue = "actual-verify-secret-sentinel-0000987"
+    const mockSsh = createMockSsh({
+      [`sysctl -n '${KEY}'`]: { code: 0, stdout: sensitiveActualValue },
+      [`sysctl -w '${KEY}=${sensitiveResetValue}'`]: { code: 0 },
+      [`test -f '${CONF_PATH}'`]: { code: 1 },
+      [ABSENT_RM_COMMAND]: { code: 0 },
+      [ABSENT_SYMLINK_PROBE]: { code: 1 },
+    })
+    const mod = sysctl.set(KEY, VALUE, {
+      resetValue: sensitiveResetValue,
+      state: "absent",
+    })
+    const result = await mod.apply(mockSsh, emptyEnv)
+
+    expect(result.status).toBe("failed")
+    expect(String(result.error)).toContain("live value did not converge to reset value")
+    expect(String(result.error)).not.toContain(sensitiveResetValue)
+    expect(String(result.error)).not.toContain(sensitiveActualValue)
   })
 
   it("does not run sysctl -w when resetValue is not given (state: absent)", async () => {

@@ -43,9 +43,7 @@ function keyHash(key: string): string {
  * @throws {Error} When the key is empty or contains disallowed characters.
  */
 function validateKey(key: string): void {
-  if (key.length === 0) {
-    throw new Error("sysctl.set: key must not be empty")
-  }
+  if (key.length === 0) throw new Error("sysctl.set: key must not be empty")
   if (!SYSCTL_KEY_PATTERN.test(key)) {
     throw new Error(
       `sysctl.set: key must match ${String(SYSCTL_KEY_PATTERN)}, got: ${JSON.stringify(key)}`
@@ -70,9 +68,8 @@ function validateValue(value: string): void {
 }
 
 function validateState(state: unknown): asserts state is "absent" | "present" {
-  if (state !== "present" && state !== "absent") {
+  if (state !== "present" && state !== "absent")
     throw new Error('sysctl.set: state must be "present" or "absent"')
-  }
 }
 
 /**
@@ -248,9 +245,12 @@ async function applyPresentState(
   const previousValue = await readLiveValueBeforeApply(conn, key)
   if (typeof previousValue !== "string") return previousValue
   const assignment = `${key}=${value}`
-  const result = await conn.exec(`sysctl -w ${shellQuote(assignment)}`, EXEC_OPTS)
+  const result = await conn.exec(`sysctl -w ${shellQuote(assignment)}`, {
+    ...EXEC_OPTS,
+    secrets: [value],
+  })
   if (result.code !== 0) {
-    return failedCommand(`[sysctl.set: ${key}] sysctl -w failed`, result)
+    return failedCommand(`[sysctl.set: ${key}] sysctl -w failed`, result, [value])
   }
   // R-0000242: convert a `writeFile` exception into a structured `failed`
   // ModuleResult. Without the catch, a failure of the persistence write
@@ -299,11 +299,15 @@ async function resetLiveValue(
   resetValue: string
 ): Promise<ModuleResult | undefined> {
   const assignment = `${key}=${resetValue}`
-  const writeResult = await conn.exec(`sysctl -w ${shellQuote(assignment)}`, EXEC_OPTS)
+  const writeResult = await conn.exec(`sysctl -w ${shellQuote(assignment)}`, {
+    ...EXEC_OPTS,
+    secrets: [resetValue],
+  })
   if (writeResult.code !== 0) {
     return failedCommand(
       `[sysctl.set: ${key}] sysctl -w failed while resetting live value`,
-      writeResult
+      writeResult,
+      [resetValue]
     )
   }
   const verify = await conn.exec(`sysctl -n ${shellQuote(key)}`, EXEC_OPTS)
@@ -311,9 +315,7 @@ async function resetLiveValue(
     return failedCommand(`[sysctl.set: ${key}] failed to read live value after reset`, verify)
   }
   if (verify.stdout.trim() !== resetValue) {
-    return failed(
-      `[sysctl.set: ${key}] live value did not converge to reset value: expected ${JSON.stringify(resetValue)}, got ${JSON.stringify(verify.stdout.trim())}`
-    )
+    return failed(`[sysctl.set: ${key}] live value did not converge to reset value`)
   }
   return undefined
 }
