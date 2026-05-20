@@ -81,6 +81,20 @@ function createComposeMockSsh(
   )
 }
 
+function buildSequentialMktempExec(
+  mockSsh: ReturnType<typeof createComposeMockSsh>,
+  originalExec: ExecLike,
+  outputs: string[]
+): ExecLike {
+  return async (command, options) => {
+    if (command !== mktempCommand) return originalExec(command, options)
+    await Promise.resolve()
+    mockSsh.calls.push(command)
+    mockSsh.execCalls.push({ command, options })
+    return { code: 0, stderr: "", stdout: outputs.shift() ?? "" }
+  }
+}
+
 // ─── compose.up ──────────────────────────────────────────────────────────────
 
 describe("compose.up — check", () => {
@@ -838,10 +852,15 @@ describe("compose.config — apply", () => {
       [`rm -f -- '${secondStagingPath}'`]: { code: 0 },
       [`rm -f -- '${stagingPath}'`]: { code: 0 },
     })
-    const outputMock = vi
-      .spyOn(mockSsh, "output")
-      .mockResolvedValueOnce(stagingPath)
-      .mockResolvedValueOnce(secondStagingPath)
+    const originalExec = mockSsh.exec
+    const execMock = vi
+      .spyOn(mockSsh, "exec")
+      .mockImplementation(
+        buildSequentialMktempExec(mockSsh, originalExec, [
+          `${stagingPath}\n`,
+          `${secondStagingPath}\n`,
+        ])
+      )
 
     const first = compose.config({ content: sampleContent, projectDirectory })
     const second = compose.config({
@@ -858,8 +877,14 @@ describe("compose.config — apply", () => {
     const writeFileRemotePaths = mockSsh.writeFileCalls.map((call) => call.remotePath)
     expect(writeFileRemotePaths).toHaveLength(2)
     expect(new Set(writeFileRemotePaths)).toStrictEqual(new Set([secondStagingPath, stagingPath]))
-    expect(outputMock).toHaveBeenNthCalledWith(1, mktempCommand)
-    expect(outputMock).toHaveBeenNthCalledWith(2, mktempCommand)
+    expect(execMock).toHaveBeenCalledWith(mktempCommand, {
+      ignoreExitCode: true,
+      silent: true,
+    })
+    expect(mockSsh.execCalls.filter((call) => call.command === mktempCommand)).toStrictEqual([
+      { command: mktempCommand, options: { ignoreExitCode: true, silent: true } },
+      { command: mktempCommand, options: { ignoreExitCode: true, silent: true } },
+    ])
     expect(mockSsh.calls).toContain(`${composeCmd("podman")} -f '${stagingPath}' config --quiet`)
     expect(mockSsh.calls).toContain(
       `${composeCmd("podman")} -f '${secondStagingPath}' config --quiet`
@@ -900,6 +925,27 @@ describe("compose.config — apply", () => {
     expect(mockSsh.calls).toContain(`mv -T -- '${stagingPath}' '${remotePath}'`)
   })
 
+  it("returns failed when mktemp fails and does not run cleanup", async () => {
+    const mockSsh = createComposeMockSsh({
+      [mktempCommand]: { code: 1, stderr: "mktemp: failed to create file" },
+    })
+
+    const mod = compose.config({ content: sampleContent, projectDirectory })
+    const result = await mod.apply(mockSsh, emptyEnv)
+
+    expect(result.status).toBe("failed")
+    expect(result.error?.message).toContain("[compose.config] mktemp failed for /opt/app")
+    expect(result.error?.message).toContain("exit code 1")
+    expect(result.error?.message).toContain("mktemp: failed to create file")
+    expect(mockSsh.writeFileCalls).toHaveLength(0)
+    expect(mockSsh.uploadFileCalls).toHaveLength(0)
+    expect(mockSsh.calls).not.toContain(`rm -f -- '${stagingPath}'`)
+    expect(mockSsh.calls).not.toContain(
+      `${composeCmd("podman")} -f '${stagingPath}' config --quiet`
+    )
+    expect(mockSsh.calls).not.toContain(`mv -T -- '${stagingPath}' '${remotePath}'`)
+  })
+
   it.each([
     {
       name: "content path rejects multiline mktemp output",
@@ -930,10 +976,14 @@ describe("compose.config — apply", () => {
     })
 
     const mod = compose.config(options)
-    await expect(mod.apply(mockSsh, emptyEnv)).rejects.toThrow("Unexpected mktemp output")
+    const result = await mod.apply(mockSsh, emptyEnv)
 
+    expect(result.status).toBe("failed")
+    expect(result.error?.message).toContain("[compose.config] mktemp produced an unexpected path")
+    expect(result.error?.message).toContain("Unexpected mktemp output")
     expect(mockSsh.writeFileCalls).toHaveLength(0)
     expect(mockSsh.uploadFileCalls).toHaveLength(0)
+    expect(mockSsh.calls).not.toContain(`rm -f -- '${stagingPath}'`)
     expect(mockSsh.calls).not.toContain(
       `${composeCmd("podman")} -f '${stagingPath}' config --quiet`
     )

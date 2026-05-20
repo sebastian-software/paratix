@@ -1079,15 +1079,32 @@ async function removeComposeStagingFile(ssh: SshConnection, stagingPath: string)
 async function createComposeStagingPath(parameters: {
   projectDirectory: string
   ssh: SshConnection
-}): Promise<string> {
+}): Promise<ModuleResult | string> {
   // R-0000565: pass the project directory via `-p` and separate the template
   // with `--` so a future refactor that loosens the staging prefix cannot let
   // an attacker-controlled value be interpreted as a `mktemp` option.
   const template = `${COMPOSE_CONFIG_STAGING_PREFIX}.XXXXXX`
-  const stagingPath = await parameters.ssh.output(
-    `mktemp -p ${shellQuote(parameters.projectDirectory)} -- ${shellQuote(template)}`
+  const result = await parameters.ssh.exec(
+    `mktemp -p ${shellQuote(parameters.projectDirectory)} -- ${shellQuote(template)}`,
+    EXEC_OPTS
   )
-  return validateMktempPath(parameters.projectDirectory, stagingPath, COMPOSE_CONFIG_STAGING_PREFIX)
+  if (result.code !== 0) {
+    return failedCommand(
+      `[compose.config] mktemp failed for ${parameters.projectDirectory}`,
+      result
+    )
+  }
+
+  try {
+    return validateMktempPath(
+      parameters.projectDirectory,
+      result.stdout.trim(),
+      COMPOSE_CONFIG_STAGING_PREFIX
+    )
+  } catch (error) {
+    const reason = error instanceof Error ? error.message : String(error)
+    return failed(`[compose.config] mktemp produced an unexpected path: ${reason}`)
+  }
 }
 
 /**
@@ -1126,6 +1143,18 @@ async function ensureComposeProjectDirectoryNotSymlinked(
   return null
 }
 
+async function createSafeComposeStagingPath(parameters: {
+  projectDirectory: string
+  ssh: SshConnection
+}): Promise<ModuleResult | string> {
+  const symlinkFailure = await ensureComposeProjectDirectoryNotSymlinked(
+    parameters.ssh,
+    parameters.projectDirectory
+  )
+  if (symlinkFailure != null) return symlinkFailure
+  return createComposeStagingPath(parameters)
+}
+
 async function applyComposeConfig(parameters: {
   loadDesiredContent: () => Promise<null | string>
   projectDirectory: string
@@ -1139,9 +1168,8 @@ async function applyComposeConfig(parameters: {
   // projectDirectory; if the directory (or an ancestor) is a symlink, the
   // staging file lands in attacker-controlled territory and the subsequent
   // `mv -T` activates an unverified compose.yml at that location.
-  const symlinkFailure = await ensureComposeProjectDirectoryNotSymlinked(ssh, projectDirectory)
-  if (symlinkFailure != null) return symlinkFailure
-  const stagingPath = await createComposeStagingPath({ projectDirectory, ssh })
+  const stagingPath = await createSafeComposeStagingPath({ projectDirectory, ssh })
+  if (typeof stagingPath !== "string") return stagingPath
 
   // R-0000228: write into a staging file (not into compose.yml). The active
   // compose.yml is only replaced after validation succeeds, so a parallel
