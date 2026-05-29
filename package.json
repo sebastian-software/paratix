@@ -45,12 +45,12 @@
   },
   "devDependencies": {
     "@cspell/dict-de-de": "^4.1.2",
-    "@types/node": "24.12.2",
-    "concurrently": "^9.1.2",
-    "eslint": "^10.3.0",
+    "@types/node": "24.12.4",
+    "concurrently": "^10.0.0",
+    "eslint": "^10.4.0",
     "eslint-config-setup": "^0.4.0",
-    "jiti": "^2.6.1",
-    "oxlint": "^1.62.0",
+    "jiti": "^2.7.0",
+    "oxlint": "^1.67.0",
     "prettier": "^3.8.3",
     "typescript": "^6.0.3"
   }

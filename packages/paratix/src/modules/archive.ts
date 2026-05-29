@@ -590,6 +590,7 @@ async function validateTargetsForStagingMerge(
  * @param parameters.members - The validated archive members.
  * @param parameters.remoteSource - The remote archive path (uploaded or original).
  * @param parameters.source - The source archive path (used for format detection).
+ * @returns A failure `ModuleResult` if extraction or the final move fails, or `null` on success.
  */
 async function extractViaStagingDirectory(
   conn: SshConnection,

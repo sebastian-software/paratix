@@ -566,19 +566,19 @@ describe("file.directory", () => {
   })
 })
 
-describe("file.absent", () => {
-  function absentRemoveCommand(remotePath: string): string {
-    const parent = posix.dirname(remotePath)
-    const quotedParent = shellQuote(parent)
-    return [
-      `[ ! -L ${quotedParent} ]`,
-      `[ -d ${quotedParent} ]`,
-      `cd -P -- ${quotedParent}`,
-      `[ "$(pwd -P)" = ${quotedParent} ]`,
-      `rm -rf -- ${shellQuote(posix.basename(remotePath))}`,
-    ].join(" && ")
-  }
+function absentRemoveCommand(remotePath: string): string {
+  const parent = posix.dirname(remotePath)
+  const quotedParent = shellQuote(parent)
+  return [
+    `[ ! -L ${quotedParent} ]`,
+    `[ -d ${quotedParent} ]`,
+    `cd -P -- ${quotedParent}`,
+    `[ "$(pwd -P)" = ${quotedParent} ]`,
+    `rm -rf -- ${shellQuote(posix.basename(remotePath))}`,
+  ].join(" && ")
+}
 
+describe("file.absent", () => {
   it("rejects an empty remote path", () => {
     expect(() => file.absent("")).toThrow("file.absent: remotePath must not be empty")
   })

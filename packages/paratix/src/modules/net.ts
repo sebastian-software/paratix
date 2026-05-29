@@ -1554,19 +1554,12 @@ async function captureHostsFileSnapshot(conn: SshConnection): Promise<HostsFileS
 }
 
 /**
- * Apply the `state: "present"` reconciliation for /etc/hosts.
- *
- * @param conn - The SSH connection.
- * @param parameters - Cached hosts state context.
- * @param snapshot - The current /etc/hosts content and its lines.
- * @returns The module result for the apply operation.
- */
-/**
  * Create `/etc/hosts` from scratch, rejecting a planted symlink at the
  * target path before the write.
  *
  * @param conn - The SSH connection.
  * @param mergedLine - The single canonical line to write into the new file.
+ * @returns A `changed` module result on success, or a `failed` result if a symlink is detected at the target path.
  */
 async function createHostsFileWithSymlinkGuard(
   conn: SshConnection,
@@ -1583,6 +1576,14 @@ async function createHostsFileWithSymlinkGuard(
   return { status: "changed" }
 }
 
+/**
+ * Apply the `state: "present"` reconciliation for /etc/hosts.
+ *
+ * @param conn - The SSH connection.
+ * @param parameters - Cached hosts state context.
+ * @param snapshot - The current /etc/hosts content and its lines.
+ * @returns The module result for the apply operation.
+ */
 async function applyHostsPresent(
   conn: SshConnection,
   parameters: HostsStateParameters,
