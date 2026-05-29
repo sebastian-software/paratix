@@ -7,6 +7,15 @@ import { pathToFileURL } from "node:url"
 
 import { isDirectExecution, publishWorkspacePackages } from "./publishWorkspacePackages.mjs"
 
+// Tests that exercise the local-publish path rely on `publishWorkspacePackages`
+// falling back to `process.env` and not seeing any GitHub Actions environment.
+// When this suite runs inside GitHub Actions itself those variables leak into
+// every call site that does not pass an explicit `environment`, so clear them
+// once for the whole test process.
+delete process.env.GITHUB_ACTIONS
+delete process.env.GITHUB_REF
+delete process.env.GITHUB_SHA
+
 const DEFAULT_STABLE_VERSION = "1.2.3"
 const CREATE_PARATIX_NAME = "create-paratix"
 const PARATIX_NAME = "paratix"
