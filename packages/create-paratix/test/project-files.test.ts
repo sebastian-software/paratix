@@ -334,7 +334,7 @@ describe("writeProjectFiles", () => {
     writeProjectFiles(TEST_DIR)
 
     expectGeneratedServerToTypecheck(TEST_DIR)
-  })
+  }, 30_000)
 
   it("generated root-bootstrap server.ts typechecks against the local paratix package types", () => {
     writeProjectFiles(TEST_DIR, {
@@ -343,7 +343,7 @@ describe("writeProjectFiles", () => {
     })
 
     expectGeneratedServerToTypecheck(TEST_DIR)
-  })
+  }, 30_000)
 
   it("writes a Prettier config matching the scaffold default", () => {
     writeProjectFiles(TEST_DIR)

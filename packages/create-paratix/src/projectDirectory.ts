@@ -1,4 +1,6 @@
+import { randomBytes } from "node:crypto"
 import {
+  existsSync,
   lstatSync,
   mkdirSync,
   mkdtempSync,
@@ -7,11 +9,19 @@ import {
   rmdirSync,
   rmSync,
   type Stats,
+  writeFileSync,
 } from "node:fs"
 import { dirname, join } from "node:path"
 
 import { formatCliValue } from "./cliFormat.js"
 import { exitWithMessage } from "./cliValidation.js"
+
+// Sentinel filename written into the reserved project directory so we can
+// detect a replacement even when the inode is recycled by the OS — Linux
+// tmpfs/ext4 will happily hand a freshly removed inode back to the next
+// `mkdirSync`, defeating a plain dev/ino identity check.
+const RESERVATION_SENTINEL_PREFIX = ".paratix-reservation-"
+const RESERVATION_SENTINEL_TOKEN_BYTES = 16
 
 function isErrnoException(error: unknown): error is NodeJS.ErrnoException {
   return error instanceof Error && "code" in error && typeof error.code === "string"
@@ -35,6 +45,7 @@ export function createProjectDirectoryAtomically(
 export type StagedProjectDirectory = {
   projectDirectory: string
   projectDirectoryIdentity: ProjectDirectoryIdentity
+  reservationSentinel: string
   stagingDirectory: string
 }
 
@@ -54,10 +65,10 @@ function readProjectDirectoryIdentity(projectDirectory: string): ProjectDirector
   return { dev: stats.dev, ino: stats.ino }
 }
 
-export function createStagedProjectDirectory(
+function reserveProjectDirectoryWithSentinel(
   projectDirectory: string,
   normalizedProjectName: string
-): StagedProjectDirectory {
+): string {
   try {
     // eslint-disable-next-line security/detect-non-literal-fs-filename
     mkdirSync(projectDirectory, { recursive: false })
@@ -68,6 +79,29 @@ export function createStagedProjectDirectory(
     throw error
   }
 
+  const reservationSentinel = `${RESERVATION_SENTINEL_PREFIX}${randomBytes(
+    RESERVATION_SENTINEL_TOKEN_BYTES
+  ).toString("hex")}`
+  try {
+    // eslint-disable-next-line security/detect-non-literal-fs-filename
+    writeFileSync(join(projectDirectory, reservationSentinel), "")
+  } catch (error: unknown) {
+    // eslint-disable-next-line security/detect-non-literal-fs-filename
+    rmdirSync(projectDirectory)
+    throw error
+  }
+
+  return reservationSentinel
+}
+
+export function createStagedProjectDirectory(
+  projectDirectory: string,
+  normalizedProjectName: string
+): StagedProjectDirectory {
+  const reservationSentinel = reserveProjectDirectoryWithSentinel(
+    projectDirectory,
+    normalizedProjectName
+  )
   const projectDirectoryIdentity = readProjectDirectoryIdentity(projectDirectory)
   const stagingParentDirectory = dirname(projectDirectory)
   const stagingPrefix = join(stagingParentDirectory, `.${normalizedProjectName}-staging-`)
@@ -76,16 +110,21 @@ export function createStagedProjectDirectory(
     return {
       projectDirectory,
       projectDirectoryIdentity,
+      reservationSentinel,
       stagingDirectory: mkdtempSync(stagingPrefix),
     }
   } catch (error: unknown) {
-    removeReservedProjectDirectoryIfEmpty({ projectDirectory, projectDirectoryIdentity })
+    removeReservedProjectDirectoryIfEmpty({
+      projectDirectory,
+      projectDirectoryIdentity,
+      reservationSentinel,
+    })
     throw error
   }
 }
 
 function assertReservedProjectDirectory(
-  { projectDirectory, projectDirectoryIdentity }: StagedProjectDirectory,
+  { projectDirectory, projectDirectoryIdentity, reservationSentinel }: StagedProjectDirectory,
   normalizedProjectName: string
 ): void {
   if (!isSameProjectDirectoryIdentity(projectDirectory, projectDirectoryIdentity)) {
@@ -93,7 +132,15 @@ function assertReservedProjectDirectory(
   }
 
   // eslint-disable-next-line security/detect-non-literal-fs-filename
-  if (readdirSync(projectDirectory).length > 0) {
+  if (!existsSync(join(projectDirectory, reservationSentinel))) {
+    exitWithDirectoryAlreadyExists(normalizedProjectName)
+  }
+
+  // eslint-disable-next-line security/detect-non-literal-fs-filename
+  const foreignEntries = readdirSync(projectDirectory).filter(
+    (name) => name !== reservationSentinel
+  )
+  if (foreignEntries.length > 0) {
     exitWithDirectoryAlreadyExists(normalizedProjectName)
   }
 }
@@ -121,7 +168,11 @@ function quarantineReservedProjectDirectory(
   {
     projectDirectory,
     projectDirectoryIdentity,
-  }: Pick<StagedProjectDirectory, "projectDirectory" | "projectDirectoryIdentity">,
+    reservationSentinel,
+  }: Pick<
+    StagedProjectDirectory,
+    "projectDirectory" | "projectDirectoryIdentity" | "reservationSentinel"
+  >,
   normalizedProjectName: string
 ): string {
   const quarantineDirectory = createQuarantinePath(dirname(projectDirectory), normalizedProjectName)
@@ -134,7 +185,16 @@ function quarantineReservedProjectDirectory(
   }
 
   // eslint-disable-next-line security/detect-non-literal-fs-filename
-  if (readdirSync(quarantineDirectory).length > 0) {
+  if (!existsSync(join(quarantineDirectory, reservationSentinel))) {
+    restoreQuarantinedDirectory(quarantineDirectory, projectDirectory)
+    exitWithDirectoryAlreadyExists(normalizedProjectName)
+  }
+
+  // eslint-disable-next-line security/detect-non-literal-fs-filename
+  const foreignEntries = readdirSync(quarantineDirectory).filter(
+    (name) => name !== reservationSentinel
+  )
+  if (foreignEntries.length > 0) {
     restoreQuarantinedDirectory(quarantineDirectory, projectDirectory)
     exitWithDirectoryAlreadyExists(normalizedProjectName)
   }
@@ -146,7 +206,7 @@ function publishStagedProjectDirectory(
   stagedProjectDirectory: StagedProjectDirectory,
   normalizedProjectName: string
 ): void {
-  const { projectDirectory, stagingDirectory } = stagedProjectDirectory
+  const { projectDirectory, reservationSentinel, stagingDirectory } = stagedProjectDirectory
   const quarantineDirectory = quarantineReservedProjectDirectory(
     stagedProjectDirectory,
     normalizedProjectName
@@ -159,6 +219,10 @@ function publishStagedProjectDirectory(
     throw error
   }
 
+  // Publish succeeded — the quarantine still holds the reservation
+  // sentinel. Drop the sentinel so the quarantine becomes empty and can
+  // be removed cleanly.
+  rmSync(join(quarantineDirectory, reservationSentinel), { force: true })
   // eslint-disable-next-line security/detect-non-literal-fs-filename
   rmdirSync(quarantineDirectory)
 }
@@ -198,15 +262,40 @@ export function isSameProjectDirectoryIdentity(
   }
 }
 
+function readForeignReservationEntries(
+  projectDirectory: string,
+  reservationSentinel: string
+): null | string[] {
+  try {
+    // eslint-disable-next-line security/detect-non-literal-fs-filename
+    return readdirSync(projectDirectory).filter((name) => name !== reservationSentinel)
+  } catch (error: unknown) {
+    if (isErrnoException(error) && error.code === "ENOENT") {
+      return null
+    }
+    throw error
+  }
+}
+
 export function removeReservedProjectDirectoryIfEmpty({
   projectDirectory,
   projectDirectoryIdentity,
-}: Pick<StagedProjectDirectory, "projectDirectory" | "projectDirectoryIdentity">): void {
+  reservationSentinel,
+}: Pick<
+  StagedProjectDirectory,
+  "projectDirectory" | "projectDirectoryIdentity" | "reservationSentinel"
+>): void {
   if (!isSameProjectDirectoryIdentity(projectDirectory, projectDirectoryIdentity)) {
     return
   }
 
+  const foreignEntries = readForeignReservationEntries(projectDirectory, reservationSentinel)
+  if (foreignEntries === null || foreignEntries.length > 0) {
+    return
+  }
+
   try {
+    rmSync(join(projectDirectory, reservationSentinel), { force: true })
     // eslint-disable-next-line security/detect-non-literal-fs-filename
     rmdirSync(projectDirectory)
   } catch (error: unknown) {
