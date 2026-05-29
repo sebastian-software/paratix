@@ -25,6 +25,13 @@ updates:
       npm-dependencies:
         patterns:
           - "*"
+    # Keep @types/node aligned with the Node.js major declared in
+    # engines.node (>= 24). Allow minor and patch updates within 24.x
+    # but block jumps to 25.x or later.
+    ignore:
+      - dependency-name: "@types/node"
+        update-types:
+          - "version-update:semver-major"
   - package-ecosystem: "npm"
     directory: "/packages/create-paratix"
     schedule:
@@ -37,6 +44,13 @@ updates:
       npm-dependencies:
         patterns:
           - "*"
+    # Keep @types/node aligned with the Node.js major declared in
+    # engines.node (>= 24). Allow minor and patch updates within 24.x
+    # but block jumps to 25.x or later.
+    ignore:
+      - dependency-name: "@types/node"
+        update-types:
+          - "version-update:semver-major"
   - package-ecosystem: "npm"
     directory: "/packages/paratix"
     schedule:
@@ -49,6 +63,13 @@ updates:
       npm-dependencies:
         patterns:
           - "*"
+    # Keep @types/node aligned with the Node.js major declared in
+    # engines.node (>= 24). Allow minor and patch updates within 24.x
+    # but block jumps to 25.x or later.
+    ignore:
+      - dependency-name: "@types/node"
+        update-types:
+          - "version-update:semver-major"
   - package-ecosystem: "docker"
     directory: "/packages/paratix/test/integration/docker"
     schedule:
