@@ -30,6 +30,10 @@ export default defineConfig({
     PACKAGE_VERSION: JSON.stringify(version),
   },
   test: {
+    // picocolors auto-enables ANSI when `CI` is present in the env, which
+    // breaks substring assertions on UI output. Force colors off for tests
+    // so the assertions match the same plain output developers see locally.
+    env: { NO_COLOR: "1" },
     exclude: ["test/integration/**/*.test.ts", "test/postbuild/**/*.test.ts"],
     include: ["test/**/*.test.ts"],
   },
