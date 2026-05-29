@@ -1,5 +1,40 @@
 # Changelog
 
+## [0.11.0](https://github.com/sebastian-software/paratix/compare/create-paratix-v0.10.0...create-paratix-v0.11.0) (2026-05-29)
+
+
+### Bug Fixes
+
+* **create-paratix:** align initial-user TTY gate condition with sibling prompts ([c386c77](https://github.com/sebastian-software/paratix/commit/c386c7781075559e016377197605be2cad14ed62))
+* **create-paratix:** derive host key payload offset from parsed wire string ([a741c84](https://github.com/sebastian-software/paratix/commit/a741c8473ac987fa89f46e5f4f47d1a7c9391b54))
+* **create-paratix:** derive package name with platform-appropriate basename ([3b0505d](https://github.com/sebastian-software/paratix/commit/3b0505d527ba2220a3adbfaedb7af00d18ead173))
+* **create-paratix:** drop unreachable throw in fingerprint scan failure handler ([44ef992](https://github.com/sebastian-software/paratix/commit/44ef9924c02ccc1f84588e8450d39aab2a5264c8))
+* **create-paratix:** escape project name in success and partial success output ([6fa7fc6](https://github.com/sebastian-software/paratix/commit/6fa7fc68e5016ab52b19ff9b05206ed38d376126))
+* **create-paratix:** exit explicitly after handling late rejections ([663fbc1](https://github.com/sebastian-software/paratix/commit/663fbc11e2ff265ddb81af4c1144c9d74a47f632))
+* **create-paratix:** exit with cli error when select fallback is unavailable ([d2f52b7](https://github.com/sebastian-software/paratix/commit/d2f52b7a452e087993823c857701358779c219c8))
+* **create-paratix:** guarantee terminal select cleanup on stdin errors ([e01b6c8](https://github.com/sebastian-software/paratix/commit/e01b6c8194e97c0c8939961190926e319c12f098))
+* **create-paratix:** log ancestor symlinks resolving the public key path ([1ea82a3](https://github.com/sebastian-software/paratix/commit/1ea82a3a06731e47e3029fd452aacad320fe97fb))
+* **create-paratix:** make argument validation deterministically throwing ([2f2253e](https://github.com/sebastian-software/paratix/commit/2f2253e27d674b04706671db6a8fe1da658b39ca))
+* **create-paratix:** operate read-admin-public-key on resolved realpath consistently ([e67f301](https://github.com/sebastian-software/paratix/commit/e67f301f492b4c06b8c6eaa9d9b1a14e7e4e123c))
+* **create-paratix:** reject mpint values with non-canonical leading zeros ([5e2ecbf](https://github.com/sebastian-software/paratix/commit/5e2ecbf4699f380b55b06646f16626b9fc86c640))
+* **create-paratix:** route late rejections and uncaught exceptions through handleCliExit ([d70859f](https://github.com/sebastian-software/paratix/commit/d70859f27aac72cde8c94a6163efe696d9aec6a3))
+* **create-paratix:** separate missing-argument and flag-like-value diagnostics ([975c7af](https://github.com/sebastian-software/paratix/commit/975c7af4431e78f7f58cb90d63fd7f5b1360849c))
+* **create-paratix:** validate admin key file path length and bytes early ([e4f6162](https://github.com/sebastian-software/paratix/commit/e4f61625c0d469aa9b3402cf5e7af075dbb82989))
+* **create-paratix:** verify ssh fingerprint decodes to 32 raw bytes ([f943405](https://github.com/sebastian-software/paratix/commit/f943405e7473fdd9d8355b1e9a52843b86d4ac47))
+* detect reserved project directory replacement on linux ([1a1d8aa](https://github.com/sebastian-software/paratix/commit/1a1d8aa3505134d77d7dee07549df64c0cb430c9))
+* escape public key symlink provenance logs ([364118b](https://github.com/sebastian-software/paratix/commit/364118bd4f414629a106eb42e8b9d554372d6c0c))
+* harden scaffold directory publish cleanup ([5f3ffab](https://github.com/sebastian-software/paratix/commit/5f3ffab1e6fbbd3792bdc719b174ec9f9c66527c))
+* read admin public keys through file descriptors ([af5681e](https://github.com/sebastian-software/paratix/commit/af5681e84400487c0cce770068cb5883bdc0471d))
+* read scaffold first-run state from paratix context ([c0eacdd](https://github.com/sebastian-software/paratix/commit/c0eacdd1d9543df47856c4dfe8cc05d3fac022c9))
+* report dependency install timeouts clearly ([0433dc1](https://github.com/sebastian-software/paratix/commit/0433dc130c0319f7f7927aa1d815b0247b931456))
+* reserve scaffold target before publishing ([9a8f475](https://github.com/sebastian-software/paratix/commit/9a8f4758eee58b9cfc6c7f640c8a1f154e771df3))
+* resolve final validation errors and apply prettier formatting ([6dc6174](https://github.com/sebastian-software/paratix/commit/6dc6174b90e131d645fa4ab54cb4a4b35a07b39f))
+* resolve final validation failures ([e927ed8](https://github.com/sebastian-software/paratix/commit/e927ed86c55d4cad845e740c48a7ed73995108ba))
+* resolve lint and test fallout from review apply ([a6bb1cb](https://github.com/sebastian-software/paratix/commit/a6bb1cb012b01ad878ee811e238d58df7e71b7ac))
+* resolve validation errors from final check ([28a6e66](https://github.com/sebastian-software/paratix/commit/28a6e66f8dbff228ec8b94fa28d5ef46a53b9ef4))
+* roll back partial scaffold publication ([6b0a045](https://github.com/sebastian-software/paratix/commit/6b0a045f879180f325fb0b5e8831ac3890606e6c))
+* show single local public key before selection ([9cd3d2a](https://github.com/sebastian-software/paratix/commit/9cd3d2af1995d8836f86af81faa3b574799e5e64))
+
 ## [0.10.0](https://github.com/sebastian-software/paratix/compare/create-paratix-v0.9.0...create-paratix-v0.10.0) (2026-05-02)
 
 
