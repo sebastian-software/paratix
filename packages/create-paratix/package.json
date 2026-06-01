@@ -30,7 +30,7 @@
     "@types/ssh2": "^1.15.4",
     "tsup": "^8.4.0",
     "typescript": "^6.0.3",
-    "vitest": "^4.1.7"
+    "vitest": "^4.1.8"
   },
   "engines": {
     "node": ">=24.0.0"
