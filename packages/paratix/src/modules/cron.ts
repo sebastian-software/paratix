@@ -1,3 +1,4 @@
+/* eslint-disable max-lines -- crontab marker/mutation/lock logic shares many module-local helpers; splitting them across files would scatter the R-0000168/R-0000676 invariants. */
 import { createHash } from "node:crypto"
 
 import { failed, failedCommand } from "../moduleFailure.js"
@@ -11,6 +12,7 @@ import {
 } from "../types.js"
 import { computePresentMutation, looksLikeCronJobLine } from "./cronMutation.js"
 import { cronJobDigest, selectCronAbsentWarning } from "./cronWarningHelpers.js"
+import { buildUnifiedDiff } from "./diffHelpers.js"
 import { withMutexLock } from "./moduleHelpers.js"
 import { assertValidUserName } from "./posixNames.js"
 
@@ -424,6 +426,69 @@ async function applyCronAbsentMutation(parameters: {
 }
 
 /**
+ * Compute the prospective crontab lines for a `cron.absent` operation
+ * without writing anything. Mirrors the byte-exact remove decision in
+ * {@link applyCronAbsentMutation} so the dry-run diff and the apply path
+ * stay aligned. Returns `null` when the marker is not present and nothing
+ * would change.
+ *
+ * @param input - Bundled parameters.
+ * @param input.lines - The current crontab lines.
+ * @param input.name - The logical job name to remove.
+ * @returns The new crontab lines after removing the marker (and its
+ *   matching managed follow-up), or `null` when no mutation is required.
+ */
+function computeCronAbsentLines(input: { lines: string[]; name: string }): null | string[] {
+  const markerIndex = findMarkerIndex(input.lines, input.name)
+  if (markerIndex === -1) return null
+  const recordedDigest = readMarkerDigest(input.lines[markerIndex] ?? "")
+  const followLine = input.lines[markerIndex + 1] ?? ""
+  const followLooksLikeJob = looksLikeCronJobLine(input.lines, markerIndex + 1)
+  const followIsManagedJob =
+    recordedDigest === null
+      ? false
+      : followLooksLikeJob && cronJobDigest(followLine) === recordedDigest
+  const removeCount = followIsManagedJob ? 2 : 1
+  const nextLines = [...input.lines]
+  nextLines.splice(markerIndex, removeCount)
+  return nextLines
+}
+
+/**
+ * Build a unified diff that previews a crontab mutation for the dry-run
+ * output. The current and prospective crontab are joined with newlines and
+ * fed through {@link buildUnifiedDiff}. Returns `undefined` when the
+ * crontab read failed so the caller can fall back to the generic
+ * `(dry-run)` suffix without leaking diagnostics.
+ *
+ * @param input - Bundled parameters.
+ * @param input.ssh - The active SSH connection.
+ * @param input.user - The target user whose crontab to read.
+ * @param input.computeNext - Pure function that takes the current lines and
+ *   returns the prospective lines (or `null` if no mutation is required).
+ * @returns The unified diff text, or `undefined` when no diff can be produced.
+ */
+async function buildCrontabDryRunDiff(input: {
+  computeNext: (lines: string[]) => null | string[]
+  ssh: SshConnection
+  user: string
+}): Promise<string | undefined> {
+  try {
+    const readResult = await readCrontab(input.ssh, input.user)
+    if (readResult.kind === "error") return undefined
+    const nextLines = input.computeNext(readResult.lines)
+    if (nextLines === null) return undefined
+    const diff = buildUnifiedDiff(readResult.lines.join("\n"), nextLines.join("\n"), {
+      currentLabel: `crontab(${input.user})`,
+      desiredLabel: "desired",
+    })
+    return diff === "" ? undefined : diff
+  } catch {
+    return undefined
+  }
+}
+
+/**
  * Modules for managing cron jobs in user crontabs.
  *
  * Each managed entry is identified by a `# paratix: <name>` marker comment
@@ -456,6 +521,16 @@ export const cron = {
     assertCronName(name)
 
     return {
+      async _applyDryRun(ssh: null | SshConnection): Promise<ModuleResult> {
+        if (!ssh) return { status: "changed" }
+        const diff = await buildCrontabDryRunDiff({
+          computeNext: (lines) => computeCronAbsentLines({ lines, name }),
+          ssh,
+          user,
+        })
+        return diff == null ? { status: "changed" } : { diff, status: "changed" }
+      },
+      _dryRunDiffProducer: true,
       async apply(ssh: null | SshConnection): Promise<ModuleResult> {
         if (!ssh) return failed(`[cron.absent: ${name} (${user})] SSH connection is required`)
 
@@ -560,6 +635,24 @@ export const cron = {
     const marker = renderMarkerLine(name, cronJob)
 
     return {
+      async _applyDryRun(ssh: null | SshConnection): Promise<ModuleResult> {
+        if (!ssh) return { status: "changed" }
+        const diff = await buildCrontabDryRunDiff({
+          computeNext: (lines) =>
+            computeCronJobMutation({
+              adoptOrphans,
+              cronJob,
+              lines,
+              marker,
+              markerIndex: findMarkerIndex(lines, name),
+              state,
+            }),
+          ssh,
+          user,
+        })
+        return diff == null ? { status: "changed" } : { diff, status: "changed" }
+      },
+      _dryRunDiffProducer: true,
       async apply(ssh: null | SshConnection): Promise<ModuleResult> {
         if (!ssh) return failed(`[cron.job: ${name} (${user})] SSH connection is required`)
 

@@ -8,6 +8,7 @@ import {
   NEEDS_APPLY,
   type SshConnection,
 } from "../types.js"
+import { buildUnifiedDiff } from "./diffHelpers.js"
 import { readFileSnapshot, restoreUnitFileSnapshots } from "./timerFileSnapshots.js"
 import {
   assertTimerName,
@@ -957,6 +958,81 @@ async function applyAbsent(ssh: SshConnection, context: AbsentContext): Promise<
  * step. Compared to cron, this gives you `Persistent=` for catch-up runs,
  * journald logging, and richer scheduling expressions.
  */
+/**
+ * Read a remote file for a dry-run diff. Returns the empty string when the
+ * file does not exist or cannot be read, so the caller can render a clean
+ * "new file" diff instead of crashing on a missing-source error.
+ *
+ * @param ssh - The SSH connection.
+ * @param path - Absolute remote path to read.
+ * @returns The file content, or `""` for missing / unreadable files.
+ */
+async function readRemoteOrEmpty(ssh: SshConnection, path: string): Promise<string> {
+  try {
+    if (!(await ssh.exists(path))) return ""
+    return await ssh.readFile(path)
+  } catch {
+    return ""
+  }
+}
+
+/**
+ * Build the dry-run diff for `timer.scheduled` (state="present") by
+ * comparing both the `.service` and the `.timer` unit content against
+ * their remote counterparts. The two diffs are joined so the operator sees
+ * the whole prospective change in one block.
+ *
+ * @param ssh - The SSH connection.
+ * @param paths - The resolved timer paths (`buildTimerPaths`).
+ * @returns The combined unified-diff text, or `undefined` when nothing differs.
+ */
+async function buildTimerPresentDryRunDiff(
+  ssh: SshConnection,
+  paths: TimerPaths
+): Promise<string | undefined> {
+  const blocks: string[] = []
+  try {
+    const currentService = await readRemoteOrEmpty(ssh, paths.servicePath)
+    const serviceDiff = buildUnifiedDiff(currentService, paths.serviceContent, {
+      currentLabel: paths.servicePath,
+      desiredLabel: "desired",
+    })
+    if (serviceDiff !== "") blocks.push(serviceDiff)
+    const currentTimer = await readRemoteOrEmpty(ssh, paths.timerPath)
+    const timerDiff = buildUnifiedDiff(currentTimer, paths.timerContent, {
+      currentLabel: paths.timerPath,
+      desiredLabel: "desired",
+    })
+    if (timerDiff !== "") blocks.push(timerDiff)
+  } catch {
+    return undefined
+  }
+  return blocks.length === 0 ? undefined : blocks.join("\n")
+}
+
+/**
+ * Build the dry-run diff for `timer.scheduled` (state="absent") and
+ * `timer.absent`. Lists the unit files that would be removed; if neither
+ * exists, no diff is produced.
+ *
+ * @param ssh - The SSH connection.
+ * @param locations - The resolved timer locations (`buildTimerLocations`).
+ * @returns A short summary diff, or `undefined` when nothing would be removed.
+ */
+async function buildTimerAbsentDryRunDiff(
+  ssh: SshConnection,
+  locations: TimerLocations
+): Promise<string | undefined> {
+  try {
+    const lines: string[] = []
+    if (await ssh.exists(locations.servicePath)) lines.push(`-${locations.servicePath}`)
+    if (await ssh.exists(locations.timerPath)) lines.push(`-${locations.timerPath}`)
+    return lines.length === 0 ? undefined : lines.join("\n")
+  } catch {
+    return undefined
+  }
+}
+
 export const timer = {
   /**
    * Ensure a systemd timer-driven scheduled task does not exist.
@@ -980,6 +1056,12 @@ export const timer = {
     const locations = buildTimerLocations(name)
 
     return {
+      async _applyDryRun(ssh: null | SshConnection): Promise<ModuleResult> {
+        if (!ssh) return { status: "changed" }
+        const diff = await buildTimerAbsentDryRunDiff(ssh, locations)
+        return diff == null ? { status: "changed" } : { diff, status: "changed" }
+      },
+      _dryRunDiffProducer: true,
       async apply(ssh: null | SshConnection): Promise<ModuleResult> {
         if (!ssh) return failed(`[timer.absent: ${name}] SSH connection is required`)
         return applyAbsent(ssh, { locations, module: "timer.absent", name })
@@ -1020,6 +1102,12 @@ export const timer = {
     if (state === "absent") {
       const locations = buildTimerLocations(name)
       return {
+        async _applyDryRun(ssh: null | SshConnection): Promise<ModuleResult> {
+          if (!ssh) return { status: "changed" }
+          const diff = await buildTimerAbsentDryRunDiff(ssh, locations)
+          return diff == null ? { status: "changed" } : { diff, status: "changed" }
+        },
+        _dryRunDiffProducer: true,
         async apply(ssh: null | SshConnection): Promise<ModuleResult> {
           if (!ssh) return failed(`[timer.scheduled: ${name}] SSH connection is required`)
           return applyAbsent(ssh, { locations, module: TIMER_SCHEDULED_MODULE_PATH, name })
@@ -1036,6 +1124,12 @@ export const timer = {
     const paths = buildTimerPaths(name, options)
 
     return {
+      async _applyDryRun(ssh: null | SshConnection): Promise<ModuleResult> {
+        if (!ssh) return { status: "changed" }
+        const diff = await buildTimerPresentDryRunDiff(ssh, paths)
+        return diff == null ? { status: "changed" } : { diff, status: "changed" }
+      },
+      _dryRunDiffProducer: true,
       async apply(ssh: null | SshConnection): Promise<ModuleResult> {
         if (!ssh) return failed(`[timer.scheduled: ${name}] SSH connection is required`)
         return applyPresent(ssh, name, paths)

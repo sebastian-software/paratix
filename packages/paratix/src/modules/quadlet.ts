@@ -1,6 +1,7 @@
 import { failed, failedCommand } from "../moduleFailure.js"
 import { shellQuote } from "../ssh.js"
 import { type Module, type ModuleResult, NEEDS_APPLY, type SshConnection } from "../types.js"
+import { buildUnifiedDiff } from "./diffHelpers.js"
 import { sha256String } from "./fileHelpers.js"
 import { hasFlag, setVersionedFlag } from "./moduleHelpers.js"
 import { applyQuadletFile, checkQuadletFile } from "./quadletFileHelpers.js"
@@ -172,6 +173,34 @@ async function applyQuadletImageUpdate(
 }
 
 /**
+ * Build the dry-run diff for a `quadlet.container` mutation by comparing
+ * the remote unit file against the desired content. Returns `undefined`
+ * when either side cannot be read (missing file is treated as empty, but a
+ * permission error returns `undefined` so the caller falls back to the
+ * generic `(dry-run)` suffix without leaking diagnostics).
+ *
+ * @param ssh - The SSH connection.
+ * @param filePath - Absolute path of the Quadlet unit file on the remote host.
+ * @param desired - The desired Quadlet unit content.
+ * @returns The unified-diff text, or `undefined` when no diff can be produced.
+ */
+async function buildQuadletContainerDryRunDiff(
+  ssh: SshConnection,
+  filePath: string,
+  desired: string
+): Promise<string | undefined> {
+  try {
+    const exists = await ssh.exists(filePath)
+    const current = exists ? await ssh.readFile(filePath) : ""
+    const currentLabel = exists ? filePath : `${filePath} (new file)`
+    const diff = buildUnifiedDiff(current, desired, { currentLabel, desiredLabel: "desired" })
+    return diff === "" ? undefined : diff
+  } catch {
+    return undefined
+  }
+}
+
+/**
  * Modules for managing Podman Quadlet definitions.
  *
  * The first V1 method writes `.container` files under `/etc/containers/systemd`
@@ -196,6 +225,12 @@ export const quadlet = {
     const reloadFlag = buildQuadletReloadFlag(options.name, content)
 
     return {
+      async _applyDryRun(ssh: null | SshConnection): Promise<ModuleResult> {
+        if (!ssh) return { status: "changed" }
+        const diff = await buildQuadletContainerDryRunDiff(ssh, filePath, content)
+        return diff == null ? { status: "changed" } : { diff, status: "changed" }
+      },
+      _dryRunDiffProducer: true,
       async apply(ssh: null | SshConnection): Promise<ModuleResult> {
         if (!ssh) return failed(`[quadlet.container: ${options.name}] SSH connection is required`)
         const result = await applyQuadletFile({ content, filePath, name: options.name, ssh })

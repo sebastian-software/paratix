@@ -136,7 +136,7 @@ Options:
 
 `--first-run` is meant for explicit bootstrap flows where a fresh server must be hardened first and the rest of the system should only be applied later.
 
-`--diff` only works together with `--dry-run`. When enabled, modules that opt in (currently `file.copy`, `file.template`, `sysctl.set`, `hostname.set`, and `swap.swappiness`/`swap.vfsCachePressure` via `sysctl`) print a unified diff below their status line, showing exactly which lines or values would change. Without `--diff`, the dry-run output is unchanged.
+`--diff` only works together with `--dry-run`. When enabled, modules that opt in print a unified diff below their status line, showing exactly which lines or values would change. Without `--diff`, the dry-run output is unchanged. Diff-producing modules: `file.copy`, `file.template`, `sysctl.set`, `hostname.set`, `swap.file`, `swap.swappiness`, `swap.vfsCachePressure`, `cron.job`, `cron.absent`, `timer.scheduled`, `timer.absent`, `net.hosts`, `quadlet.container`.
 
 ## Documentation
 

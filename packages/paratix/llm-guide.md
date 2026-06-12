@@ -737,6 +737,23 @@ Rules:
 - Every diff line is masked through the registered-secret sink and a terminal
   sanitizer before printing, so secret-laden file contents never leak verbatim.
 
+Diff-producing built-in modules:
+
+| Modul                                       | Diff-Inhalt                                                                       |
+| ------------------------------------------- | --------------------------------------------------------------------------------- |
+| `file.copy`                                 | Unified diff zwischen Remote-Datei und lokaler Quelle.                            |
+| `file.template`                             | Unified diff zwischen Remote-Datei und gerendertem Template.                      |
+| `sysctl.set`                                | `key = old → new` für die Soll-Konfiguration.                                     |
+| `hostname.set`                              | `hostname = old → new`.                                                           |
+| `swap.file`                                 | Diff des `/etc/fstab`-Eintrags (oder Entfernung der Zeile bei `state: "absent"`). |
+| `swap.swappiness`                           | `vm.swappiness = old → new` (via `sysctl.set`).                                   |
+| `swap.vfsCachePressure`                     | `vm.vfs_cache_pressure = old → new` (via `sysctl.set`).                           |
+| `cron.job` / `cron.absent`                  | Unified diff der Crontab des Ziel-Users.                                          |
+| `timer.scheduled` (present)                 | Konkatenierte Diffs der `.service`- und `.timer`-Unit-Dateien.                    |
+| `timer.scheduled` (absent) / `timer.absent` | Liste der zu entfernenden Unit-Dateien.                                           |
+| `net.hosts`                                 | Unified diff von `/etc/hosts`.                                                    |
+| `quadlet.container`                         | Unified diff der `.container`-Unit-Datei.                                         |
+
 ### Implementing a Diff for a Custom Module
 
 A module participates in `--diff` output by setting `_dryRunDiffProducer: true`

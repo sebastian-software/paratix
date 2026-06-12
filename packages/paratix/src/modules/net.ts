@@ -19,6 +19,7 @@ import {
   hasSensitiveQueryParameters,
   redactUrlForDisplay,
 } from "./curlHelpers.js"
+import { buildUnifiedDiff } from "./diffHelpers.js"
 import { sha256String } from "./fileHelpers.js"
 import { hasFlag, setVersionedFlag, withMutexLock } from "./moduleHelpers.js"
 import {
@@ -1789,6 +1790,86 @@ function rejectSensitiveUrlSecretsOverHttp(url: string): void {
 }
 
 /**
+ * Compute the prospective `/etc/hosts` content for a `net.hosts` (state =
+ * "present") mutation without writing anything. Mirrors the
+ * canonical-merge logic in {@link applyHostsPresent} so the dry-run diff
+ * stays aligned with the apply path. Returns the proposed new file
+ * content, or `null` when the file already reflects the desired state.
+ *
+ * @param snapshot - The captured snapshot of `/etc/hosts`.
+ * @param parameters - The cached hosts-state context.
+ * @returns The new file content, or `null` when no mutation is needed.
+ */
+function computePresentHostsContent(
+  snapshot: HostsFileSnapshot,
+  parameters: HostsStateParameters
+): null | string {
+  const { isSameIpLine } = parameters
+  const { existed, lines } = snapshot
+  const mergedLine = buildMergedHostsLine(lines, parameters)
+  if (!existed) return `${mergedLine}\n`
+  const sameIpLines = lines.filter((line) => isSameIpLine(line))
+  const alreadyCanonical = sameIpLines.length === 1 && sameIpLines[0]?.trim() === mergedLine
+  if (alreadyCanonical) return null
+  const filtered = lines.filter((line) => !isSameIpLine(line))
+  if (filtered.length > 0 && filtered.at(-1) === "") filtered.pop()
+  filtered.push(mergedLine)
+  return `${filtered.join("\n")}\n`
+}
+
+/**
+ * Compute the prospective `/etc/hosts` content for a `net.hosts`
+ * (state = "absent") mutation. Returns `null` when the file already lacks
+ * any matching entry.
+ *
+ * @param snapshot - The captured snapshot of `/etc/hosts`.
+ * @param parameters - The cached hosts-state context.
+ * @returns The new file content, or `null` when no mutation is needed.
+ */
+function computeAbsentHostsContent(
+  snapshot: HostsFileSnapshot,
+  parameters: HostsStateParameters
+): null | string {
+  const { matchesAbsentTarget } = parameters
+  const { existed, lines } = snapshot
+  if (!existed) return null
+  if (!lines.some((line) => matchesAbsentTarget(line))) return null
+  return lines.filter((line) => !matchesAbsentTarget(line)).join("\n")
+}
+
+/**
+ * Build the dry-run diff for a `net.hosts` mutation. Reads the current
+ * `/etc/hosts` content (with a read-only path that bypasses the
+ * `withMutexLock` used in apply), computes the prospective content, and
+ * returns the unified diff. Returns `undefined` on read failure or when
+ * no mutation is required.
+ *
+ * @param conn - The SSH connection.
+ * @param parameters - The cached hosts-state context.
+ * @returns The unified-diff text, or `undefined` when no diff can be produced.
+ */
+async function buildHostsDryRunDiff(
+  conn: SshConnection,
+  parameters: HostsStateParameters
+): Promise<string | undefined> {
+  try {
+    const snapshot = await captureHostsFileSnapshot(conn)
+    const nextContent =
+      parameters.state === "present"
+        ? computePresentHostsContent(snapshot, parameters)
+        : computeAbsentHostsContent(snapshot, parameters)
+    if (nextContent === null) return undefined
+    const diff = buildUnifiedDiff(snapshot.content, nextContent, {
+      currentLabel: HOSTS_FILE,
+      desiredLabel: "desired",
+    })
+    return diff === "" ? undefined : diff
+  } catch {
+    return undefined
+  }
+}
+
+/**
  * Modules for managing network configuration on the remote host.
  */
 export const net = {
@@ -1823,6 +1904,18 @@ export const net = {
     }
 
     return {
+      async _applyDryRun(conn: null | SshConnection): Promise<ModuleResult> {
+        if (!conn) return { status: "changed" }
+        const diff = await buildHostsDryRunDiff(conn, {
+          desiredHostnames: hostnames,
+          expectedLine,
+          isSameIpLine,
+          matchesAbsentTarget,
+          state,
+        })
+        return diff == null ? { status: "changed" } : { diff, status: "changed" }
+      },
+      _dryRunDiffProducer: true,
       async apply(conn: null | SshConnection): Promise<ModuleResult> {
         if (!conn) {
           return failed(`[net.hosts: ${ip} ${hostnames.join(" ")}] SSH connection is required`)
