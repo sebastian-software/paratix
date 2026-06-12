@@ -991,22 +991,18 @@ async function buildTimerPresentDryRunDiff(
   paths: TimerPaths
 ): Promise<string | undefined> {
   const blocks: string[] = []
-  try {
-    const currentService = await readRemoteOrEmpty(ssh, paths.servicePath)
-    const serviceDiff = buildUnifiedDiff(currentService, paths.serviceContent, {
-      currentLabel: paths.servicePath,
-      desiredLabel: "desired",
-    })
-    if (serviceDiff !== "") blocks.push(serviceDiff)
-    const currentTimer = await readRemoteOrEmpty(ssh, paths.timerPath)
-    const timerDiff = buildUnifiedDiff(currentTimer, paths.timerContent, {
-      currentLabel: paths.timerPath,
-      desiredLabel: "desired",
-    })
-    if (timerDiff !== "") blocks.push(timerDiff)
-  } catch {
-    return undefined
-  }
+  const currentService = await readRemoteOrEmpty(ssh, paths.servicePath)
+  const serviceDiff = buildUnifiedDiff(currentService, paths.serviceContent, {
+    currentLabel: paths.servicePath,
+    desiredLabel: "desired",
+  })
+  if (serviceDiff !== "") blocks.push(serviceDiff)
+  const currentTimer = await readRemoteOrEmpty(ssh, paths.timerPath)
+  const timerDiff = buildUnifiedDiff(currentTimer, paths.timerContent, {
+    currentLabel: paths.timerPath,
+    desiredLabel: "desired",
+  })
+  if (timerDiff !== "") blocks.push(timerDiff)
   return blocks.length === 0 ? undefined : blocks.join("\n")
 }
 
@@ -1023,14 +1019,10 @@ async function buildTimerAbsentDryRunDiff(
   ssh: SshConnection,
   locations: TimerLocations
 ): Promise<string | undefined> {
-  try {
-    const lines: string[] = []
-    if (await ssh.exists(locations.servicePath)) lines.push(`-${locations.servicePath}`)
-    if (await ssh.exists(locations.timerPath)) lines.push(`-${locations.timerPath}`)
-    return lines.length === 0 ? undefined : lines.join("\n")
-  } catch {
-    return undefined
-  }
+  const lines: string[] = []
+  if (await ssh.exists(locations.servicePath)) lines.push(`-${locations.servicePath}`)
+  if (await ssh.exists(locations.timerPath)) lines.push(`-${locations.timerPath}`)
+  return lines.length === 0 ? undefined : lines.join("\n")
 }
 
 export const timer = {
