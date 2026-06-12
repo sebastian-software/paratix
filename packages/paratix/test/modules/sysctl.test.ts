@@ -809,8 +809,8 @@ describe("sysctl.set — dry-run diff", () => {
     // every exception silently. Force the inner exec to throw an Error with a
     // `code` property and assert the detail is surfaced.
     const mockSsh = createMockSsh()
-    mockSsh.exec = async () => {
-      const error = new Error("broken pipe") as Error & { code: string }
+    mockSsh.exec = () => {
+      const error = new Error("broken pipe") as { code: string } & Error
       error.code = "EPIPE"
       throw error
     }

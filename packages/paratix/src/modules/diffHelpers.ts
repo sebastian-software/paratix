@@ -332,13 +332,13 @@ export function buildUnifiedDiff(
  * applies.
  *
  * @param error - The value caught by the surrounding try/catch, if any.
- * @returns A short parenthesised detail string suitable for
- *   {@link ModuleResult._dryRunDetail}.
+ * @returns A short parenthesised detail string suitable for the
+ *   `_dryRunDetail` field on `ModuleResult`.
  */
 export function buildDryRunDetail(error?: unknown): string {
   if (error == null) return "(dry-run)"
   if (typeof error === "object" && "code" in error) {
-    const code = (error as { code: unknown }).code
+    const { code } = error
     if (typeof code === "string" && code.length > 0) {
       return `(dry-run, diff unavailable: ${code})`
     }

@@ -110,8 +110,8 @@ describe("hostname.set", () => {
     // and assert the detail is surfaced so the operator sees *why* no diff
     // could be produced.
     const ssh = createMockSsh()
-    ssh.exec = async () => {
-      const error = new Error("transient SSH failure") as Error & { code: string }
+    ssh.exec = () => {
+      const error = new Error("transient SSH failure") as { code: string } & Error
       error.code = "ECONNRESET"
       throw error
     }
