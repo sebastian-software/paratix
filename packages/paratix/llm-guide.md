@@ -742,20 +742,20 @@ Rules:
 
 Diff-producing built-in modules:
 
-| Modul                                       | Diff-Inhalt                                                                       |
-| ------------------------------------------- | --------------------------------------------------------------------------------- |
-| `file.copy`                                 | Unified diff zwischen Remote-Datei und lokaler Quelle.                            |
-| `file.template`                             | Unified diff zwischen Remote-Datei und gerendertem Template.                      |
-| `sysctl.set`                                | `key = old → new` für die Soll-Konfiguration.                                     |
-| `hostname.set`                              | `hostname = old → new`.                                                           |
-| `swap.file`                                 | Diff des `/etc/fstab`-Eintrags (oder Entfernung der Zeile bei `state: "absent"`). |
-| `swap.swappiness`                           | `vm.swappiness = old → new` (via `sysctl.set`).                                   |
-| `swap.vfsCachePressure`                     | `vm.vfs_cache_pressure = old → new` (via `sysctl.set`).                           |
-| `cron.job` / `cron.absent`                  | Unified diff der Crontab des Ziel-Users.                                          |
-| `timer.scheduled` (present)                 | Konkatenierte Diffs der `.service`- und `.timer`-Unit-Dateien.                    |
-| `timer.scheduled` (absent) / `timer.absent` | Liste der zu entfernenden Unit-Dateien.                                           |
-| `net.hosts`                                 | Unified diff von `/etc/hosts`.                                                    |
-| `quadlet.container`                         | Unified diff der `.container`-Unit-Datei.                                         |
+| Modul                                       | Diff-Inhalt                                                                                                                                                                             |
+| ------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `file.copy`                                 | Unified diff zwischen Remote-Datei und lokaler Quelle.                                                                                                                                  |
+| `file.template`                             | Unified diff zwischen Remote-Datei und gerendertem Template.                                                                                                                            |
+| `sysctl.set`                                | `key = old → new` für die Soll-Konfiguration.                                                                                                                                           |
+| `hostname.set`                              | `hostname = old → new`.                                                                                                                                                                 |
+| `swap.file`                                 | Diff des `/etc/fstab`-Eintrags (oder Entfernung der Zeile bei `state: "absent"`).                                                                                                       |
+| `swap.swappiness`                           | `vm.swappiness = old → new` (via `sysctl.set`).                                                                                                                                         |
+| `swap.vfsCachePressure`                     | `vm.vfs_cache_pressure = old → new` (via `sysctl.set`).                                                                                                                                 |
+| `cron.job` / `cron.absent`                  | Unified diff der Crontab des Ziel-Users.                                                                                                                                                |
+| `timer.scheduled` (present)                 | Konkatenierte Diffs der `.service`- und `.timer`-Unit-Dateien.                                                                                                                          |
+| `timer.scheduled` (absent) / `timer.absent` | Liste der zu entfernenden Unit-Dateien.                                                                                                                                                 |
+| `net.hosts`                                 | Unified diff von `/etc/hosts`.                                                                                                                                                          |
+| `quadlet.container`                         | Unified diff der `.container`-Unit-Datei. Wenn die Datei bereits passt, das `daemon-reload`-Flag aber fehlt, erscheint zusätzlich `(dry-run, daemon-reload pending)` als Detail-Suffix. |
 
 ### Implementing a Diff for a Custom Module
 
