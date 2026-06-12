@@ -64,6 +64,38 @@ function deferred(): { promise: Promise<void>; resolve: () => void } {
   }
 }
 
+/**
+ * R-0000840 helper for the flag-lock mocks below. Returns the canonical
+ * mock response for the holder-marker readback (now routed through
+ * ssh.exec instead of ssh.output) and the bulk of the
+ * mutex-bookkeeping commands; returns `undefined` when the command is
+ * not a known internal flag-lock call, so callers can fall through to
+ * their own dispatch.
+ *
+ * Extracted because inlining both branches into each mock pushed the
+ * surrounding `exec` past the project-wide ESLint complexity limit
+ * (R-0000840 added an extra branch on top of the historical
+ * `isFlagLockInternalSuccessCommand` check).
+ *
+ * @param command - The shell command intercepted by the mock.
+ * @param markerAwkReadCommand - The exact awk readback string the mock
+ *   should treat as a holder-marker probe.
+ * @returns A canned `ExecResult` for known flag-lock internal commands,
+ *   or `undefined` when the caller should keep dispatching.
+ */
+function handleFlagLockInternalCommand(
+  command: string,
+  markerAwkReadCommand: string
+): { code: number; stderr: string; stdout: string } | undefined {
+  if (command === markerAwkReadCommand) {
+    return { code: 0, stderr: "", stdout: MOCK_FLAG_LOCK_HOLDER_TOKEN }
+  }
+  if (isFlagLockInternalSuccessCommand(command)) {
+    return { code: 0, stderr: "", stdout: "" }
+  }
+  return undefined
+}
+
 function createSharedFlagMockSsh(flagName: string): ReturnType<typeof createMockSsh> {
   const base = createMockSsh(
     {},
@@ -137,13 +169,14 @@ function createSharedFlagMockSsh(flagName: string): ReturnType<typeof createMock
         expectLockExecOptions(options)
         return { code: 0, stderr: "", stdout: "" }
       }
-      if (isFlagLockInternalSuccessCommand(command)) return { code: 0, stderr: "", stdout: "" }
+      // R-0000840 + R-0000634 internal-default handler — see helper above.
+      const internal = handleFlagLockInternalCommand(command, markerAwkReadCommand)
+      if (internal) return internal
       throw new Error(`unexpected shared flag lock exec command: ${command}`)
     },
-    // R-0000670: writeFlagLockHolderMarker reads the `pid@hostname` token
-    // back via `ssh.output` and now fails the acquire if the readback is
-    // empty. Return the shared deterministic token so the lock is acquired
-    // normally and the release path matches `verifiedReleaseCommand`.
+    // R-0000634: kept for callers that exercise the helper through
+    // ssh.output directly (the production path moved to ssh.exec under
+    // R-0000840).
     async output(command) {
       base.calls.push(command)
       if (command === markerAwkReadCommand) return MOCK_FLAG_LOCK_HOLDER_TOKEN
@@ -452,12 +485,19 @@ function createStaleLockSsh(
       base.calls.push(command)
       base.execCalls.push({ command, options })
       await Promise.resolve()
+      // R-0000840: the production code now reads the holder marker via
+      // ssh.exec (was ssh.output) so the readback's exit code can be
+      // inspected. Intercept the readback at the exec layer with the
+      // shared deterministic token so the acquire proceeds and the
+      // stale-lock recovery test keeps the lock acquired after reclaim.
+      if (command === markerAwkReadCommand) {
+        return { code: 0, stderr: "", stdout: MOCK_FLAG_LOCK_HOLDER_TOKEN }
+      }
       return handleCommand(command, options)
     },
-    // R-0000670: the acquire path now fails fast if the holder-marker
-    // readback yields an empty token. Return the shared deterministic
-    // token so the stale-lock recovery test keeps the lock acquired after
-    // reclaim succeeded.
+    // R-0000670: kept for callers that exercise the helper through
+    // ssh.output directly (the production path moved to ssh.exec under
+    // R-0000840).
     async output(command) {
       base.calls.push(command)
       if (command === markerAwkReadCommand) return MOCK_FLAG_LOCK_HOLDER_TOKEN
@@ -739,13 +779,20 @@ function createSharedMutexMockSsh(lockName: string): ReturnType<typeof createMoc
         expectLockExecOptions(options)
         return { code: 0, stderr: "", stdout: "" }
       }
+      // R-0000840: writeFlagLockHolderMarker now reads the marker via
+      // ssh.exec (was ssh.output) so the readback's exit code is
+      // observable. Return the deterministic token so the subsequent
+      // verified-release command can match `verifiedReleaseCommand`.
+      if (command === markerAwkReadCommand) {
+        return { code: 0, stderr: "", stdout: FAKE_HOLDER_TOKEN }
+      }
       if (isFlagLockInternalSuccessCommand(command)) return { code: 0, stderr: "", stdout: "" }
       throw new Error(`unexpected shared mutex exec command: ${command}`)
     },
-    // R-0000634: `writeFlagLockHolderMarker` calls `ssh.output` to read the
-    // marker's `pid@hostname` token back after writing. Returning a
-    // deterministic token here lets the subsequent verified-release
-    // command match `verifiedReleaseCommand` above.
+    // R-0000634: kept for callers that still issue the awk readback via
+    // ssh.output. The production code path (writeFlagLockHolderMarker)
+    // routes through ssh.exec post-R-0000840; this handler protects mocks
+    // that exercise the helper in isolation.
     async output(command) {
       base.calls.push(command)
       if (command === markerAwkReadCommand) {
@@ -1101,8 +1148,9 @@ describe("acquireFlagLock – holder marker write failures (R-0000670)", () => {
   it("returns a failed ModuleResult and removes the lock when readback is empty", async () => {
     const flagName = "marker-readback-empty"
     const lockDirectoryName = `${flagName}.lock`
-    // defaultOutputResult is "" so the holder-readback returns an empty
-    // token even though printf reported success.
+    // defaultExecResult is { code: 0 } with empty stdout so the holder
+    // readback (R-0000840: now an `ssh.exec`) returns an empty token even
+    // though printf reported success.
     const ssh = buildHolderMarkerFailureSsh(lockDirectoryName, "succeed-but-empty-readback")
     let applyCalls = 0
 
@@ -1118,7 +1166,7 @@ describe("acquireFlagLock – holder marker write failures (R-0000670)", () => {
     expect(result).toMatchObject({
       error: expect.objectContaining({
         message: expect.stringContaining(
-          `flag lock holder marker for ${lockDirectoryName} is empty after write`
+          `flag lock holder marker for ${lockDirectoryName} is readable but empty`
         ),
       }),
       status: "failed",

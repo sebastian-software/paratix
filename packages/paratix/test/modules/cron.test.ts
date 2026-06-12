@@ -5,6 +5,7 @@ import { cron } from "../../src/modules/cron.js"
 import { FLAGS_DIRECTORY } from "../../src/modules/moduleHelpers.js"
 import { createMockSsh as createBaseMockSsh } from "../helpers/mockSsh.js"
 import {
+  isFlagLockHolderReadback,
   isFlagLockInternalSuccessCommand,
   MOCK_FLAG_LOCK_HOLDER_TOKEN,
 } from "../helpers/mockSshFlagLock.js"
@@ -243,6 +244,13 @@ function createSharedCrontabMockSsh(
           })
         }
         return { code: 0, stderr: "", stdout: "" }
+      }
+      // R-0000840: the holder-marker readback moved from ssh.output to
+      // ssh.exec so the readback's exit code can be inspected. Return the
+      // shared deterministic token so the acquire proceeds and the release
+      // path matches `verifiedReleaseCommand`.
+      if (isFlagLockHolderReadback(command)) {
+        return { code: 0, stderr: "", stdout: MOCK_FLAG_LOCK_HOLDER_TOKEN }
       }
       if (isFlagLockInternalSuccessCommand(command)) return { code: 0, stderr: "", stdout: "" }
       throw new Error(`unexpected shared crontab exec command: ${command}`)

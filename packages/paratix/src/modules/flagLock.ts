@@ -1,4 +1,4 @@
-import type { ModuleResult, SshConnection } from "../types.js"
+import type { ExecResult, ModuleResult, SshConnection } from "../types.js"
 
 import { failed, failedCommand } from "../moduleFailure.js"
 import { shellQuote } from "../ssh.js"
@@ -147,37 +147,76 @@ async function writeFlagLockHolderMarker(
   }
   // R-0000634: read back the `pid@hostname` token from the marker so
   // releaseFlagLock can verify ownership before removing the lock.
+  // R-0000840: use `ssh.exec` instead of `ssh.output` so the readback's
+  // exit code and stderr survive into the failure diagnostic. The previous
+  // `ssh.output(...).catch(() => "")` form silently mapped every readback
+  // failure (awk EUSAGE in issue #35, permission denied, transient IO
+  // errors, …) onto an empty token, which then surfaced as the
+  // mis-leading "marker is empty after write" message. Capturing the raw
+  // ExecResult lets the empty-stdout vs. non-zero-exit branches split
+  // cleanly into "readback failed" and "readable but empty".
   // Note: unlike rm/rmdir/find, GNU awk and mawk do NOT recognise `--` as
   // an end-of-options sentinel — they treat it as a literal filename and
   // exit with "cannot open file `--'" (see issue #35). `quotedMarker` is
   // built from the absolute `/var/lib/paratix/flags/` prefix, so a path
   // that begins with `-` is not reachable; the bare invocation below is
   // the portable form across awk implementations.
-  const holderToken = await ssh
-    .output(`awk 'NR==1{print $1}' ${quotedMarker}`)
-    .then((token) => token.trim())
-    .catch(() => "")
-  if (holderToken.length === 0) {
-    // R-0000670: an empty readback means the marker is unreadable even
-    // though printf reported success — the readback exit code may have
-    // been suppressed by `.catch(...)` above, or the marker file ended up
-    // empty (race against an external truncate, EIO between write and
-    // read, ...). Without a verifiable token releaseFlagLock can never
-    // remove the directory, so we drop it eagerly here and surface a
-    // structured failure instead of silently entering the critical
-    // section with an unrecoverable lock.
+  const readbackResult = await ssh
+    .exec(`awk 'NR==1{print $1}' ${quotedMarker}`, { ignoreExitCode: true, silent: true })
+    .catch(() => null)
+  const holderToken = readbackResult?.stdout.trim() ?? ""
+  if (readbackResult?.code !== 0 || holderToken.length === 0) {
+    // R-0000670: a failed readback or an empty marker leaves the holder
+    // unverifiable — without a token releaseFlagLock can never remove the
+    // directory, so we drop it eagerly here and surface a structured
+    // failure instead of silently entering the critical section with an
+    // unrecoverable lock.
     // R-0000749: `rm -f --` and `rmdir --` so path arguments are never
     // mis-parsed as options.
     await ssh.exec(`rm -f -- ${markerPath}`, { ignoreExitCode: true, silent: true })
     await ssh.exec(`rmdir -- ${lock}`, { ignoreExitCode: true, silent: true })
     return {
-      failure: failed(
-        `[moduleHelpers] flag lock holder marker for ${lockName} is empty after write`
-      ),
+      failure: buildReadbackFailure(lockName, readbackResult),
       kind: "failed",
     }
   }
   return { holderToken, kind: "ok" }
+}
+
+/**
+ * R-0000840: render the structured failure for a missing or unreadable
+ * holder marker.
+ *
+ * Three input shapes feed into the same one-failure-result API:
+ * 1. `readbackResult == null` — `ssh.exec` threw before producing a
+ *    result. We have no ExecResult to forward through `failedCommand`,
+ *    so we surface the thrown shape inline.
+ * 2. `readbackResult.code !== 0` — the readback itself failed. Route
+ *    through `failedCommand` so the operator sees awk's exit code and
+ *    stderr (already masked by `failedCommand`'s secret-sink path).
+ * 3. `readbackResult.code === 0 && stdout.trim().length === 0` — the
+ *    marker file was readable but contained no token, almost always a
+ *    race against an external truncate. Use `failed` because there is
+ *    no underlying ExecResult to display.
+ *
+ * @param lockName - The validated lock identifier.
+ * @param readbackResult - The captured exec result, or `null` when
+ *   `ssh.exec` itself threw.
+ * @returns A `ModuleResult` describing the failure.
+ */
+function buildReadbackFailure(lockName: string, readbackResult: ExecResult | null): ModuleResult {
+  if (readbackResult == null) {
+    return failed(
+      `[moduleHelpers] flag lock holder marker for ${lockName} readback failed: ssh.exec threw before returning a result`
+    )
+  }
+  if (readbackResult.code !== 0) {
+    return failedCommand(
+      `[moduleHelpers] flag lock holder marker for ${lockName} readback failed`,
+      readbackResult
+    )
+  }
+  return failed(`[moduleHelpers] flag lock holder marker for ${lockName} is readable but empty`)
 }
 
 export type FlagLockAcquireResult =

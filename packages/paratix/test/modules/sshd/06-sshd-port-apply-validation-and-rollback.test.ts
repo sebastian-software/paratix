@@ -169,6 +169,13 @@ function mockExecResolvedValue(
     if (command === "mktemp -p /tmp -- 'paratix-sshd-dry-run.XXXXXX'") {
       return { code: 0, stderr: "", stdout: "/tmp/paratix-sshd-dry-run.ABCDEF" }
     }
+    // R-0000840: holder-marker readback flows through ssh.exec since the
+    // diagnostic refactor. Without a non-empty stdout the acquire path
+    // rejects the lock as "readable but empty", which would mask every
+    // assertion that expects a successful apply.
+    if (HOLDER_READBACK_PATTERN.test(command)) {
+      return { code: 0, stderr: "", stdout: "12345@mockhost" }
+    }
     const ssProbePort = assertExpectedSsProbe(command, allowedSsProbePorts)
     if (ssProbePort !== undefined && result.code === 0) {
       return { code: 0, stderr: "", stdout: ssProbeListeningStdout(ssProbePort) }
@@ -247,9 +254,22 @@ type ScriptedExecHarness = {
   exec: ReturnType<typeof createMockSsh>["exec"]
 }
 
+// R-0000840: the holder-marker readback now flows through ssh.exec (was
+// ssh.output) so the readback's exit code can be inspected. The scripted
+// exec harness still treats it as setup noise, but it has to return a
+// non-empty stdout so the acquire path accepts the readback as
+// successful. Reuse the same fake token that mockSshFlagLock vends.
+const HOLDER_READBACK_PATTERN =
+  /^awk 'NR==1\{print \$1\}' '\/var\/lib\/paratix\/flags\/[\w.\-]+-mutex\/holder'$/v
+const MOCK_HOLDER_READBACK_TOKEN = "12345@mockhost"
+
 function buildMutexAwareExecSequence(steps: readonly ScriptedExecStep[]): ScriptedExecHarness {
   let cursor = 0
   const exec: ReturnType<typeof createMockSsh>["exec"] = async (command) => {
+    if (HOLDER_READBACK_PATTERN.test(command)) {
+      await Promise.resolve()
+      return { code: 0, stderr: "", stdout: MOCK_HOLDER_READBACK_TOKEN }
+    }
     if (isMutexBookkeepingCommand(command)) {
       await Promise.resolve()
       return { code: 0, stderr: "", stdout: "" }

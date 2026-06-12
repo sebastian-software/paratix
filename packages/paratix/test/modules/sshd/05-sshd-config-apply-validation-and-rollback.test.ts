@@ -139,11 +139,24 @@ type ScriptedExecHarness05 = {
   exec: ReturnType<typeof createMockSsh>["exec"]
 }
 
+// R-0000840: the holder-marker readback now flows through ssh.exec (was
+// ssh.output) so the readback's exit code can be inspected. The scripted
+// exec harness still treats it as setup noise, but it has to return a
+// non-empty stdout so the acquire path accepts the readback as
+// successful. Reuse the same fake token that mockSshFlagLock vends.
+const HOLDER_READBACK_PATTERN_05 =
+  /^awk 'NR==1\{print \$1\}' '\/var\/lib\/paratix\/flags\/[\w.\-]+-mutex\/holder'$/v
+const MOCK_HOLDER_READBACK_TOKEN_05 = "12345@mockhost"
+
 function buildMutexAwareExecSequence05(
   steps: readonly ScriptedExecStep05[]
 ): ScriptedExecHarness05 {
   let cursor = 0
   const exec: ReturnType<typeof createMockSsh>["exec"] = async (command) => {
+    if (HOLDER_READBACK_PATTERN_05.test(command)) {
+      await Promise.resolve()
+      return { code: 0, stderr: "", stdout: MOCK_HOLDER_READBACK_TOKEN_05 }
+    }
     if (isMutexBookkeepingCommand05(command)) {
       await Promise.resolve()
       return { code: 0, stderr: "", stdout: "" }

@@ -193,11 +193,22 @@ function assertExpectedSsProbe(
 const SSHD_DRY_RUN_MKTEMP_10 = "mktemp -p /tmp -- 'paratix-sshd-dry-run.XXXXXX'"
 const SSHD_DRY_RUN_TEMP_PATH_10 = "/tmp/paratix-sshd-dry-run.ABCDEF"
 
+// R-0000840: the holder-marker readback now flows through ssh.exec (was
+// ssh.output) so the readback's exit code can be inspected. The bulk
+// exec spies below need a non-empty stdout for this command so the
+// acquire path treats the readback as successful.
+const HOLDER_READBACK_PATTERN_10 =
+  /^awk 'NR==1\{print \$1\}' '\/var\/lib\/paratix\/flags\/[\w.\-]+-mutex\/holder'$/v
+const MOCK_HOLDER_READBACK_TOKEN_10 = "12345@mockhost"
+
 function spyExecSuccessAcceptingSsProbe(mockSsh: ReturnType<typeof createMockSsh>) {
   return vi.spyOn(mockSsh, "exec").mockImplementation(async (command) => {
     await Promise.resolve()
     if (command === SSHD_DRY_RUN_MKTEMP_10) {
       return { code: 0, stderr: "", stdout: SSHD_DRY_RUN_TEMP_PATH_10 }
+    }
+    if (HOLDER_READBACK_PATTERN_10.test(command)) {
+      return { code: 0, stderr: "", stdout: MOCK_HOLDER_READBACK_TOKEN_10 }
     }
     const ssProbePort = assertExpectedSsProbe(command, [2222])
     if (ssProbePort !== undefined) {
@@ -216,6 +227,9 @@ function spyExecForUfwRaceAfterConfigWrite(
     if (command === CAT_SSHD) return { code: 0, stderr: "", stdout: originalConfig }
     if (command === SSHD_DRY_RUN_MKTEMP_10) {
       return { code: 0, stderr: "", stdout: SSHD_DRY_RUN_TEMP_PATH_10 }
+    }
+    if (HOLDER_READBACK_PATTERN_10.test(command)) {
+      return { code: 0, stderr: "", stdout: MOCK_HOLDER_READBACK_TOKEN_10 }
     }
     const ssProbePort = assertExpectedSsProbe(command, [2222])
     if (ssProbePort !== undefined) {

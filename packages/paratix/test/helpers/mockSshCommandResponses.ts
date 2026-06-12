@@ -108,8 +108,13 @@ function getFlagLockInternalDefault(
   options: MockCommandOptions | undefined
 ): Partial<ExecResult> | undefined {
   if (options?.allowFlagLockInternalDefaults !== true) return undefined
-  // R-0000634: holder readback (via `ssh.output`) returns the deterministic
-  // token so the verified-release command can be matched.
+  // R-0000634: holder readback returns the deterministic token so the
+  // verified-release command can be matched. R-0000840 routed the readback
+  // through `ssh.exec` (was `ssh.output`) so the readback's exit code can
+  // be inspected when something other than the expected awk readback comes
+  // back. The match is intentionally kind-agnostic so both the legacy
+  // output-style helpers and the new exec-style readback hit the same
+  // default token.
   if (isFlagLockHolderReadback(command)) return { code: 0, stdout: MOCK_FLAG_LOCK_HOLDER_TOKEN }
   if (kind !== "exec") return undefined
   if (isFlagLockReclaimProbe(command)) return { code: 1 }
