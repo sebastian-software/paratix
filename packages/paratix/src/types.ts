@@ -84,6 +84,10 @@ export type ModuleResult = {
    * `_dryRunDiffProducer: true`. The runner never modifies the string; the
    * output layer applies registered-secret masking and terminal sanitizing
    * before printing each line.
+   *
+   * Renders independently of `_dryRunDetail` — both fields may be set at the
+   * same time, and the runner shows both (detail inline next to the status,
+   * diff in a block beneath it).
    */
   diff?: string
   /** Optional error details consumed by the runner for centralized CLI output. */

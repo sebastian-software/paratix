@@ -736,6 +736,9 @@ Rules:
 - Modules that do not opt in keep showing only `changed (dry-run)`.
 - Every diff line is masked through the registered-secret sink and a terminal
   sanitizer before printing, so secret-laden file contents never leak verbatim.
+- `_dryRunDetail` (inline suffix) and `diff` (multi-line block) are independent
+  output layers — a module may emit both at once; the runner renders detail next
+  to the status line and the diff below it.
 
 Diff-producing built-in modules:
 
