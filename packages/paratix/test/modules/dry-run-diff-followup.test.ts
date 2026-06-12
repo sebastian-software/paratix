@@ -267,7 +267,7 @@ describe("quadlet.container — dry-run diff", () => {
     const mod = quadlet.container({ image: "docker.io/library/traefik:v3", name: "traefik" })
     // Capture the expected content by letting the module write it via apply
     // would be intrusive — instead reuse the existing diff path: when `cat`
-    // returns the same string the desired serialisation produces, the diff
+    // returns the same string the desired serialization produces, the diff
     // is empty.
     const desired = [
       "[Unit]",
@@ -281,21 +281,24 @@ describe("quadlet.container — dry-run diff", () => {
       "[Install]",
       "WantedBy=multi-user.target",
     ].join("\n")
-    const ssh = createMockSsh({
-      // File exists and content already converges.
-      [`[ -e '${FILE_PATH}' ]`]: { code: 0 },
-      [`cat '${FILE_PATH}'`]: { code: 0, stdout: desired },
-      // The reload-flag probe — `hasFlag` runs `[ -f /var/lib/paratix/flags/'<flag>' ]`.
-      // Stub via a permissive regex so we do not have to recompute the SHA here.
-    }, {
-      responseStubs: [
-        {
-          command:
-            /^\[ -f \/var\/lib\/paratix\/flags\/'quadlet-container-[0-9a-f]{16}-[0-9a-f]{16}' \]$/v,
-          result: { code: 1 },
-        },
-      ],
-    })
+    const ssh = createMockSsh(
+      {
+        // File exists and content already converges.
+        [`[ -e '${FILE_PATH}' ]`]: { code: 0 },
+        [`cat '${FILE_PATH}'`]: { code: 0, stdout: desired },
+        // The reload-flag probe — `hasFlag` runs `[ -f /var/lib/paratix/flags/'<flag>' ]`.
+        // Stub via a permissive regex so we do not have to recompute the SHA here.
+      },
+      {
+        responseStubs: [
+          {
+            command:
+              /^\[ -f \/var\/lib\/paratix\/flags\/'quadlet-container-[0-9a-f]{16}-[0-9a-f]{16}' \]$/v,
+            result: { code: 1 },
+          },
+        ],
+      }
+    )
 
     const result = await mod._applyDryRun!(ssh, emptyEnv)
 
@@ -318,18 +321,21 @@ describe("quadlet.container — dry-run diff", () => {
       "[Install]",
       "WantedBy=multi-user.target",
     ].join("\n")
-    const ssh = createMockSsh({
-      [`[ -e '${FILE_PATH}' ]`]: { code: 0 },
-      [`cat '${FILE_PATH}'`]: { code: 0, stdout: desired },
-    }, {
-      responseStubs: [
-        {
-          command:
-            /^\[ -f \/var\/lib\/paratix\/flags\/'quadlet-container-[0-9a-f]{16}-[0-9a-f]{16}' \]$/v,
-          result: { code: 0 },
-        },
-      ],
-    })
+    const ssh = createMockSsh(
+      {
+        [`[ -e '${FILE_PATH}' ]`]: { code: 0 },
+        [`cat '${FILE_PATH}'`]: { code: 0, stdout: desired },
+      },
+      {
+        responseStubs: [
+          {
+            command:
+              /^\[ -f \/var\/lib\/paratix\/flags\/'quadlet-container-[0-9a-f]{16}-[0-9a-f]{16}' \]$/v,
+            result: { code: 0 },
+          },
+        ],
+      }
+    )
 
     const result = await mod._applyDryRun!(ssh, emptyEnv)
 
