@@ -1224,6 +1224,39 @@ describe("sftpUploadContent", () => {
     expect(vi.mocked(createReadStream)).not.toHaveBeenCalled()
     expect(sftpEnd).toHaveBeenCalledOnce()
   })
+
+  it("resolves when the remote writeStream emits close after finishing (issue #37 race)", async () => {
+    // Issue #37: for small in-memory payloads, ssh2's SFTP WriteStream may
+    // emit "close" before (or instead of) "finish" even when the writable
+    // side has already flushed everything. The pre-fix `onClose` would
+    // reject in this case; now `writableFinished` short-circuits to resolve.
+    const { sftp, sftpEnd, sftpWriteStream } = makeSftpSession()
+    const client = makeClientMock(sftp)
+
+    const promise = sftpUploadContent(client, "small", "/remote/secret.txt")
+    // Simulate ssh2's regular end-of-life on a fully flushed writable that
+    // races "close" ahead of "finish".
+    Object.assign(sftpWriteStream, { writableFinished: true })
+    sftpWriteStream.emit("close")
+
+    await expect(promise).resolves.toBeUndefined()
+    expect(sftpWriteStream.destroy).not.toHaveBeenCalled()
+    expect(sftpEnd).toHaveBeenCalledOnce()
+  })
+
+  it("still rejects when the remote writeStream closes before the writable has finished", async () => {
+    const { sftp, sftpWriteStream } = makeSftpSession()
+    const client = makeClientMock(sftp)
+
+    const promise = sftpUploadContent(client, "small", "/remote/secret.txt")
+    // `writableFinished` stays falsy → premature close path stays intact.
+    sftpWriteStream.emit("close")
+
+    await expect(promise).rejects.toThrow(
+      "SFTP content upload closed before finish: /remote/secret.txt"
+    )
+    expect(sftpWriteStream.destroy).toHaveBeenCalledOnce()
+  })
 })
 
 // ---------------------------------------------------------------------------

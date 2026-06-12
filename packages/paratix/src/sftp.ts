@@ -310,6 +310,16 @@ function buildStreamListeners(parameters: {
   return {
     onClose(): void {
       if (prematureCloseMessage === undefined) return
+      // Issue #37: for small in-memory payloads, ssh2's SFTP WriteStream may
+      // emit "close" before (or in the same micro-task as) "finish". When
+      // `writableFinished` is true the writable side has already flushed
+      // everything, so the close is the regular end-of-life and the transfer
+      // was successful. Settling here resolves the promise even when "finish"
+      // is swallowed by the racing "close".
+      if (writeStream.writableFinished) {
+        getSettlement().resolveOnce()
+        return
+      }
       readStream.destroy()
       if (typeof writeStream.destroy === "function") writeStream.destroy()
       getSettlement().rejectOnce(new Error(prematureCloseMessage))
