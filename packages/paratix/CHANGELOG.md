@@ -1,5 +1,23 @@
 # Changelog
 
+## [0.12.0](https://github.com/sebastian-software/paratix/compare/paratix-v0.11.0...paratix-v0.12.0) (2026-06-12)
+
+
+### Features
+
+* add --diff flag for unified diff output in dry-run mode ([afd8fdb](https://github.com/sebastian-software/paratix/commit/afd8fdb0fce2ade44db5556d575ce2f9e80a364b))
+* cap unified-diff LCS allocation to prevent OOM on large inputs ([438c9f2](https://github.com/sebastian-software/paratix/commit/438c9f2a993417843ed6aba628afa03aaf14549e))
+* extend dry-run diff to cron, timer, swap, net.hosts, and quadlet ([c37d6be](https://github.com/sebastian-software/paratix/commit/c37d6beb7e23eddd21fddac78a820603c50710fb))
+* skip binary local files in file.copy dry-run diff ([e40f954](https://github.com/sebastian-software/paratix/commit/e40f954ea1cb31a7269d5483411bab6ea01930f5))
+* surface dry-run diff error codes via _dryRunDetail ([7bb8ccf](https://github.com/sebastian-software/paratix/commit/7bb8ccf6f0f9e65271d65d89b02ce73cd91a6038))
+* surface pending quadlet daemon-reload in dry-run output ([7c666da](https://github.com/sebastian-software/paratix/commit/7c666dacf4db48eb75b8d6f1c74087d7980f360d))
+
+
+### Bug Fixes
+
+* resolve final validation errors from apply-review ([d7c3301](https://github.com/sebastian-software/paratix/commit/d7c330135af558529503871f6476176011691b24))
+* resolve final validation errors from apply-review ([32ccecb](https://github.com/sebastian-software/paratix/commit/32ccecba480bfd2f4efed8e14877cc3af89d88aa))
+
 ## [0.11.0](https://github.com/sebastian-software/paratix/compare/paratix-v0.10.0...paratix-v0.11.0) (2026-05-29)
 
 
