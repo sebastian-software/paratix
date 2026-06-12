@@ -605,9 +605,16 @@ async function publishPackage({
   await commandRunner.spawn(
     "pnpm",
     [
-      "--dir",
-      packageInfo.directory,
+      // R-0001024: `pnpm publish` takes the workspace package as a positional
+      // argument (`pnpm publish [<tarball>|<dir>] …`), not as the global
+      // `--dir <path>` flag. The previous `--dir <path> publish` form ended up
+      // forwarding `paratix-X.Y.Z.tgz <path> publish …` to npm publish under
+      // the hood, which emits `EUSAGE` because npm sees two extra positionals
+      // before the real `--tag` flag. The positional form below mirrors what
+      // `pnpm publish --help` documents and matches the manual `pnpm publish
+      // <dir>` invocation a maintainer would run by hand.
       "publish",
+      packageInfo.directory,
       "--no-git-checks",
       "--provenance",
       "--tag",

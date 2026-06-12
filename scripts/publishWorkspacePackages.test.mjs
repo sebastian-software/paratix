@@ -381,9 +381,8 @@ describe("publishWorkspacePackages", () => {
       ["npm", "view", PARATIX_SPECIFIER, "version", "--json"],
       [
         "pnpm",
-        "--dir",
-        ABSOLUTE_PARATIX_DIRECTORY,
         "publish",
+        ABSOLUTE_PARATIX_DIRECTORY,
         "--no-git-checks",
         "--provenance",
         "--tag",
@@ -393,9 +392,8 @@ describe("publishWorkspacePackages", () => {
       ["npm", "view", CREATE_PARATIX_SPECIFIER, "version", "--json"],
       [
         "pnpm",
-        "--dir",
-        ABSOLUTE_CREATE_PARATIX_DIRECTORY,
         "publish",
+        ABSOLUTE_CREATE_PARATIX_DIRECTORY,
         "--no-git-checks",
         "--provenance",
         "--tag",

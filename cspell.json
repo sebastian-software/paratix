@@ -47,6 +47,7 @@
     "enoent",
     "epipe",
     "EPIPE",
+    "EUSAGE",
     "gecos",
     "getent",
     "groupadd",
