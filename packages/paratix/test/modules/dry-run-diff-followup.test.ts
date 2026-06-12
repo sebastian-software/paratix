@@ -258,4 +258,83 @@ describe("quadlet.container — dry-run diff", () => {
     expect(result.diff).toContain("(new file)")
     expect(result.diff).toContain("+Image=docker.io/library/traefik:v3")
   })
+
+  it("R-0001023: surfaces a pending daemon-reload when content matches but the reload flag is missing", async () => {
+    // Build the expected unit content the module will compare against, so
+    // the simulated `cat` output matches verbatim and the content-diff is
+    // empty. The reload-flag probe (`[ -f .../<flag> ]`) returns non-zero
+    // (= missing); the operator must still see the pending reload signal.
+    const mod = quadlet.container({ image: "docker.io/library/traefik:v3", name: "traefik" })
+    // Capture the expected content by letting the module write it via apply
+    // would be intrusive — instead reuse the existing diff path: when `cat`
+    // returns the same string the desired serialisation produces, the diff
+    // is empty.
+    const desired = [
+      "[Unit]",
+      "Description=Podman container: traefik",
+      "Wants=network-online.target",
+      "After=network-online.target",
+      "",
+      "[Container]",
+      "Image=docker.io/library/traefik:v3",
+      "",
+      "[Install]",
+      "WantedBy=multi-user.target",
+    ].join("\n")
+    const ssh = createMockSsh({
+      // File exists and content already converges.
+      [`[ -e '${FILE_PATH}' ]`]: { code: 0 },
+      [`cat '${FILE_PATH}'`]: { code: 0, stdout: desired },
+      // The reload-flag probe — `hasFlag` runs `[ -f /var/lib/paratix/flags/'<flag>' ]`.
+      // Stub via a permissive regex so we do not have to recompute the SHA here.
+    }, {
+      responseStubs: [
+        {
+          command:
+            /^\[ -f \/var\/lib\/paratix\/flags\/'quadlet-container-[0-9a-f]{16}-[0-9a-f]{16}' \]$/v,
+          result: { code: 1 },
+        },
+      ],
+    })
+
+    const result = await mod._applyDryRun!(ssh, emptyEnv)
+
+    expect(result.status).toBe("changed")
+    expect(result.diff).toBeUndefined()
+    expect(result._dryRunDetail).toContain("daemon-reload pending")
+  })
+
+  it("R-0001023: omits the pending-reload detail when content matches and the reload flag is present", async () => {
+    const mod = quadlet.container({ image: "docker.io/library/traefik:v3", name: "traefik" })
+    const desired = [
+      "[Unit]",
+      "Description=Podman container: traefik",
+      "Wants=network-online.target",
+      "After=network-online.target",
+      "",
+      "[Container]",
+      "Image=docker.io/library/traefik:v3",
+      "",
+      "[Install]",
+      "WantedBy=multi-user.target",
+    ].join("\n")
+    const ssh = createMockSsh({
+      [`[ -e '${FILE_PATH}' ]`]: { code: 0 },
+      [`cat '${FILE_PATH}'`]: { code: 0, stdout: desired },
+    }, {
+      responseStubs: [
+        {
+          command:
+            /^\[ -f \/var\/lib\/paratix\/flags\/'quadlet-container-[0-9a-f]{16}-[0-9a-f]{16}' \]$/v,
+          result: { code: 0 },
+        },
+      ],
+    })
+
+    const result = await mod._applyDryRun!(ssh, emptyEnv)
+
+    expect(result.status).toBe("changed")
+    expect(result.diff).toBeUndefined()
+    expect(result._dryRunDetail).toBeUndefined()
+  })
 })

@@ -228,7 +228,17 @@ export const quadlet = {
       async _applyDryRun(ssh: null | SshConnection): Promise<ModuleResult> {
         if (!ssh) return { status: "changed" }
         const diff = await buildQuadletContainerDryRunDiff(ssh, filePath, content)
-        return diff == null ? { status: "changed" } : { diff, status: "changed" }
+        if (diff != null) return { diff, status: "changed" }
+        // R-0001023: the unit file content already converges, but `apply`
+        // also persists a versioned reload flag that drives the next
+        // `systemctl daemon-reload`. When that flag is missing the operator
+        // would otherwise see no signal in `--dry-run` (without `--diff`)
+        // even though apply would still trigger a reload. Surface that
+        // pending side effect via `_dryRunDetail`. `hasFlag` is a read-only
+        // probe (`[ -f .../flag ]`) and therefore safe in the dry-run path.
+        const flagPresent = await hasFlag(ssh, reloadFlag.flagName)
+        if (flagPresent) return { status: "changed" }
+        return { _dryRunDetail: "(dry-run, daemon-reload pending)", status: "changed" }
       },
       _dryRunDiffProducer: true,
       async apply(ssh: null | SshConnection): Promise<ModuleResult> {
