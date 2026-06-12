@@ -99,12 +99,12 @@ function createSharedFlagMockSsh(flagName: string): ReturnType<typeof createMock
   // the POSIX `x`-prefix comparison so unusual awk output cannot collide
   // with `[` operator syntax.
   const verifiedReleaseCommand =
-    `awk_token=$(awk 'NR==1{print $1}' -- ${awkMarkerPath} 2>/dev/null); awk_status=$?; ` +
+    `awk_token=$(awk 'NR==1{print $1}' ${awkMarkerPath} 2>/dev/null); awk_status=$?; ` +
     `[ "$awk_status" = 0 ] && ` +
     `[ "x$awk_token" = 'x${MOCK_FLAG_LOCK_HOLDER_TOKEN}' ] && ` +
     `rm -f -- ${markerPath} && ` +
     `rmdir -- ${lockPath}`
-  const markerAwkReadCommand = `awk 'NR==1{print $1}' -- ${awkMarkerPath}`
+  const markerAwkReadCommand = `awk 'NR==1{print $1}' ${awkMarkerPath}`
 
   return {
     ...base,
@@ -444,7 +444,7 @@ function createStaleLockSsh(
   // R-0000749: production code now emits the `--` separator before the
   // awk path argument.
   // R-0000803: awk now receives the marker as a single shell-quoted token.
-  const markerAwkReadCommand = `awk 'NR==1{print $1}' -- '${FLAGS_DIRECTORY}/${flagName}.lock/holder'`
+  const markerAwkReadCommand = `awk 'NR==1{print $1}' '${FLAGS_DIRECTORY}/${flagName}.lock/holder'`
 
   const ssh: typeof base = {
     ...base,
@@ -565,10 +565,10 @@ describe("applyWithFlagLock – stale lock recovery", () => {
     const reclaimCall = reclaimCallCandidates.find((call) => call.includes(`STALE_TOKEN=`))
     expect(reclaimCall).toBeDefined()
     expect(reclaimCall).toContain(
-      `STALE_TOKEN="$(awk 'NR==1{print $1}' -- ${awkMarkerPath} 2>/dev/null)"`
+      `STALE_TOKEN="$(awk 'NR==1{print $1}' ${awkMarkerPath} 2>/dev/null)"`
     )
     expect(reclaimCall).toContain(
-      `[ "$(awk 'NR==1{print $1}' -- ${awkMarkerPath} 2>/dev/null)" = "$STALE_TOKEN" ] && rm -f -- ${markerPath} && rmdir -- ${lockPath}`
+      `[ "$(awk 'NR==1{print $1}' ${awkMarkerPath} 2>/dev/null)" = "$STALE_TOKEN" ] && rm -f -- ${markerPath} && rmdir -- ${lockPath}`
     )
   })
 
@@ -705,9 +705,9 @@ function createSharedMutexMockSsh(lockName: string): ReturnType<typeof createMoc
   const lockMkdirCommand = `mkdir ${FLAGS_DIRECTORY}/'${lockName}'`
   // R-0000803: awk now receives the marker as a single shell-quoted token.
   const awkMarkerPath = `'${FLAGS_DIRECTORY}/${lockName}/holder'`
-  const markerAwkReadCommand = `awk 'NR==1{print $1}' -- ${awkMarkerPath}`
+  const markerAwkReadCommand = `awk 'NR==1{print $1}' ${awkMarkerPath}`
   const verifiedReleaseCommand =
-    `awk_token=$(awk 'NR==1{print $1}' -- ${awkMarkerPath} 2>/dev/null); awk_status=$?; ` +
+    `awk_token=$(awk 'NR==1{print $1}' ${awkMarkerPath} 2>/dev/null); awk_status=$?; ` +
     `[ "$awk_status" = 0 ] && ` +
     `[ "x$awk_token" = 'x${FAKE_HOLDER_TOKEN}' ] && ` +
     `rm -f -- ${FLAGS_DIRECTORY}/'${lockName}'/holder && ` +

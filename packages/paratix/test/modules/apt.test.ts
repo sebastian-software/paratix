@@ -41,14 +41,14 @@ function distUpgradeApplyLockResponses(): Record<string, { code?: number; stdout
   // R-0000758: release captures the awk readback in `$awk_token` and uses
   // the POSIX `x`-prefix comparison.
   const verifiedReleaseCommand =
-    `awk_token=$(awk 'NR==1{print $1}' -- ${awkMarkerPath} 2>/dev/null); awk_status=$?; ` +
+    `awk_token=$(awk 'NR==1{print $1}' ${awkMarkerPath} 2>/dev/null); awk_status=$?; ` +
     `[ "$awk_status" = 0 ] && ` +
     `[ "x$awk_token" = 'x${MOCK_FLAG_LOCK_HOLDER_TOKEN}' ] && ` +
     `rm -f -- ${markerPath} && ` +
     `rmdir -- ${lockPath}`
   return {
     [`[ -f /var/lib/paratix/flags/'${DIST_UPGRADE_FLAG}' ]`]: { code: 1 },
-    [`awk 'NR==1{print $1}' -- ${awkMarkerPath}`]: {
+    [`awk 'NR==1{print $1}' ${awkMarkerPath}`]: {
       code: 0,
       stdout: MOCK_FLAG_LOCK_HOLDER_TOKEN,
     },

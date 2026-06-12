@@ -63,7 +63,7 @@ const FLAG_LOCK_INTERNAL_SUCCESS_PATTERNS: RegExp[] = [
   // R-0000803: the awk path is quoted as a single token (`'…/holder'`),
   // while rm/rmdir use the partially quoted `${markerPath}`/`${lock}` form.
   new RegExp(
-    `^awk_token=\\$\\(awk 'NR==1\\{print \\$1\\}' -- ${quotedMarkerPathPattern("releaseLock")} 2>\\/dev\\/null\\); awk_status=\\$\\?; \\[ "\\$awk_status" = 0 \\] && \\[ "x\\$awk_token" = 'x[^']*' \\] && rm -f -- ${sameMarkerPathPattern("releaseLock")} && rmdir -- ${sameFlagPathPattern("releaseLock")}$`,
+    `^awk_token=\\$\\(awk 'NR==1\\{print \\$1\\}' ${quotedMarkerPathPattern("releaseLock")} 2>\\/dev\\/null\\); awk_status=\\$\\?; \\[ "\\$awk_status" = 0 \\] && \\[ "x\\$awk_token" = 'x[^']*' \\] && rm -f -- ${sameMarkerPathPattern("releaseLock")} && rmdir -- ${sameFlagPathPattern("releaseLock")}$`,
     "v"
   ),
   // Mutex-lock acquire and release commands target lock directories whose
@@ -87,7 +87,7 @@ const FLAG_LOCK_INTERNAL_SUCCESS_PATTERNS: RegExp[] = [
 // R-0000749: awk now receives the path after a `--` separator.
 // R-0000803: the awk path is shell-quoted as a single token.
 const FLAG_LOCK_HOLDER_READBACK_PATTERN = new RegExp(
-  `^awk 'NR==1\\{print \\$1\\}' -- ${quotedMarkerPathPattern("holderReadbackLock")}$`,
+  `^awk 'NR==1\\{print \\$1\\}' ${quotedMarkerPathPattern("holderReadbackLock")}$`,
   "v"
 )
 
@@ -108,7 +108,7 @@ const MUTEX_LOCK_WAIT_PATTERN = new RegExp(
  */
 // R-0000749: awk now emits the `--` separator before its path argument.
 const FLAG_LOCK_RECLAIM_PATTERN = new RegExp(
-  `^if \\[ -d ${flagPathPattern("reclaimLock")} \\]; then if \\[ -f ${sameMarkerPathPattern("reclaimLock")} \\]; then STALE_TOKEN="\\$\\(awk 'NR==1\\{print \\$1\\}' -- ${sameQuotedMarkerPathPattern("reclaimLock")} 2>\\/dev\\/null\\)"; if find ${sameMarkerPathPattern("reclaimLock")} -maxdepth 0 -mmin \\+\\d+ -print -quit \\| grep -q \\.; then \\[ "\\$\\(awk 'NR==1\\{print \\$1\\}' -- ${sameQuotedMarkerPathPattern("reclaimLock")} 2>\\/dev\\/null\\)" = "\\$STALE_TOKEN" \\] && rm -f -- ${sameMarkerPathPattern("reclaimLock")} && rmdir -- ${sameFlagPathPattern("reclaimLock")}; else exit 1; fi; else if find ${sameFlagPathPattern("reclaimLock")} -maxdepth 0 -mmin \\+\\d+ -print -quit \\| grep -q \\.; then find ${sameFlagPathPattern("reclaimLock")} -maxdepth 0 -mmin \\+\\d+ -print -quit \\| grep -q \\. && rm -f -- ${sameMarkerPathPattern("reclaimLock")} && rmdir -- ${sameFlagPathPattern("reclaimLock")}; else exit 1; fi; fi; else exit 1; fi$`,
+  `^if \\[ -d ${flagPathPattern("reclaimLock")} \\]; then if \\[ -f ${sameMarkerPathPattern("reclaimLock")} \\]; then STALE_TOKEN="\\$\\(awk 'NR==1\\{print \\$1\\}' ${sameQuotedMarkerPathPattern("reclaimLock")} 2>\\/dev\\/null\\)"; if find ${sameMarkerPathPattern("reclaimLock")} -maxdepth 0 -mmin \\+\\d+ -print -quit \\| grep -q \\.; then \\[ "\\$\\(awk 'NR==1\\{print \\$1\\}' ${sameQuotedMarkerPathPattern("reclaimLock")} 2>\\/dev\\/null\\)" = "\\$STALE_TOKEN" \\] && rm -f -- ${sameMarkerPathPattern("reclaimLock")} && rmdir -- ${sameFlagPathPattern("reclaimLock")}; else exit 1; fi; else if find ${sameFlagPathPattern("reclaimLock")} -maxdepth 0 -mmin \\+\\d+ -print -quit \\| grep -q \\.; then find ${sameFlagPathPattern("reclaimLock")} -maxdepth 0 -mmin \\+\\d+ -print -quit \\| grep -q \\. && rm -f -- ${sameMarkerPathPattern("reclaimLock")} && rmdir -- ${sameFlagPathPattern("reclaimLock")}; else exit 1; fi; fi; else exit 1; fi$`,
   "v"
 )
 
@@ -185,7 +185,7 @@ export function makeIsVerifiedReleaseCall(lockName: string): (call: string) => b
   // the POSIX `x`-prefix comparison so unusual awk output cannot collide
   // with `[` operator syntax.
   const pattern = new RegExp(
-    `^awk_token=\\$\\(awk 'NR==1\\{print \\$1\\}' -- ${escapeRegex(quotedMarkerPath)} 2>/dev/null\\); awk_status=\\$\\?; \\[ "\\$awk_status" = 0 \\] && \\[ "x\\$awk_token" = 'x[^']*' \\] && rm -f -- ${escapeRegex(markerPath)} && rmdir -- ${escapeRegex(lockPath)}$`,
+    `^awk_token=\\$\\(awk 'NR==1\\{print \\$1\\}' ${escapeRegex(quotedMarkerPath)} 2>/dev/null\\); awk_status=\\$\\?; \\[ "\\$awk_status" = 0 \\] && \\[ "x\\$awk_token" = 'x[^']*' \\] && rm -f -- ${escapeRegex(markerPath)} && rmdir -- ${escapeRegex(lockPath)}$`,
     "v"
   )
   return (call) => pattern.test(call)

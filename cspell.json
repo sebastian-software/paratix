@@ -49,6 +49,7 @@
     "EPIPE",
     "EUSAGE",
     "sigstore",
+    "mawk",
     "gecos",
     "getent",
     "groupadd",

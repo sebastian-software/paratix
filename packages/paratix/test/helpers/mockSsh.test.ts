@@ -31,7 +31,7 @@ function buildVerifiedReleaseCommand(
   const removalLockName = options?.removalLockName ?? lockName
   const rmdirLockName = options?.rmdirLockName ?? lockName
   return (
-    `awk_token=$(awk 'NR==1{print $1}' -- ${quotedMarkerPath(quotedMarkerLockName, flagsDirectory)} 2>/dev/null); ` +
+    `awk_token=$(awk 'NR==1{print $1}' ${quotedMarkerPath(quotedMarkerLockName, flagsDirectory)} 2>/dev/null); ` +
     'awk_status=$?; [ "$awk_status" = 0 ] && [ "x$awk_token" = ' +
     "'x12345@mockhost' ] && " +
     `rm -f -- ${markerPath(removalLockName, flagsDirectory)} && ` +
@@ -60,9 +60,9 @@ function buildReclaimProbe(
   return (
     `if [ -d ${flagPath(lockName, flagsDirectory)} ]; then ` +
     `if [ -f ${markerPath(markerLockName, flagsDirectory)} ]; then ` +
-    `STALE_TOKEN="$(awk 'NR==1{print $1}' -- ${quotedMarkerPath(markerLockName, flagsDirectory)} 2>/dev/null)"; ` +
+    `STALE_TOKEN="$(awk 'NR==1{print $1}' ${quotedMarkerPath(markerLockName, flagsDirectory)} 2>/dev/null)"; ` +
     `if find ${markerPath(markerLockName, flagsDirectory)} -maxdepth 0 -mmin +0 -print -quit | grep -q .; then ` +
-    `[ "$(awk 'NR==1{print $1}' -- ${quotedMarkerPath(markerLockName, flagsDirectory)} 2>/dev/null)" = "$STALE_TOKEN" ] && ` +
+    `[ "$(awk 'NR==1{print $1}' ${quotedMarkerPath(markerLockName, flagsDirectory)} 2>/dev/null)" = "$STALE_TOKEN" ] && ` +
     `rm -f -- ${markerPath(markerLockName, flagsDirectory)} && rmdir -- ${flagPath(markerLockName, flagsDirectory)}; ` +
     `else exit 1; fi; else ` +
     `if find ${flagPath(lockName, flagsDirectory)} -maxdepth 0 -mmin +0 -print -quit | grep -q .; then ` +
@@ -397,7 +397,7 @@ describe("createMockSsh", () => {
       )
     ).rejects.toThrow("createMockSsh: unstubbed exec call")
     await expect(
-      ssh.output(`awk 'NR==1{print $1}' -- ${quotedMarkerPath("etc-hosts-mutex", "/tmp")}`)
+      ssh.output(`awk 'NR==1{print $1}' ${quotedMarkerPath("etc-hosts-mutex", "/tmp")}`)
     ).rejects.toThrow("createMockSsh: unstubbed output call")
     await expect(
       ssh.exec(buildVerifiedReleaseCommand("etc-hosts-mutex", { flagsDirectory: "/tmp" }))
@@ -440,7 +440,7 @@ describe("createMockSsh", () => {
       ssh.exec(`printf '%s@%s %s\\n' "$$" host "$(date +%s)" > ${markerPath("etc..hosts-mutex")}`)
     ).rejects.toThrow("createMockSsh: unstubbed exec call")
     await expect(
-      ssh.output(`awk 'NR==1{print $1}' -- ${quotedMarkerPath("etc..hosts-mutex")}`)
+      ssh.output(`awk 'NR==1{print $1}' ${quotedMarkerPath("etc..hosts-mutex")}`)
     ).rejects.toThrow("createMockSsh: unstubbed output call")
     await expect(ssh.exec(buildVerifiedReleaseCommand("etc..hosts-mutex"))).rejects.toThrow(
       "createMockSsh: unstubbed exec call"
@@ -454,7 +454,7 @@ describe("createMockSsh", () => {
     const reclaimProbe =
       "if [ -d /var/lib/paratix/flags/'etc-hosts-mutex' ]; then " +
       "if [ -f /var/lib/paratix/flags/'etc-hosts-mutex'/holder ]; then " +
-      "STALE_TOKEN=\"$(awk 'NR==1{print $1}' -- '/var/lib/paratix/flags/etc-hosts-mutex/holder' 2>/dev/null)\"; " +
+      "STALE_TOKEN=\"$(awk 'NR==1{print $1}' '/var/lib/paratix/flags/etc-hosts-mutex/holder' 2>/dev/null)\"; " +
       "if find /var/lib/paratix/flags/'etc-hosts-mutex'/holder -maxdepth 0 -mmin +0 -print -quit | grep -q .; then " +
       "rm -f -- /var/lib/paratix/flags/'etc-hosts-mutex'/holder && rmdir -- /var/lib/paratix/flags/'etc-hosts-mutex'; " +
       "else exit 1; fi; else exit 1; fi; else exit 1; fi"
@@ -469,9 +469,9 @@ describe("createMockSsh", () => {
     const reclaimProbe =
       "if [ -d /var/lib/paratix/flags/'etc-hosts-mutex' ]; then " +
       "if [ -f /var/lib/paratix/flags/'etc-hosts-mutex'/holder ]; then " +
-      "STALE_TOKEN=\"$(awk 'NR==1{print $1}' -- '/var/lib/paratix/flags/etc-hosts-mutex/holder' 2>/dev/null)\"; " +
+      "STALE_TOKEN=\"$(awk 'NR==1{print $1}' '/var/lib/paratix/flags/etc-hosts-mutex/holder' 2>/dev/null)\"; " +
       "if find /var/lib/paratix/flags/'etc-hosts-mutex'/holder -maxdepth 0 -mmin +0 -print -quit | grep -q .; then " +
-      "[ \"$(awk 'NR==1{print $1}' -- '/var/lib/paratix/flags/etc-hosts-mutex/holder' 2>/dev/null)\" = \"$STALE_TOKEN\" ]; " +
+      "[ \"$(awk 'NR==1{print $1}' '/var/lib/paratix/flags/etc-hosts-mutex/holder' 2>/dev/null)\" = \"$STALE_TOKEN\" ]; " +
       "else exit 1; fi; else exit 1; fi; else exit 1; fi"
     const ssh = createMockSsh({}, { allowFlagLockInternalDefaults: true })
 

@@ -50,7 +50,7 @@ const createMockSsh: typeof createBaseMockSsh = (responses, options) =>
         // shared mock token used by `mockSshFlagLock`.
         // R-0000803: awk now receives the marker as a single shell-quoted token.
         command:
-          /^awk 'NR==1\{print \$1\}' -- '\/var\/lib\/paratix\/flags\/cron-crontab-[\da-f]+\/holder'$/v,
+          /^awk 'NR==1\{print \$1\}' '\/var\/lib\/paratix\/flags\/cron-crontab-[\da-f]+\/holder'$/v,
         result: { code: 0, stdout: MOCK_FLAG_LOCK_HOLDER_TOKEN },
       },
       {
@@ -58,7 +58,7 @@ const createMockSsh: typeof createBaseMockSsh = (responses, options) =>
         // ownership check, marker removal and `rmdir` atomically.
         // R-0000803: awk now receives the marker as a single shell-quoted token.
         command:
-          /^awk_token=\$\(awk 'NR==1\{print \$1\}' -- '\/var\/lib\/paratix\/flags\/cron-crontab-[\da-f]+\/holder' 2>\/dev\/null\); awk_status=\$\?; \[ "\$awk_status" = 0 \] && \[ "x\$awk_token" = 'x[^']*' \] && rm -f -- \/var\/lib\/paratix\/flags\/'cron-crontab-[\da-f]+'\/holder && rmdir -- \/var\/lib\/paratix\/flags\/'cron-crontab-[\da-f]+'$/v,
+          /^awk_token=\$\(awk 'NR==1\{print \$1\}' '\/var\/lib\/paratix\/flags\/cron-crontab-[\da-f]+\/holder' 2>\/dev\/null\); awk_status=\$\?; \[ "\$awk_status" = 0 \] && \[ "x\$awk_token" = 'x[^']*' \] && rm -f -- \/var\/lib\/paratix\/flags\/'cron-crontab-[\da-f]+'\/holder && rmdir -- \/var\/lib\/paratix\/flags\/'cron-crontab-[\da-f]+'$/v,
         result: { code: 0 },
       },
       { command: /^crontab -u '[^']+' /v, result: { code: 0 } },
@@ -160,7 +160,7 @@ function createSharedCrontabMockSsh(
   // R-0000758: release captures the awk readback in `$awk_token` and uses
   // the POSIX `x`-prefix comparison.
   const verifiedReleaseCommand =
-    `awk_token=$(awk 'NR==1{print $1}' -- ${awkMarkerPath} 2>/dev/null); awk_status=$?; ` +
+    `awk_token=$(awk 'NR==1{print $1}' ${awkMarkerPath} 2>/dev/null); awk_status=$?; ` +
     `[ "$awk_status" = 0 ] && ` +
     `[ "x$awk_token" = 'x${MOCK_FLAG_LOCK_HOLDER_TOKEN}' ] && ` +
     `rm -f -- ${markerPath} && ` +

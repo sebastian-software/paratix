@@ -147,11 +147,14 @@ async function writeFlagLockHolderMarker(
   }
   // R-0000634: read back the `pid@hostname` token from the marker so
   // releaseFlagLock can verify ownership before removing the lock.
-  // R-0000749: `awk … --` so a future path that begins with `-` cannot be
-  // mis-parsed as an awk option, matching the `--` convention applied to
-  // rm / rmdir below.
+  // Note: unlike rm/rmdir/find, GNU awk and mawk do NOT recognise `--` as
+  // an end-of-options sentinel — they treat it as a literal filename and
+  // exit with "cannot open file `--'" (see issue #35). `quotedMarker` is
+  // built from the absolute `/var/lib/paratix/flags/` prefix, so a path
+  // that begins with `-` is not reachable; the bare invocation below is
+  // the portable form across awk implementations.
   const holderToken = await ssh
-    .output(`awk 'NR==1{print $1}' -- ${quotedMarker}`)
+    .output(`awk 'NR==1{print $1}' ${quotedMarker}`)
     .then((token) => token.trim())
     .catch(() => "")
   if (holderToken.length === 0) {
@@ -246,8 +249,12 @@ export async function releaseFlagLock(
   // Single atomic shell statement so the ownership check, marker removal
   // and `rmdir` cannot interleave with a stale-lock reclaim that already
   // handed the lock to another acquirer.
-  // R-0000749: `awk … --`, `rm -f --` and `rmdir --` so path arguments are
-  // never mis-parsed as options.
+  // R-0000749: `rm -f --` and `rmdir --` so path arguments are never
+  // mis-parsed as options. `awk` does NOT support `--` as an end-of-options
+  // sentinel (it treats it as a literal filename and exits with "cannot
+  // open file `--'", see issue #35), so the readback below uses the bare
+  // form — the marker path is always rooted at `/var/lib/paratix/flags/`,
+  // so a path beginning with `-` is structurally impossible.
   // R-0000758: prefix both sides of the `=` with a literal `x` so an
   // unusual awk output that begins with `-` (or expands to a `[`/`]`
   // operator on a strict POSIX `[`) cannot turn the comparison itself
@@ -263,7 +270,7 @@ export async function releaseFlagLock(
   // when awk failed, so the release attempt fails closed.
   const expectedToken = `x${holderToken}`
   const command =
-    `awk_token=$(awk 'NR==1{print $1}' -- ${quotedMarker} 2>/dev/null); awk_status=$?; ` +
+    `awk_token=$(awk 'NR==1{print $1}' ${quotedMarker} 2>/dev/null); awk_status=$?; ` +
     `[ "$awk_status" = 0 ] && ` +
     `[ "x$awk_token" = ${shellQuote(expectedToken)} ] && ` +
     `rm -f -- ${markerPath} && ` +
@@ -329,17 +336,18 @@ export async function tryReclaimStaleFlagLock(
   // TOCTOU guard: if a fresh acquirer touched the lock directory between
   // the first age probe and the rmdir, the second probe fails and the
   // reclaim is aborted instead of destroying the new holder's lock.
-  // R-0000749: `awk … --`, `rm -f --` and `rmdir --` so path arguments are
-  // never mis-parsed as options, mirroring the convention used in
-  // archive.ts / compose.ts / aptKeyStaging.ts. `find` is not affected here
-  // because its path argument is followed by additional flags (`-maxdepth`),
-  // so `--` cannot be placed without breaking the operand/expression split.
+  // R-0000749: `rm -f --` and `rmdir --` so path arguments are never
+  // mis-parsed as options, mirroring the convention used in archive.ts /
+  // compose.ts / aptKeyStaging.ts. `awk` does NOT support `--` (see issue
+  // #35) and `find` is not affected here because its path argument is
+  // followed by additional flags (`-maxdepth`), so `--` cannot be placed
+  // without breaking the operand/expression split.
   const command =
     `if [ -d ${lock} ]; then ` +
     `if [ -f ${markerPath} ]; then ` +
-    `STALE_TOKEN="$(awk 'NR==1{print $1}' -- ${quotedMarker} 2>/dev/null)"; ` +
+    `STALE_TOKEN="$(awk 'NR==1{print $1}' ${quotedMarker} 2>/dev/null)"; ` +
     `if find ${markerPath} -maxdepth 0 -mmin +${mminThreshold} -print -quit | grep -q .; then ` +
-    `[ "$(awk 'NR==1{print $1}' -- ${quotedMarker} 2>/dev/null)" = "$STALE_TOKEN" ] && ` +
+    `[ "$(awk 'NR==1{print $1}' ${quotedMarker} 2>/dev/null)" = "$STALE_TOKEN" ] && ` +
     `rm -f -- ${markerPath} && rmdir -- ${lock}; ` +
     `else exit 1; fi; ` +
     `else ` +
