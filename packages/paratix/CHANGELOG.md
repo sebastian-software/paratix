@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.12.3](https://github.com/sebastian-software/paratix/compare/paratix-v0.12.2...paratix-v0.12.3) (2026-06-12)
+
+
+### Bug Fixes
+
+* drop --  from flag-lock awk readbacks ([1fb3cf5](https://github.com/sebastian-software/paratix/commit/1fb3cf5b2b92315e8ffef164cb3486bc5fa7f754)), closes [#35](https://github.com/sebastian-software/paratix/issues/35)
+
 ## [0.12.2](https://github.com/sebastian-software/paratix/compare/paratix-v0.12.1...paratix-v0.12.2) (2026-06-12)
 
 
