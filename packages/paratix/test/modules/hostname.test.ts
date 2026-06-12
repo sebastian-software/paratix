@@ -103,4 +103,22 @@ describe("hostname.set", () => {
     expect(result.status).toBe("changed")
     expect(result.diff).toBe("-hostname = old-server\n+hostname = my-server")
   })
+
+  it("_applyDryRun surfaces the error code via _dryRunDetail when the probe throws", async () => {
+    // R-0001018: the catch around the dry-run probe used to swallow every
+    // exception silently. Mock the inner ssh.exec to throw an Error-with-code
+    // and assert the detail is surfaced so the operator sees *why* no diff
+    // could be produced.
+    const ssh = createMockSsh()
+    ssh.exec = async () => {
+      const error = new Error("transient SSH failure") as Error & { code: string }
+      error.code = "ECONNRESET"
+      throw error
+    }
+    const mod = hostname.set("my-server")
+    const result = await mod._applyDryRun!(ssh, emptyEnv)
+    expect(result.status).toBe("changed")
+    expect(result.diff).toBeUndefined()
+    expect(result._dryRunDetail).toBe("(dry-run, diff unavailable: ECONNRESET)")
+  })
 })

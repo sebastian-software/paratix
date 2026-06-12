@@ -803,4 +803,21 @@ describe("sysctl.set — dry-run diff", () => {
     const result = await mod._applyDryRun!(mockSsh, emptyEnv)
     expect(result.diff).toBe(`+${KEY} = 1`)
   })
+
+  it("_applyDryRun surfaces the error code via _dryRunDetail when the probe throws", async () => {
+    // R-0001018: the catch in buildSysctlDryRunResult previously swallowed
+    // every exception silently. Force the inner exec to throw an Error with a
+    // `code` property and assert the detail is surfaced.
+    const mockSsh = createMockSsh()
+    mockSsh.exec = async () => {
+      const error = new Error("broken pipe") as Error & { code: string }
+      error.code = "EPIPE"
+      throw error
+    }
+    const mod = sysctl.set(KEY, VALUE)
+    const result = await mod._applyDryRun!(mockSsh, emptyEnv)
+    expect(result.status).toBe("changed")
+    expect(result.diff).toBeUndefined()
+    expect(result._dryRunDetail).toBe("(dry-run, diff unavailable: EPIPE)")
+  })
 })

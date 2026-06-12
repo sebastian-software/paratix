@@ -321,6 +321,35 @@ export function buildUnifiedDiff(
 }
 
 /**
+ * Build the `_dryRunDetail` string surfaced by a module's `_applyDryRun` hook
+ * when the diff cannot be produced because the inner code path threw. The
+ * helper inspects the thrown value for a `code` property (mirrors `NodeJS.
+ * ErrnoException` and the `CommandError` shape exposed by the SSH layer) and
+ * folds it into the human-readable detail so operators see *why* the
+ * dry-run could not compute a diff without leaking the verbatim error
+ * message. When the input is `undefined` or has no usable code, the generic
+ * `"(dry-run)"` marker is returned so the runner's fallback formatting still
+ * applies.
+ *
+ * @param error - The value caught by the surrounding try/catch, if any.
+ * @returns A short parenthesised detail string suitable for
+ *   {@link ModuleResult._dryRunDetail}.
+ */
+export function buildDryRunDetail(error?: unknown): string {
+  if (error == null) return "(dry-run)"
+  if (typeof error === "object" && "code" in error) {
+    const code = (error as { code: unknown }).code
+    if (typeof code === "string" && code.length > 0) {
+      return `(dry-run, diff unavailable: ${code})`
+    }
+    if (typeof code === "number") {
+      return `(dry-run, diff unavailable: ${String(code)})`
+    }
+  }
+  return "(dry-run)"
+}
+
+/**
  * Convenience helper for modules that compare a single scalar key (e.g. a
  * sysctl key or an env var) so the output is a tiny one-line diff instead of
  * a full unified-diff frame.

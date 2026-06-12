@@ -3681,6 +3681,46 @@ describe("file.* dry-run diff", () => {
     }
   })
 
+  it("file.copy._applyDryRun surfaces the local readFile error code via _dryRunDetail", async () => {
+    // R-0001018: the catch around the dry-run probe used to swallow every
+    // exception silently. Point the module at a non-existent local file so
+    // `readFile` throws an ENOENT error with `.code` set, and assert the
+    // detail propagates.
+    const dir = mkdtempSync(join(tmpdir(), "paratix-test-"))
+    try {
+      const localPath = join(dir, "missing-source.txt")
+      // Intentionally do not create the file — readFile must reject with ENOENT.
+      const ssh = createMockSsh({
+        "[ -e '/remote/out.txt' ]": { code: 1 },
+      })
+      const mod = file.copy("/remote/out.txt", localPath)
+      const result = await mod._applyDryRun!(ssh, emptyEnv)
+      expect(result.status).toBe("changed")
+      expect(result.diff).toBeUndefined()
+      expect(result._dryRunDetail).toBe("(dry-run, diff unavailable: ENOENT)")
+    } finally {
+      rmSync(dir, { recursive: true })
+    }
+  })
+
+  it("file.template._applyDryRun surfaces the template readFile error code via _dryRunDetail", async () => {
+    // R-0001018: same as the file.copy case but for the template variant.
+    const dir = mkdtempSync(join(tmpdir(), "paratix-test-"))
+    try {
+      const templatePath = join(dir, "missing-template.txt")
+      const ssh = createMockSsh({
+        "[ -e '/remote/out.txt' ]": { code: 1 },
+      })
+      const mod = file.template("/remote/out.txt", templatePath)
+      const result = await mod._applyDryRun!(ssh, emptyEnv)
+      expect(result.status).toBe("changed")
+      expect(result.diff).toBeUndefined()
+      expect(result._dryRunDetail).toBe("(dry-run, diff unavailable: ENOENT)")
+    } finally {
+      rmSync(dir, { recursive: true })
+    }
+  })
+
   it("file.template._applyDryRun emits a diff against the rendered output", async () => {
     const dir = mkdtempSync(join(tmpdir(), "paratix-test-"))
     try {

@@ -5,7 +5,7 @@ import { failed, failedCommand } from "../moduleFailure.js"
 import { registerSecret, unregisterSecret } from "../secretSink.js"
 import { shellQuote } from "../ssh.js"
 import { type Module, type ModuleResult, NEEDS_APPLY, type SshConnection } from "../types.js"
-import { buildKeyValueDiff } from "./diffHelpers.js"
+import { buildDryRunDetail, buildKeyValueDiff } from "./diffHelpers.js"
 
 const EXEC_OPTS = { ignoreExitCode: true, silent: true } as const
 const SYSCTL_DIR = "/etc/sysctl.d"
@@ -530,8 +530,10 @@ async function buildSysctlDryRunResult(
     const desiredValue = input.state === "present" ? input.value : (input.resetValue ?? "")
     const diff = buildKeyValueDiff(input.key, currentValue, desiredValue)
     return diff === "" ? { status: "changed" } : { diff, status: "changed" }
-  } catch {
-    return { status: "changed" }
+  } catch (error) {
+    // R-0001018: surface the underlying error code so a transient SSH error
+    // during the dry-run probe is no longer swallowed silently.
+    return { _dryRunDetail: buildDryRunDetail(error), status: "changed" }
   }
 }
 

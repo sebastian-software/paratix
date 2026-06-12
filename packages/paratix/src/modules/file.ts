@@ -14,7 +14,7 @@ import {
   NEEDS_APPLY,
   type SshConnection,
 } from "../types.js"
-import { buildUnifiedDiff } from "./diffHelpers.js"
+import { buildDryRunDetail, buildUnifiedDiff } from "./diffHelpers.js"
 import { applyDirectoryState } from "./fileDirectoryHelpers.js"
 import { assemble, block, properties, replace, stat } from "./fileExtra.js"
 import { compileUserRegex, hexHashesEqual, localSha256, sha256String } from "./fileHelpers.js"
@@ -448,8 +448,12 @@ export const file = {
             ssh,
           })
           return diff == null ? { status: "changed" } : { diff, status: "changed" }
-        } catch {
-          return { status: "changed" }
+        } catch (error) {
+          // R-0001018: surface the underlying error code (ENOENT, EACCES, …)
+          // via `_dryRunDetail` so the operator can tell a transient SSH
+          // hiccup from a missing local source instead of seeing a silent
+          // "(dry-run)".
+          return { _dryRunDetail: buildDryRunDetail(error), status: "changed" }
         }
       },
       _dryRunDiffProducer: true,
@@ -633,8 +637,11 @@ export const file = {
             ssh,
           })
           return diff == null ? { status: "changed" } : { diff, status: "changed" }
-        } catch {
-          return { status: "changed" }
+        } catch (error) {
+          // R-0001018: surface the underlying error code so the operator can
+          // tell a missing/unreadable template from a render failure when the
+          // dry-run diff cannot be produced.
+          return { _dryRunDetail: buildDryRunDetail(error), status: "changed" }
         }
       },
       _dryRunDiffProducer: true,

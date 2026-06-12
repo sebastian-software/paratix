@@ -1,7 +1,7 @@
 import { failed, failedCommand } from "../moduleFailure.js"
 import { shellQuote } from "../ssh.js"
 import { type Module, type ModuleResult, NEEDS_APPLY, type SshConnection } from "../types.js"
-import { buildKeyValueDiff } from "./diffHelpers.js"
+import { buildDryRunDetail, buildKeyValueDiff } from "./diffHelpers.js"
 
 const HOSTNAME_MAX_LENGTH = 253
 const HOSTNAME_LABEL_MAX_LENGTH = 63
@@ -74,8 +74,11 @@ export const hostname = {
           const currentValue = result.code === 0 ? result.stdout.trim() : null
           const diff = buildKeyValueDiff("hostname", currentValue, name)
           return diff === "" ? { status: "changed" } : { diff, status: "changed" }
-        } catch {
-          return { status: "changed" }
+        } catch (error) {
+          // R-0001018: surface the underlying error code so an SSH hiccup
+          // during the dry-run probe shows up in the runner log instead of a
+          // silent "(dry-run)" marker.
+          return { _dryRunDetail: buildDryRunDetail(error), status: "changed" }
         }
       },
       _dryRunDiffProducer: true,
