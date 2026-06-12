@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.12.4](https://github.com/sebastian-software/paratix/compare/paratix-v0.12.3...paratix-v0.12.4) (2026-06-12)
+
+
+### Bug Fixes
+
+* resolve sftpUploadContent when writable finishes before close ([36beda2](https://github.com/sebastian-software/paratix/commit/36beda2509c8925cad59e9195f256eae81993f7b)), closes [#37](https://github.com/sebastian-software/paratix/issues/37)
+
 ## [0.12.3](https://github.com/sebastian-software/paratix/compare/paratix-v0.12.2...paratix-v0.12.3) (2026-06-12)
 
 
