@@ -52,6 +52,29 @@ describe("buildUnifiedDiff", () => {
   it("normalizes CRLF line endings before diffing", () => {
     expect(buildUnifiedDiff("foo\r\nbar\r\n", "foo\nbar\n")).toBe("")
   })
+
+  it("falls back to a degenerate diff when the LCS table would exceed the cap", () => {
+    // R-0001017: 1001 x 1001 = 1_002_001 effective cells exceed the
+    // `MAX_DIFF_CELLS` soft cap (1_000_000). The helper must return without
+    // allocating the O(n*m) table and still produce a structurally valid
+    // unified diff with delete/insert lines for the differing content.
+    const lineCount = 1001
+    const currentLines: string[] = []
+    const desiredLines: string[] = []
+    for (let index = 0; index < lineCount; index++) {
+      currentLines.push(`current-${String(index)}`)
+      desiredLines.push(`desired-${String(index)}`)
+    }
+    const current = `${currentLines.join("\n")}\n`
+    const desired = `${desiredLines.join("\n")}\n`
+    const diff = buildUnifiedDiff(current, desired)
+    expect(diff.startsWith("--- current\n+++ desired")).toBe(true)
+    expect(diff).toContain("-current-0")
+    expect(diff).toContain("+desired-0")
+    expect(diff).toContain(`-current-${String(lineCount - 1)}`)
+    expect(diff).toContain(`+desired-${String(lineCount - 1)}`)
+    expect(diff.split("\n").some((line) => line.startsWith("@@"))).toBe(true)
+  })
 })
 
 describe("buildKeyValueDiff", () => {

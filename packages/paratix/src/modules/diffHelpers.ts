@@ -18,6 +18,19 @@
 
 const DEFAULT_CONTEXT_LINES = 3
 
+/**
+ * Soft cap on the size of the LCS dynamic-programming table allocated by
+ * {@link buildUnifiedDiff}. The table is `(currentLines.length + 1) *
+ * (desiredLines.length + 1)` entries; one million cells corresponds to roughly
+ * 8 MB of heap (V8 packed-smi arrays) for the table itself, which keeps the
+ * diff helper inside the budget of the runner even on memory-constrained
+ * agents. Inputs above the cap fall back to a degenerate "all-delete +
+ * all-insert" diff that is still format-conformant — the hunk just gets
+ * larger, but the helper never allocates an O(n*m) table that could exhaust
+ * memory.
+ */
+const MAX_DIFF_CELLS = 1_000_000
+
 export type UnifiedDiffOptions = {
   /** Number of unchanged lines printed before and after each change hunk. Defaults to 3. */
   contextLines?: number
@@ -130,12 +143,30 @@ function backtrackLcs(input: {
   return diff
 }
 
+function buildFallbackLineDiff(currentLines: string[], desiredLines: string[]): DiffLine[] {
+  // R-0001017: when the LCS table would exceed `MAX_DIFF_CELLS`, fall back to
+  // a degenerate diff that deletes every current line and inserts every
+  // desired line. The output remains a structurally valid unified diff (just
+  // a single oversized hunk), and the helper never allocates the O(n*m)
+  // table that could otherwise exhaust memory on huge inputs.
+  const fallback: DiffLine[] = []
+  for (const text of currentLines) fallback.push({ operation: "delete", text })
+  for (const text of desiredLines) fallback.push({ operation: "insert", text })
+  return fallback
+}
+
 function computeLineDiff(currentLines: string[], desiredLines: string[]): DiffLine[] {
   if (currentLines.length === 0) {
     return desiredLines.map((text) => ({ operation: "insert" as const, text }))
   }
   if (desiredLines.length === 0) {
     return currentLines.map((text) => ({ operation: "delete" as const, text }))
+  }
+  // R-0001017: bound the LCS allocation. Both lengths are at least one here,
+  // so the comparison reflects the true (n+1)*(m+1) table dimensions closely
+  // enough for the soft-cap purpose without overflowing `Number`.
+  if ((currentLines.length + 1) * (desiredLines.length + 1) > MAX_DIFF_CELLS) {
+    return buildFallbackLineDiff(currentLines, desiredLines)
   }
   const table = buildLcsTable(currentLines, desiredLines)
   return backtrackLcs({ currentLines, desiredLines, table })
