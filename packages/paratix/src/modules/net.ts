@@ -1559,12 +1559,12 @@ async function captureHostsFileSnapshot(conn: SshConnection): Promise<HostsFileS
  * target path before the write.
  *
  * @param conn - The SSH connection.
- * @param mergedLine - The single canonical line to write into the new file.
+ * @param newContent - The full file content to write into the new file (must already include the trailing newline).
  * @returns A `changed` module result on success, or a `failed` result if a symlink is detected at the target path.
  */
 async function createHostsFileWithSymlinkGuard(
   conn: SshConnection,
-  mergedLine: string
+  newContent: string
 ): Promise<ModuleResult> {
   // R-0000277: defense-in-depth — refuse to write through a planted
   // symlink at /etc/hosts before the atomic mv-replace inside writeFile
@@ -1573,8 +1573,55 @@ async function createHostsFileWithSymlinkGuard(
   if (await isSymlink(conn, HOSTS_FILE)) {
     return failed(`[net.hosts] refuses to write through symlink at ${HOSTS_FILE}`)
   }
-  await conn.writeFile(HOSTS_FILE, `${mergedLine}\n`, { mode: HOSTS_FILE_MODE })
+  await conn.writeFile(HOSTS_FILE, newContent, { mode: HOSTS_FILE_MODE })
   return { status: "changed" }
+}
+
+/**
+ * Result of {@link computeHostsPresentContent}: either no mutation is
+ * required (`changed: false`) or the desired full file content with the
+ * `existed` flag preserved from the snapshot so the apply path can
+ * decide between create and overwrite.
+ */
+type ComputedHostsContent =
+  | { changed: false }
+  | { changed: true; existed: boolean; newContent: string }
+
+/**
+ * Compute the prospective `/etc/hosts` content for a `state: "present"`
+ * reconciliation. Shared by {@link applyHostsPresent} (which then
+ * decides between create and overwrite based on `existed`) and the
+ * dry-run path (which only needs the resulting content for the diff).
+ *
+ * The helper is pure: it never touches the SSH connection and produces
+ * the same canonical-merge result that the apply path would write.
+ *
+ * @param snapshot - The captured snapshot of `/etc/hosts`.
+ * @param parameters - The cached hosts-state context.
+ * @returns A `changed: false` sentinel when the file already matches the
+ * desired state, or the full new file content plus the `existed` flag
+ * otherwise.
+ */
+function computeHostsPresentContent(
+  snapshot: HostsFileSnapshot,
+  parameters: HostsStateParameters
+): ComputedHostsContent {
+  const { isSameIpLine } = parameters
+  const { existed, lines } = snapshot
+  const mergedLine = buildMergedHostsLine(lines, parameters)
+  if (!existed) return { changed: true, existed: false, newContent: `${mergedLine}\n` }
+  // The file is canonical when all same-IP hostnames are consolidated
+  // into one stable line. Foreign hostnames already associated with the
+  // IP are preserved and desired hostnames are appended if missing.
+  const sameIpLines = lines.filter((line) => isSameIpLine(line))
+  const alreadyCanonical = sameIpLines.length === 1 && sameIpLines[0]?.trim() === mergedLine
+  if (alreadyCanonical) return { changed: false }
+  const filtered = lines.filter((line) => !isSameIpLine(line))
+  // Drop a single trailing blank introduced by `split("\n")` so we
+  // do not accumulate empty lines on every replacement.
+  if (filtered.length > 0 && filtered.at(-1) === "") filtered.pop()
+  filtered.push(mergedLine)
+  return { changed: true, existed: true, newContent: `${filtered.join("\n")}\n` }
 }
 
 /**
@@ -1590,23 +1637,9 @@ async function applyHostsPresent(
   parameters: HostsStateParameters,
   snapshot: HostsFileSnapshot
 ): Promise<ModuleResult> {
-  const { isSameIpLine } = parameters
-  const { content, existed, lines } = snapshot
-  const mergedLine = buildMergedHostsLine(lines, parameters)
-  if (!existed) return createHostsFileWithSymlinkGuard(conn, mergedLine)
-  // The file is canonical when all same-IP hostnames are consolidated
-  // into one stable line. Foreign hostnames already associated with the
-  // IP are preserved and desired hostnames are appended if missing.
-  const sameIpLines = lines.filter((line) => isSameIpLine(line))
-  const alreadyCanonical = sameIpLines.length === 1 && sameIpLines[0]?.trim() === mergedLine
-  if (alreadyCanonical) return { status: "ok" }
-
-  const filtered = lines.filter((line) => !isSameIpLine(line))
-  // Drop a single trailing blank introduced by `split("\n")` so we
-  // do not accumulate empty lines on every replacement.
-  if (filtered.length > 0 && filtered.at(-1) === "") filtered.pop()
-  filtered.push(mergedLine)
-  const newContent = `${filtered.join("\n")}\n`
+  const result = computeHostsPresentContent(snapshot, parameters)
+  if (!result.changed) return { status: "ok" }
+  if (!result.existed) return createHostsFileWithSymlinkGuard(conn, result.newContent)
   // R-0000677: defense-in-depth — also refuse to write through a planted
   // symlink in the existed path. The create path already guards via
   // `createHostsFileWithSymlinkGuard`, but a swap between the snapshot
@@ -1618,8 +1651,8 @@ async function applyHostsPresent(
   }
   await guardedWriteFile(conn, {
     mode: HOSTS_FILE_MODE,
-    newContent,
-    originalContent: content,
+    newContent: result.newContent,
+    originalContent: snapshot.content,
     remotePath: HOSTS_FILE,
   })
   return { status: "changed" }
@@ -1791,10 +1824,9 @@ function rejectSensitiveUrlSecretsOverHttp(url: string): void {
 
 /**
  * Compute the prospective `/etc/hosts` content for a `net.hosts` (state =
- * "present") mutation without writing anything. Mirrors the
- * canonical-merge logic in {@link applyHostsPresent} so the dry-run diff
- * stays aligned with the apply path. Returns the proposed new file
- * content, or `null` when the file already reflects the desired state.
+ * "present") mutation without writing anything. Thin wrapper around the
+ * shared {@link computeHostsPresentContent} helper so the dry-run diff
+ * stays aligned with the apply path by construction.
  *
  * @param snapshot - The captured snapshot of `/etc/hosts`.
  * @param parameters - The cached hosts-state context.
@@ -1804,17 +1836,8 @@ function computePresentHostsContent(
   snapshot: HostsFileSnapshot,
   parameters: HostsStateParameters
 ): null | string {
-  const { isSameIpLine } = parameters
-  const { existed, lines } = snapshot
-  const mergedLine = buildMergedHostsLine(lines, parameters)
-  if (!existed) return `${mergedLine}\n`
-  const sameIpLines = lines.filter((line) => isSameIpLine(line))
-  const alreadyCanonical = sameIpLines.length === 1 && sameIpLines[0]?.trim() === mergedLine
-  if (alreadyCanonical) return null
-  const filtered = lines.filter((line) => !isSameIpLine(line))
-  if (filtered.length > 0 && filtered.at(-1) === "") filtered.pop()
-  filtered.push(mergedLine)
-  return `${filtered.join("\n")}\n`
+  const result = computeHostsPresentContent(snapshot, parameters)
+  return result.changed ? result.newContent : null
 }
 
 /**
