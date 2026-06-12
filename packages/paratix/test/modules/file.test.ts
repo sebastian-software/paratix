@@ -3681,6 +3681,29 @@ describe("file.* dry-run diff", () => {
     }
   })
 
+  it("file.copy._applyDryRun skips binary local files instead of producing a U+FFFD-laden diff", async () => {
+    // R-0001020: a binary source (NUL bytes present) used to be decoded as
+    // utf8, which turned every non-UTF-8 byte into a replacement character
+    // (U+FFFD) and emitted a useless diff. The dry-run must short-circuit
+    // before the utf8 read and surface the binary-file detail instead.
+    const dir = mkdtempSync(join(tmpdir(), "paratix-test-"))
+    try {
+      const localPath = join(dir, "binary-source.bin")
+      writeFileSync(localPath, Buffer.from([0x00, 0xff, 0x00, 0xfe]))
+      const ssh = createMockSsh({
+        "[ -e '/remote/out.bin' ]": { code: 0 },
+        "cat '/remote/out.bin'": { code: 0, stdout: "ignored" },
+      })
+      const mod = file.copy("/remote/out.bin", localPath)
+      const result = await mod._applyDryRun!(ssh, emptyEnv)
+      expect(result.status).toBe("changed")
+      expect(result.diff).toBeUndefined()
+      expect(result._dryRunDetail).toBe("(dry-run, binary file)")
+    } finally {
+      rmSync(dir, { recursive: true })
+    }
+  })
+
   it("file.copy._applyDryRun surfaces the local readFile error code via _dryRunDetail", async () => {
     // R-0001018: the catch around the dry-run probe used to swallow every
     // exception silently. Point the module at a non-existent local file so

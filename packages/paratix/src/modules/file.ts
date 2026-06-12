@@ -439,8 +439,20 @@ export const file = {
       async _applyDryRun(ssh: null | SshConnection): Promise<ModuleResult> {
         if (!ssh) return { status: "changed" }
         try {
+          // R-0001020: read the source as a Buffer first so we can detect
+          // binary payloads before forcing them through `utf8` decoding.
+          // Reading a binary file as `utf8` would silently replace every
+          // non-UTF-8 byte with U+FFFD and render a meaningless unified diff;
+          // worse, the diff output could contain literal control bytes from
+          // the original file. A NUL-byte scan is the same heuristic git uses
+          // and is sufficient to identify the common binary types (images,
+          // archives, executables) that playbooks copy verbatim.
           // eslint-disable-next-line security/detect-non-literal-fs-filename -- localPath comes from the playbook author
-          const desired = await readFile(localPath, "utf8")
+          const buffer = await readFile(localPath)
+          if (buffer.includes(0)) {
+            return { _dryRunDetail: "(dry-run, binary file)", status: "changed" }
+          }
+          const desired = buffer.toString("utf8")
           const diff = await buildFileContentDryRunDiff({
             desired,
             desiredLabel: localPath,
