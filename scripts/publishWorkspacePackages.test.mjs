@@ -379,26 +379,10 @@ describe("publishWorkspacePackages", () => {
       ...GIT_PREFLIGHT_CALLS,
       ["npm", "view", CREATE_PARATIX_SPECIFIER, "version", "--json"],
       ["npm", "view", PARATIX_SPECIFIER, "version", "--json"],
-      [
-        "pnpm",
-        "publish",
-        ABSOLUTE_PARATIX_DIRECTORY,
-        "--no-git-checks",
-        "--provenance",
-        "--tag",
-        "latest",
-      ],
+      ["pnpm", "publish", ABSOLUTE_PARATIX_DIRECTORY, "--no-git-checks", "--tag", "latest"],
       ["npm", "view", PARATIX_SPECIFIER, "version", "--json"],
       ["npm", "view", CREATE_PARATIX_SPECIFIER, "version", "--json"],
-      [
-        "pnpm",
-        "publish",
-        ABSOLUTE_CREATE_PARATIX_DIRECTORY,
-        "--no-git-checks",
-        "--provenance",
-        "--tag",
-        "latest",
-      ],
+      ["pnpm", "publish", ABSOLUTE_CREATE_PARATIX_DIRECTORY, "--no-git-checks", "--tag", "latest"],
       ["npm", "view", CREATE_PARATIX_SPECIFIER, "version", "--json"],
     ])
   })

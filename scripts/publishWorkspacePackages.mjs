@@ -616,7 +616,11 @@ async function publishPackage({
       "publish",
       packageInfo.directory,
       "--no-git-checks",
-      "--provenance",
+      // R-0001025: npm's sigstore provenance verification rejects releases
+      // when the GitHub source repository is marked private ("Unsupported
+      // GitHub Actions source repository visibility"). The repo is currently
+      // private, so dropping `--provenance` is the only way the publish step
+      // can succeed. Re-enable provenance once the repository is made public.
       "--tag",
       distributionTag,
     ],
