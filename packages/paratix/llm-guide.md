@@ -709,6 +709,77 @@ async check(ssh) {
 }
 ```
 
+## Dry-Run Diff Output (`--diff`)
+
+Paratix runs a playbook in dry-run mode via `paratix apply <file> --dry-run`, which
+reports per-module `changed (dry-run)` or `ok` based on each module's `check()`.
+
+`--diff` enables a second, opt-in layer: modules that mark themselves as diff
+producers also render a unified-diff block under their status line so the user
+sees _what_ would change, not only _that_ something would change.
+
+```
+$ paratix apply server.ts --dry-run --diff
+  ↺  /etc/ssh/sshd_config                            changed  (dry-run)
+     │ --- /etc/ssh/sshd_config
+     │ +++ /local/path/sshd_config
+     │ -Port 22
+     │ +Port 2222
+```
+
+Rules:
+
+- `--diff` requires `--dry-run`. The CLI rejects `paratix apply <file> --diff`
+  without `--dry-run` before any SSH connection or playbook side effect.
+- Without `--diff`, the dry-run runs are byte-identical to before: no extra
+  remote round-trips, no diff output.
+- Modules that do not opt in keep showing only `changed (dry-run)`.
+- Every diff line is masked through the registered-secret sink and a terminal
+  sanitizer before printing, so secret-laden file contents never leak verbatim.
+
+### Implementing a Diff for a Custom Module
+
+A module participates in `--diff` output by setting `_dryRunDiffProducer: true`
+and implementing `_applyDryRun`. The runner calls `_applyDryRun` only when the
+user passed `--diff` and `check()` returned `"needs-apply"`.
+
+```typescript
+import { buildUnifiedDiff } from "paratix/modules" // not exported publicly today
+// or, for scalar drift:
+import { buildKeyValueDiff } from "paratix/modules"
+```
+
+```typescript
+return {
+  _dryRunDiffProducer: true,
+  async _applyDryRun(ssh) {
+    if (!ssh) return { status: "changed" }
+    try {
+      const current = (await ssh.exists(remotePath)) ? await ssh.readFile(remotePath) : ""
+      const diff = buildUnifiedDiff(current, desired, {
+        currentLabel: remotePath,
+        desiredLabel: localPath,
+      })
+      return diff === "" ? { status: "changed" } : { diff, status: "changed" }
+    } catch {
+      // A read failure must not abort the dry-run. Drop the diff and fall back
+      // to the generic "(dry-run)" suffix.
+      return { status: "changed" }
+    }
+  },
+  async check(ssh) {
+    /* unchanged */
+  },
+  async apply(ssh) {
+    /* unchanged */
+  },
+  name: "myModule: ...",
+}
+```
+
+The diff string is plain text — no ANSI codes. The output layer applies colors
+(`-` red, `+` green, headers dimmed) and indentation.
+
 ## Do's and Don'ts
 
 ### DO

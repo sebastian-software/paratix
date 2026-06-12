@@ -343,6 +343,40 @@ describe("printModuleResult", () => {
       })
     }
   })
+
+  it("renders unified-diff lines below the status when a diff is provided", () => {
+    const diff = ["--- /etc/foo", "+++ desired", "-old", "+new"].join("\n")
+    printModuleResult("file.copy: /etc/foo", "changed", "(dry-run)", diff)
+
+    // 1 status line + 4 diff lines.
+    expect(consoleLogs).toHaveLength(5)
+    expect(consoleLogs[0]).toContain("file.copy: /etc/foo")
+    expect(consoleLogs[1]).toContain("--- /etc/foo")
+    expect(consoleLogs[2]).toContain("+++ desired")
+    expect(consoleLogs[3]).toContain("-old")
+    expect(consoleLogs[4]).toContain("+new")
+  })
+
+  it("masks registered secrets that appear inside the diff", () => {
+    const secret = "diff-secret-ABCXYZ"
+    registerSecret(secret)
+    const diff = ["--- /etc/foo", "+++ desired", `-token = ${secret}`, "+token = rotated"].join(
+      "\n"
+    )
+
+    printModuleResult("file.copy: /etc/foo", "changed", "(dry-run)", diff)
+
+    const combined = consoleLogs.join("\n")
+    expect(combined).not.toContain(secret)
+    expect(combined).toContain("[REDACTED]")
+  })
+
+  it("omits diff output when the diff string is empty", () => {
+    printModuleResult("noop", "changed", "(dry-run)", "")
+
+    expect(consoleLogs).toHaveLength(1)
+    expect(consoleLogs[0]).toContain("noop")
+  })
 })
 
 describe("printRecipeHeader", () => {

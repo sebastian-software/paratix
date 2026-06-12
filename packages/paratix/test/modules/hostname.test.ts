@@ -87,4 +87,20 @@ describe("hostname.set", () => {
     )
     expect(result.error?.message).toContain("permission denied")
   })
+
+  it("declares itself as a dry-run diff producer", () => {
+    const mod = hostname.set("my-server")
+    expect(mod._dryRunDiffProducer).toBe(true)
+    expect(typeof mod._applyDryRun).toBe("function")
+  })
+
+  it("_applyDryRun returns a key-value diff when the persisted hostname differs", async () => {
+    const ssh = createMockSsh({
+      "hostnamectl --static": { code: 0, stdout: "old-server" },
+    })
+    const mod = hostname.set("my-server")
+    const result = await mod._applyDryRun!(ssh, emptyEnv)
+    expect(result.status).toBe("changed")
+    expect(result.diff).toBe("-hostname = old-server\n+hostname = my-server")
+  })
 })

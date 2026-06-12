@@ -2218,6 +2218,7 @@ describe("CLI entrypoint", () => {
       await runApplyCommand(
         playbookPath,
         {
+          diff: false,
           dryRun: true,
           env: { INLINE_ENV: "inline" },
           envFile: envFilePath,
@@ -2242,6 +2243,7 @@ describe("CLI entrypoint", () => {
         ...capturedOptions,
         envOverrides: { ...capturedOptions.envOverrides },
       }).toStrictEqual({
+        diff: false,
         dryRun: true,
         envFile: envFilePath,
         envOverrides: { INLINE_ENV: "inline", PARATIX_FIRST_RUN: "true" },
@@ -2279,6 +2281,7 @@ describe("CLI entrypoint", () => {
       await runApplyCommand(
         playbookPath,
         {
+          diff: false,
           dryRun: true,
           env: {},
           firstRun: false,
@@ -2358,6 +2361,81 @@ describe("CLI entrypoint", () => {
       process.exitCode = previousExitCode
       exitSpy.mockRestore()
       errorSpy.mockRestore()
+    }
+  })
+})
+
+describe("runApplyCommand --diff validation", () => {
+  it("rejects --diff without --dry-run before any playbook side effects", async () => {
+    const playbookSpy = vi.fn()
+    const logSpy = vi.spyOn(console, "log").mockImplementation(() => {
+      /* suppress CLI header */
+    })
+
+    try {
+      await expect(
+        runApplyCommand(
+          "/non/existent/playbook.ts",
+          {
+            diff: true,
+            dryRun: false,
+            env: {},
+            firstRun: false,
+            verbose: false,
+          },
+          async (_definition, _options) => {
+            playbookSpy()
+            await Promise.resolve()
+          }
+        )
+      ).rejects.toThrow(/--diff requires --dry-run/v)
+      expect(playbookSpy).not.toHaveBeenCalled()
+    } finally {
+      logSpy.mockRestore()
+    }
+  })
+
+  it("forwards diff: true to the runner when --diff and --dry-run are combined", async () => {
+    const tempDirectory = mkdtempSync(join(tmpdir(), "paratix-cli-diff-"))
+    const playbookPath = join(tempDirectory, "diff-playbook.mjs")
+    const calls: Array<{ options: unknown }> = []
+    const logSpy = vi.spyOn(console, "log").mockImplementation(() => {
+      /* suppress CLI header */
+    })
+
+    try {
+      writeFileSync(
+        playbookPath,
+        [
+          "export default {",
+          "  name: 'test-server',",
+          "  host: '1.2.3.4',",
+          "  ssh: { user: 'root', ports: [22] },",
+          "  run: ['noop'],",
+          "}",
+        ].join("\n")
+      )
+
+      await runApplyCommand(
+        playbookPath,
+        {
+          diff: true,
+          dryRun: true,
+          env: {},
+          firstRun: false,
+          verbose: false,
+        },
+        async (_definition, options) => {
+          await Promise.resolve()
+          calls.push({ options })
+        }
+      )
+
+      expect(calls).toHaveLength(1)
+      expect(calls[0]?.options).toMatchObject({ diff: true, dryRun: true })
+    } finally {
+      logSpy.mockRestore()
+      rmSync(tempDirectory, { force: true, recursive: true })
     }
   })
 })

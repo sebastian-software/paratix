@@ -76,6 +76,16 @@ export type ModuleResult = {
   _stopRun?: true
   /** Optional short detail appended to the printed module status line. */
   detail?: string
+  /**
+   * Optional multi-line unified-diff string rendered below the module status
+   * line when the runner was started with the `--diff` CLI flag (or with
+   * the runner option `diff`). Modules that participate in diff output produce
+   * the string in their `_applyDryRun` hook and mark themselves with
+   * `_dryRunDiffProducer: true`. The runner never modifies the string; the
+   * output layer applies registered-secret masking and terminal sanitizing
+   * before printing each line.
+   */
+  diff?: string
   /** Optional error details consumed by the runner for centralized CLI output. */
   error?: Error
   /** Optional typed meta entries for env propagation and runner control-plane updates. */
@@ -176,6 +186,15 @@ export type Module = {
    * @internal
    */
   _dryRunBlocker?: true
+  /**
+   * Internal marker for modules that can produce a {@link ModuleResult.diff}
+   * during dry-run by running their `_applyDryRun` hook. The runner only
+   * dispatches `_applyDryRun` for diff production when the user passed the
+   * `--diff` CLI flag (i.e. the runner option `diff` is `true`); otherwise the
+   * generic `(dry-run)` suffix is shown without any extra remote round-trips.
+   * @internal
+   */
+  _dryRunDiffProducer?: true
   /**
    * Internal marker for non-mutating modules whose apply step emits meta that must
    * still be materialized during dry-run so downstream modules see the same environment.

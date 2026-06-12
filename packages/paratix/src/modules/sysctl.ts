@@ -1,9 +1,11 @@
+/* eslint-disable max-lines -- the live-value rollback path and the new --diff dry-run helper share the module-local helpers; splitting them out across files would split the rollback choreography. */
 import { createHash } from "node:crypto"
 
 import { failed, failedCommand } from "../moduleFailure.js"
 import { registerSecret, unregisterSecret } from "../secretSink.js"
 import { shellQuote } from "../ssh.js"
 import { type Module, type ModuleResult, NEEDS_APPLY, type SshConnection } from "../types.js"
+import { buildKeyValueDiff } from "./diffHelpers.js"
 
 const EXEC_OPTS = { ignoreExitCode: true, silent: true } as const
 const SYSCTL_DIR = "/etc/sysctl.d"
@@ -496,6 +498,44 @@ async function applyAbsentState(
 }
 
 /**
+ * Build the dry-run diff for a sysctl.set module by reading the live runtime
+ * value and comparing it against the desired one. The helper returns a
+ * `ModuleResult` so the caller can directly return its output.
+ *
+ * @param conn - The SSH connection.
+ * @param input - Bundled parameters.
+ * @param input.configPath - The persistence file path under `/etc/sysctl.d/`.
+ * @param input.key - The kernel parameter name to inspect on the remote host.
+ * @param input.resetValue - Optional live value to restore when `state` is `"absent"`.
+ * @param input.state - Whether the module manages `"present"` or `"absent"`.
+ * @param input.value - The desired value when `state` is `"present"`.
+ * @returns A `{ status: "changed" }` result with an optional `diff` field.
+ */
+async function buildSysctlDryRunResult(
+  conn: SshConnection,
+  input: {
+    configPath: string
+    key: string
+    resetValue: string | undefined
+    state: "absent" | "present"
+    value: string
+  }
+): Promise<ModuleResult> {
+  try {
+    const live = await conn.exec(`sysctl -n ${shellQuote(input.key)}`, EXEC_OPTS)
+    const currentValue = live.code === 0 ? live.stdout.trim() : null
+    if (input.state === "absent" && input.resetValue === undefined) {
+      return { diff: `-${input.configPath}`, status: "changed" }
+    }
+    const desiredValue = input.state === "present" ? input.value : (input.resetValue ?? "")
+    const diff = buildKeyValueDiff(input.key, currentValue, desiredValue)
+    return diff === "" ? { status: "changed" } : { diff, status: "changed" }
+  } catch {
+    return { status: "changed" }
+  }
+}
+
+/**
  * Check whether the `absent` state has converged: the persistence file is
  * gone and (if `resetValue` is set) the live runtime value matches.
  *
@@ -558,6 +598,11 @@ export const sysctl = {
     const expectedContent = buildSysctlConfig(key, value)
 
     return {
+      async _applyDryRun(conn: null | SshConnection): Promise<ModuleResult> {
+        if (!conn) return { status: "changed" }
+        return buildSysctlDryRunResult(conn, { configPath, key, resetValue, state, value })
+      },
+      _dryRunDiffProducer: true,
       async apply(conn: null | SshConnection): Promise<ModuleResult> {
         if (!conn) return failed(`[sysctl.set: ${key}] SSH connection is required`)
         if (state === "present") {

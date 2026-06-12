@@ -9,6 +9,7 @@ import type {
   ServerDefinition,
 } from "./types.js"
 
+import { shouldExecuteApplyDuringDryRun } from "./dryRunDispatch.js"
 import { dryRunRecipeModule } from "./dryRunRecipe.js"
 import { loadDotEnvironment, mergeEnvironment } from "./environment.js"
 import {
@@ -161,6 +162,15 @@ export const __testing = {
 }
 
 export type RunOptions = {
+  /**
+   * When `true`, the runner asks dry-run-capable modules to also produce a
+   * unified-diff string in {@link ModuleResult.diff}. The diff is rendered
+   * below the status line of every module that opts in via the
+   * `_dryRunDiffProducer` marker. Implies `dryRun`; the CLI rejects `--diff`
+   * without `--dry-run` so this option only has an effect together with it.
+   * Defaults to `false`.
+   */
+  diff?: boolean
   /** When `true`, modules report what would change without applying anything. Defaults to `false`. */
   dryRun?: boolean
   /** Path to a `.env` file whose variables are merged into the run environment. */
@@ -329,6 +339,7 @@ function interruptedBeforeApply(
 
 async function applyCheckedModule(parameters: {
   currentEnvironment: Environment
+  diff?: boolean
   dryRun?: boolean
   rebootGrace: RebootGraceContext
   shutdownSignal: () => NodeJS.Signals | null
@@ -344,6 +355,7 @@ async function applyCheckedModule(parameters: {
 
   return applyModule({
     currentEnvironment: parameters.currentEnvironment,
+    diff: parameters.diff,
     dryRun: parameters.dryRun,
     rebootGrace: parameters.rebootGrace,
     shutdownSignal: parameters.shutdownSignal,
@@ -351,14 +363,6 @@ async function applyCheckedModule(parameters: {
     targetModule: parameters.targetModule,
     verbose: parameters.verbose,
   })
-}
-
-function shouldExecuteApplyDuringDryRun(module: Module): boolean {
-  return (
-    module._applyDryRun != null ||
-    module._dryRunBlocker === true ||
-    module._dryRunMetaProducer === true
-  )
 }
 
 function handleCaughtStepError(parameters: {
@@ -536,6 +540,7 @@ async function handleMetaAndBuildResult(parameters: {
 }
 
 async function runDryRunRecipeModule(parameters: {
+  diff: boolean
   environment: Environment
   recipeModule: RecipeModule
   shutdownSignal: () => NodeJS.Signals | null
@@ -544,7 +549,7 @@ async function runDryRunRecipeModule(parameters: {
 }): Promise<StepResult> {
   return dryRunRecipeModule({
     environment: parameters.environment,
-    options: { verbose: parameters.verbose },
+    options: { diff: parameters.diff, verbose: parameters.verbose },
     recipeModule: parameters.recipeModule,
     shutdownSignal: parameters.shutdownSignal,
     ssh: parameters.ssh,
@@ -552,6 +557,7 @@ async function runDryRunRecipeModule(parameters: {
 }
 
 async function runRecipeModule(parameters: {
+  diff: boolean
   dryRun: boolean
   environment: Environment
   rebootGrace: RebootGraceContext
@@ -561,11 +567,21 @@ async function runRecipeModule(parameters: {
   stats: RunStats
   verbose: boolean
 }): Promise<StepResult> {
-  const { dryRun, environment, rebootGrace, recipeModule, shutdownSignal, ssh, stats, verbose } =
-    parameters
+  const {
+    diff,
+    dryRun,
+    environment,
+    rebootGrace,
+    recipeModule,
+    shutdownSignal,
+    ssh,
+    stats,
+    verbose,
+  } = parameters
   try {
     if (dryRun) {
       return await runDryRunRecipeModule({
+        diff,
         environment,
         recipeModule,
         shutdownSignal,
@@ -612,8 +628,35 @@ async function runRecipeModule(parameters: {
   }
 }
 
+async function executeModuleForApply(parameters: {
+  connection: null | SshConnectionImpl
+  currentEnvironment: Environment
+  dryRun: boolean
+  rebootGrace: RebootGraceContext
+  shutdownSignal: () => NodeJS.Signals | null
+  ssh: SshConnectionImpl
+  targetModule: Module
+}): Promise<ModuleResult> {
+  const { connection, currentEnvironment, dryRun, rebootGrace, ssh, targetModule } = parameters
+  if (dryRun && targetModule._applyDryRun != null) {
+    return targetModule._applyDryRun(connection, currentEnvironment, {
+      shutdownSignal: parameters.shutdownSignal,
+    })
+  }
+  if (targetModule._supportsChildStepHook === true) {
+    return targetModule.apply(connection, currentEnvironment, {
+      async onChildStep(step) {
+        await applyRunnerControlPlaneMeta(ssh, step, rebootGrace)
+      },
+      shutdownSignal: parameters.shutdownSignal,
+    })
+  }
+  return targetModule.apply(connection, currentEnvironment)
+}
+
 async function applyModule(parameters: {
   currentEnvironment: Environment
+  diff?: boolean
   dryRun?: boolean
   rebootGrace: RebootGraceContext
   shutdownSignal: () => NodeJS.Signals | null
@@ -621,23 +664,25 @@ async function applyModule(parameters: {
   targetModule: Module
   verbose: boolean
 }): Promise<StepResult> {
-  const { currentEnvironment, dryRun = false, rebootGrace, ssh, targetModule, verbose } = parameters
+  const {
+    currentEnvironment,
+    diff = false,
+    dryRun = false,
+    rebootGrace,
+    ssh,
+    targetModule,
+    verbose,
+  } = parameters
   const connection = targetModule.local === true ? null : ssh
-  let result: ModuleResult
-  if (dryRun && targetModule._applyDryRun != null) {
-    result = await targetModule._applyDryRun(connection, currentEnvironment, {
-      shutdownSignal: parameters.shutdownSignal,
-    })
-  } else if (targetModule._supportsChildStepHook === true) {
-    result = await targetModule.apply(connection, currentEnvironment, {
-      async onChildStep(step) {
-        await applyRunnerControlPlaneMeta(ssh, step, rebootGrace)
-      },
-      shutdownSignal: parameters.shutdownSignal,
-    })
-  } else {
-    result = await targetModule.apply(connection, currentEnvironment)
-  }
+  const result = await executeModuleForApply({
+    connection,
+    currentEnvironment,
+    dryRun,
+    rebootGrace,
+    shutdownSignal: parameters.shutdownSignal,
+    ssh,
+    targetModule,
+  })
   const stepResult = await handleMetaAndBuildResult({
     dryRun,
     environment: currentEnvironment,
@@ -646,7 +691,8 @@ async function applyModule(parameters: {
     ssh,
   })
   const detail = dryRun ? (result._dryRunDetail ?? "(dry-run)") : result.detail
-  printModuleResult(targetModule.name, result.status, detail)
+  const diffOutput = dryRun && diff ? result.diff : undefined
+  printModuleResult(targetModule.name, result.status, detail, diffOutput)
   if (result.status === "failed" && result.error != null) {
     printCommandFailure(result.error, verbose)
   }
@@ -669,6 +715,7 @@ function buildDryRunChangedResult(environment: Environment): StepResult {
 }
 
 type RegularModuleArguments = {
+  diff: boolean
   dryRun: boolean
   env: Environment
   rebootGrace: RebootGraceContext
@@ -679,7 +726,7 @@ type RegularModuleArguments = {
 }
 
 async function runRegularModule(parameters: RegularModuleArguments): Promise<StepResult> {
-  const { dryRun, env, rebootGrace, ssh, targetModule, verbose } = parameters
+  const { diff, dryRun, env, rebootGrace, ssh, targetModule, verbose } = parameters
   const shutdownSignal = parameters.shutdownSignal
 
   try {
@@ -691,9 +738,10 @@ async function runRegularModule(parameters: RegularModuleArguments): Promise<Ste
     }
 
     if (dryRun) {
-      if (shouldExecuteApplyDuringDryRun(targetModule)) {
+      if (shouldExecuteApplyDuringDryRun(targetModule, diff)) {
         return await applyCheckedModule({
           currentEnvironment: env,
+          diff,
           dryRun: true,
           rebootGrace,
           shutdownSignal,
@@ -728,6 +776,7 @@ async function runRegularModule(parameters: RegularModuleArguments): Promise<Ste
 
 type LoopArguments = {
   definitionSignals?: Module[]
+  diff: boolean
   dryRun: boolean
   env: Environment
   modules: Module[]
@@ -861,6 +910,7 @@ async function flushTopLevelSignalsIfRequested(parameters: {
 async function createModuleStepPromise(parameters: {
   currentEnvironment: Environment
   currentModule: Module
+  diff: boolean
   dryRun: boolean
   rebootGrace: RebootGraceContext
   shutdownSignal: () => NodeJS.Signals | null
@@ -871,6 +921,7 @@ async function createModuleStepPromise(parameters: {
   const {
     currentEnvironment,
     currentModule,
+    diff,
     dryRun,
     rebootGrace,
     shutdownSignal,
@@ -881,6 +932,7 @@ async function createModuleStepPromise(parameters: {
 
   return isRecipe(currentModule)
     ? runRecipeModule({
+        diff,
         dryRun,
         environment: currentEnvironment,
         rebootGrace,
@@ -891,6 +943,7 @@ async function createModuleStepPromise(parameters: {
         verbose,
       })
     : runRegularModule({
+        diff,
         dryRun,
         env: currentEnvironment,
         rebootGrace,
@@ -906,8 +959,17 @@ async function runModuleLoop(parameters: LoopArguments): Promise<{
   signalsPending: boolean
   stopRun?: true
 }> {
-  const { definitionSignals, dryRun, modules, rebootGrace, shutdownSignal, ssh, stats, verbose } =
-    parameters
+  const {
+    definitionSignals,
+    diff,
+    dryRun,
+    modules,
+    rebootGrace,
+    shutdownSignal,
+    ssh,
+    stats,
+    verbose,
+  } = parameters
   // R-0000842: hold loop state in a single `let` binding and reassign
   // wholesale each iteration. The previous code created the value as
   // `const` and used `Object.assign(loopState, applyLoopResultToState(...))`
@@ -928,6 +990,7 @@ async function runModuleLoop(parameters: LoopArguments): Promise<{
     const stepPromise = createModuleStepPromise({
       currentEnvironment: loopState.currentEnvironment,
       currentModule,
+      diff,
       dryRun,
       rebootGrace,
       shutdownSignal,
@@ -1025,6 +1088,7 @@ async function connectAndRegister(parameters: {
 
 type ExecuteRunArguments = {
   definition: ServerDefinition
+  diff: boolean
   dryRun: boolean
   environment: Environment
   rebootGrace: RebootGraceContext
@@ -1035,12 +1099,22 @@ type ExecuteRunArguments = {
 }
 
 async function executeRun(parameters: ExecuteRunArguments): Promise<void> {
-  const { definition, dryRun, environment, rebootGrace, shutdownSignal, ssh, stats, verbose } =
-    parameters
+  const {
+    definition,
+    diff,
+    dryRun,
+    environment,
+    rebootGrace,
+    shutdownSignal,
+    ssh,
+    stats,
+    verbose,
+  } = parameters
 
   printRecipeHeader(definition.name)
   const loopResult = await runModuleLoop({
     definitionSignals: definition.signals,
+    diff,
     dryRun,
     env: environment,
     modules: definition.run,
@@ -1134,7 +1208,7 @@ export async function runPlaybook(
   options: RunOptions = {}
 ): Promise<void> {
   validateServerDefinition(definition, { allowEmptyRun: true })
-  const { dryRun = false, verbose = false } = options
+  const { diff = false, dryRun = false, verbose = false } = options
   const environment = await initializeEnvironment(options, definition)
   const { handleShutdownSignal, promptAbortSignal, rebootGrace, setSsh, shutdownSignal } =
     initializeRunPlaybookContext(options)
@@ -1170,6 +1244,7 @@ export async function runPlaybook(
       await withRunScopedSecrets(async () =>
         executeRun({
           definition,
+          diff,
           dryRun,
           environment,
           rebootGrace,

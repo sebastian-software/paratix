@@ -1,6 +1,7 @@
 import { failed, failedCommand } from "../moduleFailure.js"
 import { shellQuote } from "../ssh.js"
 import { type Module, type ModuleResult, NEEDS_APPLY, type SshConnection } from "../types.js"
+import { buildKeyValueDiff } from "./diffHelpers.js"
 
 const HOSTNAME_MAX_LENGTH = 253
 const HOSTNAME_LABEL_MAX_LENGTH = 63
@@ -63,6 +64,21 @@ export const hostname = {
   set(name: string): Module {
     validateHostname(name)
     return {
+      async _applyDryRun(ssh: null | SshConnection): Promise<ModuleResult> {
+        if (!ssh) return { status: "changed" }
+        try {
+          const result = await ssh.exec("hostnamectl --static", {
+            ignoreExitCode: true,
+            silent: true,
+          })
+          const currentValue = result.code === 0 ? result.stdout.trim() : null
+          const diff = buildKeyValueDiff("hostname", currentValue, name)
+          return diff === "" ? { status: "changed" } : { diff, status: "changed" }
+        } catch {
+          return { status: "changed" }
+        }
+      },
+      _dryRunDiffProducer: true,
       async apply(ssh: null | SshConnection): Promise<ModuleResult> {
         if (!ssh) return failed(`[hostname.set: ${name}] SSH connection is required`)
         const result = await ssh.exec(`hostnamectl set-hostname ${shellQuote(name)}`, {

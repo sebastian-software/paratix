@@ -684,6 +684,7 @@ export async function loadServerDefinitionFromFile(
 }
 
 type ApplyCommandOptions = {
+  diff: boolean
   dryRun: boolean
   env: Environment
   envFile?: string
@@ -694,11 +695,32 @@ type ApplyCommandOptions = {
 
 type RunPlaybookFunction = (definition: ServerDefinition, options: RunOptions) => Promise<void>
 
+/**
+ * Thrown when the user combined incompatible CLI flags (e.g. `--diff` without
+ * `--dry-run`). Carries a fixed exit code so the top-level error handler can
+ * surface a clean message without a stack trace.
+ */
+export class CliUsageError extends Error {
+  public readonly exitCode: number
+
+  public constructor(message: string, exitCode = 2) {
+    super(message)
+    this.name = "CliUsageError"
+    this.exitCode = exitCode
+  }
+}
+
 export async function runApplyCommand(
   file: string,
   options: ApplyCommandOptions,
   run: RunPlaybookFunction = runPlaybook
 ): Promise<void> {
+  if (options.diff && !options.dryRun) {
+    // R-0001119: refuse the combination before any side effects (SSH connect,
+    // playbook import, secret resolution) so the user gets an instant, clear
+    // error instead of an opaque mid-run failure.
+    throw new CliUsageError("--diff requires --dry-run")
+  }
   printCliHeader(PACKAGE_DISPLAY_VERSION)
   const environmentOverrides = applyCliEnvironmentOverrides(options.env, {
     firstRun: options.firstRun,
@@ -708,6 +730,7 @@ export async function runApplyCommand(
   })
 
   const runOptions: RunOptions = {
+    diff: options.diff,
     dryRun: options.dryRun,
     envFile: options.envFile,
     envOverrides: environmentOverrides,
@@ -721,6 +744,15 @@ export async function runApplyCommand(
 }
 
 export function exitAfterApplyError(error: unknown, verbose: boolean): never {
+  if (error instanceof CliUsageError) {
+    // R-0001119: usage errors are user input mistakes, not runtime failures.
+    // Print only the short message (no stack trace, no cause chain) and use
+    // the carried exit code so tests/wrappers can distinguish them from the
+    // generic exit code 2.
+    console.error(`${pc.red("Error:")} ${error.message}`)
+    // eslint-disable-next-line node/no-process-exit
+    process.exit(error.exitCode)
+  }
   printExceptionError(error, verbose)
   const exitCode = process.exitCode === undefined || process.exitCode === 0 ? 2 : process.exitCode
   // eslint-disable-next-line node/no-process-exit
@@ -738,6 +770,11 @@ program
   .command("apply <file>")
   .description("Apply a server definition")
   .option(
+    "--diff",
+    "When combined with --dry-run, show a unified diff per module that would change.",
+    false
+  )
+  .option(
     "--dry-run",
     "Only check, do not apply. Some modules validate prospective config but cannot verify runtime restarts.",
     false
@@ -754,6 +791,8 @@ program
   .action(async (file: string, options: Record<string, unknown>) => {
     try {
       await runApplyCommand(file, {
+        // eslint-disable-next-line @typescript-eslint/no-unsafe-type-assertion -- Commander options typed as Record<string, unknown>
+        diff: options.diff as boolean,
         // eslint-disable-next-line @typescript-eslint/no-unsafe-type-assertion -- Commander options typed as Record<string, unknown>
         dryRun: options.dryRun as boolean,
         // eslint-disable-next-line @typescript-eslint/no-unsafe-type-assertion -- Commander options typed as Record<string, unknown>

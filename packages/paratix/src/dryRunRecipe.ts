@@ -1,6 +1,7 @@
 import type { RecipeModule } from "./recipe.js"
 import type { Environment, ModuleMetaEntry, ModuleStatus, SshConnection } from "./types.js"
 
+import { shouldExecuteApplyDuringDryRun } from "./dryRunDispatch.js"
 import { mergeEnvironmentFromMeta } from "./meta.js"
 import {
   printCommandFailure,
@@ -31,22 +32,15 @@ function interruptedDryRunResult(parameters: {
   }
 }
 
-function shouldExecuteApplyDuringDryRun(module: RecipeModule["_modules"][number]): boolean {
-  return (
-    module._applyDryRun != null ||
-    module._dryRunBlocker === true ||
-    module._dryRunMetaProducer === true
-  )
-}
-
 async function executeDryRunBlockingModule(parameters: {
   childModule: RecipeModule["_modules"][number]
   connection: null | SshConnection
+  diff: boolean
   environment: Environment
   shutdownSignal: () => NodeJS.Signals | null
   verbose: boolean
 }): Promise<StepResult> {
-  const { childModule, connection, environment, verbose } = parameters
+  const { childModule, connection, diff, environment, verbose } = parameters
   if (parameters.shutdownSignal() != null) return { env: environment, shouldBreak: true }
   startModuleSpinner(childModule.name)
   const result =
@@ -57,7 +51,13 @@ async function executeDryRunBlockingModule(parameters: {
         })
   const nextEnvironment =
     result.meta == null ? environment : await mergeEnvironmentFromMeta(environment, result.meta)
-  printModuleResult(childModule.name, result.status, result._dryRunDetail ?? "(dry-run)")
+  const diffOutput = diff ? result.diff : undefined
+  printModuleResult(
+    childModule.name,
+    result.status,
+    result._dryRunDetail ?? "(dry-run)",
+    diffOutput
+  )
   if (result.status === "failed" && result.error != null) {
     printCommandFailure(result.error, verbose)
   }
@@ -72,21 +72,23 @@ async function executeDryRunBlockingModule(parameters: {
 
 async function executeDryRunChildModule(parameters: {
   childModule: RecipeModule["_modules"][number]
+  diff: boolean
   environment: Environment
   shutdownSignal: () => NodeJS.Signals | null
   ssh: null | SshConnection
   verbose: boolean
 }): Promise<StepResult> {
-  const { childModule, environment, ssh, verbose } = parameters
+  const { childModule, diff, environment, ssh, verbose } = parameters
   if (parameters.shutdownSignal() != null) return { env: environment, shouldBreak: true }
   const connection = childModule.local === true ? null : ssh
   startModuleSpinner(childModule.name)
   const checkResult = await childModule.check(connection, environment)
   if (parameters.shutdownSignal() != null) return { env: environment, shouldBreak: true }
-  if (checkResult !== "ok" && shouldExecuteApplyDuringDryRun(childModule)) {
+  if (checkResult !== "ok" && shouldExecuteApplyDuringDryRun(childModule, diff)) {
     return executeDryRunBlockingModule({
       childModule,
       connection,
+      diff,
       environment,
       shutdownSignal: parameters.shutdownSignal,
       verbose,
@@ -98,9 +100,62 @@ async function executeDryRunChildModule(parameters: {
   return { env: environment, shouldBreak: false, status }
 }
 
+type DryRunRecipeAccumulator = {
+  aggregatedMeta: ModuleMetaEntry[]
+  aggregatedStatus: "changed" | "ok"
+  currentEnvironment: Environment
+}
+
+function applyDryRunChildResult(
+  accumulator: DryRunRecipeAccumulator,
+  result: StepResult
+): DryRunRecipeAccumulator {
+  return {
+    aggregatedMeta:
+      result.meta == null
+        ? accumulator.aggregatedMeta
+        : [...accumulator.aggregatedMeta, ...result.meta],
+    aggregatedStatus: result.status === "changed" ? "changed" : accumulator.aggregatedStatus,
+    currentEnvironment: result.env,
+  }
+}
+
+async function runDryRunChildLoop(parameters: {
+  accumulator: DryRunRecipeAccumulator
+  diff: boolean
+  recipeModule: RecipeModule
+  shutdownSignal: () => NodeJS.Signals | null
+  ssh: null | SshConnection
+  verbose: boolean
+}): Promise<DryRunRecipeAccumulator | StepResult> {
+  let accumulator = parameters.accumulator
+  for (const childModule of parameters.recipeModule._modules) {
+    if (parameters.shutdownSignal() != null) {
+      return interruptedDryRunResult({
+        aggregatedMeta: accumulator.aggregatedMeta,
+        aggregatedStatus: accumulator.aggregatedStatus,
+        currentEnvironment: accumulator.currentEnvironment,
+      })
+    }
+    // eslint-disable-next-line no-await-in-loop
+    const result = await executeDryRunChildModule({
+      childModule,
+      diff: parameters.diff,
+      environment: accumulator.currentEnvironment,
+      shutdownSignal: parameters.shutdownSignal,
+      ssh: parameters.ssh,
+      verbose: parameters.verbose,
+    })
+    if (result.shouldBreak) return result
+    accumulator = applyDryRunChildResult(accumulator, result)
+  }
+  return accumulator
+}
+
 export async function dryRunRecipeModule(parameters: {
   environment: Environment
   options?: {
+    diff?: boolean
     verbose?: boolean
   }
   recipeModule: RecipeModule
@@ -110,38 +165,25 @@ export async function dryRunRecipeModule(parameters: {
   return withRecipeOutputScope(async () => {
     const { environment, recipeModule, ssh } = parameters
     printRecipeHeader(recipeModule.name)
-    let aggregatedStatus: "changed" | "ok" = "ok"
-    const aggregatedMeta: ModuleMetaEntry[] = []
-    let currentEnvironment = environment
     const shutdownSignal = parameters.shutdownSignal ?? (() => null)
-
-    for (const childModule of recipeModule._modules) {
-      if (shutdownSignal() != null) {
-        return interruptedDryRunResult({
-          aggregatedMeta,
-          aggregatedStatus,
-          currentEnvironment,
-        })
-      }
-      // eslint-disable-next-line no-await-in-loop
-      const result = await executeDryRunChildModule({
-        childModule,
-        environment: currentEnvironment,
-        shutdownSignal,
-        ssh,
-        verbose: parameters.options?.verbose ?? false,
-      })
-      if (result.shouldBreak) return result
-      currentEnvironment = result.env
-      if (result.meta != null) aggregatedMeta.push(...result.meta)
-      if (result.status === "changed") aggregatedStatus = "changed"
-    }
-
+    const loopResult = await runDryRunChildLoop({
+      accumulator: {
+        aggregatedMeta: [],
+        aggregatedStatus: "ok",
+        currentEnvironment: environment,
+      },
+      diff: parameters.options?.diff ?? false,
+      recipeModule,
+      shutdownSignal,
+      ssh,
+      verbose: parameters.options?.verbose ?? false,
+    })
+    if ("shouldBreak" in loopResult) return loopResult
     return {
-      env: currentEnvironment,
-      meta: aggregatedMeta.length === 0 ? undefined : aggregatedMeta,
+      env: loopResult.currentEnvironment,
+      meta: loopResult.aggregatedMeta.length === 0 ? undefined : loopResult.aggregatedMeta,
       shouldBreak: false,
-      status: aggregatedStatus,
+      status: loopResult.aggregatedStatus,
     }
   })
 }

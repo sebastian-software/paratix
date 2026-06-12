@@ -283,8 +283,51 @@ export function printRunContext(parameters: {
   )
 }
 
+function colorizeDiffLine(line: string): string {
+  if (line.startsWith("---") || line.startsWith("+++") || line.startsWith("@@")) {
+    return pc.dim(line)
+  }
+  if (line.startsWith("-")) return pc.red(line)
+  if (line.startsWith("+")) return pc.green(line)
+  return pc.dim(line)
+}
+
+function renderDiffLines(diff: string): string[] {
+  if (diff.trim() === "") return []
+  const sanitized = sanitizeTerminalText(maskRegisteredSecrets(diff))
+  return sanitized.split("\n").map((line) => `│ ${colorizeDiffLine(line)}`)
+}
+
+function writeContinuationLine(
+  line: string,
+  extraGuideDepths: number[],
+  via: "console" | "stdout"
+): void {
+  const composed = `${buildGuideIndent(getContinuationIndent(), { extraGuideDepths })}${line}`
+  if (via === "stdout") {
+    process.stdout.write(`${composed}\n`)
+  } else {
+    console.log(composed)
+  }
+}
+
+function writeContinuationBlock(parameters: {
+  detailLines: string[]
+  diffLines: string[]
+  extraGuideDepths: number[]
+  via: "console" | "stdout"
+}): void {
+  for (const detailLine of parameters.detailLines) {
+    writeContinuationLine(pc.dim(detailLine), parameters.extraGuideDepths, parameters.via)
+  }
+  for (const diffLine of parameters.diffLines) {
+    writeContinuationLine(diffLine, parameters.extraGuideDepths, parameters.via)
+  }
+}
+
 function printRenderedModuleResult(parameters: {
   detail?: string
+  diff?: string
   extraGuideDepths?: number[]
   name: string
   status: DisplayStatus
@@ -309,25 +352,21 @@ function printRenderedModuleResult(parameters: {
     name: displayModule.name,
     status: parameters.status,
   })
-
-  if (supportsAnimatedModuleOutput() && activeSpinner != null) {
+  const diffLines = parameters.diff == null ? [] : renderDiffLines(parameters.diff)
+  const usesSpinner = supportsAnimatedModuleOutput() && activeSpinner != null
+  if (usesSpinner) {
     stopAnimatedModuleLine()
     writeAnimatedModuleLine(line)
     process.stdout.write("\n")
-    for (const detailLine of displayModule.detailLines) {
-      process.stdout.write(
-        `${buildGuideIndent(getContinuationIndent(), { extraGuideDepths })}${pc.dim(detailLine)}\n`
-      )
-    }
-    return
+  } else {
+    console.log(line)
   }
-
-  console.log(line)
-  for (const detailLine of displayModule.detailLines) {
-    console.log(
-      `${buildGuideIndent(getContinuationIndent(), { extraGuideDepths })}${pc.dim(detailLine)}`
-    )
-  }
+  writeContinuationBlock({
+    detailLines: displayModule.detailLines,
+    diffLines,
+    extraGuideDepths,
+    via: usesSpinner ? "stdout" : "console",
+  })
 }
 
 /**
@@ -336,15 +375,33 @@ function printRenderedModuleResult(parameters: {
  * @param name - The module name shown in the left column.
  * @param status - One of the known status strings (`ok`, `changed`, `skipped`, `failed`).
  * @param detail - Optional short detail appended in dim text after the status.
+ * @param diff - Optional unified-diff text rendered as a guarded multi-line block
+ *   below the status line. The block is rendered only when the runner forwards
+ *   a non-empty diff (i.e. the user passed `--diff` and the module produced one).
+ *   Every diff line is masked through `maskRegisteredSecrets` and
+ *   `sanitizeTerminalText` before printing.
  */
-export function printModuleResult(name: string, status: DisplayStatus, detail?: string): void {
+// eslint-disable-next-line max-params -- positional API kept for source compatibility with downstream callers; diff is a leaf-level optional follow-up to detail
+export function printModuleResult(
+  name: string,
+  status: DisplayStatus,
+  detail?: string,
+  diff?: string
+): void {
   clearPendingRecipeClosureGuides()
-  printRenderedModuleResult({ detail, name, status })
+  printRenderedModuleResult({ detail, diff, name, status })
 }
 
-export function printRecipeModuleResult(name: string, status: DisplayStatus, detail?: string): void {
+// eslint-disable-next-line max-params -- mirrors printModuleResult; positional API kept for source compatibility
+export function printRecipeModuleResult(
+  name: string,
+  status: DisplayStatus,
+  detail?: string,
+  diff?: string
+): void {
   printRenderedModuleResult({
     detail,
+    diff,
     extraGuideDepths: pendingRecipeClosureGuideDepths,
     name,
     status,

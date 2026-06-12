@@ -777,3 +777,30 @@ describe("sysctl.set — validation", () => {
     expect(() => sysctl.set("net.ipv4.tcp_rmem-max_v2", "4096 87380 6291456")).not.toThrow()
   })
 })
+
+describe("sysctl.set — dry-run diff", () => {
+  it("declares itself as a dry-run diff producer", () => {
+    const mod = sysctl.set(KEY, VALUE)
+    expect(mod._dryRunDiffProducer).toBe(true)
+    expect(typeof mod._applyDryRun).toBe("function")
+  })
+
+  it("_applyDryRun returns a key-value diff between live and desired value", async () => {
+    const mockSsh = createMockSsh({
+      [`sysctl -n '${KEY}'`]: { code: 0, stdout: "0" },
+    })
+    const mod = sysctl.set(KEY, VALUE)
+    const result = await mod._applyDryRun!(mockSsh, emptyEnv)
+    expect(result.status).toBe("changed")
+    expect(result.diff).toBe(`-${KEY} = 0\n+${KEY} = 1`)
+  })
+
+  it("_applyDryRun renders the insert when the live key is unset", async () => {
+    const mockSsh = createMockSsh({
+      [`sysctl -n '${KEY}'`]: { code: 1, stderr: `sysctl: cannot stat /proc/sys/${KEY}` },
+    })
+    const mod = sysctl.set(KEY, VALUE)
+    const result = await mod._applyDryRun!(mockSsh, emptyEnv)
+    expect(result.diff).toBe(`+${KEY} = 1`)
+  })
+})

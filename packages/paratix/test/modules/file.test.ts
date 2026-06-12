@@ -3624,3 +3624,82 @@ describe("file.stat", () => {
     expect(result.status).toBe("failed")
   })
 })
+
+describe("file.* dry-run diff", () => {
+  it("file.copy declares itself as a dry-run diff producer", () => {
+    const dir = mkdtempSync(join(tmpdir(), "paratix-test-"))
+    try {
+      const localPath = join(dir, "source.txt")
+      writeFileSync(localPath, "irrelevant")
+      const mod = file.copy("/remote/out.txt", localPath)
+      expect(mod._dryRunDiffProducer).toBe(true)
+      expect(typeof mod._applyDryRun).toBe("function")
+    } finally {
+      rmSync(dir, { recursive: true })
+    }
+  })
+
+  it("file.copy._applyDryRun emits a unified diff between remote and local content", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "paratix-test-"))
+    try {
+      const localPath = join(dir, "source.txt")
+      writeFileSync(localPath, "line1\nline2-new\n")
+
+      const ssh = createMockSsh({
+        "[ -e '/remote/out.txt' ]": { code: 0 },
+        "cat '/remote/out.txt'": { code: 0, stdout: "line1\nline2-old\n" },
+      })
+
+      const mod = file.copy("/remote/out.txt", localPath)
+      const result = await mod._applyDryRun!(ssh, emptyEnv)
+      expect(result.status).toBe("changed")
+      expect(result.diff).toContain("--- /remote/out.txt")
+      expect(result.diff).toContain(`+++ ${localPath}`)
+      expect(result.diff).toContain("-line2-old")
+      expect(result.diff).toContain("+line2-new")
+    } finally {
+      rmSync(dir, { recursive: true })
+    }
+  })
+
+  it("file.copy._applyDryRun marks the destination as a new file when remote does not exist", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "paratix-test-"))
+    try {
+      const localPath = join(dir, "source.txt")
+      writeFileSync(localPath, "fresh\n")
+
+      const ssh = createMockSsh({
+        "[ -e '/remote/out.txt' ]": { code: 1 },
+      })
+
+      const mod = file.copy("/remote/out.txt", localPath)
+      const result = await mod._applyDryRun!(ssh, emptyEnv)
+      expect(result.diff).toContain("/remote/out.txt (new file)")
+      expect(result.diff).toContain("+fresh")
+    } finally {
+      rmSync(dir, { recursive: true })
+    }
+  })
+
+  it("file.template._applyDryRun emits a diff against the rendered output", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "paratix-test-"))
+    try {
+      const templatePath = join(dir, "template.txt")
+      writeFileSync(templatePath, "port {{PORT|raw}}\n")
+
+      const ssh = createMockSsh({
+        "[ -e '/remote/out.txt' ]": { code: 0 },
+        "cat '/remote/out.txt'": { code: 0, stdout: "port 22\n" },
+      })
+
+      const mod = file.template("/remote/out.txt", templatePath)
+      const result = await mod._applyDryRun!(ssh, { PORT: 2222 })
+      expect(result.status).toBe("changed")
+      expect(result.diff).toContain("-port 22")
+      expect(result.diff).toContain("+port 2222")
+      expect(result.diff).toContain(`+++ ${templatePath} (rendered)`)
+    } finally {
+      rmSync(dir, { recursive: true })
+    }
+  })
+})

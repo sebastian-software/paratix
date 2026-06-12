@@ -123,6 +123,7 @@ Paratix can also manage file-backed swap directly. Use `swap.file(...)` to provi
 paratix apply <file> [options]
 
 Options:
+  --diff
   --dry-run
   --env <key=value>
   --env-file <path>
@@ -134,6 +135,8 @@ Options:
 ```
 
 `--first-run` is meant for explicit bootstrap flows where a fresh server must be hardened first and the rest of the system should only be applied later.
+
+`--diff` only works together with `--dry-run`. When enabled, modules that opt in (currently `file.copy`, `file.template`, `sysctl.set`, `hostname.set`, and `swap.swappiness`/`swap.vfsCachePressure` via `sysctl`) print a unified diff below their status line, showing exactly which lines or values would change. Without `--diff`, the dry-run output is unchanged.
 
 ## Documentation
 

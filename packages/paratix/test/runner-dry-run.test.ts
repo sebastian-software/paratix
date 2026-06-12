@@ -1138,6 +1138,125 @@ describe("runPlaybook local module in dry-run recipe behaviour", () => {
     // A local child module in a dry-run recipe must receive null instead of an SSH connection
     expect(capturedSshInCheck).toBeNull()
   })
+
+  it("does not call _applyDryRun on a diff-producer module when --diff is off", async () => {
+    const capturedConfigs: unknown[] = []
+    vi.doMock("../src/ssh.js", () => ({
+      shellQuote: (s: string) => `'${s}'`,
+      SshConnectionImpl: makeMockSshClass(capturedConfigs, { lifecycle: "permissive" }),
+    }))
+
+    const { runPlaybook } = await import("../src/runner.js")
+
+    const dryRunHook = vi.fn().mockResolvedValue({
+      diff: "-a\n+b",
+      status: "changed",
+    } satisfies ModuleResult)
+    const diffProducer: Module = {
+      _applyDryRun: dryRunHook,
+      _dryRunDiffProducer: true,
+      apply: vi.fn().mockResolvedValue({ status: "changed" } satisfies ModuleResult),
+      check: vi.fn().mockResolvedValue("needs-apply"),
+      name: "diff-producer",
+    }
+
+    const definition: ServerDefinition = {
+      host: "1.2.3.4",
+      name: "test-server",
+      run: [diffProducer],
+      ssh: { ports: [22], privateKey: "~/.ssh/id", user: "root" },
+    }
+
+    await runPlaybook(definition, { dryRun: true })
+
+    expect(diffProducer.check).toHaveBeenCalledOnce()
+    expect(dryRunHook).not.toHaveBeenCalled()
+    expect(diffProducer.apply).not.toHaveBeenCalled()
+  })
+
+  it("calls _applyDryRun and renders the diff on a diff-producer module when --diff is on", async () => {
+    const capturedConfigs: unknown[] = []
+    vi.doMock("../src/ssh.js", () => ({
+      shellQuote: (s: string) => `'${s}'`,
+      SshConnectionImpl: makeMockSshClass(capturedConfigs, { lifecycle: "permissive" }),
+    }))
+
+    const consoleLogs: unknown[][] = []
+    vi.spyOn(console, "log").mockImplementation((...args) => {
+      consoleLogs.push(args)
+    })
+
+    const { runPlaybook } = await import("../src/runner.js")
+
+    const dryRunHook = vi.fn().mockResolvedValue({
+      diff: ["--- /etc/foo", "+++ desired", "-Port 22", "+Port 2222"].join("\n"),
+      status: "changed",
+    } satisfies ModuleResult)
+    const diffProducer: Module = {
+      _applyDryRun: dryRunHook,
+      _dryRunDiffProducer: true,
+      apply: vi.fn().mockResolvedValue({ status: "changed" } satisfies ModuleResult),
+      check: vi.fn().mockResolvedValue("needs-apply"),
+      name: "diff-producer",
+    }
+
+    const definition: ServerDefinition = {
+      host: "1.2.3.4",
+      name: "test-server",
+      run: [diffProducer],
+      ssh: { ports: [22], privateKey: "~/.ssh/id", user: "root" },
+    }
+
+    await runPlaybook(definition, { diff: true, dryRun: true })
+
+    expect(dryRunHook).toHaveBeenCalledOnce()
+    expect(diffProducer.apply).not.toHaveBeenCalled()
+    const allLogs = consoleLogs.flat().join(" ")
+    expect(allLogs).toContain("-Port 22")
+    expect(allLogs).toContain("+Port 2222")
+  })
+
+  it("suppresses the diff render when --diff is off even if a module returns one", async () => {
+    const capturedConfigs: unknown[] = []
+    vi.doMock("../src/ssh.js", () => ({
+      shellQuote: (s: string) => `'${s}'`,
+      SshConnectionImpl: makeMockSshClass(capturedConfigs, { lifecycle: "permissive" }),
+    }))
+
+    const consoleLogs: unknown[][] = []
+    vi.spyOn(console, "log").mockImplementation((...args) => {
+      consoleLogs.push(args)
+    })
+
+    const { runPlaybook } = await import("../src/runner.js")
+
+    // _dryRunBlocker keeps the legacy semantics: _applyDryRun runs without
+    // --diff. The runner must still suppress any diff string the module
+    // happens to populate, because the user did not ask for diff output.
+    const blockerModule: Module = {
+      _applyDryRun: vi.fn().mockResolvedValue({
+        diff: "-leak\n+leak",
+        status: "changed",
+      } satisfies ModuleResult),
+      _dryRunBlocker: true,
+      apply: vi.fn().mockResolvedValue({ status: "changed" } satisfies ModuleResult),
+      check: vi.fn().mockResolvedValue("needs-apply"),
+      name: "blocker-module",
+    }
+
+    const definition: ServerDefinition = {
+      host: "1.2.3.4",
+      name: "test-server",
+      run: [blockerModule],
+      ssh: { ports: [22], privateKey: "~/.ssh/id", user: "root" },
+    }
+
+    await runPlaybook(definition, { dryRun: true })
+
+    const allLogs = consoleLogs.flat().join(" ")
+    expect(allLogs).not.toContain("-leak")
+    expect(allLogs).not.toContain("+leak")
+  })
 })
 
 // Bug regression: runSignals() must update stats.failed on exception and { status: "failed" } returns

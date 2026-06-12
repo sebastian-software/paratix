@@ -14,6 +14,7 @@ import {
   NEEDS_APPLY,
   type SshConnection,
 } from "../types.js"
+import { buildUnifiedDiff } from "./diffHelpers.js"
 import { applyDirectoryState } from "./fileDirectoryHelpers.js"
 import { assemble, block, properties, replace, stat } from "./fileExtra.js"
 import { compileUserRegex, hexHashesEqual, localSha256, sha256String } from "./fileHelpers.js"
@@ -327,6 +328,39 @@ async function templateStateMatches(input: {
 }
 
 /**
+ * Build the dry-run diff for a file-content module by comparing the remote
+ * file against the desired content. Returns `undefined` when either side is
+ * unreadable (missing remote file, binary content, read error) so the caller
+ * can fall back to the generic "(dry-run)" suffix without leaking diagnostics.
+ *
+ * @param input - Bundled parameters.
+ * @param input.ssh - The SSH connection.
+ * @param input.remotePath - Remote path to read from.
+ * @param input.desired - The desired content the module would write.
+ * @param input.desiredLabel - Label used on the `+++` header (e.g. local path).
+ * @returns The unified-diff text, or `undefined` when no diff can be produced.
+ */
+async function buildFileContentDryRunDiff(input: {
+  desired: string
+  desiredLabel: string
+  remotePath: string
+  ssh: SshConnection
+}): Promise<string | undefined> {
+  try {
+    const exists = await input.ssh.exists(input.remotePath)
+    const current = exists ? await input.ssh.readFile(input.remotePath) : ""
+    const currentLabel = exists ? input.remotePath : `${input.remotePath} (new file)`
+    const diff = buildUnifiedDiff(current, input.desired, {
+      currentLabel,
+      desiredLabel: input.desiredLabel,
+    })
+    return diff === "" ? undefined : diff
+  } catch {
+    return undefined
+  }
+}
+
+/**
  * Modules for managing remote files and directories.
  *
  * Idempotency is enforced via SHA-256 checksums for file content and
@@ -402,6 +436,23 @@ export const file = {
     validateMode(desiredMode)
 
     return {
+      async _applyDryRun(ssh: null | SshConnection): Promise<ModuleResult> {
+        if (!ssh) return { status: "changed" }
+        try {
+          // eslint-disable-next-line security/detect-non-literal-fs-filename -- localPath comes from the playbook author
+          const desired = await readFile(localPath, "utf8")
+          const diff = await buildFileContentDryRunDiff({
+            desired,
+            desiredLabel: localPath,
+            remotePath,
+            ssh,
+          })
+          return diff == null ? { status: "changed" } : { diff, status: "changed" }
+        } catch {
+          return { status: "changed" }
+        }
+      },
+      _dryRunDiffProducer: true,
       async apply(ssh: null | SshConnection): Promise<ModuleResult> {
         if (!ssh) return failed(`[file.copy: ${remotePath}] SSH connection is required`)
         if (await isSymlink(ssh, remotePath)) {
@@ -565,6 +616,28 @@ export const file = {
     }
 
     return {
+      async _applyDryRun(
+        ssh: null | SshConnection,
+        environment: Environment
+      ): Promise<ModuleResult> {
+        if (!ssh) return { status: "changed" }
+        try {
+          const templateContent = await getTemplateContent()
+          const rendered = await renderTemplate(templateContent, environment, {
+            strict: options?.strict,
+          })
+          const diff = await buildFileContentDryRunDiff({
+            desired: rendered,
+            desiredLabel: `${templatePath} (rendered)`,
+            remotePath,
+            ssh,
+          })
+          return diff == null ? { status: "changed" } : { diff, status: "changed" }
+        } catch {
+          return { status: "changed" }
+        }
+      },
+      _dryRunDiffProducer: true,
       async apply(ssh: null | SshConnection, environment: Environment): Promise<ModuleResult> {
         if (!ssh) return failed(`[file.template: ${remotePath}] SSH connection is required`)
         if (await isSymlink(ssh, remotePath)) {
