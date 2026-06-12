@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.12.1](https://github.com/sebastian-software/paratix/compare/paratix-v0.12.0...paratix-v0.12.1) (2026-06-12)
+
+
+### Miscellaneous Chores
+
+* release patch 0.12.1 ([740b2dc](https://github.com/sebastian-software/paratix/commit/740b2dc40b5c283a289bc43bd0b0d1873837d4a3))
+
 ## [0.12.0](https://github.com/sebastian-software/paratix/compare/paratix-v0.11.0...paratix-v0.12.0) (2026-06-12)
 
 
