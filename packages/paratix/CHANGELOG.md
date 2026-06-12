@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.12.2](https://github.com/sebastian-software/paratix/compare/paratix-v0.12.1...paratix-v0.12.2) (2026-06-12)
+
+
+### Documentation
+
+* note daemon-reload pending suffix in quadlet diff table ([8ec5167](https://github.com/sebastian-software/paratix/commit/8ec5167352e7838d2d7ad47d75ad29ad4faecaef))
+
 ## [0.12.1](https://github.com/sebastian-software/paratix/compare/paratix-v0.12.0...paratix-v0.12.1) (2026-06-12)
 
 
