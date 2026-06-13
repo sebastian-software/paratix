@@ -45,7 +45,7 @@
   },
   "devDependencies": {
     "@cspell/dict-de-de": "^4.1.2",
-    "@types/node": "24.12.4",
+    "@types/node": "24.13.2",
     "concurrently": "^10.0.0",
     "eslint": "^10.4.0",
     "eslint-config-setup": "^0.4.0",
