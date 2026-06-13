@@ -33,16 +33,6 @@
     "node": ">=24.0.0"
   },
   "packageManager": "pnpm@11.5.3",
-  "pnpm": {
-    "onlyBuiltDependencies": [
-      "cpu-features",
-      "esbuild",
-      "ssh2"
-    ],
-    "overrides": {
-      "vite": "8.0.16"
-    }
-  },
   "devDependencies": {
     "@cspell/dict-de-de": "^4.1.2",
     "@types/node": "24.13.2",
