@@ -5,7 +5,3 @@ allowBuilds:
   esbuild: true
   ssh2: true
   unrs-resolver: false
-# TODO: pnpm v11 introduced a 24h minimumReleaseAge supply-chain policy by
-# default. We disable it here so the migration PR stays unblocked; a
-# follow-up PR re-enables the policy once the team is ready to commit to it.
-minimumReleaseAge: 0
