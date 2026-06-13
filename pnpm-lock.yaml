@@ -25,7 +25,7 @@ importers:
         version: 10.4.0(jiti@2.7.0)
       eslint-config-setup:
         specifier: ^0.4.0
-        version: 0.4.0(@types/estree@1.0.9)(@typescript-eslint/eslint-plugin@8.59.1(@typescript-eslint/parser@8.59.1(eslint@10.4.0(jiti@2.7.0))(typescript@6.0.3))(eslint@10.4.0(jiti@2.7.0))(typescript@6.0.3))(@typescript-eslint/utils@8.59.1(eslint@10.4.0(jiti@2.7.0))(typescript@6.0.3))(eslint@10.4.0(jiti@2.7.0))(jsonc-eslint-parser@3.1.0)(oxlint@1.67.0)(storybook@10.2.17(@testing-library/dom@10.4.1)(prettier@3.8.3)(react-dom@19.2.4(react@19.2.4))(react@19.2.4))(typescript@6.0.3)(vitest@4.1.7(@types/node@24.12.4)(vite@7.3.3(@types/node@24.12.4)(jiti@2.7.0)(tsx@4.22.3)(yaml@2.8.4)))
+        version: 0.4.0(@types/estree@1.0.9)(@typescript-eslint/eslint-plugin@8.59.1(@typescript-eslint/parser@8.59.1(eslint@10.4.0(jiti@2.7.0))(typescript@6.0.3))(eslint@10.4.0(jiti@2.7.0))(typescript@6.0.3))(@typescript-eslint/utils@8.59.1(eslint@10.4.0(jiti@2.7.0))(typescript@6.0.3))(eslint@10.4.0(jiti@2.7.0))(jsonc-eslint-parser@3.1.0)(oxlint@1.67.0)(storybook@10.2.17(@testing-library/dom@10.4.1)(prettier@3.8.4)(react-dom@19.2.4(react@19.2.4))(react@19.2.4))(typescript@6.0.3)(vitest@4.1.7(@types/node@24.12.4)(vite@7.3.3(@types/node@24.12.4)(jiti@2.7.0)(tsx@4.22.3)(yaml@2.8.4)))
       jiti:
         specifier: ^2.7.0
         version: 2.7.0
@@ -34,7 +34,7 @@ importers:
         version: 1.67.0
       prettier:
         specifier: ^3.8.3
-        version: 3.8.3
+        version: 3.8.4
       typescript:
         specifier: ^6.0.3
         version: 6.0.3
@@ -3445,8 +3445,8 @@ packages:
     resolution: {integrity: sha512-vkcDPrRZo1QZLbn5RLGPpg/WmIQ65qoWWhcGKf/b5eplkkarX0m9z8ppCat4mlOqUsWpyNuYgO3VRyrYHSzX5g==}
     engines: {node: '>= 0.8.0'}
 
-  prettier@3.8.3:
-    resolution: {integrity: sha512-7igPTM53cGHMW8xWuVTydi2KO233VFiTNyF5hLJqpilHfmn8C8gPf+PS7dUT64YcXFbiMGZxS9pCSxL/Dxm/Jw==}
+  prettier@3.8.4:
+    resolution: {integrity: sha512-N2MylSdi48+5N/6S5j+maeHbUSIzzZ5uOcX5Hm4QpV8Dkb1HFjfAKTKX6yNPJQD9AhcT3ifHNB66tWTTJDi11Q==}
     engines: {node: '>=14'}
     hasBin: true
 
@@ -6246,7 +6246,7 @@ snapshots:
     dependencies:
       eslint: 10.4.0(jiti@2.7.0)
 
-  eslint-config-setup@0.4.0(@types/estree@1.0.9)(@typescript-eslint/eslint-plugin@8.59.1(@typescript-eslint/parser@8.59.1(eslint@10.4.0(jiti@2.7.0))(typescript@6.0.3))(eslint@10.4.0(jiti@2.7.0))(typescript@6.0.3))(@typescript-eslint/utils@8.59.1(eslint@10.4.0(jiti@2.7.0))(typescript@6.0.3))(eslint@10.4.0(jiti@2.7.0))(jsonc-eslint-parser@3.1.0)(oxlint@1.67.0)(storybook@10.2.17(@testing-library/dom@10.4.1)(prettier@3.8.3)(react-dom@19.2.4(react@19.2.4))(react@19.2.4))(typescript@6.0.3)(vitest@4.1.7(@types/node@24.12.4)(vite@7.3.3(@types/node@24.12.4)(jiti@2.7.0)(tsx@4.22.3)(yaml@2.8.4))):
+  eslint-config-setup@0.4.0(@types/estree@1.0.9)(@typescript-eslint/eslint-plugin@8.59.1(@typescript-eslint/parser@8.59.1(eslint@10.4.0(jiti@2.7.0))(typescript@6.0.3))(eslint@10.4.0(jiti@2.7.0))(typescript@6.0.3))(@typescript-eslint/utils@8.59.1(eslint@10.4.0(jiti@2.7.0))(typescript@6.0.3))(eslint@10.4.0(jiti@2.7.0))(jsonc-eslint-parser@3.1.0)(oxlint@1.67.0)(storybook@10.2.17(@testing-library/dom@10.4.1)(prettier@3.8.4)(react-dom@19.2.4(react@19.2.4))(react@19.2.4))(typescript@6.0.3)(vitest@4.1.7(@types/node@24.12.4)(vite@7.3.3(@types/node@24.12.4)(jiti@2.7.0)(tsx@4.22.3)(yaml@2.8.4))):
     dependencies:
       '@cspell/eslint-plugin': 10.0.0(eslint@10.4.0(jiti@2.7.0))
       '@eslint-react/eslint-plugin': 4.2.3(eslint@10.4.0(jiti@2.7.0))(typescript@6.0.3)
@@ -6273,7 +6273,7 @@ snapshots:
       eslint-plugin-regexp: 3.1.0(eslint@10.4.0(jiti@2.7.0))
       eslint-plugin-security: 4.0.0
       eslint-plugin-sonarjs: 4.0.3(eslint@10.4.0(jiti@2.7.0))
-      eslint-plugin-storybook: 10.3.6(eslint@10.4.0(jiti@2.7.0))(storybook@10.2.17(@testing-library/dom@10.4.1)(prettier@3.8.3)(react-dom@19.2.4(react@19.2.4))(react@19.2.4))(typescript@6.0.3)
+      eslint-plugin-storybook: 10.3.6(eslint@10.4.0(jiti@2.7.0))(storybook@10.2.17(@testing-library/dom@10.4.1)(prettier@3.8.4)(react-dom@19.2.4(react@19.2.4))(react@19.2.4))(typescript@6.0.3)
       eslint-plugin-testing-library: 7.16.2(eslint@10.4.0(jiti@2.7.0))(typescript@6.0.3)
       eslint-plugin-unicorn: 64.0.0(eslint@10.4.0(jiti@2.7.0))
       eslint-plugin-unused-imports: 4.4.1(@typescript-eslint/eslint-plugin@8.59.1(@typescript-eslint/parser@8.59.1(eslint@10.4.0(jiti@2.7.0))(typescript@6.0.3))(eslint@10.4.0(jiti@2.7.0))(typescript@6.0.3))(eslint@10.4.0(jiti@2.7.0))
@@ -6627,11 +6627,11 @@ snapshots:
       ts-api-utils: 2.5.0(typescript@6.0.3)
       typescript: 6.0.3
 
-  eslint-plugin-storybook@10.3.6(eslint@10.4.0(jiti@2.7.0))(storybook@10.2.17(@testing-library/dom@10.4.1)(prettier@3.8.3)(react-dom@19.2.4(react@19.2.4))(react@19.2.4))(typescript@6.0.3):
+  eslint-plugin-storybook@10.3.6(eslint@10.4.0(jiti@2.7.0))(storybook@10.2.17(@testing-library/dom@10.4.1)(prettier@3.8.4)(react-dom@19.2.4(react@19.2.4))(react@19.2.4))(typescript@6.0.3):
     dependencies:
       '@typescript-eslint/utils': 8.59.1(eslint@10.4.0(jiti@2.7.0))(typescript@6.0.3)
       eslint: 10.4.0(jiti@2.7.0)
-      storybook: 10.2.17(@testing-library/dom@10.4.1)(prettier@3.8.3)(react-dom@19.2.4(react@19.2.4))(react@19.2.4)
+      storybook: 10.2.17(@testing-library/dom@10.4.1)(prettier@3.8.4)(react-dom@19.2.4(react@19.2.4))(react@19.2.4)
     transitivePeerDependencies:
       - supports-color
       - typescript
@@ -7745,7 +7745,7 @@ snapshots:
 
   prelude-ls@1.2.1: {}
 
-  prettier@3.8.3: {}
+  prettier@3.8.4: {}
 
   pretty-format@27.5.1:
     dependencies:
@@ -8095,7 +8095,7 @@ snapshots:
       es-errors: 1.3.0
       internal-slot: 1.1.0
 
-  storybook@10.2.17(@testing-library/dom@10.4.1)(prettier@3.8.3)(react-dom@19.2.4(react@19.2.4))(react@19.2.4):
+  storybook@10.2.17(@testing-library/dom@10.4.1)(prettier@3.8.4)(react-dom@19.2.4(react@19.2.4))(react@19.2.4):
     dependencies:
       '@storybook/global': 5.0.0
       '@storybook/icons': 2.0.2(react-dom@19.2.4(react@19.2.4))(react@19.2.4)
@@ -8110,7 +8110,7 @@ snapshots:
       use-sync-external-store: 1.6.0(react@19.2.4)
       ws: 8.21.0
     optionalDependencies:
-      prettier: 3.8.3
+      prettier: 3.8.4
     transitivePeerDependencies:
       - '@testing-library/dom'
       - bufferutil
