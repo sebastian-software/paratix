@@ -3,4 +3,5 @@ node_modules/
 .claude/
 pnpm-lock.yaml
 CHANGELOG.md
+renovate.json
 *.tmp.md
