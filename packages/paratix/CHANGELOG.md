@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.12.5](https://github.com/sebastian-software/paratix/compare/paratix-v0.12.4...paratix-v0.12.5) (2026-06-13)
+
+
+### Bug Fixes
+
+* treat close as completion event for sftpUploadContent ([5b17dd7](https://github.com/sebastian-software/paratix/commit/5b17dd7726c5bb88d6a8327cd80c27f36dda191e))
+
 ## [0.12.4](https://github.com/sebastian-software/paratix/compare/paratix-v0.12.3...paratix-v0.12.4) (2026-06-12)
 
 
