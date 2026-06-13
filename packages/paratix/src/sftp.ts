@@ -586,8 +586,11 @@ export async function sftpDownload(
           return
         }
 
+        // Issue #37: align with the upload paths — accept "close" alongside
+        // "finish" so a swallowed "finish" emit on the local fs WriteStream
+        // never strands the transfer until the 120 s timeout fires.
         wireStreams({
-          completionEvents: ["finish"],
+          completionEvents: ["finish", "close"],
           connectionAbortSignal,
           readStream: streams.readStream,
           reject: rejectWithCleanup,
@@ -662,10 +665,14 @@ export async function sftpUpload(
           return
         }
 
+        // Issue #37: same race as sftpUploadContent — ssh2's SFTP WriteStream
+        // can emit "close" without scheduling "finish" for the final flush.
+        // Treat "close" as a completion event and drop the premature-close
+        // branch; real disconnects stay covered by connectionAbortSignal and
+        // the SFTP session timeout.
         wireStreams({
-          completionEvents: ["finish"],
+          completionEvents: ["finish", "close"],
           connectionAbortSignal,
-          prematureCloseMessage: `SFTP upload closed before finish: ${maskedRemotePath}`,
           readStream: streams.readStream,
           reject,
           resolve,

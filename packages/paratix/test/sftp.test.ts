@@ -691,6 +691,25 @@ describe("sftpDownload", () => {
     // Assert — sftp.end() was called exactly once (from the error handler, not the timeout)
     expect(sftpEnd).toHaveBeenCalledOnce()
   })
+
+  it("resolves when the local writeStream emits close without finish (issue #37 race)", async () => {
+    // Issue #37: align with the upload paths so a swallowed "finish" emit on
+    // the local fs WriteStream cannot strand the download until the 120 s
+    // timeout fires.
+    const { sftp, sftpEnd, sftpReadStream } = makeSftpSession()
+    const client = makeClientMock(sftp)
+
+    const localWriteStream = new EventEmitter()
+    vi.mocked(createWriteStream).mockReturnValue(localWriteStream as unknown as WriteStream)
+
+    const promise = sftpDownload(client, "/remote/file.txt", "/local/file.txt")
+    localWriteStream.emit("close")
+
+    await expect(promise).resolves.toBeUndefined()
+    expect(sftpReadStream.destroy).not.toHaveBeenCalled()
+    expect(sftpEnd).toHaveBeenCalledOnce()
+    expect(vi.mocked(rename)).toHaveBeenCalledOnce()
+  })
 })
 
 // ---------------------------------------------------------------------------
@@ -955,19 +974,23 @@ describe("sftpUpload", () => {
     expect(sftpEnd).toHaveBeenCalledOnce()
   })
 
-  it("rejects and cleans up when the remote writeStream closes without finish", async () => {
-    const { sftp, sftpWriteStream } = makeSftpSession()
+  it("resolves when the remote writeStream emits close without finish (issue #37 race)", async () => {
+    // Issue #37: ssh2's SFTP WriteStream can emit "close" without scheduling
+    // "finish" for the final flush — same race as sftpUploadContent.
+    // "close" is now a completion event so the upload resolves on either.
+    const { sftp, sftpEnd, sftpWriteStream } = makeSftpSession()
     const client = makeClientMock(sftp)
 
     const localReadStream = makeMockStream()
     vi.mocked(createReadStream).mockReturnValue(localReadStream as unknown as ReadStream)
 
     const promise = sftpUpload(client, "/local/file.txt", "/remote/file.txt")
-
     sftpWriteStream.emit("close")
-    await expect(promise).rejects.toThrow("SFTP upload closed before finish: /remote/file.txt")
-    expect(localReadStream.destroy).toHaveBeenCalledOnce()
-    expect(sftpWriteStream.destroy).toHaveBeenCalledOnce()
+
+    await expect(promise).resolves.toBeUndefined()
+    expect(localReadStream.destroy).not.toHaveBeenCalled()
+    expect(sftpWriteStream.destroy).not.toHaveBeenCalled()
+    expect(sftpEnd).toHaveBeenCalledOnce()
   })
 
   // ---------------------------------------------------------------------------
