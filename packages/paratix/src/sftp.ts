@@ -720,10 +720,15 @@ export async function sftpUploadContent(
           return
         }
 
+        // Issue #37: for small in-memory payloads, ssh2's SFTP WriteStream
+        // may emit "close" without ever scheduling "finish" — the writableFinished
+        // guard in onClose cannot catch that race because the flag is only flipped
+        // immediately before "finish". Treat "close" as a completion event and drop
+        // the premature-close branch for content uploads; real disconnects are
+        // already covered by connectionAbortSignal and the SFTP session timeout.
         wireStreams({
-          completionEvents: ["finish"],
+          completionEvents: ["finish", "close"],
           connectionAbortSignal,
-          prematureCloseMessage: `SFTP content upload closed before finish: ${maskedRemotePath}`,
           readStream: streams.readStream,
           reject,
           resolve,
