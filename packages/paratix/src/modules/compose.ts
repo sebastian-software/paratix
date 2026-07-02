@@ -169,12 +169,25 @@ async function getRuntime(
  * Build the base `docker compose` or `podman compose` command string for a
  * given project directory.
  *
+ * Issue #60: the command `cd`s into the project directory instead of passing
+ * the `--project-directory` global flag. `podman compose` delegates to the
+ * external `podman-compose` provider, and podman-compose < 2 (e.g. 1.0.6) does
+ * not understand `--project-directory` — its argparse consumes the path as the
+ * subcommand and fails with exit 2. Running from the project directory is the
+ * same approach the generated systemd unit already uses via `WorkingDirectory=`
+ * and behaves identically for both runtimes: compose resolves `compose.yml`
+ * from the working directory and derives the default project name from its
+ * basename.
+ *
+ * All callers place the returned string at the start of the command, so the
+ * leading `cd … &&` composes safely with the appended subcommand.
+ *
  * @param runtime - The container runtime to use.
- * @param projectDirectory - The project directory passed via `--project-directory`.
+ * @param projectDirectory - The project directory the command runs from.
  * @returns The base compose command string, ready for subcommand concatenation.
  */
 function composeCommand(runtime: ComposeRuntime, projectDirectory: string): string {
-  return `${runtime} compose --project-directory ${shellQuote(projectDirectory)}`
+  return `cd ${shellQuote(projectDirectory)} && ${runtime} compose`
 }
 
 function parseComposeProjectName(stdout: string, projectDirectory: string): null | string {

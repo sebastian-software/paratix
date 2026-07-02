@@ -21,9 +21,12 @@ const stagingPath = `${projectDirectory}/.compose.yml.paratix-staging.ABCDEF`
 const secondStagingPath = `${projectDirectory}/.compose.yml.paratix-staging.SECOND`
 const mktempCommand = `mktemp -p '${projectDirectory}' -- '.compose.yml.paratix-staging.XXXXXX'`
 
-// Helper: build the compose command prefix for a given runtime
+// Helper: build the compose command prefix for a given runtime.
+// Issue #60: paratix `cd`s into the project directory instead of passing the
+// `--project-directory` global flag, which podman-compose < 2 does not
+// understand.
 function composeCmd(runtime: "docker" | "podman"): string {
-  return `${runtime} compose --project-directory '${projectDirectory}'`
+  return `cd '${projectDirectory}' && ${runtime} compose`
 }
 
 type ExecLike = SshConnection["exec"]
@@ -384,6 +387,28 @@ describe("compose.pull — apply", () => {
     const result = await mod.apply(mockSsh, emptyEnv)
     expect(result.status).toBe("failed")
     expect(result.error).toBeInstanceOf(Error)
+  })
+})
+
+// Issue #60: podman-compose < 2 (e.g. 1.0.6) does not understand the global
+// `--project-directory` flag — its argparse consumes the path as the
+// subcommand and fails with exit 2. paratix must instead `cd` into the project
+// directory before invoking compose, mirroring the systemd unit's
+// `WorkingDirectory=` approach.
+describe("compose — project directory handling (issue #60)", () => {
+  it("never passes --project-directory and runs compose from the project directory", async () => {
+    const mockSsh = createComposeMockSsh({
+      [`${composeCmd("podman")} pull 2>&1`]: { code: 0, stdout: "Image is up to date" },
+    })
+    const mod = compose.pull({ projectDirectory })
+    await mod.apply(mockSsh, emptyEnv)
+
+    const composeCall = mockSsh.calls.find((call) => call.includes("compose pull"))
+    expect(composeCall).toBe(`cd '${projectDirectory}' && podman compose pull 2>&1`)
+    expect(composeCall).not.toContain("--project-directory")
+    for (const call of mockSsh.calls) {
+      expect(call).not.toContain("--project-directory")
+    }
   })
 })
 
