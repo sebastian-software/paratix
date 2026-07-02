@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.12.7](https://github.com/sebastian-software/paratix/compare/paratix-v0.12.6...paratix-v0.12.7) (2026-07-02)
+
+
+### Bug Fixes
+
+* **compose:** avoid --project-directory for podman-compose &lt;2 compatibility ([#61](https://github.com/sebastian-software/paratix/issues/61)) ([3cce645](https://github.com/sebastian-software/paratix/commit/3cce645dc9d5d4f85cc177b24a136a6174b53750))
+
 ## [0.12.6](https://github.com/sebastian-software/paratix/compare/paratix-v0.12.5...paratix-v0.12.6) (2026-06-13)
 
 
