@@ -2,6 +2,7 @@
   "applyReview": {
     "defaultCommitStrategy": "worktrees",
     "finalValidation": "full",
+    "stashPolicy": "interactive",
     "worktree": {
       "baseDir": ".sf-plugin/.worktrees",
       "setup": "auto"
@@ -12,5 +13,16 @@
     "autoConfirmScope": true,
     "designDecisionSources": "standard",
     "validation": "full"
+  },
+  "plan": {
+    "markerLanguage": "de"
+  },
+  "worktree": {
+    "enabled": true,
+    "baseBranch": "origin/main",
+    "branchPrefix": "sf",
+    "completion": "pr",
+    "setup": "auto",
+    "baseDir": ".sf-plugin/.worktrees"
   }
 }
