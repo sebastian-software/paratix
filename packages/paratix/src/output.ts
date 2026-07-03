@@ -19,6 +19,22 @@ const MODULE_NAME_WIDTH = 56
 const MIN_MODULE_NAME_WIDTH = 12
 const OUTPUT_INDENT_UNIT = "  "
 const SPINNER_FRAME_INTERVAL_MS = 80
+
+/** ASCII ESC byte (0x1B) used to start ANSI/VT100 control sequences. */
+const ASCII_ESC = 0x1b
+
+/**
+ * ANSI escape sequences to hide ("ESC [ ? 25 l") and re-show ("ESC [ ? 25 h")
+ * the terminal cursor. The animated module spinner rewrites the current line
+ * on every frame via clearLine/cursorTo; without hiding the cursor first it
+ * visibly jumps between column 0 and the line end on every frame and on every
+ * start/stop of the many short-lived module/recipe/signal spinners. Standard
+ * spinner libraries always emit these sequences around their animation.
+ * Defined locally here (mirroring the equivalent constant in runner.ts) to
+ * avoid cross-file coupling.
+ */
+const ANSI_HIDE_CURSOR = `${String.fromCharCode(ASCII_ESC)}[?25l`
+const ANSI_SHOW_CURSOR = `${String.fromCharCode(ASCII_ESC)}[?25h`
 const SPINNER_FRAMES = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"]
 type DisplayStatus = "waiting" | ModuleStatus
 
@@ -48,6 +64,10 @@ type ActiveSpinner = {
 }
 
 let activeSpinner: ActiveSpinner | null = null
+// Tracks whether the terminal cursor is currently hidden by the animated
+// spinner so hide/show sequences are only emitted on an actual transition and
+// never redundantly.
+let cursorHidden = false
 let activeRecipeGuideDepths: number[] = []
 let pendingRecipeClosureGuideDepths: number[] = []
 let recipeOutputDepth = -1
@@ -180,13 +200,38 @@ function renderModuleLine(parameters: {
   return `${indent}${icon}  ${name.padEnd(alignedNameWidth)}  ${statusText}${detailSuffix}`
 }
 
+// Hide the terminal cursor before the spinner starts rewriting the current
+// line. Only ever emit the escape in the animated/TTY case so redirected or
+// piped output stays byte-for-byte clean, and use the transition guard so the
+// sequence is never sent redundantly.
+function hideCursor(): void {
+  if (cursorHidden) return
+  if (!supportsAnimatedModuleOutput()) return
+  process.stdout.write(ANSI_HIDE_CURSOR)
+  cursorHidden = true
+}
+
+// Restore the terminal cursor. No extra TTY guard is needed because
+// cursorHidden only becomes true when animated output is supported.
+function showCursor(): void {
+  if (!cursorHidden) return
+  process.stdout.write(ANSI_SHOW_CURSOR)
+  cursorHidden = false
+}
+
 function writeAnimatedModuleLine(line: string): void {
+  hideCursor()
   process.stdout.clearLine(0)
   process.stdout.cursorTo(0)
   process.stdout.write(fitAnimatedModuleLine(line, process.stdout.columns))
 }
 
 function stopAnimatedModuleLine(clearCurrentLine = false): void {
+  // Show the cursor first, before the early return: printSummary calls
+  // stopAnimatedModuleLine(true) at the end of a run when the last module has
+  // already cleared activeSpinner, so restoring the cursor after the guard
+  // below would leave it hidden once the run completes.
+  showCursor()
   if (activeSpinner == null) return
 
   clearInterval(activeSpinner.interval)
@@ -251,6 +296,9 @@ export function startModuleSpinner(name: string, detail?: string): void {
 
 export function resetLiveOutputForTests(): void {
   stopAnimatedModuleLine()
+  // Defensive: stopAnimatedModuleLine already restores the cursor, but reset
+  // the flag explicitly so test isolation never leaves a stale hidden state.
+  cursorHidden = false
   activeRecipeGuideDepths = []
   clearPendingRecipeClosureGuides()
   recipeOutputDepth = -1

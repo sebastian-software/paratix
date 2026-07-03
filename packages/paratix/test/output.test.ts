@@ -5,6 +5,7 @@ import {
   printCommandFailure,
   printModuleResult,
   printRecipeHeader,
+  printSummary,
   printVerboseCommandError,
   renderCliHeader,
   resetLiveOutputForTests,
@@ -376,6 +377,158 @@ describe("printModuleResult", () => {
 
     expect(consoleLogs).toHaveLength(1)
     expect(consoleLogs[0]).toContain("noop")
+  })
+
+  // ---------------------------------------------------------------------------
+  // Cursor-visibility regression tests (fix: hide/show cursor during spinner)
+  // ---------------------------------------------------------------------------
+
+  it("hides the terminal cursor when the spinner starts and restores it after live output stops", () => {
+    const writes: string[] = []
+    vi.spyOn(process.stdout, "write").mockImplementation((chunk: string | Uint8Array) => {
+      writes.push(String(chunk))
+      return true
+    })
+    const originalIsTTY = process.stdout.isTTY
+    const originalClearLine = bindOptionalStdoutMethod("clearLine")
+    const originalCursorTo = bindOptionalStdoutMethod("cursorTo")
+
+    Object.defineProperty(process.stdout, "isTTY", { configurable: true, value: true })
+    Object.defineProperty(process.stdout, "clearLine", {
+      configurable: true,
+      value: vi.fn(() => true),
+    })
+    Object.defineProperty(process.stdout, "cursorTo", {
+      configurable: true,
+      value: vi.fn(() => true),
+    })
+
+    try {
+      startModuleSpinner("service.start: nginx")
+
+      // The hide-cursor sequence must have been written synchronously on frame 0.
+      expect(writes.some((w) => w.includes("\x1b[?25l"))).toBe(true)
+
+      stopLiveModuleOutput(true)
+
+      // After stopping, the last cursor-related sequence must be show-cursor,
+      // not hide-cursor — the cursor must be visible again when the run ends.
+      const cursorWrites = writes.filter((w) => w.includes("\x1b[?25"))
+      expect(cursorWrites.length).toBeGreaterThan(0)
+      expect(cursorWrites.at(-1)).toContain("\x1b[?25h")
+    } finally {
+      stopLiveModuleOutput(true)
+      Object.defineProperty(process.stdout, "isTTY", {
+        configurable: true,
+        value: originalIsTTY,
+      })
+      Object.defineProperty(process.stdout, "clearLine", {
+        configurable: true,
+        value: originalClearLine,
+      })
+      Object.defineProperty(process.stdout, "cursorTo", {
+        configurable: true,
+        value: originalCursorTo,
+      })
+    }
+  })
+
+  it("restores the terminal cursor via printSummary even when printModuleResult already cleared the active spinner", () => {
+    // Regression: printModuleResult stops the spinner (activeSpinner → null) but
+    // re-hides the cursor while writing the final animated result line.
+    // printSummary must then emit the show-cursor sequence even though
+    // activeSpinner is null at that point — before the fix, showCursor() was
+    // guarded behind the activeSpinner null-check and was never reached.
+    const writes: string[] = []
+    vi.spyOn(process.stdout, "write").mockImplementation((chunk: string | Uint8Array) => {
+      writes.push(String(chunk))
+      return true
+    })
+    const originalIsTTY = process.stdout.isTTY
+    const originalClearLine = bindOptionalStdoutMethod("clearLine")
+    const originalCursorTo = bindOptionalStdoutMethod("cursorTo")
+
+    Object.defineProperty(process.stdout, "isTTY", { configurable: true, value: true })
+    Object.defineProperty(process.stdout, "clearLine", {
+      configurable: true,
+      value: vi.fn(() => true),
+    })
+    Object.defineProperty(process.stdout, "cursorTo", {
+      configurable: true,
+      value: vi.fn(() => true),
+    })
+
+    try {
+      startModuleSpinner("file.copy: /etc/nginx/nginx.conf")
+      // printModuleResult internally stops the spinner (activeSpinner → null)
+      // and then re-hides the cursor while writing the final result line via
+      // writeAnimatedModuleLine, leaving cursorHidden=true and activeSpinner=null.
+      printModuleResult("file.copy: /etc/nginx/nginx.conf", "changed")
+      // printSummary must emit show-cursor even though activeSpinner is null.
+      printSummary({ changed: 1, failed: 0, ok: 0, signals: 0, skipped: 0 })
+
+      const cursorWrites = writes.filter((w) => w.includes("\x1b[?25"))
+      expect(cursorWrites.length).toBeGreaterThan(0)
+      expect(cursorWrites.at(-1)).toContain("\x1b[?25h")
+    } finally {
+      Object.defineProperty(process.stdout, "isTTY", {
+        configurable: true,
+        value: originalIsTTY,
+      })
+      Object.defineProperty(process.stdout, "clearLine", {
+        configurable: true,
+        value: originalClearLine,
+      })
+      Object.defineProperty(process.stdout, "cursorTo", {
+        configurable: true,
+        value: originalCursorTo,
+      })
+    }
+  })
+
+  it("does not write cursor hide or show sequences when stdout is not a TTY", () => {
+    // Redirected or piped output must stay byte-for-byte clean: no ANSI cursor
+    // control sequences when supportsAnimatedModuleOutput() returns false.
+    const writes: string[] = []
+    vi.spyOn(process.stdout, "write").mockImplementation((chunk: string | Uint8Array) => {
+      writes.push(String(chunk))
+      return true
+    })
+    const originalIsTTY = process.stdout.isTTY
+    const originalClearLine = bindOptionalStdoutMethod("clearLine")
+    const originalCursorTo = bindOptionalStdoutMethod("cursorTo")
+
+    Object.defineProperty(process.stdout, "isTTY", { configurable: true, value: false })
+    Object.defineProperty(process.stdout, "clearLine", {
+      configurable: true,
+      value: undefined,
+    })
+    Object.defineProperty(process.stdout, "cursorTo", {
+      configurable: true,
+      value: undefined,
+    })
+
+    try {
+      startModuleSpinner("file.copy: /etc/hosts")
+      printModuleResult("file.copy: /etc/hosts", "ok")
+      stopLiveModuleOutput(true)
+
+      expect(writes.every((w) => !w.includes("\x1b[?25l"))).toBe(true)
+      expect(writes.every((w) => !w.includes("\x1b[?25h"))).toBe(true)
+    } finally {
+      Object.defineProperty(process.stdout, "isTTY", {
+        configurable: true,
+        value: originalIsTTY,
+      })
+      Object.defineProperty(process.stdout, "clearLine", {
+        configurable: true,
+        value: originalClearLine,
+      })
+      Object.defineProperty(process.stdout, "cursorTo", {
+        configurable: true,
+        value: originalCursorTo,
+      })
+    }
   })
 })
 
