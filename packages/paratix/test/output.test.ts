@@ -530,6 +530,53 @@ describe("printModuleResult", () => {
       })
     }
   })
+
+  it("keeps the live-output state on a globalThis singleton so duplicate module bundles share one spinner", () => {
+    // The CLI bundle (cli.js) and the library bundle (index.js) each contain a
+    // copy of this module. Sharing the spinner/cursor/indent state through a
+    // Symbol.for-keyed globalThis slot is what stops the two copies from
+    // running concurrent spinner intervals on the same terminal line.
+    const stateKey = Symbol.for("paratix.output.liveState")
+    const shared = (globalThis as Record<symbol, { activeSpinner: unknown } | undefined>)[stateKey]
+    expect(shared).toBeDefined()
+
+    const originalIsTTY = process.stdout.isTTY
+    const originalClearLine = bindOptionalStdoutMethod("clearLine")
+    const originalCursorTo = bindOptionalStdoutMethod("cursorTo")
+    vi.spyOn(process.stdout, "write").mockImplementation(() => true)
+
+    Object.defineProperty(process.stdout, "isTTY", { configurable: true, value: true })
+    Object.defineProperty(process.stdout, "clearLine", {
+      configurable: true,
+      value: vi.fn(() => true),
+    })
+    Object.defineProperty(process.stdout, "cursorTo", {
+      configurable: true,
+      value: vi.fn(() => true),
+    })
+
+    try {
+      startModuleSpinner("service.restart: app")
+      // The running spinner is visible through the shared globalThis slot, so a
+      // second module copy would observe (and clear) the same spinner.
+      expect(shared?.activeSpinner).not.toBeNull()
+      stopLiveModuleOutput(true)
+      expect(shared?.activeSpinner).toBeNull()
+    } finally {
+      Object.defineProperty(process.stdout, "isTTY", {
+        configurable: true,
+        value: originalIsTTY,
+      })
+      Object.defineProperty(process.stdout, "clearLine", {
+        configurable: true,
+        value: originalClearLine,
+      })
+      Object.defineProperty(process.stdout, "cursorTo", {
+        configurable: true,
+        value: originalCursorTo,
+      })
+    }
+  })
 })
 
 describe("printRecipeHeader", () => {
