@@ -1,6 +1,12 @@
 import { createInterface } from "node:readline"
 import { Writable } from "node:stream"
 
+/** ASCII ESC byte (0x1B) used to start ANSI/VT100 control sequences. */
+const ASCII_ESC = 0x1b
+
+/** ANSI escape sequence to re-show the terminal cursor ("ESC [ ? 25 h"). */
+const ANSI_SHOW_CURSOR = `${String.fromCharCode(ASCII_ESC)}[?25h`
+
 function normalizePromptAbortReason(reason: unknown): Error {
   return reason instanceof Error ? reason : new Error(String(reason))
 }
@@ -104,6 +110,17 @@ export async function promptTerminal(
   const output = hidden ? createHiddenPromptOutput(process.stderr) : process.stderr
   const rl = createInterface({ input: process.stdin, output })
   const abortSignal = options?.abortSignal
+
+  // An interactive prompt (sudo password, host-key confirmation, `pause`
+  // builtin) can run while the live module spinner in output.ts is active and
+  // has hidden the cursor via "ESC [ ? 25 l". Re-show the cursor on the prompt
+  // stream so the user always sees where their input goes. Only emit the
+  // escape on a TTY so redirected/piped stderr stays clean. Both the hidden
+  // and the visible path write their prompt to process.stderr, so writing here
+  // covers both.
+  if (process.stderr.isTTY) {
+    process.stderr.write(ANSI_SHOW_CURSOR)
+  }
 
   if (hidden) {
     // Write the prompt exactly once directly to stderr; readline's own

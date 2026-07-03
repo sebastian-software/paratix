@@ -19,6 +19,22 @@ const MODULE_NAME_WIDTH = 56
 const MIN_MODULE_NAME_WIDTH = 12
 const OUTPUT_INDENT_UNIT = "  "
 const SPINNER_FRAME_INTERVAL_MS = 80
+
+/** ASCII ESC byte (0x1B) used to start ANSI/VT100 control sequences. */
+const ASCII_ESC = 0x1b
+
+/**
+ * ANSI escape sequences to hide ("ESC [ ? 25 l") and re-show ("ESC [ ? 25 h")
+ * the terminal cursor. The animated module spinner rewrites the current line
+ * on every frame via clearLine/cursorTo; without hiding the cursor first it
+ * visibly jumps between column 0 and the line end on every frame and on every
+ * start/stop of the many short-lived module/recipe/signal spinners. Standard
+ * spinner libraries always emit these sequences around their animation.
+ * Defined locally here (mirroring the equivalent constant in runner.ts) to
+ * avoid cross-file coupling.
+ */
+const ANSI_HIDE_CURSOR = `${String.fromCharCode(ASCII_ESC)}[?25l`
+const ANSI_SHOW_CURSOR = `${String.fromCharCode(ASCII_ESC)}[?25h`
 const SPINNER_FRAMES = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"]
 type DisplayStatus = "waiting" | ModuleStatus
 
@@ -47,10 +63,47 @@ type ActiveSpinner = {
   interval: NodeJS.Timeout
 }
 
-let activeSpinner: ActiveSpinner | null = null
-let activeRecipeGuideDepths: number[] = []
-let pendingRecipeClosureGuideDepths: number[] = []
-let recipeOutputDepth = -1
+type LiveOutputState = {
+  activeRecipeGuideDepths: number[]
+  // The single active spinner, or null when no line is being animated.
+  activeSpinner: ActiveSpinner | null
+  // Whether the terminal cursor is currently hidden by the animated spinner,
+  // so hide/show sequences are only emitted on an actual transition and never
+  // redundantly.
+  cursorHidden: boolean
+  pendingRecipeClosureGuideDepths: number[]
+  recipeOutputDepth: number
+}
+
+// The live-output state MUST be a single process-wide singleton. paratix ships
+// this module in two separate bundles — the CLI (`cli.js`, the runner) and the
+// library (`index.js`, imported by the user's server definition and its
+// recipes). Without sharing, each bundle keeps its own module-level copy of
+// the spinner/cursor/indent state. When the runner (cli.js) drives a recipe
+// whose `apply`/`_applyDryRun` renders through the library bundle (index.js),
+// the two copies run spinner intervals concurrently and neither clears the
+// other's line, so the terminal output jumps back and forth and recipe headers
+// append to leftover spinner lines. A `Symbol.for`-keyed slot on `globalThis`
+// collapses every copy of this module onto one spinner, one interval timer and
+// one indentation stack.
+const LIVE_OUTPUT_STATE_KEY = Symbol.for("paratix.output.liveState")
+
+function getSharedLiveOutputState(): LiveOutputState {
+  const registry = globalThis as Record<symbol, LiveOutputState | undefined>
+  const existing = registry[LIVE_OUTPUT_STATE_KEY]
+  if (existing != null) return existing
+  const created: LiveOutputState = {
+    activeRecipeGuideDepths: [],
+    activeSpinner: null,
+    cursorHidden: false,
+    pendingRecipeClosureGuideDepths: [],
+    recipeOutputDepth: -1,
+  }
+  registry[LIVE_OUTPUT_STATE_KEY] = created
+  return created
+}
+
+const liveOutputState = getSharedLiveOutputState()
 
 export function renderCliHeader(version: string): string {
   const versionText = pc.dim(`v${version}`)
@@ -94,7 +147,7 @@ function getModuleStatusText(status: DisplayStatus): string {
 }
 
 function getCurrentOutputDepth(): number {
-  return Math.max(recipeOutputDepth, 0)
+  return Math.max(liveOutputState.recipeOutputDepth, 0)
 }
 
 function getGuideDot(depth: number): string {
@@ -111,7 +164,7 @@ function buildGuideIndent(
 ): string {
   const indentCharacters = Array.from(baseIndent)
   const guideDepths = [
-    ...(options?.activeGuideDepths ?? activeRecipeGuideDepths),
+    ...(options?.activeGuideDepths ?? liveOutputState.activeRecipeGuideDepths),
     ...(options?.extraGuideDepths ?? []),
   ]
 
@@ -126,11 +179,11 @@ function buildGuideIndent(
 }
 
 function clearPendingRecipeClosureGuides(): void {
-  pendingRecipeClosureGuideDepths = []
+  liveOutputState.pendingRecipeClosureGuideDepths = []
 }
 
 function getModuleIndent(): string {
-  if (recipeOutputDepth < 0) {
+  if (liveOutputState.recipeOutputDepth < 0) {
     return OUTPUT_INDENT_UNIT
   }
 
@@ -138,7 +191,7 @@ function getModuleIndent(): string {
 }
 
 function getRecipeHeaderIndent(): string {
-  if (recipeOutputDepth < 0) return ""
+  if (liveOutputState.recipeOutputDepth < 0) return ""
   return OUTPUT_INDENT_UNIT.repeat(getCurrentOutputDepth() + 1)
 }
 
@@ -153,13 +206,13 @@ function getContinuationIndent(): string {
 export async function withRecipeOutputScope<T>(
   scopedOperation: () => Promise<T> | T
 ): Promise<T> {
-  recipeOutputDepth += 1
+  liveOutputState.recipeOutputDepth += 1
   try {
     return await scopedOperation()
   } finally {
-    activeRecipeGuideDepths = activeRecipeGuideDepths.filter((depth) => depth !== recipeOutputDepth)
-    pendingRecipeClosureGuideDepths = [recipeOutputDepth]
-    recipeOutputDepth -= 1
+    liveOutputState.activeRecipeGuideDepths = liveOutputState.activeRecipeGuideDepths.filter((depth) => depth !== liveOutputState.recipeOutputDepth)
+    liveOutputState.pendingRecipeClosureGuideDepths = [liveOutputState.recipeOutputDepth]
+    liveOutputState.recipeOutputDepth -= 1
   }
 }
 
@@ -180,17 +233,42 @@ function renderModuleLine(parameters: {
   return `${indent}${icon}  ${name.padEnd(alignedNameWidth)}  ${statusText}${detailSuffix}`
 }
 
+// Hide the terminal cursor before the spinner starts rewriting the current
+// line. Only ever emit the escape in the animated/TTY case so redirected or
+// piped output stays byte-for-byte clean, and use the transition guard so the
+// sequence is never sent redundantly.
+function hideCursor(): void {
+  if (liveOutputState.cursorHidden) return
+  if (!supportsAnimatedModuleOutput()) return
+  process.stdout.write(ANSI_HIDE_CURSOR)
+  liveOutputState.cursorHidden = true
+}
+
+// Restore the terminal cursor. No extra TTY guard is needed because
+// liveOutputState.cursorHidden only becomes true when animated output is supported.
+function showCursor(): void {
+  if (!liveOutputState.cursorHidden) return
+  process.stdout.write(ANSI_SHOW_CURSOR)
+  liveOutputState.cursorHidden = false
+}
+
 function writeAnimatedModuleLine(line: string): void {
+  hideCursor()
   process.stdout.clearLine(0)
   process.stdout.cursorTo(0)
   process.stdout.write(fitAnimatedModuleLine(line, process.stdout.columns))
 }
 
 function stopAnimatedModuleLine(clearCurrentLine = false): void {
-  if (activeSpinner == null) return
+  // Show the cursor first, before the early return: printSummary calls
+  // stopAnimatedModuleLine(true) at the end of a run when the last module has
+  // already cleared liveOutputState.activeSpinner, so restoring the cursor after the guard
+  // below would leave it hidden once the run completes.
+  showCursor()
+  if (liveOutputState.activeSpinner == null) return
 
-  clearInterval(activeSpinner.interval)
-  activeSpinner = null
+  clearInterval(liveOutputState.activeSpinner.interval)
+  liveOutputState.activeSpinner = null
 
   if (clearCurrentLine && supportsAnimatedModuleOutput()) {
     process.stdout.clearLine(0)
@@ -238,7 +316,7 @@ export function startModuleSpinner(name: string, detail?: string): void {
   // to exit. Mirrors the pattern used by sleepRespectingShutdown in runner.ts.
   if (typeof spinner.interval.unref === "function") spinner.interval.unref()
 
-  activeSpinner = spinner
+  liveOutputState.activeSpinner = spinner
   writeAnimatedModuleLine(
     renderModuleLine({
       detail: displayModule.detail,
@@ -251,9 +329,12 @@ export function startModuleSpinner(name: string, detail?: string): void {
 
 export function resetLiveOutputForTests(): void {
   stopAnimatedModuleLine()
-  activeRecipeGuideDepths = []
+  // Defensive: stopAnimatedModuleLine already restores the cursor, but reset
+  // the flag explicitly so test isolation never leaves a stale hidden state.
+  liveOutputState.cursorHidden = false
+  liveOutputState.activeRecipeGuideDepths = []
   clearPendingRecipeClosureGuides()
-  recipeOutputDepth = -1
+  liveOutputState.recipeOutputDepth = -1
 }
 
 /**
@@ -265,8 +346,8 @@ export function printRecipeHeader(name: string): void {
   clearPendingRecipeClosureGuides()
   const header = pc.bold(pc.blue(`[${name}]`))
   console.log(`${buildGuideIndent(getRecipeHeaderIndent())}${header}`)
-  if (recipeOutputDepth >= 0) {
-    activeRecipeGuideDepths = [...activeRecipeGuideDepths, recipeOutputDepth]
+  if (liveOutputState.recipeOutputDepth >= 0) {
+    liveOutputState.activeRecipeGuideDepths = [...liveOutputState.activeRecipeGuideDepths, liveOutputState.recipeOutputDepth]
   }
 }
 
@@ -353,7 +434,7 @@ function printRenderedModuleResult(parameters: {
     status: parameters.status,
   })
   const diffLines = parameters.diff == null ? [] : renderDiffLines(parameters.diff)
-  const usesSpinner = supportsAnimatedModuleOutput() && activeSpinner != null
+  const usesSpinner = supportsAnimatedModuleOutput() && liveOutputState.activeSpinner != null
   if (usesSpinner) {
     stopAnimatedModuleLine()
     writeAnimatedModuleLine(line)
@@ -402,7 +483,7 @@ export function printRecipeModuleResult(
   printRenderedModuleResult({
     detail,
     diff,
-    extraGuideDepths: pendingRecipeClosureGuideDepths,
+    extraGuideDepths: liveOutputState.pendingRecipeClosureGuideDepths,
     name,
     status,
   })
