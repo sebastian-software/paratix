@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.12.8](https://github.com/sebastian-software/paratix/compare/paratix-v0.12.7...paratix-v0.12.8) (2026-07-03)
+
+
+### Bug Fixes
+
+* **paratix:** stop live-output jitter — share spinner state across CLI/library bundles ([#64](https://github.com/sebastian-software/paratix/issues/64)) ([bd608c3](https://github.com/sebastian-software/paratix/commit/bd608c30ec4b26b665b630f31e6966b781dcf86d))
+
 ## [0.12.7](https://github.com/sebastian-software/paratix/compare/paratix-v0.12.6...paratix-v0.12.7) (2026-07-02)
 
 
