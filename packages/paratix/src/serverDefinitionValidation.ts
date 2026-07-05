@@ -191,5 +191,10 @@ function normalizeServerDefinitionSshError(error: string): string {
 export function validateSshConfig(ssh: SshConfig): void {
   const errors = collectSshConfigErrors(ssh)
   if (errors.length === 0) return
-  throw new Error(`ServerDefinition: ${normalizeServerDefinitionSshError(errors[0])}`)
+  // #87: `collectSshConfigErrors` already gathers every problem, so report all
+  // of them in a single run instead of only the first. Each error is normalized
+  // to its user-facing message and joined with "; " so a misconfigured ssh
+  // block surfaces its full set of issues without repeated validate/fix cycles.
+  const message = errors.map((error) => normalizeServerDefinitionSshError(error)).join("; ")
+  throw new Error(`ServerDefinition: ${message}`)
 }

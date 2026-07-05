@@ -169,4 +169,19 @@ describe("validateSshConfig", () => {
       validateSshConfig({ ports: [0], user: "root" })
     }).toThrow("ServerDefinition: Property 'ssh.ports[0]' must be an integer between 1 and 65535")
   })
+
+  it("reports every error in a single run, joined with '; '", () => {
+    let thrown: unknown
+    try {
+      validateSshConfig({ ports: [], strictHostKeyChecking: "maybe" } as unknown as SshConfig)
+    } catch (error) {
+      thrown = error
+    }
+    expect(thrown).toBeInstanceOf(Error)
+    const message = (thrown as Error).message
+    expect(message).toBe(
+      "ServerDefinition: ssh.ports must not be empty; ssh.user is required; " +
+        "ssh.strictHostKeyChecking must be one of accept-new, no, yes"
+    )
+  })
 })

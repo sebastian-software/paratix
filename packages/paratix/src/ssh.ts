@@ -125,27 +125,41 @@ function expandHomePath(path: string): string {
   return path
 }
 
-function resolveWriteFileMode(
+// #87: shared default for both `writeFile` and `uploadFile` when the caller
+// omits `options.mode`. Kept intentionally restrictive (owner read/write only)
+// so an unspecified mode never widens access on the remote host.
+const DEFAULT_FILE_MODE = "0600"
+
+/**
+ * Resolve the effective file mode for `writeFile`/`uploadFile`. `options.mode`
+ * is optional; when omitted it defaults to {@link DEFAULT_FILE_MODE} (`"0600"`)
+ * so both methods behave identically (#87). The resolved mode is validated
+ * eagerly, turning an invalid mode into a clear, operation-scoped error before
+ * any remote round-trip happens.
+ *
+ * @param operation - The public method resolving the mode, used for the error prefix.
+ * @param remotePath - Destination path on the remote host, used for the error prefix.
+ * @param options - The caller-provided options carrying an optional `mode`.
+ * @returns The validated file mode string.
+ * @throws {Error} When `options.mode` is present but not a valid file mode.
+ */
+function resolveFileMode(
+  operation: "uploadFile" | "writeFile",
   remotePath: string,
   options: { mode?: string } | null | undefined
 ): string {
-  if (options?.mode == null) {
-    throw new Error(
-      `[ssh.writeFile: ${remotePath}] missing options.mode; pass { mode: "0644" } or another explicit file mode`
-    )
-  }
+  const mode = options?.mode ?? DEFAULT_FILE_MODE
 
   try {
-    validateMode(options.mode)
+    validateMode(mode)
   } catch (error) {
     const reason = error instanceof Error ? error.message : String(error)
-    throw new Error(
-      `[ssh.writeFile: ${remotePath}] invalid options.mode "${options.mode}": ${reason}`,
-      { cause: error }
-    )
+    throw new Error(`[ssh.${operation}: ${remotePath}] invalid options.mode "${mode}": ${reason}`, {
+      cause: error,
+    })
   }
 
-  return options.mode
+  return mode
 }
 
 const COMMAND_TIMEOUT = 120_000
@@ -649,6 +663,17 @@ export class SshConnectionImpl implements SshConnection {
     this.runtime.host = host
   }
 
+  /**
+   * Upload a local file to the remote host via SFTP, staged to a temp file and
+   * finalized atomically with `mv`.
+   *
+   * @param localPath - Path to the local upload source.
+   * @param remotePath - Destination path on the remote host.
+   * @param options - Optional settings for the remote upload.
+   * @param options.mode - File mode to set via `chmod` on the temp file before
+   *   moving (e.g. `"0644"`). Optional; defaults to `"0600"` when omitted, matching
+   *   {@link writeFile}.
+   */
   public async uploadFile(
     localPath: string,
     remotePath: string,
@@ -664,7 +689,7 @@ export class SshConnectionImpl implements SshConnection {
     // memory usage flat regardless of the uploaded file's size.
     const expectedHash = await computeLocalFileSha256(localPath)
     const temporaryPath = await this.createRemoteWritableTempPath(remotePath, "paratix-upload")
-    const temporaryMode = options?.mode ?? "0600"
+    const temporaryMode = resolveFileMode("uploadFile", remotePath, options)
     // #82: track whether the privileged finalize consumed the staged temp via
     // `mv`. On the success path the staged file no longer exists, so the
     // best-effort cleanup can be skipped — saving one exec round-trip. The
@@ -728,17 +753,19 @@ export class SshConnectionImpl implements SshConnection {
    *
    * @param remotePath - Destination path on the remote host.
    * @param content - The string content to write.
-   * @param options - Settings for the remote write.
-   * @param options.mode - File mode to set via `chmod` on the temp file before moving (e.g. `"0644"`).
+   * @param options - Optional settings for the remote write.
+   * @param options.mode - File mode to set via `chmod` on the temp file before
+   *   moving (e.g. `"0644"`). Optional; defaults to `"0600"` when omitted, matching
+   *   {@link uploadFile}.
    */
   public async writeFile(
     remotePath: string,
     content: string,
-    options: { mode: string }
+    options?: { mode?: string }
   ): Promise<void> {
     const client = this.ensureClient()
     const remoteTemporary = await this.createRemoteWritableTempPath(remotePath, "paratix-write")
-    const temporaryMode = resolveWriteFileMode(remotePath, options)
+    const temporaryMode = resolveFileMode("writeFile", remotePath, options)
     const expectedSize = Buffer.byteLength(content, "utf8")
     // R-0000522: pre-compute the SHA-256 of the local content so the
     // post-finalize verification can compare hashes instead of byte counts.
