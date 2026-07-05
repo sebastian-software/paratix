@@ -156,7 +156,7 @@ function makeDiskCheckExecSpy(prefix: string, dfOutput: string): ReturnType<type
       // disk-full / generic-empty branches in ensureRemoteWriteFile fire
       // exactly as before.
       stream.emit("data", Buffer.from(sha256SumOutput(EMPTY_FILE_SHA256_HEX, sha256SumPath)))
-    } else if (cmd.includes("df -P")) {
+    } else if (cmd.includes("df -Pk")) {
       stream.emit("data", Buffer.from(dfOutput))
     }
     stream.emit("close", 0)
