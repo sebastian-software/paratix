@@ -14,12 +14,14 @@ import { pathToFileURL } from "node:url"
 import { afterEach, beforeEach, describe, expect, it, type MockInstance, vi } from "vitest"
 
 import type { RunOptions } from "../src/runner.js"
-import type { Environment } from "../src/types.js"
+import type { Environment, Module, ServerDefinition } from "../src/types.js"
 
 import {
   applyCliEnvironmentOverrides,
+  CliUsageError,
   collectDefinitionErrors,
   collectEnvironment,
+  collectFilter,
   exitAfterApplyError,
   handleTsxLoadFailure,
   isDirectCliExecution,
@@ -30,11 +32,13 @@ import {
   parseReconnectTimeoutSeconds,
   printExceptionError,
   resetTsxRegistrationForTests,
+  resolveFilteredRun,
   runApplyCommand,
   withCliProcessEnvironment,
   withSerializedPlaybookImport,
 } from "../src/cli.js"
 import { printCliHeader, printCommandFailure } from "../src/output.js"
+import { recipe } from "../src/recipe.js"
 import { clearRegisteredSecrets, registerSecret } from "../src/secretSink.js"
 
 declare const PACKAGE_VERSION: string
@@ -2222,6 +2226,7 @@ describe("CLI entrypoint", () => {
           dryRun: true,
           env: { INLINE_ENV: "inline" },
           envFile: envFilePath,
+          filter: [],
           firstRun: true,
           reconnectTimeout: 12.5,
           verbose: true,
@@ -2284,6 +2289,7 @@ describe("CLI entrypoint", () => {
           diff: false,
           dryRun: true,
           env: {},
+          filter: [],
           firstRun: false,
           verbose: false,
         },
@@ -2380,6 +2386,7 @@ describe("runApplyCommand --diff validation", () => {
             diff: true,
             dryRun: false,
             env: {},
+            filter: [],
             firstRun: false,
             verbose: false,
           },
@@ -2422,6 +2429,7 @@ describe("runApplyCommand --diff validation", () => {
           diff: true,
           dryRun: true,
           env: {},
+          filter: [],
           firstRun: false,
           verbose: false,
         },
@@ -2433,6 +2441,180 @@ describe("runApplyCommand --diff validation", () => {
 
       expect(calls).toHaveLength(1)
       expect(calls[0]?.options).toMatchObject({ diff: true, dryRun: true })
+    } finally {
+      logSpy.mockRestore()
+      rmSync(tempDirectory, { force: true, recursive: true })
+    }
+  })
+})
+
+function filterLeaf(name: string): Module {
+  return {
+    // eslint-disable-next-line @typescript-eslint/require-await -- interface requires async
+    async apply() {
+      return { status: "ok" }
+    },
+    // eslint-disable-next-line @typescript-eslint/require-await -- interface requires async
+    async check() {
+      return "ok"
+    },
+    name,
+  }
+}
+
+function makeFilterDefinition(): ServerDefinition {
+  return {
+    host: "1.2.3.4",
+    name: "s1",
+    run: [
+      filterLeaf("base-setup"),
+      recipe("service-layer", [recipe("rybbit", [filterLeaf("rybbit-file")])]),
+    ],
+    ssh: { ports: [22], user: "root" },
+  }
+}
+
+describe("collectFilter", () => {
+  it("appends each occurrence to the accumulator", () => {
+    expect(collectFilter("c", ["a", "b"])).toStrictEqual(["a", "b", "c"])
+  })
+
+  it("starts from the empty default", () => {
+    expect(collectFilter("a,b", [])).toStrictEqual(["a,b"])
+  })
+})
+
+describe("resolveFilteredRun", () => {
+  it("returns the original run array when no filter is given", () => {
+    const definition = makeFilterDefinition()
+    expect(resolveFilteredRun(definition, [])).toBe(definition.run)
+  })
+
+  it("skips unselected nodes and descends into matching recipes", () => {
+    const definition = makeFilterDefinition()
+    const run = resolveFilteredRun(definition, ["rybbit"])
+
+    expect(run).not.toBe(definition.run)
+    expect(run).toHaveLength(2)
+    // base-setup is not selected → skip module.
+    expect(run[0].name).toBe("base-setup")
+    expect(run[0].local).toBe(true)
+    // service-layer is descended into (still a recipe).
+    expect((run[1] as { _isRecipe?: boolean } & Module)._isRecipe).toBe(true)
+  })
+
+  it("throws a CliUsageError naming an unknown filter value", () => {
+    const definition = makeFilterDefinition()
+    let caught: unknown
+    try {
+      resolveFilteredRun(definition, ["rybbit", "does-not-exist"])
+    } catch (error) {
+      caught = error
+    }
+    expect(caught).toBeInstanceOf(CliUsageError)
+    expect((caught as CliUsageError).exitCode).toBe(2)
+    expect((caught as Error).message).toContain('"does-not-exist"')
+    expect((caught as Error).message).not.toContain('"rybbit"')
+  })
+
+  it("throws when the filter contains only empty values", () => {
+    const definition = makeFilterDefinition()
+    expect(() => resolveFilteredRun(definition, ["  ", ","])).toThrow(
+      /--filter requires at least one non-empty module name/v
+    )
+  })
+})
+
+describe("runApplyCommand --filter", () => {
+  it("aborts before connecting when a filter name matches nothing", async () => {
+    const tempDirectory = mkdtempSync(join(tmpdir(), "paratix-cli-filter-"))
+    const playbookPath = join(tempDirectory, "playbook.mjs")
+    const playbookSpy = vi.fn()
+    const logSpy = vi.spyOn(console, "log").mockImplementation(() => {
+      /* suppress CLI header */
+    })
+
+    try {
+      writeFileSync(
+        playbookPath,
+        [
+          "export default {",
+          "  name: 'test-server',",
+          "  host: '1.2.3.4',",
+          "  ssh: { user: 'root', ports: [22] },",
+          "  run: [{ name: 'base-setup' }, { name: 'rybbit' }],",
+          "}",
+        ].join("\n")
+      )
+
+      await expect(
+        runApplyCommand(
+          playbookPath,
+          {
+            diff: false,
+            dryRun: true,
+            env: {},
+            filter: ["nope"],
+            firstRun: false,
+            verbose: false,
+          },
+          async (_definition, _options) => {
+            playbookSpy()
+            await Promise.resolve()
+          }
+        )
+      ).rejects.toThrow(/--filter matched no module: "nope"/v)
+      expect(playbookSpy).not.toHaveBeenCalled()
+    } finally {
+      logSpy.mockRestore()
+      rmSync(tempDirectory, { force: true, recursive: true })
+    }
+  })
+
+  it("forwards a filtered definition to the runner for a valid filter", async () => {
+    const tempDirectory = mkdtempSync(join(tmpdir(), "paratix-cli-filter-ok-"))
+    const playbookPath = join(tempDirectory, "playbook.mjs")
+    const calls: Array<{ definition: ServerDefinition }> = []
+    const logSpy = vi.spyOn(console, "log").mockImplementation(() => {
+      /* suppress CLI header */
+    })
+
+    try {
+      writeFileSync(
+        playbookPath,
+        [
+          "export default {",
+          "  name: 'test-server',",
+          "  host: '1.2.3.4',",
+          "  ssh: { user: 'root', ports: [22] },",
+          "  run: [{ name: 'base-setup' }, { name: 'rybbit' }],",
+          "}",
+        ].join("\n")
+      )
+
+      await runApplyCommand(
+        playbookPath,
+        {
+          diff: false,
+          dryRun: true,
+          env: {},
+          filter: ["rybbit"],
+          firstRun: false,
+          verbose: false,
+        },
+        async (definition, _options) => {
+          await Promise.resolve()
+          calls.push({ definition })
+        }
+      )
+
+      expect(calls).toHaveLength(1)
+      // base-setup is filtered out → skip module (local, named); rybbit is kept
+      // by reference → still the exact plain object from the playbook.
+      expect(calls[0]?.definition.run).toStrictEqual([
+        expect.objectContaining({ local: true, name: "base-setup" }),
+        { name: "rybbit" },
+      ])
     } finally {
       logSpy.mockRestore()
       rmSync(tempDirectory, { force: true, recursive: true })

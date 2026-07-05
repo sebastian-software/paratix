@@ -6,13 +6,14 @@ import { extname, resolve } from "node:path"
 import { fileURLToPath, pathToFileURL } from "node:url"
 import pc from "picocolors"
 
-import type { Environment, ServerDefinition } from "./types.js"
+import type { Environment, Module, ServerDefinition } from "./types.js"
 
 import { isMissingTsxDependencyError } from "./cliTsxHelpers.js"
 import { createNullPrototypeEnvironment, ENVIRONMENT_FORBIDDEN_KEYS } from "./environment.js"
 import { inspectRedactedDiagnosticValue } from "./errorRedaction.js"
 import { runWithFirstRunFlag, runWithoutFirstRunFlag } from "./firstRunContext.js"
 import { describeHostValidationFailure, validateHostLabel } from "./hostValidation.js"
+import { applyModuleFilter, collectModuleNames, parseFilterNames } from "./moduleFilter.js"
 import { printCliHeader } from "./output.js"
 import { type RunOptions, runPlaybook } from "./runner.js"
 import { maskRegisteredSecrets } from "./secretSink.js"
@@ -688,6 +689,13 @@ type ApplyCommandOptions = {
   dryRun: boolean
   env: Environment
   envFile?: string
+  /**
+   * Raw `--filter` values collected by Commander. Each entry may be a
+   * comma-separated list, and the option may be repeated; an empty array means
+   * no filtering. When non-empty, the run is restricted to the named nodes and
+   * every other node is rendered as `skipped`.
+   */
+  filter: string[]
   firstRun: boolean
   reconnectTimeout?: number
   verbose: boolean
@@ -710,6 +718,42 @@ export class CliUsageError extends Error {
   }
 }
 
+/**
+ * Resolve the effective top-level module list for a run, applying the
+ * `--filter` selection when the user requested one.
+ *
+ * Returns `definition.run` unchanged when no filter was given. Otherwise the
+ * raw values are normalized, validated against the names actually present in
+ * the tree, and the tree is transformed so unselected nodes render as
+ * `skipped`. Validation runs before the caller connects over SSH, so an unknown
+ * filter name fails fast with a {@link CliUsageError} (exit code 2).
+ *
+ * @param definition - The loaded server definition.
+ * @param rawFilter - The raw `--filter` values collected by Commander.
+ * @returns The original or the filtered top-level module list.
+ * @throws {CliUsageError} When the filter resolves to no names or names an
+ *   unknown node.
+ */
+export function resolveFilteredRun(definition: ServerDefinition, rawFilter: string[]): Module[] {
+  if (rawFilter.length === 0) return definition.run
+
+  const names = parseFilterNames(rawFilter)
+  if (names.length === 0) {
+    throw new CliUsageError("--filter requires at least one non-empty module name")
+  }
+
+  const available = collectModuleNames(definition.run)
+  const unknown = names.filter((name) => !available.has(name))
+  if (unknown.length > 0) {
+    const quoted = unknown.map((name) => `"${name}"`).join(", ")
+    throw new CliUsageError(
+      `--filter matched no module: ${quoted}. Available names: ${[...available].join(", ")}`
+    )
+  }
+
+  return applyModuleFilter(definition.run, new Set(names))
+}
+
 export async function runApplyCommand(
   file: string,
   options: ApplyCommandOptions,
@@ -729,6 +773,12 @@ export async function runApplyCommand(
     firstRun: options.firstRun,
   })
 
+  // Resolve --filter before building run options: an unknown name must fail
+  // fast (exit 2) here, before run() opens the SSH connection.
+  const runModules = resolveFilteredRun(definition, options.filter)
+  const targetDefinition =
+    runModules === definition.run ? definition : { ...definition, run: runModules }
+
   const runOptions: RunOptions = {
     diff: options.diff,
     dryRun: options.dryRun,
@@ -740,7 +790,7 @@ export async function runApplyCommand(
     runOptions.reconnectTimeout = options.reconnectTimeout * SECONDS_TO_MS
   }
 
-  await run(definition, runOptions)
+  await run(targetDefinition, runOptions)
 }
 
 export function exitAfterApplyError(error: unknown, verbose: boolean): never {
@@ -781,6 +831,12 @@ program
   )
   .option("--env <key=value...>", "Set env values", collectEnvironment, {})
   .option("--env-file <path>", "Load dotenv file")
+  .option(
+    "--filter <names>",
+    "Run only the named recipes/modules (comma-separated, repeatable). Every other node is shown as skipped.",
+    collectFilter,
+    []
+  )
   .option("--first-run", "Set PARATIX_FIRST_RUN=true before loading the playbook", false)
   .option(
     "--reconnect-timeout <seconds>",
@@ -799,6 +855,8 @@ program
         env: options.env as Environment,
         // eslint-disable-next-line @typescript-eslint/no-unsafe-type-assertion -- Commander options typed as Record<string, unknown>
         envFile: options.envFile as string | undefined,
+        // eslint-disable-next-line @typescript-eslint/no-unsafe-type-assertion -- Commander options typed as Record<string, unknown>
+        filter: options.filter as string[],
         // eslint-disable-next-line @typescript-eslint/no-unsafe-type-assertion -- Commander options typed as Record<string, unknown>
         firstRun: options.firstRun as boolean,
         // eslint-disable-next-line @typescript-eslint/no-unsafe-type-assertion -- Commander options typed as Record<string, unknown>
@@ -851,6 +909,19 @@ export function parsePositiveNumber(value: string, options: { max?: number } = {
  */
 export function parseReconnectTimeoutSeconds(value: string): number {
   return parsePositiveNumber(value, { max: RECONNECT_TIMEOUT_MAX_SECONDS })
+}
+
+/**
+ * Commander collector for the repeatable `--filter` option. Each occurrence
+ * appends its raw value (which may itself be a comma-separated list) to the
+ * accumulator; the values are normalized later by {@link parseFilterNames}.
+ *
+ * @param value - The raw value of a single `--filter` occurrence.
+ * @param previous - The values accumulated from earlier occurrences.
+ * @returns The accumulator with `value` appended.
+ */
+export function collectFilter(value: string, previous: string[]): string[] {
+  return [...previous, value]
 }
 
 export function collectEnvironment(
