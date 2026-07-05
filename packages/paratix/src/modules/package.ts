@@ -137,6 +137,10 @@ function missingPackageManager(moduleName: string): ModuleResult {
  * @returns `true` when `which` reported the binary as present, otherwise `false`.
  */
 async function probePackageManagerBinary(ssh: SshConnection, binary: string): Promise<boolean> {
+  // Issue #89: `binary` is a compile-time constant — every caller passes a
+  // hardcoded package-manager binary literal (`"apt-get"`, `"dnf"`, `"yum"`,
+  // `"apk"` in `detectPackageManager`), never user input, so no shellQuote is
+  // required for this interpolation.
   const result = await ssh.exec(`which ${binary}`, EXEC_OPTS)
   return result.code === 0
 }

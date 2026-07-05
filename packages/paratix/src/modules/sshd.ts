@@ -375,6 +375,9 @@ async function resolveExistingSshdSocketUnit(
     // embedding shell redirects in the command string. Keeps the helper
     // consistent with the rest of the codebase and avoids shell-metacharacter
     // surprises.
+    // Issue #89: `candidate` is a compile-time constant — an element of the
+    // `SshdSocketUnit` literal union (`SSHD_SOCKET_UNIT_CANDIDATES`), never user
+    // input, so no shellQuote is required for this interpolation.
     // eslint-disable-next-line no-await-in-loop -- sequential systemctl probes by design
     const exists = await ssh.exec(`systemctl cat ${candidate}`, {
       ignoreExitCode: true,
@@ -389,6 +392,9 @@ async function captureSshSocketState(ssh: SshConnection): Promise<SshSocketState
   const unit = await resolveExistingSshdSocketUnit(ssh)
   if (unit == null) return { exists: false }
 
+  // Issue #89: `unit` is a compile-time constant (`SshdSocketUnit` literal
+  // union), not user input; the systemctl interpolations below need no
+  // shellQuote.
   const enabled = await ssh.exec(`systemctl is-enabled --quiet ${unit}`, {
     ignoreExitCode: true,
     silent: true,
@@ -412,6 +418,9 @@ async function disableSocketActivatedSsh(
 ): Promise<void> {
   if (!socketState.exists) return
 
+  // Issue #89: `socketState.unit` is a compile-time constant (`SshdSocketUnit`
+  // literal union) captured from an internal probe, not user input; no
+  // shellQuote required.
   await ssh.exec(`systemctl disable --now ${socketState.unit}`, {
     ignoreExitCode: false,
     silent: true,
@@ -423,6 +432,9 @@ async function restoreSocketActivatedSsh(
   socketState: SshSocketState
 ): Promise<void> {
   if (!socketState.exists) return
+  // Issue #89: `socketState.unit` is a compile-time constant (`SshdSocketUnit`
+  // literal union), not user input; the systemctl interpolations below need no
+  // shellQuote.
   if (socketState.enabled && socketState.active) {
     await ssh.exec(`systemctl enable --now ${socketState.unit}`, {
       ignoreExitCode: false,
@@ -472,6 +484,8 @@ async function sshServiceBootState(
   ssh: SshConnection,
   serviceUnit: SshdServiceUnit
 ): Promise<SshdServiceBootState> {
+  // Issue #89: `serviceUnit` is a compile-time constant (`SshdServiceUnit`
+  // literal union `"ssh" | "sshd"`), not user input; no shellQuote required.
   const enabled = await ssh.exec(`${SYSTEMCTL} is-enabled --quiet ${serviceUnit}.service`, {
     ignoreExitCode: true,
     silent: true,
@@ -485,6 +499,8 @@ async function ensureSshServiceBootEnabled(
 ): Promise<SshdServiceBootState> {
   const bootState = await sshServiceBootState(ssh, parameters.serviceUnit)
   if (parameters.socketState.exists && parameters.socketState.enabled && !bootState.enabled) {
+    // Issue #89: `parameters.serviceUnit` is a compile-time constant
+    // (`SshdServiceUnit` literal union), not user input; no shellQuote required.
     await ssh.exec(`${SYSTEMCTL} enable ${parameters.serviceUnit}.service`, {
       ignoreExitCode: false,
       silent: true,
@@ -498,6 +514,8 @@ async function restoreSshServiceBootState(
   bootState: SshdServiceBootState | undefined
 ): Promise<void> {
   if (bootState == null || bootState.enabled) return
+  // Issue #89: `bootState.unit` is a compile-time constant (`SshdServiceUnit`
+  // literal union), not user input; no shellQuote required.
   const result = await ssh.exec(`${SYSTEMCTL} disable ${bootState.unit}.service`, {
     ignoreExitCode: true,
     silent: true,
@@ -610,6 +628,8 @@ async function reloadSshdWithoutRestartFallback(
   ssh: SshConnection,
   serviceUnit: SshdServiceUnit
 ): Promise<ModuleResult> {
+  // Issue #89: `serviceUnit` is a compile-time constant (`SshdServiceUnit`
+  // literal union), not user input; no shellQuote required.
   const result = await ssh.exec(`${SYSTEMCTL} reload ${serviceUnit}`, {
     ignoreExitCode: true,
     silent: true,
@@ -645,6 +665,9 @@ async function reloadSshd(
   // (e.g. sshd config syntax issue at startup).
   const hasExecReload = await sshdUnitDefinesExecReload(ssh, serviceUnit)
   const action = hasExecReload ? "reload" : "reload-or-restart"
+  // Issue #89: both `action` (a fixed `"reload" | "reload-or-restart"` literal)
+  // and `serviceUnit` (`SshdServiceUnit` literal union) are compile-time
+  // constants, not user input; no shellQuote required.
   const result = await ssh.exec(`${SYSTEMCTL} ${action} ${serviceUnit}`, {
     ignoreExitCode: true,
     silent: true,
@@ -753,6 +776,9 @@ function buildRestartFailureRollbackSteps(
     steps.push({
       name: "ssh service restart",
       async run() {
+        // Issue #89: `serviceUnit` is a compile-time constant
+        // (`SshdServiceUnit` literal union), not user input; no shellQuote
+        // required.
         const result = await ssh.exec(`${SYSTEMCTL} restart ${serviceUnit}`, {
           ignoreExitCode: true,
           silent: true,
@@ -859,6 +885,8 @@ async function restartSshdOnNewPort(
     await disableSocketActivatedSsh(ssh, socketState)
     serviceUnit = await resolveSshServiceUnit(ssh)
     serviceBootState = await ensureSshServiceBootEnabled(ssh, { serviceUnit, socketState })
+    // Issue #89: `serviceUnit` is a compile-time constant (`SshdServiceUnit`
+    // literal union), not user input; no shellQuote required.
     await ssh.exec(`${SYSTEMCTL} restart ${serviceUnit}`, { silent: true })
     return {
       kind: "completed",
@@ -1171,6 +1199,8 @@ async function restartSshdIfNotAlreadyOnOriginalPort(
     )
   }
   const serviceUnit = parameters.serviceUnit ?? (await resolveSshServiceUnit(ssh))
+  // Issue #89: `serviceUnit` is a compile-time constant (`SshdServiceUnit`
+  // literal union), not user input; no shellQuote required.
   const result = await ssh.exec(`${SYSTEMCTL} restart ${serviceUnit}`, {
     ignoreExitCode: true,
     silent: true,
@@ -1245,6 +1275,9 @@ async function allocateProspectiveSshdConfigPath(
   const template = `${SSHD_DRY_RUN_TEMP_PREFIX}.XXXXXX`
   // R-0000565: the trailing `--` separates the template from any future
   // `mktemp` options. R-0000766: matches `allocateRemoteScriptPath`.
+  // Issue #89: `SSHD_DRY_RUN_TEMP_DIRECTORY` is a compile-time constant
+  // (`"/tmp"`), not user input; the `template` argument is already routed
+  // through shellQuote.
   const mktempResult = await ssh.exec(
     `mktemp -p ${SSHD_DRY_RUN_TEMP_DIRECTORY} -- ${shellQuote(template)}`,
     {
