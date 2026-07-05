@@ -582,8 +582,11 @@ function createRecipeDryRunApply(
  * @returns A RecipeModule that groups the child modules.
  *
  * @example
+ * import { recipe } from "paratix"
+ * import { package as pkg, file, service } from "paratix/modules"
+ *
  * export const nginxRecipe = recipe("nginx", [
- *   apt.installed("nginx"),
+ *   pkg.installed("nginx"),
  *   file.template("/etc/nginx/nginx.conf", "./files/nginx.conf.tmpl"),
  *   service.enabled("nginx"),
  * ], {
