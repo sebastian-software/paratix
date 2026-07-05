@@ -1032,41 +1032,61 @@ describe("runPlaybook handleReboot grace period (R-0000153)", () => {
   // immediately so the runner reaches its shutdown path without idling for
   // the full grace duration.
   it("ends the grace sleep immediately when SIGINT arrives mid-grace", async () => {
-    const capturedConfigs: unknown[] = []
-    const reconnect = vi.fn().mockResolvedValue(null)
+    // Issue #81: drive the grace window with fake timers instead of racing a
+    // real `setTimeout` SIGINT against the wall clock. The old assertion
+    // (`Date.now()` delta < 2000ms against a 5s grace) was wall-clock
+    // dependent and grew flaky on shared self-hosted runners. With fake
+    // timers the abort-ends-the-sleep behaviour is proven deterministically:
+    // the run only completes because the SIGINT aborts the pending grace
+    // timer — the fake clock is never advanced toward the 5-second deadline.
+    vi.useFakeTimers()
+    try {
+      const capturedConfigs: unknown[] = []
+      const reconnect = vi.fn().mockResolvedValue(null)
 
-    vi.doMock("../src/ssh.js", () => ({
-      shellQuote: (s: string) => `'${s}'`,
-      SshConnectionImpl: makeMockSshClass(capturedConfigs, { lifecycle: "permissive", reconnect }),
-    }))
+      vi.doMock("../src/ssh.js", () => ({
+        shellQuote: (s: string) => `'${s}'`,
+        SshConnectionImpl: makeMockSshClass(capturedConfigs, {
+          lifecycle: "permissive",
+          reconnect,
+        }),
+      }))
 
-    const { runPlaybook } = await import("../src/runner.js")
-    const moduleWithReboot = makeModuleWithMeta([meta.systemReboot()])
+      const { runPlaybook } = await import("../src/runner.js")
+      const moduleWithReboot = makeModuleWithMeta([meta.systemReboot()])
 
-    const definition: ServerDefinition = {
-      host: "1.2.3.4",
-      name: "test-server",
-      run: [moduleWithReboot],
-      ssh: { ports: [22], privateKey: "~/.ssh/id", user: "root" },
-    }
+      const definition: ServerDefinition = {
+        host: "1.2.3.4",
+        name: "test-server",
+        run: [moduleWithReboot],
+        ssh: { ports: [22], privateKey: "~/.ssh/id", user: "root" },
+      }
 
-    // Schedule a SIGINT shortly after the run starts, while the 5-second
-    // grace sleep is still in flight. Without R-0000203, the run would have
-    // to wait the full 5 seconds; with the AbortSignal hookup it returns
-    // almost instantly.
-    const signalTimer = setTimeout(() => {
+      let settled = false
+      const runPromise = runPlaybook(definition, { rebootGraceSeconds: 5 }).then(() => {
+        settled = true
+      })
+
+      // Let the run advance until it parks in the 5-second grace sleep. Flush
+      // the pending microtask chain without moving the fake clock, so the
+      // grace timer is armed but nowhere near its deadline and the first
+      // reconnect has not run yet.
+      await vi.advanceTimersByTimeAsync(0)
+      expect(settled).toBe(false)
+      expect(reconnect).not.toHaveBeenCalled()
+
+      // A SIGINT observed mid-grace must abort the sleep synchronously.
+      // Without R-0000203 the run would stay parked until the full 5 seconds
+      // elapsed; since the clock is never advanced toward that deadline, the
+      // run can only resolve because the AbortSignal ended the sleep early.
       getSignalBus().emit("SIGINT")
-    }, 50)
+      await runPromise
 
-    const start = Date.now()
-    await runPlaybook(definition, { rebootGraceSeconds: 5 })
-    const elapsed = Date.now() - start
-
-    clearTimeout(signalTimer)
-
-    // Allow generous tolerance for slow CI but assert we did not idle for
-    // anywhere near the full 5-second grace.
-    expect(elapsed).toBeLessThan(2000)
+      expect(settled).toBe(true)
+      expect(reconnect).toHaveBeenCalledTimes(1)
+    } finally {
+      vi.useRealTimers()
+    }
   })
 })
 
