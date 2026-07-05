@@ -141,6 +141,8 @@ Options:
 
 `--diff` only works together with `--dry-run`. When enabled, modules that opt in print a unified diff below their status line, showing exactly which lines or values would change. Without `--diff`, the dry-run output is unchanged. Diff-producing modules: `file.copy`, `file.template`, `sysctl.set`, `hostname.set`, `swap.file`, `swap.swappiness`, `swap.vfsCachePressure`, `cron.job`, `cron.absent`, `timer.scheduled`, `timer.absent`, `net.hosts`, `quadlet.container`.
 
+`--reconnect-timeout <seconds>` sets how long Paratix keeps retrying the SSH connection after a module forces the connection to drop — after a `system.reboot` or after an SSH port change. When a module reboots the host, Paratix waits a short grace period and then reconnects within a **300 second window by default**, so hosts that need a few minutes to come back (fsck, cloud-init, slow POST) still succeed. The number of attempts follows the time window rather than a fixed cap, so the window is never cut short. Port-change reconnects use a shorter 120 second default because the port comes back almost immediately. Set `--reconnect-timeout` (up to 86400 seconds) to override both paths for exceptionally slow reboots.
+
 ## Documentation
 
 - For project scaffolding, see [`create-paratix`](https://www.npmjs.com/package/create-paratix).

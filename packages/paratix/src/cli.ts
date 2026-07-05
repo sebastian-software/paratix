@@ -840,7 +840,7 @@ program
   .option("--first-run", "Set PARATIX_FIRST_RUN=true before loading the playbook", false)
   .option(
     "--reconnect-timeout <seconds>",
-    "SSH reconnect timeout (seconds, max 86400)",
+    "SSH reconnect timeout override for reboots and port changes (seconds, max 86400; reboot default 300)",
     parseReconnectTimeoutSeconds
   )
   .option("--verbose", "Show full stack traces on error", false)

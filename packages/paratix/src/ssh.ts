@@ -149,8 +149,34 @@ function resolveWriteFileMode(
 }
 
 const COMMAND_TIMEOUT = 120_000
-const DEFAULT_MAX_RECONNECT_ATTEMPTS = 10
 const DEFAULT_RECONNECT_TIMEOUT = 120_000
+
+/**
+ * Resolve the effective reconnect time window and attempt cap for a reconnect.
+ *
+ * Timeout precedence: an explicit `reconnectTimeout` (from `--reconnect-timeout`)
+ * always wins for every reconnect path. When it is unset, callers may pass a
+ * path-specific default (e.g. the longer reboot window), otherwise the generic
+ * reconnect default applies.
+ *
+ * The attempt count is bounded by the time window, not by a fixed default cap:
+ * with the 30 s backoff ceiling a small default cap would silently cut a
+ * configured window short (e.g. only ~7-8 tries fit a 120 s window). Only an
+ * explicitly configured `maxReconnectAttempts` still imposes a hard cap.
+ *
+ * @param config - The SSH config carrying any explicit reconnect overrides.
+ * @param defaultTimeout - Optional path-specific default timeout in milliseconds.
+ * @returns The resolved `timeout` (ms) and `maxAttempts` for this reconnect.
+ */
+function resolveReconnectBudget(
+  config: SshConfig,
+  defaultTimeout?: number
+): { maxAttempts: number; timeout: number } {
+  return {
+    maxAttempts: config.maxReconnectAttempts ?? Number.POSITIVE_INFINITY,
+    timeout: config.reconnectTimeout ?? defaultTimeout ?? DEFAULT_RECONNECT_TIMEOUT,
+  }
+}
 // SHA-256 of an empty byte sequence. Used by `verifyRemoteWriteFile` to detect
 // a remote file that was finalized as 0 bytes (e.g. disk full) — when the
 // expected content hash is anything other than this constant and the remote
@@ -563,9 +589,8 @@ export class SshConnectionImpl implements SshConnection {
     return result.stdout
   }
 
-  public async reconnect(): Promise<void> {
-    const timeout = this.config.reconnectTimeout ?? DEFAULT_RECONNECT_TIMEOUT
-    const maxAttempts = this.config.maxReconnectAttempts ?? DEFAULT_MAX_RECONNECT_ATTEMPTS
+  public async reconnect(options?: { defaultTimeout?: number }): Promise<void> {
+    const { maxAttempts, timeout } = resolveReconnectBudget(this.config, options?.defaultTimeout)
     const deadline = Date.now() + timeout
     let attempt = 0
 

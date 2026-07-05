@@ -180,8 +180,8 @@ export type RunOptions = {
   /**
    * Initial grace period (in seconds) the runner waits before the first
    * reconnect attempt after a `system.reboot` meta. Defaults to
-   * {@link DEFAULT_REBOOT_GRACE_SECONDS}. The wait does not consume any of
-   * the configured `maxReconnectAttempts` budget.
+   * {@link DEFAULT_REBOOT_GRACE_SECONDS}. The wait runs before the reconnect
+   * time window starts, so it does not eat into the reconnect budget.
    */
   rebootGraceSeconds?: number
   /** Custom reconnect timeout in milliseconds passed to SSH, overriding the config default. */
@@ -192,6 +192,16 @@ export type RunOptions = {
 
 /** Default grace period before reconnecting after a reboot. */
 export const DEFAULT_REBOOT_GRACE_SECONDS = 15
+
+/**
+ * Default reconnect window (in milliseconds) applied to the reboot path when
+ * the operator did not set `--reconnect-timeout`. Reboots are a core feature,
+ * but real VPS reboots (fsck, cloud-init, slow POST) routinely take 2-5
+ * minutes, so the generic 120 s reconnect default is too short here. An
+ * explicit `--reconnect-timeout` still overrides this for both the reboot and
+ * the port-change path.
+ */
+export const DEFAULT_REBOOT_RECONNECT_TIMEOUT = 300_000
 const REBOOT_GRACE_SECONDS_TO_MS = 1000
 
 /**
@@ -480,7 +490,7 @@ async function handleReboot(
   }
 
   // Wait an initial grace period before the first reconnect so attempts
-  // during shutdown/boot do not waste the maxReconnectAttempts budget. The
+  // during shutdown/boot do not eat into the reconnect time window. The
   // wait short-circuits when a shutdown signal arrives — both via the
   // synchronous shutdown getter (already set when this is reached) and via
   // the AbortSignal that fires on a fresh SIGINT/SIGTERM mid-sleep.
@@ -490,7 +500,9 @@ async function handleReboot(
   })
 
   try {
-    await ssh.reconnect()
+    // Grant reboots a longer default reconnect window than the generic path.
+    // An explicit `--reconnect-timeout` still overrides this default.
+    await ssh.reconnect({ defaultTimeout: DEFAULT_REBOOT_RECONNECT_TIMEOUT })
   } catch (error) {
     console.error(`Failed to reconnect after reboot: ${String(error)}`)
     throw error

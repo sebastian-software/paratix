@@ -649,6 +649,35 @@ describe("runPlaybook handlePortChange + handleReboot interaction", () => {
     expect(reconnect).toHaveBeenCalledTimes(1)
   })
 
+  // Issue #73: only the reboot path extends the default window. Port changes
+  // come back almost immediately and must keep the generic reconnect default,
+  // so the handler must not pass a defaultTimeout override.
+  it("does not extend the reconnect window for a port change (no defaultTimeout override)", async () => {
+    const capturedConfigs: unknown[] = []
+    const reconnect = vi.fn().mockResolvedValue(null)
+
+    vi.doMock("../src/ssh.js", () => ({
+      shellQuote: (s: string) => `'${s}'`,
+      SshConnectionImpl: makeMockSshClass(capturedConfigs, { lifecycle: "permissive", reconnect }),
+    }))
+
+    const { runPlaybook } = await import("../src/runner.js")
+
+    const moduleWithPortOnly = makeModuleWithMeta([meta.sshdPort(2222)])
+
+    const definition: ServerDefinition = {
+      host: "1.2.3.4",
+      name: "test-server",
+      run: [moduleWithPortOnly],
+      ssh: { ports: [22], privateKey: "~/.ssh/id", user: "root" },
+    }
+
+    await runPlaybook(definition)
+
+    expect(reconnect).toHaveBeenCalledTimes(1)
+    expect(reconnect).toHaveBeenCalledWith()
+  })
+
   it("skips runner reconnect when sshd.port already reconnected to the reported target port", async () => {
     const capturedConfigs: unknown[] = []
     const addPort = vi.fn().mockReturnValue(true)
@@ -969,6 +998,34 @@ describe("runPlaybook handleReboot grace period (R-0000153)", () => {
 
     // The grace wait must not have caused additional reconnect calls.
     expect(reconnect).toHaveBeenCalledTimes(1)
+  })
+
+  // Issue #73: the reboot path must hand the SSH layer a longer default
+  // reconnect window (300 s) so slow VPS reboots still reconnect.
+  it("grants the reboot reconnect a longer default window via defaultTimeout", async () => {
+    const capturedConfigs: unknown[] = []
+    const reconnect = vi.fn().mockResolvedValue(null)
+
+    vi.doMock("../src/ssh.js", () => ({
+      shellQuote: (s: string) => `'${s}'`,
+      SshConnectionImpl: makeMockSshClass(capturedConfigs, { lifecycle: "permissive", reconnect }),
+    }))
+
+    const { DEFAULT_REBOOT_RECONNECT_TIMEOUT, runPlaybook } = await import("../src/runner.js")
+    const moduleWithReboot = makeModuleWithMeta([meta.systemReboot()])
+
+    const definition: ServerDefinition = {
+      host: "1.2.3.4",
+      name: "test-server",
+      run: [moduleWithReboot],
+      ssh: { ports: [22], privateKey: "~/.ssh/id", user: "root" },
+    }
+
+    await runPlaybook(definition, { rebootGraceSeconds: 0 })
+
+    expect(DEFAULT_REBOOT_RECONNECT_TIMEOUT).toBe(300_000)
+    expect(reconnect).toHaveBeenCalledTimes(1)
+    expect(reconnect).toHaveBeenCalledWith({ defaultTimeout: DEFAULT_REBOOT_RECONNECT_TIMEOUT })
   })
 
   // R-0000203: a SIGINT/SIGTERM observed mid-sleep aborts the grace timer
