@@ -812,13 +812,16 @@ describe("SshConnectionImpl", () => {
       expect(tryConnectOnPort).toHaveBeenCalledTimes(3)
     })
 
-    it("uses default maxReconnectAttempts (10) when not specified", async () => {
+    // Issue #73: without an explicit maxReconnectAttempts the attempt count is
+    // bounded by the time window, not a fixed cap. The old default of 10
+    // attempts truncated a configured window to ~7-8 tries (30 s backoff
+    // ceiling). A 300 s window must therefore allow well beyond 10 attempts.
+    it("keeps retrying within the whole window without a fixed attempt cap", async () => {
       vi.useFakeTimers()
 
       vi.mocked(tryConnectOnPort).mockRejectedValue(new Error("Connection refused"))
 
-      // Use a high timeout so it never triggers — only the default attempt limit should fire
-      const ssh = makeSshInstance({ reconnectTimeout: 600_000 })
+      const ssh = makeSshInstance({ reconnectTimeout: 300_000 })
 
       const reconnectPromise = ssh.reconnect()
 
@@ -827,18 +830,66 @@ describe("SshConnectionImpl", () => {
         /* handled below */
       })
 
-      // Advance timers in large steps so all backoff delays (up to ~250 s total) pass.
-      // Using 10 000 ms per step keeps microtask interleaving intact without exceeding
-      // the default vitest test timeout.
-      for (let elapsed = 0; elapsed < 300_000; elapsed += 10_000) {
+      // Advance past the full window in large steps so every backoff delay
+      // fires while keeping microtask interleaving intact.
+      for (let elapsed = 0; elapsed < 305_000; elapsed += 5000) {
         // eslint-disable-next-line no-await-in-loop
-        await vi.advanceTimersByTimeAsync(10_000)
+        await vi.advanceTimersByTimeAsync(5000)
       }
 
       await expect(reconnectPromise).rejects.toThrow(
-        /Failed to reconnect to 1\.2\.3\.4 after 10 attempts/v
+        /Failed to reconnect to 1\.2\.3\.4 after \d+ attempts \(timeout: 300000ms\)/v
       )
-      expect(tryConnectOnPort).toHaveBeenCalledTimes(10)
+      // The old fixed cap of 10 must no longer bound a 300 s window.
+      expect(vi.mocked(tryConnectOnPort).mock.calls.length).toBeGreaterThan(10)
+    })
+
+    // Issue #73: the reboot path passes a longer `defaultTimeout`. It must take
+    // effect only when no explicit reconnectTimeout is configured, and must
+    // shape the deadline reported in the failure message.
+    it("applies options.defaultTimeout as the reconnect window when reconnectTimeout is unset", async () => {
+      vi.useFakeTimers()
+
+      vi.mocked(tryConnectOnPort).mockRejectedValue(new Error("Connection refused"))
+
+      const ssh = makeSshInstance({})
+
+      const reconnectPromise = ssh.reconnect({ defaultTimeout: 300_000 })
+      reconnectPromise.catch(() => {
+        /* handled below */
+      })
+
+      for (let elapsed = 0; elapsed < 305_000; elapsed += 5000) {
+        // eslint-disable-next-line no-await-in-loop
+        await vi.advanceTimersByTimeAsync(5000)
+      }
+
+      await expect(reconnectPromise).rejects.toThrow(
+        /Failed to reconnect to 1\.2\.3\.4 after \d+ attempts \(timeout: 300000ms\)/v
+      )
+    })
+
+    it("lets an explicit reconnectTimeout override options.defaultTimeout", async () => {
+      vi.useFakeTimers()
+
+      vi.mocked(tryConnectOnPort).mockRejectedValue(new Error("Connection refused"))
+
+      // An explicit (short) window must win over the longer reboot default.
+      const ssh = makeSshInstance({ reconnectTimeout: 5000 })
+
+      const reconnectPromise = ssh.reconnect({ defaultTimeout: 300_000 })
+      reconnectPromise.catch(() => {
+        /* handled below */
+      })
+
+      for (let elapsed = 0; elapsed < 12_000; elapsed += 1000) {
+        // eslint-disable-next-line no-await-in-loop
+        await vi.advanceTimersByTimeAsync(1000)
+      }
+
+      await expect(reconnectPromise).rejects.toThrow(
+        /Failed to reconnect to 1\.2\.3\.4 after \d+ attempts \(timeout: 5000ms\)/v
+      )
     })
 
     it("clears cached password and throws when host key changes on reconnect", async () => {

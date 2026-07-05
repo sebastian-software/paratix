@@ -81,6 +81,8 @@ Options:
   --verbose
 ```
 
+`--reconnect-timeout <seconds>` controls how long Paratix keeps retrying the SSH connection after a module forces it to drop. Reboots (`system.reboot`) get a 300 second reconnect window by default so slow-booting VPS hosts still reconnect, while SSH port changes use a shorter default. The retry count follows the time window instead of a fixed attempt cap, so the window is never truncated. Override the default (up to 86400 seconds) for exceptionally slow reboots.
+
 ## Packages
 
 This repository contains two user-facing packages:
