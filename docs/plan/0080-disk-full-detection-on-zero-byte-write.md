@@ -25,7 +25,7 @@ Wenn Paratix beim Schreiben einer Datei (z.B. `file.copy`, `writeFile`) nur eine
 ### Neue Methode `checkRemoteDiskSpace(remotePath)`
 
 - Extrahiert das Verzeichnis aus dem Remote-Pfad
-- Führt `df -P <directory>` aus
+- Führt `df -Pk <directory>` aus (nachträglich korrigiert: `-k` erzwingt 1024-Byte-Blöcke; reines `df -P` liefert unter POSIX bzw. `POSIXLY_CORRECT=1` 512-Byte-Blöcke und würde den freien Platz verdoppeln)
 - Parst die Ausgabe: Available-Spalte (Index 3) × 1024 = verfügbare Bytes, Mountpoint (Index 5)
 - Gibt `{ availableBytes, mountpoint }` zurück oder `null` bei Parse-/Exec-Fehler
 

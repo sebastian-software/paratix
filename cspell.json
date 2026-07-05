@@ -125,6 +125,7 @@
     "pipefail",
     "pkill",
     "podman",
+    "POSIXLY",
     "postbuild",
     "quadlet",
     "rcbuggy",

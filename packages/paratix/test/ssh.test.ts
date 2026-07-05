@@ -3066,7 +3066,7 @@ describe("SshConnectionImpl", () => {
           stream.emit("data", Buffer.from("0"))
           stream.emit("close", 0)
         })
-        // df -P (disk space check triggered by 0-byte detection)
+        // df -Pk (disk space check triggered by 0-byte detection)
         .mockImplementationOnce((_command: string, callback: ExecCallback) => {
           const stream = makeStream()
           executedCommands.push(_command)
@@ -3099,7 +3099,7 @@ describe("SshConnectionImpl", () => {
       // R-0000150: stat now runs on the staged temp path (before mv).
       expect(executedCommands[3]).toContain("stat -c")
       expect(executedCommands[3]).toContain(tempPath)
-      expect(executedCommands[4]).toContain("df -P")
+      expect(executedCommands[4]).toContain("df -Pk")
       expect(executedCommands[5]).toContain("rm -f")
       // mv must not have run — assertRemoteFileSize threw before finalize.
       expect(executedCommands.some((cmd) => cmd.includes("mv -T"))).toBe(false)

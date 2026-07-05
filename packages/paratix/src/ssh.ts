@@ -935,7 +935,11 @@ export class SshConnectionImpl implements SshConnection {
       const directory = remotePath.includes("/")
         ? remotePath.slice(0, remotePath.lastIndexOf("/")) || "/"
         : "."
-      const dfOutput = await this.output(`df -P ${shellQuote(directory)}`)
+      // Use `-Pk` so the Available column is guaranteed in 1024-byte
+      // units. Plain `df -P` reports 512-byte blocks under POSIX (e.g. GNU
+      // coreutils with POSIXLY_CORRECT=1), which would double the reported free
+      // space and defeat the disk-full diagnosis. `-k` overrides that to 1 KiB.
+      const dfOutput = await this.output(`df -Pk ${shellQuote(directory)}`)
       const lines = dfOutput.trim().split("\n")
       if (lines.length < 2) return null
       const columns = lines[1].split(/\s+/v)
