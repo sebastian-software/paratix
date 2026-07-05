@@ -127,12 +127,15 @@ Options:
   --dry-run
   --env <key=value>
   --env-file <path>
+  --filter <names>
   --first-run
   --reconnect-timeout <seconds>
   --verbose
   --version
   --help
 ```
+
+`--filter <names>` restricts the run to the named recipes and modules. Names are matched anywhere in the tree, and every node that is not selected is shown as `skipped` instead of being executed. The option is comma-separated and repeatable, so `--filter rybbit,palamedes-examples` and `--filter rybbit --filter palamedes-examples` are equivalent. Selecting a recipe runs its whole subtree; a recipe that is not selected but contains a selected descendant is still descended into, so only the matching children run while its siblings are skipped. If several nodes share the same name, every one of them is selected. An unknown filter name aborts the run before it connects (exit code 2). The final run summary counts only top-level nodes, so nested skipped nodes are still shown but are not added to the `skipped` tally. `--filter` composes with `--dry-run` and the other flags.
 
 `--first-run` is meant for explicit bootstrap flows where a fresh server must be hardened first and the rest of the system should only be applied later.
 
