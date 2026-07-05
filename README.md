@@ -20,7 +20,7 @@ If you already know tools like Ansible, the core idea will feel familiar. The di
 ## Prerequisites
 
 - Node.js `>=24.0.0`
-- pnpm `10.30.3` or newer
+- pnpm 11 or newer (the repo pins the exact version in the `packageManager` field; use Corepack to activate it automatically)
 
 ## Usage
 
@@ -73,9 +73,11 @@ Useful flags:
 paratix apply <file> [options]
 
 Options:
+  --diff
   --dry-run
   --env <key=value>
   --env-file <path>
+  --filter <names>
   --first-run
   --reconnect-timeout <seconds>
   --verbose

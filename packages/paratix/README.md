@@ -131,7 +131,6 @@ Options:
   --first-run
   --reconnect-timeout <seconds>
   --verbose
-  --version
   --help
 ```
 
