@@ -27,11 +27,16 @@ import {
 
 /**
  * Internal representation of a recipe module.
- * The `_isRecipe` flag lets the runner distinguish recipes from leaf modules.
+ *
+ * The `kind: "recipe"` discriminator lets the runner distinguish recipes from
+ * leaf modules through the {@link isRecipe} type guard, forming a discriminated
+ * union with plain {@link Module} values (which leave `kind` unset). The child
+ * `_modules` and optional `_signals` are recipe-specific data that TypeScript
+ * narrows to once `isRecipe` confirmed the discriminator — no structural cast
+ * is required anywhere.
  * @internal
  */
 export type RecipeModule = {
-  _isRecipe: true
   _modules: Module[]
   _signals?: Module[]
   apply: (
@@ -45,6 +50,7 @@ export type RecipeModule = {
       verbose?: boolean
     }
   ) => Promise<ModuleResult>
+  kind: "recipe"
 } & Module
 
 type RecipeState = {
@@ -71,12 +77,23 @@ type RecipeLoopStepResult =
 
 const INTERRUPTED_BEFORE_APPLY = Symbol("recipe-interrupted-before-apply")
 
-function isRecipeModuleLike(module: Module): module is RecipeModule {
-  return (module as { _isRecipe?: boolean } & Module)._isRecipe === true
+/**
+ * Central type guard that narrows a {@link Module} to a {@link RecipeModule}
+ * through the internal `kind` discriminator.
+ *
+ * This is the single source of truth for the recipe/leaf-module distinction;
+ * the runner, the module filter and the dry-run paths all consume it instead of
+ * repeating an unsafe structural cast on an ad-hoc marker.
+ *
+ * @param module - The module to inspect.
+ * @returns `true` when `module` is a recipe exposing child `_modules`.
+ */
+export function isRecipe(module: Module): module is RecipeModule {
+  return module.kind === "recipe"
 }
 
 function printRecipeChildResult(module: Module, result: ModuleResult): void {
-  if (isRecipeModuleLike(module)) {
+  if (isRecipe(module)) {
     printRecipeModuleResult(module.name, result.status, result.detail)
     return
   }
@@ -212,7 +229,7 @@ async function applyRecipeChild(parameters: {
   targetModule: Module
   verbose: boolean
 }): Promise<ModuleResult> {
-  if (isRecipeModuleLike(parameters.targetModule)) {
+  if (isRecipe(parameters.targetModule)) {
     return parameters.targetModule.apply(parameters.connection, parameters.currentEnvironment, {
       onChildStep: parameters.onChildStep,
       onSignalStep: parameters.onSignalStep,
@@ -543,7 +560,6 @@ function createRecipeDryRunApply(
     const result = await dryRunRecipeModule({
       environment,
       recipeModule: {
-        _isRecipe: true,
         _modules: modules,
         async apply() {
           await Promise.resolve()
@@ -553,6 +569,7 @@ function createRecipeDryRunApply(
           await Promise.resolve()
           return "ok"
         },
+        kind: "recipe",
         name,
       },
       shutdownSignal: parameters?.shutdownSignal,
@@ -609,7 +626,6 @@ export function recipe(
       ? { _dryRunMetaProducer: true as const }
       : {}),
     ...(applyDryRun == null ? {} : { _applyDryRun: applyDryRun }),
-    _isRecipe: true,
     _modules: modules,
     _signals: options?.signals,
     _supportsChildStepHook: true,
@@ -668,6 +684,7 @@ export function recipe(
       return "ok"
     },
 
+    kind: "recipe",
     name,
   }
 }

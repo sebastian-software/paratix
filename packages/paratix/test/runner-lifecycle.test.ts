@@ -105,10 +105,10 @@ describe("runPlaybook recipe exception handling", () => {
     const { runPlaybook } = await import("../src/runner.js")
 
     const throwingRecipe = {
-      _isRecipe: true as const,
       _modules: [],
       apply: vi.fn().mockRejectedValue(new Error("recipe internal failure")),
       check: vi.fn().mockResolvedValue("needs-apply"),
+      kind: "recipe" as const,
       name: "throwing-recipe",
     }
 
@@ -145,10 +145,10 @@ describe("runPlaybook recipe exception handling", () => {
 
     const recipeError = new Error("recipe internal failure")
     const throwingRecipe = {
-      _isRecipe: true as const,
       _modules: [],
       apply: vi.fn().mockRejectedValue(recipeError),
       check: vi.fn().mockResolvedValue("needs-apply"),
+      kind: "recipe" as const,
       name: "throwing-recipe",
     }
 
@@ -180,10 +180,10 @@ describe("runPlaybook recipe exception handling", () => {
     const { runPlaybook } = await import("../src/runner.js")
 
     const throwingRecipe = {
-      _isRecipe: true as const,
       _modules: [],
       apply: vi.fn().mockRejectedValue(new Error("recipe boom")),
       check: vi.fn().mockResolvedValue("needs-apply"),
+      kind: "recipe" as const,
       name: "throwing-recipe",
     }
 

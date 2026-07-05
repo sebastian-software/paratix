@@ -2503,7 +2503,7 @@ describe("resolveFilteredRun", () => {
     expect(run[0].name).toBe("base-setup")
     expect(run[0].local).toBe(true)
     // service-layer is descended into (still a recipe).
-    expect((run[1] as { _isRecipe?: boolean } & Module)._isRecipe).toBe(true)
+    expect(run[1].kind).toBe("recipe")
   })
 
   it("throws a CliUsageError naming an unknown filter value", () => {
