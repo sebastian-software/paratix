@@ -15,7 +15,6 @@ import { installRunnerTestHooks, makeMockSshClass } from "./helpers/runnerMocks.
 installRunnerTestHooks()
 
 type RecipeView = {
-  _isRecipe?: boolean
   _modules: Module[]
   _signals?: Module[]
 } & Module
@@ -27,7 +26,7 @@ function asRecipe(module: Module): RecipeView {
 }
 
 function isRecipe(module: Module): boolean {
-  return asRecipe(module)._isRecipe === true
+  return module.kind === "recipe"
 }
 
 // Minimal leaf module whose behaviour is irrelevant to filter transformation.

@@ -28,6 +28,7 @@ import {
   startModuleSpinner,
   stopLiveModuleOutput,
 } from "./output.js"
+import { isRecipe } from "./recipe.js"
 import { withRunnerAbortSignal } from "./runnerAbortSignal.js"
 import { resolveExitCode, signalExitCode } from "./runnerHelpers.js"
 import { clearRegisteredSecrets, withRunScopedSecrets } from "./secretSink.js"
@@ -451,11 +452,6 @@ function handleCaughtStepError(parameters: {
   printModuleResult(parameters.moduleName, "failed")
   printCommandFailure(parameters.error, parameters.verbose)
   return { env: parameters.environment, shouldBreak: true, status: "failed" }
-}
-
-function isRecipe(target: Module): target is RecipeModule {
-  // eslint-disable-next-line @typescript-eslint/no-unsafe-type-assertion -- RecipeModule uses _isRecipe as discriminator
-  return "_isRecipe" in target && (target as RecipeModule)._isRecipe
 }
 
 function addSshdPorts(ssh: SshConnectionImpl, metaEntries: ModuleResult["meta"]): number[] {

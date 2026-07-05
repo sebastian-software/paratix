@@ -378,7 +378,6 @@ describe("runPlaybook signal handling", () => {
     const { runPlaybook } = await import("../src/runner.js")
 
     const interruptedRecipe = {
-      _isRecipe: true as const,
       _modules: [],
       apply: vi.fn().mockImplementationOnce(async () => {
         await Promise.resolve()
@@ -386,6 +385,7 @@ describe("runPlaybook signal handling", () => {
         throw new Error("recipe transport closed during shutdown")
       }),
       check: vi.fn().mockResolvedValue("needs-apply" as const),
+      kind: "recipe" as const,
       name: "interrupted-recipe",
     }
 

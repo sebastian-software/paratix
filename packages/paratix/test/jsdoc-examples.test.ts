@@ -51,7 +51,7 @@ describe("JSDoc @example blocks", () => {
       }
     )
 
-    expect(nginxRecipe._isRecipe).toBe(true)
+    expect(nginxRecipe.kind).toBe("recipe")
     expect(nginxRecipe._modules).toHaveLength(3)
     expect(nginxRecipe._modules[0]?.name).toBe("package.installed: nginx")
     expect(nginxRecipe._signals).toHaveLength(1)

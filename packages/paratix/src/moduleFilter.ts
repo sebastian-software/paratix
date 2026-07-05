@@ -1,7 +1,6 @@
-import type { RecipeModule } from "./recipe.js"
 import type { Module, ModuleResult } from "./types.js"
 
-import { recipe } from "./recipe.js"
+import { isRecipe, recipe } from "./recipe.js"
 import { NEEDS_APPLY } from "./types.js"
 
 /**
@@ -10,21 +9,6 @@ import { NEEDS_APPLY } from "./types.js"
  * `(dry-run)` suffix; this makes clear why the node reports `skipped`.
  */
 const SKIP_DRY_RUN_DETAIL = "filtered out"
-
-/**
- * Narrow a {@link Module} to a {@link RecipeModule}.
- *
- * A local `_isRecipe` check is used on purpose instead of importing the
- * `isRecipe` helper from `runner.ts`: it keeps `moduleFilter.ts` free of a
- * dependency on the runner and avoids an import cycle, while relying on the
- * same discriminator the runner and recipe modules already expose.
- *
- * @param module - The module to inspect.
- * @returns `true` when `module` is a recipe that exposes child `_modules`.
- */
-function isRecipeModule(module: Module): module is RecipeModule {
-  return (module as { _isRecipe?: boolean } & Module)._isRecipe === true
-}
 
 /**
  * Split, trim, and de-duplicate the raw `--filter` values collected by the CLI.
@@ -63,7 +47,7 @@ export function collectModuleNames(modules: Module[]): Set<string> {
   const names = new Set<string>()
   const visit = (module: Module): void => {
     names.add(module.name)
-    if (isRecipeModule(module)) {
+    if (isRecipe(module)) {
       for (const child of module._modules) visit(child)
     }
   }
@@ -81,7 +65,7 @@ export function collectModuleNames(modules: Module[]): Set<string> {
  */
 export function subtreeHasFilterMatch(module: Module, filter: ReadonlySet<string>): boolean {
   if (filter.has(module.name)) return true
-  if (isRecipeModule(module)) {
+  if (isRecipe(module)) {
     return module._modules.some((child) => subtreeHasFilterMatch(child, filter))
   }
   return false
@@ -144,7 +128,7 @@ function filterNode(
   const selfSelected = ancestorSelected || filter.has(module.name)
   if (selfSelected) return module
 
-  if (isRecipeModule(module) && subtreeHasFilterMatch(module, filter)) {
+  if (isRecipe(module) && subtreeHasFilterMatch(module, filter)) {
     const filteredChildren = module._modules.map((child) => filterNode(child, filter, false))
     return recipe(module.name, filteredChildren, { signals: module._signals })
   }

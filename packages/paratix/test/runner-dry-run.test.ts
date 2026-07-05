@@ -65,10 +65,10 @@ describe("runPlaybook dry-run recipe behaviour", () => {
     }
 
     const recipeModule = {
-      _isRecipe: true as const,
       _modules: [childModule1, childModule2],
       apply: vi.fn().mockResolvedValue({ status: "changed" } satisfies ModuleResult),
       check: vi.fn().mockResolvedValue("needs-apply"),
+      kind: "recipe" as const,
       name: "test-recipe",
     }
 
@@ -107,10 +107,10 @@ describe("runPlaybook dry-run recipe behaviour", () => {
     }
 
     const recipeModule = {
-      _isRecipe: true as const,
       _modules: [childModule1, childModule2],
       apply: vi.fn().mockResolvedValue({ status: "changed" } satisfies ModuleResult),
       check: vi.fn().mockResolvedValue("needs-apply"),
+      kind: "recipe" as const,
       name: "test-recipe",
     }
 
@@ -149,10 +149,10 @@ describe("runPlaybook dry-run recipe behaviour", () => {
     }
 
     const recipeModule = {
-      _isRecipe: true as const,
       _modules: [childModule],
       apply: vi.fn().mockResolvedValue({ status: "changed" } satisfies ModuleResult),
       check: vi.fn().mockResolvedValue("needs-apply"),
+      kind: "recipe" as const,
       name: "test-recipe",
     }
 
@@ -1119,10 +1119,10 @@ describe("runPlaybook local module in dry-run recipe behaviour", () => {
     }
 
     const recipeModule = {
-      _isRecipe: true as const,
       _modules: [localChildModule],
       apply: vi.fn().mockResolvedValue({ status: "changed" } satisfies ModuleResult),
       check: vi.fn().mockResolvedValue("needs-apply" as const),
+      kind: "recipe" as const,
       name: "test-recipe",
     }
 

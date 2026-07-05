@@ -226,6 +226,17 @@ export type Module = {
    */
   check: (ssh: null | SshConnection, environment: Environment) => Promise<"needs-apply" | "ok">
   /**
+   * Internal discriminator that distinguishes leaf modules from recipes.
+   *
+   * Leaf modules leave this `undefined` (treated as `"module"`); recipes set
+   * `"recipe"` so the runner can narrow to the recipe contract via the
+   * `isRecipe` type guard instead of an unsafe structural cast. Intentionally
+   * optional so existing custom modules and playbooks stay source-compatible —
+   * they never need to set it.
+   * @internal
+   */
+  kind?: "module" | "recipe"
+  /**
    * When true the module runs locally instead of over SSH.
    * The `ssh` parameter will be `null` in check/apply.
    */
