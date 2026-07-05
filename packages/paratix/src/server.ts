@@ -69,11 +69,14 @@ export function validateServerDefinition(
  * @throws {Error} When any required field is missing or empty.
  *
  * @example
+ * import { server } from "paratix"
+ * import { package as pkg } from "paratix/modules"
+ *
  * export default server({
  *   name: "web-01",
  *   host: "10.0.0.1",
  *   ssh: { user: "root", ports: [22], privateKey: "~/.ssh/id_ed25519" }, // "~" is expanded
- *   run: [apt.installed("nginx")],
+ *   run: [pkg.installed("nginx")],
  * });
  */
 export function server(config: ServerDefinition): ServerDefinition {
