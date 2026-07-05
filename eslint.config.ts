@@ -10,6 +10,7 @@ const eslintConfig: Linter.Config[] = [
     ignores: [
       "**/node_modules/**",
       "**/dist/**",
+      "**/coverage/**",
       ".claude/**",
       ".sf-plugin/**",
       ".wisdom-*",

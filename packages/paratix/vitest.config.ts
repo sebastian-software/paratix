@@ -30,6 +30,26 @@ export default defineConfig({
     PACKAGE_VERSION: JSON.stringify(version),
   },
   test: {
+    coverage: {
+      // Only measure the shipped source. Test helpers, config files, generated
+      // type declarations, and the CLI/library entrypoints (thin wiring that is
+      // exercised end-to-end by the distribution/integration suites rather than
+      // by unit tests) are excluded so the thresholds reflect meaningful
+      // logic coverage.
+      exclude: ["src/**/*.d.ts", "src/cli.ts", "src/index.ts", "src/modules/index.ts"],
+      include: ["src/**/*.ts"],
+      provider: "v8",
+      reporter: ["text", "text-summary", "lcov", "html"],
+      // Thresholds are set slightly below the measured baseline (statements
+      // 93.24%, branches 85.85%, functions 97.66%, lines 95.22%) so the gate
+      // stays green today while still failing CI on a meaningful regression.
+      thresholds: {
+        branches: 82,
+        functions: 90,
+        lines: 90,
+        statements: 90,
+      },
+    },
     // picocolors auto-enables ANSI when `CI` is present in the env, which
     // breaks substring assertions on UI output. Force colors off for tests
     // so the assertions match the same plain output developers see locally.
