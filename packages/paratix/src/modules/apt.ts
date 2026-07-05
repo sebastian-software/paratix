@@ -1,7 +1,7 @@
 /* eslint-disable max-lines -- apt module variants share helper code and fixtures */
 import type { UpgradeOptions } from "./package.js"
 
-import { failed, failedCommand } from "../moduleFailure.js"
+import { failed, failedCommand, firstNonEmptyLine } from "../moduleFailure.js"
 import { shellQuote } from "../ssh.js"
 import {
   type ExecOptions,
@@ -68,14 +68,6 @@ type AptRepositorySnapshot =
       identity: null | string
     }
   | { exists: false }
-
-function firstNonEmptyApt(text: string): null | string {
-  for (const line of text.split("\n")) {
-    const trimmed = line.trim()
-    if (trimmed.length > 0) return trimmed
-  }
-  return null
-}
 
 /**
  * R-0000702: probe the device:inode pair of the sources.list. Combining this
@@ -176,7 +168,7 @@ async function rollbackRepositoryAfterUpdateFailure(
   const failureMessage = `[apt.repository] apt-get update failed for ${name}`
   if (rollbackUpdate.code !== 0) {
     return failedCommand(
-      `${failureMessage}; rollback succeeded but apt-get update on the restored sources also failed (exit code ${String(rollbackUpdate.code)}): ${firstNonEmptyApt(rollbackUpdate.stderr) ?? firstNonEmptyApt(rollbackUpdate.stdout) ?? "no output"}`,
+      `${failureMessage}; rollback succeeded but apt-get update on the restored sources also failed (exit code ${String(rollbackUpdate.code)}): ${firstNonEmptyLine(rollbackUpdate.stderr) ?? firstNonEmptyLine(rollbackUpdate.stdout) ?? "no output"}`,
       updateResult
     )
   }

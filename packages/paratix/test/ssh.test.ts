@@ -16,6 +16,7 @@ import { rsync } from "../src/modules/rsync.js"
 import { sftpDownload } from "../src/sftp.js"
 import { SshConnectionImpl, validateMktempPath } from "../src/ssh.js"
 import {
+  CAPTURE_TRUNCATION_MARKER,
   cleanupFailedSshClient,
   collectStreamOutput,
   DEFAULT_MAX_OUTPUT_BYTES,
@@ -3797,26 +3798,28 @@ describe("SshConnectionImpl", () => {
       ).rejects.toThrow("Command failed with signal SIGKILL")
     })
 
-    it("rejects and closes execRaw streams when stdout exceeds the capture limit", async () => {
-      let stream: StreamWithStderr | undefined
+    it("truncates execRaw stdout with the capture marker when it exceeds the limit", async () => {
+      // After the #86 consolidation execRaw delegates capping to
+      // collectStreamOutput: stdout is capped at DEFAULT_MAX_OUTPUT_BYTES and
+      // suffixed with the shared capture-truncation marker (instead of the old
+      // manual reject-on-overflow path), so the raw path and the sudo path emit
+      // one identical truncation output.
       const execSpy = vi.fn().mockImplementation((_command: string, callback: ExecCallback) => {
-        stream = makeStream()
+        const stream = makeStream()
         callback(undefined, stream)
         stream.emit("data", Buffer.alloc(DEFAULT_MAX_OUTPUT_BYTES + 1, "a"))
+        stream.emit("close", 0)
       })
 
       const client = makeClientWithExecSpy(execSpy)
       const ssh = makeConnectedSsh(client, { sudoPassword: null, user: "deploy" })
 
-      const error = await expectRejectedError(
-        (ssh as unknown as PrivateSshConnection).outputWithoutSudo("printf large-output")
+      const output = await (ssh as unknown as PrivateSshConnection).outputWithoutSudo(
+        "printf large-output"
       )
 
-      expect(error.message).toContain(`Command stdout exceeded ${DEFAULT_MAX_OUTPUT_BYTES} bytes`)
-      expect(error.message).toContain("stdout: ")
-      expect(error.message).toContain("…(truncated)")
-      expect(error.message.length).toBeLessThan(1000)
-      expect(stream?.close).toHaveBeenCalledOnce()
+      expect(output.endsWith(CAPTURE_TRUNCATION_MARKER)).toBe(true)
+      expect(output).toBe(`${"a".repeat(DEFAULT_MAX_OUTPUT_BYTES)}${CAPTURE_TRUNCATION_MARKER}`)
     })
 
     it("treats undefined ssh2 close code as exit code 0 in outputWithoutSudo (regression)", async () => {

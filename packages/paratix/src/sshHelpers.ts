@@ -54,7 +54,19 @@ function ignoreTeardownError(): void {
  */
 export const MAX_OUTPUT_LENGTH = 500
 
-function truncateOutput(text: string): string {
+/**
+ * Truncate `text` to at most {@link MAX_OUTPUT_LENGTH} Unicode code points,
+ * appending a `…(truncated)` marker when the limit is exceeded. Counting by
+ * code point (not UTF-16 units) keeps a trailing surrogate pair intact so the
+ * slice never splits a character. This is the single truncation implementation
+ * shared across the SSH layer — both the sudo path ({@link buildCommandError})
+ * and the raw path (via {@link collectStreamOutput}) render error snippets
+ * through this exact function so their output stays byte-for-byte identical.
+ *
+ * @param text - The text to truncate.
+ * @returns The original text, or a truncated prefix with a `…(truncated)` marker.
+ */
+export function truncateOutput(text: string): string {
   let count = 0
   let sliceEnd = 0
   for (const char of text) {
