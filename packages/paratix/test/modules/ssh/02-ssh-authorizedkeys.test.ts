@@ -25,11 +25,11 @@ const successfulSshApplyOptions: MockSshOptions = {
       // probe now run in a single `set -e` pipeline. The previous two
       // separate stub entries are replaced by the fused pattern below.
       command:
-        /^set -e; \[ ! -L '[^']+\/\.ssh' \] \|\| \{ echo '\.ssh must not be a symlink' >&2; exit 1; \}; if \[ -e '[^']+\/\.ssh' \]; then \[ -d '[^']+\/\.ssh' \] \|\| \{ echo '\.ssh must be a directory' >&2; exit 1; \}; else mkdir -p '[^']+\/\.ssh'; fi; \[ -d '[^']+\/\.ssh' \] && \[ ! -L '[^']+\/\.ssh' \] \|\| \{ echo '\.ssh must be a real directory' >&2; exit 1; \}; ssh_directory_identity=\$\(stat -c '%d:%i' '[^']+\/\.ssh'\) \|\| exit \$\?; chmod 700 '[^']+\/\.ssh' && chown '[^']+':'[^']+' '[^']+\/\.ssh'; \[ ! -L '[^']+\/\.ssh' \] && \[ -d '[^']+\/\.ssh' \] \|\| \{ echo '\.ssh must be a real directory' >&2; exit 1; \}; post_ssh_directory_identity=\$\(stat -c '%d:%i' '[^']+\/\.ssh'\) \|\| exit \$\?; \[ "\$post_ssh_directory_identity" = "\$ssh_directory_identity" \] \|\| \{ echo '\.ssh directory changed during metadata update' >&2; exit 1; \}; \[ ! -L '[^']+\/\.ssh\/authorized_keys' \] \|\| \{ echo 'authorized_keys must not be a symlink' >&2; exit 1; \}$/v,
+        /^set -e\n\[ ! -L '[^']+\/\.ssh' \] \|\| \{ echo '\.ssh must not be a symlink' >&2; exit 1; \}\nif \[ -e '[^']+\/\.ssh' \]; then\n {2}\[ -d '[^']+\/\.ssh' \] \|\| \{ echo '\.ssh must be a directory' >&2; exit 1; \}\nelse\n {2}mkdir -p '[^']+\/\.ssh'\nfi\n\[ -d '[^']+\/\.ssh' \] && \[ ! -L '[^']+\/\.ssh' \] \|\| \{ echo '\.ssh must be a real directory' >&2; exit 1; \}\nssh_directory_identity=\$\(stat -c '%d:%i' '[^']+\/\.ssh'\) \|\| exit \$\?\nchmod 700 '[^']+\/\.ssh' && chown '[^']+':'[^']+' '[^']+\/\.ssh'\n\[ ! -L '[^']+\/\.ssh' \] && \[ -d '[^']+\/\.ssh' \] \|\| \{ echo '\.ssh must be a real directory' >&2; exit 1; \}\npost_ssh_directory_identity=\$\(stat -c '%d:%i' '[^']+\/\.ssh'\) \|\| exit \$\?\n\[ "\$post_ssh_directory_identity" = "\$ssh_directory_identity" \] \|\| \{ echo '\.ssh directory changed during metadata update' >&2; exit 1; \}\n\[ ! -L '[^']+\/\.ssh\/authorized_keys' \] \|\| \{ echo 'authorized_keys must not be a symlink' >&2; exit 1; \}$/v,
       result: { code: 0 },
     },
     {
-      command: /^\{ if \[ -e '[^']+\/\.ssh\/authorized_keys' \]; then .+; fi; \}$/v,
+      command: /^\{ if \[ -e '[^']+\/\.ssh\/authorized_keys' \]; then\n[\s\S]+\nfi; \}$/v,
       result: { code: 0 },
     },
     {
@@ -101,7 +101,22 @@ function presentAuthorizedKeysRewriteCommand(
   // R-0000617: existing authorized_keys is read via `dd ... iflag=nofollow`
   // so the open(2) call uses O_NOFOLLOW, collapsing the TOCTOU window where
   // a symlink could otherwise be swapped in after the `[ ! -L ]` guard.
-  return `{ if [ -e ${authorizedKeysPath} ]; then [ ! -L ${authorizedKeysPath} ] || { echo 'authorized_keys must not be a symlink' >&2; exit 1; }; [ -f ${authorizedKeysPath} ] || { echo 'authorized_keys must be a regular file' >&2; exit 1; }; dd if=${authorizedKeysPath} iflag=nofollow status=none of='${temporaryPath}' || exit $?; grep -qxF -- '${key}' '${temporaryPath}'; grep_status=$?; if [ "$grep_status" -eq 0 ]; then :; elif [ "$grep_status" -eq 1 ]; then printf '%s\\n' '${key}' >> '${temporaryPath}'; else exit "$grep_status"; fi; else printf '%s\\n' '${key}' > '${temporaryPath}'; fi; }`
+  return `{ if [ -e ${authorizedKeysPath} ]; then
+  [ ! -L ${authorizedKeysPath} ] || { echo 'authorized_keys must not be a symlink' >&2; exit 1; }
+  [ -f ${authorizedKeysPath} ] || { echo 'authorized_keys must be a regular file' >&2; exit 1; }
+  dd if=${authorizedKeysPath} iflag=nofollow status=none of='${temporaryPath}' || exit $?
+  grep -qxF -- '${key}' '${temporaryPath}'
+  grep_status=$?
+  if [ "$grep_status" -eq 0 ]; then
+    :
+  elif [ "$grep_status" -eq 1 ]; then
+    printf '%s\\n' '${key}' >> '${temporaryPath}'
+  else
+    exit "$grep_status"
+  fi
+else
+  printf '%s\\n' '${key}' > '${temporaryPath}'
+fi; }`
 }
 
 function absentAuthorizedKeysRewriteCommand(
@@ -113,7 +128,21 @@ function absentAuthorizedKeysRewriteCommand(
   // filter it in-place via grep -v on the staged copy. This avoids opening
   // the authorized_keys path itself with grep, which would otherwise follow
   // a symlink swapped in between the `[ ! -L ]` guard and the read.
-  return `{ if [ -e ${authorizedKeysPath} ]; then [ ! -L ${authorizedKeysPath} ] || { echo 'authorized_keys must not be a symlink' >&2; exit 1; }; [ -f ${authorizedKeysPath} ] || { echo 'authorized_keys must be a regular file' >&2; exit 1; }; dd if=${authorizedKeysPath} iflag=nofollow status=none of='${temporaryPath}' || exit $?; grep -vxF -- '${key}' '${temporaryPath}' > '${temporaryPath}.filter'; grep_status=$?; if [ "$grep_status" -eq 0 ] || [ "$grep_status" -eq 1 ]; then mv -T -- '${temporaryPath}.filter' '${temporaryPath}' || exit $?; else rm -f -- '${temporaryPath}.filter'; exit "$grep_status"; fi; else : > '${temporaryPath}'; fi; }`
+  return `{ if [ -e ${authorizedKeysPath} ]; then
+  [ ! -L ${authorizedKeysPath} ] || { echo 'authorized_keys must not be a symlink' >&2; exit 1; }
+  [ -f ${authorizedKeysPath} ] || { echo 'authorized_keys must be a regular file' >&2; exit 1; }
+  dd if=${authorizedKeysPath} iflag=nofollow status=none of='${temporaryPath}' || exit $?
+  grep -vxF -- '${key}' '${temporaryPath}' > '${temporaryPath}.filter'
+  grep_status=$?
+  if [ "$grep_status" -eq 0 ] || [ "$grep_status" -eq 1 ]; then
+    mv -T -- '${temporaryPath}.filter' '${temporaryPath}' || exit $?
+  else
+    rm -f -- '${temporaryPath}.filter'
+    exit "$grep_status"
+  fi
+else
+  : > '${temporaryPath}'
+fi; }`
 }
 
 function sshDirectoryGuardCommand(parameters: {
@@ -123,7 +152,20 @@ function sshDirectoryGuardCommand(parameters: {
   user: string
 }): string {
   const { authorizedKeysPath, group, sshDirectoryPath, user } = parameters
-  return `set -e; [ ! -L ${sshDirectoryPath} ] || { echo '.ssh must not be a symlink' >&2; exit 1; }; if [ -e ${sshDirectoryPath} ]; then [ -d ${sshDirectoryPath} ] || { echo '.ssh must be a directory' >&2; exit 1; }; else mkdir -p ${sshDirectoryPath}; fi; [ -d ${sshDirectoryPath} ] && [ ! -L ${sshDirectoryPath} ] || { echo '.ssh must be a real directory' >&2; exit 1; }; ssh_directory_identity=$(stat -c '%d:%i' ${sshDirectoryPath}) || exit $?; chmod 700 ${sshDirectoryPath} && chown '${user}':'${group}' ${sshDirectoryPath}; [ ! -L ${sshDirectoryPath} ] && [ -d ${sshDirectoryPath} ] || { echo '.ssh must be a real directory' >&2; exit 1; }; post_ssh_directory_identity=$(stat -c '%d:%i' ${sshDirectoryPath}) || exit $?; [ "$post_ssh_directory_identity" = "$ssh_directory_identity" ] || { echo '.ssh directory changed during metadata update' >&2; exit 1; }; [ ! -L ${authorizedKeysPath} ] || { echo 'authorized_keys must not be a symlink' >&2; exit 1; }`
+  return `set -e
+[ ! -L ${sshDirectoryPath} ] || { echo '.ssh must not be a symlink' >&2; exit 1; }
+if [ -e ${sshDirectoryPath} ]; then
+  [ -d ${sshDirectoryPath} ] || { echo '.ssh must be a directory' >&2; exit 1; }
+else
+  mkdir -p ${sshDirectoryPath}
+fi
+[ -d ${sshDirectoryPath} ] && [ ! -L ${sshDirectoryPath} ] || { echo '.ssh must be a real directory' >&2; exit 1; }
+ssh_directory_identity=$(stat -c '%d:%i' ${sshDirectoryPath}) || exit $?
+chmod 700 ${sshDirectoryPath} && chown '${user}':'${group}' ${sshDirectoryPath}
+[ ! -L ${sshDirectoryPath} ] && [ -d ${sshDirectoryPath} ] || { echo '.ssh must be a real directory' >&2; exit 1; }
+post_ssh_directory_identity=$(stat -c '%d:%i' ${sshDirectoryPath}) || exit $?
+[ "$post_ssh_directory_identity" = "$ssh_directory_identity" ] || { echo '.ssh directory changed during metadata update' >&2; exit 1; }
+[ ! -L ${authorizedKeysPath} ] || { echo 'authorized_keys must not be a symlink' >&2; exit 1; }`
 }
 
 function authorizedKeysFinalReplaceCommand(parameters: {
@@ -152,7 +194,38 @@ function authorizedKeysFinalReplaceCommand(parameters: {
   // `[ ! -L ]` guard is also repeated immediately before the `ln` as
   // defence in depth.
   const backupPath = `${authorizedKeysPath.slice(0, -1)}.paratix-backup'`
-  return `chmod 600 '${temporaryPath}' && chown '${user}':'${group}' '${temporaryPath}' && { expected_authorized_keys_hash=$(sha256sum '${temporaryPath}' | cut -d' ' -f1) || exit $?; [ ! -L ${sshDirectoryPath} ] || { echo '.ssh must not be a symlink' >&2; exit 1; }; [ -d ${sshDirectoryPath} ] || { echo '.ssh must be a directory' >&2; exit 1; }; ssh_directory_state=$(stat -c '%a %U %G %F' ${sshDirectoryPath}) || exit $?; [ "$ssh_directory_state" = '${expectedSshDirectoryState}' ] || { echo '.ssh ownership changed before authorized_keys replace' >&2; exit 1; }; [ ! -L ${authorizedKeysPath} ] || { echo 'authorized_keys must not be a symlink' >&2; exit 1; }; rm -f -- ${backupPath}; backup_created=0; if [ -e ${authorizedKeysPath} ]; then [ -f ${authorizedKeysPath} ] || { echo 'authorized_keys must be a regular file' >&2; exit 1; }; [ ! -L ${authorizedKeysPath} ] || { echo 'authorized_keys must not be a symlink' >&2; exit 1; }; ln -P -- ${authorizedKeysPath} ${backupPath} || { echo 'failed to create authorized_keys backup hardlink' >&2; exit 1; }; backup_created=1; fi; [ ! -L ${authorizedKeysPath} ] || { rm -f -- ${backupPath}; echo 'authorized_keys must not be a symlink' >&2; exit 1; }; if ! mv -T -- '${temporaryPath}' ${authorizedKeysPath}; then if [ "$backup_created" = 1 ]; then mv -T -- ${backupPath} ${authorizedKeysPath} || echo 'authorized_keys backup restore failed; backup is at '${backupPath} >&2; fi; echo 'authorized_keys replace failed' >&2; exit 1; fi; [ ! -e '${temporaryPath}' ] || { rm -f -- ${backupPath}; echo 'authorized_keys replace did not consume temporary file' >&2; exit 1; }; [ ! -L ${authorizedKeysPath} ] || { rm -f -- ${backupPath}; echo 'authorized_keys must not be a symlink' >&2; exit 1; }; [ -f ${authorizedKeysPath} ] || { rm -f -- ${backupPath}; echo 'authorized_keys must be a regular file' >&2; exit 1; }; authorized_keys_state=$(stat -c '%a %U %G %F' ${authorizedKeysPath}) || { rm -f -- ${backupPath}; exit 1; }; [ "$authorized_keys_state" = '600 ${user} ${group} regular file' ] || { rm -f -- ${backupPath}; echo 'authorized_keys metadata changed during replace' >&2; exit 1; }; authorized_keys_hash=$(sha256sum ${authorizedKeysPath} | cut -d' ' -f1) || { rm -f -- ${backupPath}; exit 1; }; [ "$authorized_keys_hash" = "$expected_authorized_keys_hash" ] || { rm -f -- ${backupPath}; echo 'authorized_keys content changed during replace' >&2; exit 1; }; rm -f -- ${backupPath}; }`
+  return `chmod 600 '${temporaryPath}' && chown '${user}':'${group}' '${temporaryPath}' && {
+  expected_authorized_keys_hash=$(sha256sum '${temporaryPath}' | cut -d' ' -f1) || exit $?
+  [ ! -L ${sshDirectoryPath} ] || { echo '.ssh must not be a symlink' >&2; exit 1; }
+  [ -d ${sshDirectoryPath} ] || { echo '.ssh must be a directory' >&2; exit 1; }
+  ssh_directory_state=$(stat -c '%a %U %G %F' ${sshDirectoryPath}) || exit $?
+  [ "$ssh_directory_state" = '${expectedSshDirectoryState}' ] || { echo '.ssh ownership changed before authorized_keys replace' >&2; exit 1; }
+  [ ! -L ${authorizedKeysPath} ] || { echo 'authorized_keys must not be a symlink' >&2; exit 1; }
+  rm -f -- ${backupPath}
+  backup_created=0
+  if [ -e ${authorizedKeysPath} ]; then
+    [ -f ${authorizedKeysPath} ] || { echo 'authorized_keys must be a regular file' >&2; exit 1; }
+    [ ! -L ${authorizedKeysPath} ] || { echo 'authorized_keys must not be a symlink' >&2; exit 1; }
+    ln -P -- ${authorizedKeysPath} ${backupPath} || { echo 'failed to create authorized_keys backup hardlink' >&2; exit 1; }
+    backup_created=1
+  fi
+  [ ! -L ${authorizedKeysPath} ] || { rm -f -- ${backupPath}; echo 'authorized_keys must not be a symlink' >&2; exit 1; }
+  if ! mv -T -- '${temporaryPath}' ${authorizedKeysPath}; then
+    if [ "$backup_created" = 1 ]; then
+      mv -T -- ${backupPath} ${authorizedKeysPath} || echo 'authorized_keys backup restore failed; backup is at '${backupPath} >&2
+    fi
+    echo 'authorized_keys replace failed' >&2
+    exit 1
+  fi
+  [ ! -e '${temporaryPath}' ] || { rm -f -- ${backupPath}; echo 'authorized_keys replace did not consume temporary file' >&2; exit 1; }
+  [ ! -L ${authorizedKeysPath} ] || { rm -f -- ${backupPath}; echo 'authorized_keys must not be a symlink' >&2; exit 1; }
+  [ -f ${authorizedKeysPath} ] || { rm -f -- ${backupPath}; echo 'authorized_keys must be a regular file' >&2; exit 1; }
+  authorized_keys_state=$(stat -c '%a %U %G %F' ${authorizedKeysPath}) || { rm -f -- ${backupPath}; exit 1; }
+  [ "$authorized_keys_state" = '600 ${user} ${group} regular file' ] || { rm -f -- ${backupPath}; echo 'authorized_keys metadata changed during replace' >&2; exit 1; }
+  authorized_keys_hash=$(sha256sum ${authorizedKeysPath} | cut -d' ' -f1) || { rm -f -- ${backupPath}; exit 1; }
+  [ "$authorized_keys_hash" = "$expected_authorized_keys_hash" ] || { rm -f -- ${backupPath}; echo 'authorized_keys content changed during replace' >&2; exit 1; }
+  rm -f -- ${backupPath}
+}`
 }
 
 /**

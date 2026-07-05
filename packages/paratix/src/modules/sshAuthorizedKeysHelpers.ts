@@ -160,7 +160,24 @@ async function ensureSshDirectoryAndAuthorizedKeysAreNotSymlinks(
   // prepared directory's device+inode before chmod/chown and verifies it
   // afterwards, so a concurrent swap to another real directory is reported
   // before the authorized_keys rewrite continues.
-  const command = `set -e; [ ! -L ${directory} ] || { echo '.ssh must not be a symlink' >&2; exit 1; }; if [ -e ${directory} ]; then [ -d ${directory} ] || { echo '.ssh must be a directory' >&2; exit 1; }; else mkdir -p ${directory}; fi; [ -d ${directory} ] && [ ! -L ${directory} ] || { echo '.ssh must be a real directory' >&2; exit 1; }; ssh_directory_identity=$(stat -c '%d:%i' ${directory}) || exit $?; chmod 700 ${directory} && chown ${quotedUser}:${quotedPrimaryGroup} ${directory}; [ ! -L ${directory} ] && [ -d ${directory} ] || { echo '.ssh must be a real directory' >&2; exit 1; }; post_ssh_directory_identity=$(stat -c '%d:%i' ${directory}) || exit $?; [ "$post_ssh_directory_identity" = "$ssh_directory_identity" ] || { echo '.ssh directory changed during metadata update' >&2; exit 1; }; [ ! -L ${keysPath} ] || { echo 'authorized_keys must not be a symlink' >&2; exit 1; }`
+  // The multi-line form below is byte-for-byte equivalent to the previous
+  // single-line pipeline: newlines act as the same command separators that
+  // `; ` did, every guard clause stays intact on its own line, and `set -e`
+  // still aborts on the first failing statement.
+  const command = `set -e
+[ ! -L ${directory} ] || { echo '.ssh must not be a symlink' >&2; exit 1; }
+if [ -e ${directory} ]; then
+  [ -d ${directory} ] || { echo '.ssh must be a directory' >&2; exit 1; }
+else
+  mkdir -p ${directory}
+fi
+[ -d ${directory} ] && [ ! -L ${directory} ] || { echo '.ssh must be a real directory' >&2; exit 1; }
+ssh_directory_identity=$(stat -c '%d:%i' ${directory}) || exit $?
+chmod 700 ${directory} && chown ${quotedUser}:${quotedPrimaryGroup} ${directory}
+[ ! -L ${directory} ] && [ -d ${directory} ] || { echo '.ssh must be a real directory' >&2; exit 1; }
+post_ssh_directory_identity=$(stat -c '%d:%i' ${directory}) || exit $?
+[ "$post_ssh_directory_identity" = "$ssh_directory_identity" ] || { echo '.ssh directory changed during metadata update' >&2; exit 1; }
+[ ! -L ${keysPath} ] || { echo 'authorized_keys must not be a symlink' >&2; exit 1; }`
 
   const result = await conn.exec(command, MUTATION_EXEC_OPTS)
   if (result.code !== 0) {
@@ -224,7 +241,11 @@ async function stageAuthorizedKeysContent(
   const filterScratchPath = `${temporaryPath}.filter`
   const quotedFilterScratchPath = shellQuote(filterScratchPath)
   const quotedKey = shellQuote(key)
-  const existingAuthorizedKeysGuard = `[ ! -L ${quotedAuthorizedKeysPath} ] || { echo 'authorized_keys must not be a symlink' >&2; exit 1; }; [ -f ${quotedAuthorizedKeysPath} ] || { echo 'authorized_keys must be a regular file' >&2; exit 1; }`
+  // Two guard clauses rendered on their own (body-indented) lines. The
+  // trailing statement carries a leading two-space indent so the shared
+  // guard aligns with the surrounding staging body in both branches below.
+  const existingAuthorizedKeysGuard = `[ ! -L ${quotedAuthorizedKeysPath} ] || { echo 'authorized_keys must not be a symlink' >&2; exit 1; }
+  [ -f ${quotedAuthorizedKeysPath} ] || { echo 'authorized_keys must be a regular file' >&2; exit 1; }`
   // R-0000617: read the existing authorized_keys via `dd ... iflag=nofollow`
   // so the open(2) on the path uses `O_NOFOLLOW`. The previous `awk '1'
   // $auth_keys` and `grep -vxF -- key $auth_keys` calls opened the file
@@ -238,7 +259,21 @@ async function stageAuthorizedKeysContent(
   const stage =
     state === "present"
       ? await conn.exec(
-          `{ if [ -e ${quotedAuthorizedKeysPath} ]; then ${existingAuthorizedKeysGuard}; ${readExistingAuthorizedKeys} || exit $?; grep -qxF -- ${quotedKey} ${quotedTemporaryPath}; grep_status=$?; if [ "$grep_status" -eq 0 ]; then :; elif [ "$grep_status" -eq 1 ]; then printf '%s\\n' ${quotedKey} >> ${quotedTemporaryPath}; else exit "$grep_status"; fi; else printf '%s\\n' ${quotedKey} > ${quotedTemporaryPath}; fi; }`,
+          `{ if [ -e ${quotedAuthorizedKeysPath} ]; then
+  ${existingAuthorizedKeysGuard}
+  ${readExistingAuthorizedKeys} || exit $?
+  grep -qxF -- ${quotedKey} ${quotedTemporaryPath}
+  grep_status=$?
+  if [ "$grep_status" -eq 0 ]; then
+    :
+  elif [ "$grep_status" -eq 1 ]; then
+    printf '%s\\n' ${quotedKey} >> ${quotedTemporaryPath}
+  else
+    exit "$grep_status"
+  fi
+else
+  printf '%s\\n' ${quotedKey} > ${quotedTemporaryPath}
+fi; }`,
           MUTATION_EXEC_OPTS
         )
       : // R-0000044: use `grep -vxF` (whole-line match) to mirror the present
@@ -250,7 +285,20 @@ async function stageAuthorizedKeysContent(
         // TOCTOU where the path could become a symlink between the
         // `[ ! -L ]` guard and grep's open() call.
         await conn.exec(
-          `{ if [ -e ${quotedAuthorizedKeysPath} ]; then ${existingAuthorizedKeysGuard}; ${readExistingAuthorizedKeys} || exit $?; grep -vxF -- ${quotedKey} ${quotedTemporaryPath} > ${quotedFilterScratchPath}; grep_status=$?; if [ "$grep_status" -eq 0 ] || [ "$grep_status" -eq 1 ]; then mv -T -- ${quotedFilterScratchPath} ${quotedTemporaryPath} || exit $?; else rm -f -- ${quotedFilterScratchPath}; exit "$grep_status"; fi; else : > ${quotedTemporaryPath}; fi; }`,
+          `{ if [ -e ${quotedAuthorizedKeysPath} ]; then
+  ${existingAuthorizedKeysGuard}
+  ${readExistingAuthorizedKeys} || exit $?
+  grep -vxF -- ${quotedKey} ${quotedTemporaryPath} > ${quotedFilterScratchPath}
+  grep_status=$?
+  if [ "$grep_status" -eq 0 ] || [ "$grep_status" -eq 1 ]; then
+    mv -T -- ${quotedFilterScratchPath} ${quotedTemporaryPath} || exit $?
+  else
+    rm -f -- ${quotedFilterScratchPath}
+    exit "$grep_status"
+  fi
+else
+  : > ${quotedTemporaryPath}
+fi; }`,
           MUTATION_EXEC_OPTS
         )
   if (stage.code !== 0) {
@@ -326,7 +374,38 @@ async function replaceAuthorizedKeysAtomically(
   // block, that the destination is the exact regular file we staged.
   const quotedBackupPath = shellQuote(`${authorizedKeysPath}.paratix-backup`)
   const replace = await conn.exec(
-    `chmod 600 ${quotedTemporaryPath} && chown ${shellQuote(user)}:${shellQuote(primaryGroup)} ${quotedTemporaryPath} && { expected_authorized_keys_hash=$(sha256sum ${quotedTemporaryPath} | cut -d' ' -f1) || exit $?; [ ! -L ${quotedSshDirectoryPath} ] || { echo '.ssh must not be a symlink' >&2; exit 1; }; [ -d ${quotedSshDirectoryPath} ] || { echo '.ssh must be a directory' >&2; exit 1; }; ssh_directory_state=$(stat -c '%a %U %G %F' ${quotedSshDirectoryPath}) || exit $?; [ "$ssh_directory_state" = ${expectedSshDirectoryState} ] || { echo '.ssh ownership changed before authorized_keys replace' >&2; exit 1; }; [ ! -L ${quotedAuthorizedKeysPath} ] || { echo 'authorized_keys must not be a symlink' >&2; exit 1; }; rm -f -- ${quotedBackupPath}; backup_created=0; if [ -e ${quotedAuthorizedKeysPath} ]; then [ -f ${quotedAuthorizedKeysPath} ] || { echo 'authorized_keys must be a regular file' >&2; exit 1; }; [ ! -L ${quotedAuthorizedKeysPath} ] || { echo 'authorized_keys must not be a symlink' >&2; exit 1; }; ln -P -- ${quotedAuthorizedKeysPath} ${quotedBackupPath} || { echo 'failed to create authorized_keys backup hardlink' >&2; exit 1; }; backup_created=1; fi; [ ! -L ${quotedAuthorizedKeysPath} ] || { rm -f -- ${quotedBackupPath}; echo 'authorized_keys must not be a symlink' >&2; exit 1; }; if ! mv -T -- ${quotedTemporaryPath} ${quotedAuthorizedKeysPath}; then if [ "$backup_created" = 1 ]; then mv -T -- ${quotedBackupPath} ${quotedAuthorizedKeysPath} || echo 'authorized_keys backup restore failed; backup is at '${quotedBackupPath} >&2; fi; echo 'authorized_keys replace failed' >&2; exit 1; fi; [ ! -e ${quotedTemporaryPath} ] || { rm -f -- ${quotedBackupPath}; echo 'authorized_keys replace did not consume temporary file' >&2; exit 1; }; [ ! -L ${quotedAuthorizedKeysPath} ] || { rm -f -- ${quotedBackupPath}; echo 'authorized_keys must not be a symlink' >&2; exit 1; }; [ -f ${quotedAuthorizedKeysPath} ] || { rm -f -- ${quotedBackupPath}; echo 'authorized_keys must be a regular file' >&2; exit 1; }; authorized_keys_state=$(stat -c '%a %U %G %F' ${quotedAuthorizedKeysPath}) || { rm -f -- ${quotedBackupPath}; exit 1; }; [ "$authorized_keys_state" = ${expectedAuthorizedKeysState} ] || { rm -f -- ${quotedBackupPath}; echo 'authorized_keys metadata changed during replace' >&2; exit 1; }; authorized_keys_hash=$(sha256sum ${quotedAuthorizedKeysPath} | cut -d' ' -f1) || { rm -f -- ${quotedBackupPath}; exit 1; }; [ "$authorized_keys_hash" = "$expected_authorized_keys_hash" ] || { rm -f -- ${quotedBackupPath}; echo 'authorized_keys content changed during replace' >&2; exit 1; }; rm -f -- ${quotedBackupPath}; }`,
+    `chmod 600 ${quotedTemporaryPath} && chown ${shellQuote(user)}:${shellQuote(primaryGroup)} ${quotedTemporaryPath} && {
+  expected_authorized_keys_hash=$(sha256sum ${quotedTemporaryPath} | cut -d' ' -f1) || exit $?
+  [ ! -L ${quotedSshDirectoryPath} ] || { echo '.ssh must not be a symlink' >&2; exit 1; }
+  [ -d ${quotedSshDirectoryPath} ] || { echo '.ssh must be a directory' >&2; exit 1; }
+  ssh_directory_state=$(stat -c '%a %U %G %F' ${quotedSshDirectoryPath}) || exit $?
+  [ "$ssh_directory_state" = ${expectedSshDirectoryState} ] || { echo '.ssh ownership changed before authorized_keys replace' >&2; exit 1; }
+  [ ! -L ${quotedAuthorizedKeysPath} ] || { echo 'authorized_keys must not be a symlink' >&2; exit 1; }
+  rm -f -- ${quotedBackupPath}
+  backup_created=0
+  if [ -e ${quotedAuthorizedKeysPath} ]; then
+    [ -f ${quotedAuthorizedKeysPath} ] || { echo 'authorized_keys must be a regular file' >&2; exit 1; }
+    [ ! -L ${quotedAuthorizedKeysPath} ] || { echo 'authorized_keys must not be a symlink' >&2; exit 1; }
+    ln -P -- ${quotedAuthorizedKeysPath} ${quotedBackupPath} || { echo 'failed to create authorized_keys backup hardlink' >&2; exit 1; }
+    backup_created=1
+  fi
+  [ ! -L ${quotedAuthorizedKeysPath} ] || { rm -f -- ${quotedBackupPath}; echo 'authorized_keys must not be a symlink' >&2; exit 1; }
+  if ! mv -T -- ${quotedTemporaryPath} ${quotedAuthorizedKeysPath}; then
+    if [ "$backup_created" = 1 ]; then
+      mv -T -- ${quotedBackupPath} ${quotedAuthorizedKeysPath} || echo 'authorized_keys backup restore failed; backup is at '${quotedBackupPath} >&2
+    fi
+    echo 'authorized_keys replace failed' >&2
+    exit 1
+  fi
+  [ ! -e ${quotedTemporaryPath} ] || { rm -f -- ${quotedBackupPath}; echo 'authorized_keys replace did not consume temporary file' >&2; exit 1; }
+  [ ! -L ${quotedAuthorizedKeysPath} ] || { rm -f -- ${quotedBackupPath}; echo 'authorized_keys must not be a symlink' >&2; exit 1; }
+  [ -f ${quotedAuthorizedKeysPath} ] || { rm -f -- ${quotedBackupPath}; echo 'authorized_keys must be a regular file' >&2; exit 1; }
+  authorized_keys_state=$(stat -c '%a %U %G %F' ${quotedAuthorizedKeysPath}) || { rm -f -- ${quotedBackupPath}; exit 1; }
+  [ "$authorized_keys_state" = ${expectedAuthorizedKeysState} ] || { rm -f -- ${quotedBackupPath}; echo 'authorized_keys metadata changed during replace' >&2; exit 1; }
+  authorized_keys_hash=$(sha256sum ${quotedAuthorizedKeysPath} | cut -d' ' -f1) || { rm -f -- ${quotedBackupPath}; exit 1; }
+  [ "$authorized_keys_hash" = "$expected_authorized_keys_hash" ] || { rm -f -- ${quotedBackupPath}; echo 'authorized_keys content changed during replace' >&2; exit 1; }
+  rm -f -- ${quotedBackupPath}
+}`,
     MUTATION_EXEC_OPTS
   )
   if (replace.code !== 0) {
