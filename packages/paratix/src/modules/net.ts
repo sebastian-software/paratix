@@ -710,6 +710,23 @@ async function interfaceLiveStateMatches(
   name: string,
   options: InterfaceOptions
 ): Promise<boolean> {
+  // Issue #89: when neither static addresses nor a gateway are requested (e.g.
+  // a DHCP-only or nameservers-only interface), there is no static live state
+  // to reconcile, so we deliberately return `true` here WITHOUT probing live
+  // interface existence via `ip link show`. This is intentional, not an
+  // oversight:
+  //   1. The caller (`net.interface(...).check`) has already gated on the
+  //      on-disk config file existing and matching the desired content, so
+  //      idempotency is anchored by the config file, not by a live probe.
+  //   2. `net.interface(...).apply` only writes the netplan/networkd config and
+  //      reloads it — it cannot bring a missing kernel device into existence.
+  //      Adding a live-existence gate here would therefore flip a legitimately
+  //      converged DHCP-only config to `needs-apply` on every run for any
+  //      interface that is not currently present (e.g. hot-plug or
+  //      later-appearing virtual interfaces), an unbreakable "changed" loop.
+  // Live existence IS verified below (`liveInterfaceExists`) whenever static
+  // addresses or a gateway are requested, because those states can only match
+  // on an existing device.
   if ((options.addresses?.length ?? 0) === 0 && (options.gateway ?? "") === "") return true
   if (!(await liveInterfaceExists(conn, name))) return false
   if (!(await interfaceAddressesMatch(conn, name, options.addresses))) return false
