@@ -61,7 +61,9 @@ export default defineConfig([
     dts: false,
     entry: { cli: "src/cli.ts" },
     format: ["esm"],
-    sourcemap: true,
+    // #75: ship no source maps in the published tarball. They are useless at
+    // runtime for a CLI tool and previously accounted for ~70% of the package.
+    sourcemap: false,
     splitting: false,
     target: "node24",
   },
@@ -74,7 +76,9 @@ export default defineConfig([
       "modules/index": "src/modules/index.ts",
     },
     format: ["esm"],
-    sourcemap: true,
+    // #75: ship no source maps in the published tarball. They are useless at
+    // runtime for a CLI tool and previously accounted for ~70% of the package.
+    sourcemap: false,
     // R-0000729: keep splitting on so the shared module surface lives in a
     // single chunk and `paratix` / `paratix/modules` re-export the very
     // same function references. The dist tests assert object identity
