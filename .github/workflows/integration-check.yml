@@ -6,12 +6,17 @@ on:
     branches:
       - main
 
+concurrency:
+  group: "${{ github.workflow }}-${{ github.ref }}"
+  cancel-in-progress: true
+
 jobs:
   integration-check:
     permissions:
       contents: read
 
     runs-on: [self-hosted, linux, x64]
+    timeout-minutes: 30
 
     steps:
       - name: Checkout
@@ -21,10 +26,8 @@ jobs:
           persist-credentials: false
 
       - name: Setup pnpm
-        # pnpm/action-setup@v4
-        uses: pnpm/action-setup@f40ffcd9367d9f12939873eb1018b921a783ffaa
-        with:
-          version: 11.5.3
+        # pnpm/action-setup@v6
+        uses: pnpm/action-setup@5d6f3fe6c685be83c141aea1141d8a825903c82a
 
       - name: Setup Node.js
         # actions/setup-node@v4

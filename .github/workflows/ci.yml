@@ -5,10 +5,16 @@ on:
   push:
     branches:
       - main
+      - develop
+
+concurrency:
+  group: "${{ github.workflow }}-${{ github.ref }}"
+  cancel-in-progress: true
 
 jobs:
   check:
     runs-on: [self-hosted, linux, x64]
+    timeout-minutes: 20
     permissions:
       contents: read
     steps:
