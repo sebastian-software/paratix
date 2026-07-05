@@ -23,7 +23,9 @@ import {
   collectEnvironment,
   collectFilter,
   exitAfterApplyError,
+  handleLastResortError,
   handleTsxLoadFailure,
+  installLastResortErrorHandlers,
   isDirectCliExecution,
   isFirstRun,
   isServerDefinitionLike,
@@ -31,6 +33,7 @@ import {
   parsePositiveNumber,
   parseReconnectTimeoutSeconds,
   printExceptionError,
+  resetLastResortHandlerForTests,
   resetTsxRegistrationForTests,
   resolveFilteredRun,
   runApplyCommand,
@@ -2619,5 +2622,61 @@ describe("runApplyCommand --filter", () => {
       logSpy.mockRestore()
       rmSync(tempDirectory, { force: true, recursive: true })
     }
+  })
+})
+
+describe("last-resort error handlers", () => {
+  let errorSpy: MockInstance<typeof console.error>
+  let originalExitCode: typeof process.exitCode
+
+  beforeEach(() => {
+    resetLastResortHandlerForTests()
+    // The handler assigns a non-zero process.exitCode; snapshot and restore it
+    // so a test never poisons the runner's own exit status.
+    originalExitCode = process.exitCode
+    process.exitCode = undefined
+    errorSpy = vi.spyOn(console, "error").mockImplementation(() => {
+      // noop: suppress console.error output during tests
+    })
+  })
+
+  afterEach(() => {
+    clearRegisteredSecrets()
+    process.exitCode = originalExitCode
+    vi.restoreAllMocks()
+  })
+
+  it("prints the escaping error and assigns a non-zero exit code", () => {
+    handleLastResortError(new Error("boom"))
+    expect(errorSpy).toHaveBeenCalledWith("Error: boom")
+    expect(process.exitCode).toBe(1)
+  })
+
+  it("is idempotent: a second escaping error neither re-prints nor clobbers a more specific exit code", () => {
+    handleLastResortError(new Error("first"))
+    // Simulate a more specific exit code assigned elsewhere before a second
+    // rejection arrives in the same tick.
+    process.exitCode = 42
+    errorSpy.mockClear()
+    handleLastResortError(new Error("second"))
+    expect(errorSpy).not.toHaveBeenCalled()
+    expect(process.exitCode).toBe(42)
+  })
+
+  it("redacts registered secrets in the printed diagnostic (printed before cleanup clears the sink)", () => {
+    // Must be >= MINIMUM_SECRET_LENGTH (8) for the sink to accept it.
+    const secret = "hunter2-pw"
+    registerSecret(secret)
+    handleLastResortError(new Error(`ssh auth failed for ${secret}`))
+    const output = errorSpy.mock.calls.map((args) => String(args[0])).join("\n")
+    expect(output).not.toContain(secret)
+  })
+
+  it("installs process-level unhandledRejection and uncaughtException listeners", () => {
+    const onSpy = vi.spyOn(process, "on").mockReturnValue(process)
+    installLastResortErrorHandlers()
+    const events = onSpy.mock.calls.map((call) => call[0])
+    expect(events).toContain("unhandledRejection")
+    expect(events).toContain("uncaughtException")
   })
 })
