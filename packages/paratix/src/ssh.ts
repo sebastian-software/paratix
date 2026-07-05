@@ -665,6 +665,12 @@ export class SshConnectionImpl implements SshConnection {
     const expectedHash = await computeLocalFileSha256(localPath)
     const temporaryPath = await this.createRemoteWritableTempPath(remotePath, "paratix-upload")
     const temporaryMode = options?.mode ?? "0600"
+    // #82: track whether the privileged finalize consumed the staged temp via
+    // `mv`. On the success path the staged file no longer exists, so the
+    // best-effort cleanup can be skipped — saving one exec round-trip. The
+    // `finally` still runs `rm -f` for every path that leaves the staged temp
+    // behind (SFTP failure, chmod/size-check failure, finalize failure).
+    let finalized = false
     try {
       await sftpUpload(
         client,
@@ -676,38 +682,40 @@ export class SshConnectionImpl implements SshConnection {
         // remote temp path before they reach an operator-visible error.
         prepareSecrets(this.buildSecrets())
       )
-      await this.setRemoteTempMode(temporaryPath, temporaryMode)
-      // R-0000150: verify the size on the staged temp file BEFORE the
-      // privileged finalize (`mv -T`). After the move, an attacker with
-      // write access to the destination directory could swap the final
-      // file and our `stat` would report a size for an attacker-controlled
-      // inode rather than the file we actually wrote. Asserting on the
-      // temp path eliminates that TOCTOU window.
-      // R-0000266: assertRemoteFileSize routes the stat call through raw
-      // exec for non-root users so an expired sudo credential cache between
-      // upload and finalize cannot mask a real size mismatch with a
-      // sudo-auth error.
-      await this.assertRemoteFileSize(temporaryPath, localFileSize)
-      await this.finalizeRemoteTempFile(temporaryPath, remotePath, temporaryMode)
-      // R-0000599: re-hash the finalized destination so a same-length TOCTOU
-      // swap between the staged temp file and the privileged `mv -T` cannot
-      // slip past. Mirrors the post-finalize SHA-256 check `writeFile`
-      // performs via `ensureRemoteWriteFile`; the shell-fallback rewrite
-      // there is specific to in-memory content and does not apply to a
-      // streamed local upload source.
+      // #82: one round-trip sets the temp mode AND reads its size back.
+      // R-0000150: the size is asserted on the staged temp BEFORE the
+      // privileged finalize (`mv -T`); after the move an attacker with write
+      // access to the destination directory could swap the final file so a
+      // stat would report a size for an attacker-controlled inode rather than
+      // the file we actually wrote. R-0000266: for non-root users the combined
+      // chmod+stat runs through the raw (non-sudo) exec path so an expired sudo
+      // credential cache cannot mask a real size mismatch with a sudo-auth
+      // error.
+      await this.stageRemoteTempFile({
+        expectedSize: localFileSize,
+        mode: temporaryMode,
+        operation: "uploadFile",
+        temporaryPath,
+      })
+      // #82: one round-trip finalizes (`mv -T`) AND hashes the destination.
+      // R-0000599: re-hashing the finalized destination catches a same-length
+      // TOCTOU swap between the staged temp file and the privileged `mv -T`;
+      // computing the digest inside the same privileged script tightens that
+      // window to a single remote command instead of a network gap.
+      const remoteHash = await this.finalizeAndHashRemoteFile(
+        temporaryPath,
+        remotePath,
+        temporaryMode
+      )
+      finalized = true
       await this.ensureRemoteUploadFile({
         expectedHash,
         expectedSize: localFileSize,
+        remoteHash,
         remotePath,
       })
     } finally {
-      try {
-        await this.cleanupRemoteTempFile(temporaryPath)
-      } catch (cleanupError) {
-        process.stderr.write(
-          `Warning: failed to remove temp file ${temporaryPath}: ${maskSecrets(String(cleanupError), this.buildSecrets())}\n`
-        )
-      }
+      if (!finalized) await this.cleanupUploadTemporaryPath(temporaryPath)
     }
   }
 
@@ -738,6 +746,10 @@ export class SshConnectionImpl implements SshConnection {
     // so a one-shot `update()` is sufficient — no need for a streaming
     // hash.
     const expectedHash = createHash("sha256").update(content, "utf8").digest("hex")
+    // #82: same success-path cleanup skip as `uploadFile`; a successful
+    // finalize consumes the staged temp via `mv`, so the `rm -f` round-trip is
+    // only needed when a failure leaves the staged file behind.
+    let finalized = false
     try {
       await sftpUploadContent(
         client,
@@ -750,24 +762,36 @@ export class SshConnectionImpl implements SshConnection {
         // with values registered in the secret sink.
         prepareSecrets(this.buildSecrets())
       )
-      await this.setRemoteTempMode(remoteTemporary, temporaryMode)
+      // #82: one round-trip sets the temp mode AND reads its size back.
       // R-0000150: the pre-finalize size check on the staged temp file is a
       // cheap smoke-test that catches obvious upload failures (0-byte writes,
       // truncated transfers) before we ever move the file into place. The
       // post-finalize verification below tightens this to a full SHA-256
       // comparison so a same-length TOCTOU swap of the finalized inode
       // cannot slip past.
-      await this.assertRemoteFileSize(remoteTemporary, expectedSize, "writeFile")
-      await this.finalizeRemoteTempFile(remoteTemporary, remotePath, temporaryMode)
+      await this.stageRemoteTempFile({
+        expectedSize,
+        mode: temporaryMode,
+        operation: "writeFile",
+        temporaryPath: remoteTemporary,
+      })
+      // #82: one round-trip finalizes (`mv -T`) AND hashes the destination.
+      const remoteHash = await this.finalizeAndHashRemoteFile(
+        remoteTemporary,
+        remotePath,
+        temporaryMode
+      )
+      finalized = true
       await this.ensureRemoteWriteFile({
         content,
         expectedHash,
         expectedSize,
         mode: temporaryMode,
+        remoteHash,
         remotePath,
       })
     } finally {
-      await this.cleanupWriteFileTemporaryPath(remoteTemporary)
+      if (!finalized) await this.cleanupWriteFileTemporaryPath(remoteTemporary)
     }
   }
 
@@ -814,46 +838,6 @@ export class SshConnectionImpl implements SshConnection {
     }
   }
 
-  private async assertRemoteFileSize(
-    remotePath: string,
-    expectedSize: number,
-    operation: "uploadFile" | "writeFile" = "uploadFile"
-  ): Promise<void> {
-    // R-0000266: the upload temp path is owned by the connecting user (mktemp
-    // staged it under /tmp without sudo). Reading the size through `output`
-    // would funnel the call through `ensureSudoReady` and could fail with a
-    // sudo-auth error after the cached credentials expired. Use the raw exec
-    // path for non-root users so the size check stays a pure stat call and
-    // surfaces a real size mismatch instead of a sudo prompt failure.
-    const statCommand = `stat -c '%s' ${shellQuote(remotePath)}`
-    const rawSize =
-      this.config.user === "root"
-        ? await this.output(statCommand)
-        : await this.outputWithoutSudo(statCommand)
-    const actualSize = Number(rawSize.trim())
-
-    if (!Number.isFinite(actualSize)) {
-      throw new TypeError(
-        `[ssh.${operation}: ${remotePath}] could not determine remote file size after upload`
-      )
-    }
-
-    if (actualSize === 0 && expectedSize > 0) {
-      const diskInfo = await this.checkRemoteDiskSpace(remotePath)
-      if (diskInfo != null && diskInfo.availableBytes < expectedSize) {
-        throw new Error(
-          `[ssh.${operation}: ${remotePath}] disk full – ${diskInfo.availableBytes} bytes available on ${diskInfo.mountpoint}; the file was written as 0 bytes because there is no space left on the device`
-        )
-      }
-    }
-
-    if (actualSize !== expectedSize) {
-      throw new Error(
-        `[ssh.${operation}: ${remotePath}] remote file size mismatch after upload; expected ${expectedSize} bytes, got ${actualSize}`
-      )
-    }
-  }
-
   /**
    * R-0000669: build the abort signal that {@link tryConnectOnPort} subscribes
    * to. Combines the prompt-level abort signal (which fires from the SIGINT
@@ -873,6 +857,33 @@ export class SshConnectionImpl implements SshConnection {
     return signals.length === 1 ? signals[0] : AbortSignal.any(signals)
   }
 
+  /**
+   * R-0000141 / R-0000693: build the shell lines that reject a destination
+   * directory whose resolved path differs from the literal one — i.e. at least
+   * one path component is a symbolic link. Resolving via `command -p realpath
+   * -m` runs the lookup against the POSIX default PATH so a wrapper earlier in
+   * the connected shell's PATH cannot short-circuit the check, and `-m`
+   * tolerates trailing components that do not yet exist.
+   *
+   * The lines are meant to be embedded at the top of a `set -eu` script so the
+   * guard fails the whole round-trip (via the `paratix-symlink-component`
+   * marker + exit 20) before any `mktemp`/`mv` runs. An empty string is
+   * returned for `""`/`"/"`, mirroring the early return in
+   * {@link assertDirnameHasNoSymlinkComponent}.
+   *
+   * @param directory - The destination directory derived from `posix.dirname`.
+   * @returns Shell lines (newline-terminated) or an empty string when no check is needed.
+   */
+  private buildDirSymlinkCheckScript(directory: string): string {
+    if (directory === "" || directory === "/") return ""
+    return `dir_resolved=$(command -p realpath -m -- ${shellQuote(directory)})
+if [ "$dir_resolved" != ${shellQuote(directory)} ]; then
+  printf 'paratix-symlink-component %s\\n' "$dir_resolved" >&2
+  exit 20
+fi
+`
+  }
+
   private buildEnvPrefix(environment?: Record<string, string>): string {
     if (environment == null) return ""
     for (const key of Object.keys(environment)) {
@@ -882,6 +893,73 @@ export class SshConnectionImpl implements SshConnection {
     }
     const pairs = Object.entries(environment).map(([k, v]) => `${k}=${shellQuote(v)}`)
     return `${pairs.join(" ")} `
+  }
+
+  /**
+   * Build the non-root finalize+hash script. Mirrors the privileged finalize
+   * in {@link finalizeRemoteTempFile} (guard, intermediate in-destination
+   * `mktemp`, `mv`/`chmod`/`chown`/`mv`) and additionally folds in the
+   * dirname-symlink guard and a trailing `sha256sum` of the destination.
+   *
+   * @param temporaryPath - The staged temp path to move into place.
+   * @param remotePath - The destination path on the remote host.
+   * @param mode - The validated file mode to apply to the finalized file.
+   * @returns The `set -eu` finalize+hash script.
+   */
+  private buildNonRootFinalizeAndHashScript(
+    temporaryPath: string,
+    remotePath: string,
+    mode: string
+  ): string {
+    const directory = posix.dirname(remotePath)
+    const basename = posix.basename(remotePath)
+    const targetGuard = `[ ! -d ${shellQuote(remotePath)} ] && [ ! -L ${shellQuote(remotePath)} ]`
+    // R-0000565: pass the directory via `-p` and separate the template with
+    // `--` so the prefix cannot be parsed as a `mktemp` option after a future
+    // refactor that loosens the basename validation. Same `--` for the
+    // `rm -f` cleanup so `$target_temp` cannot be parsed as an `rm` option.
+    const finalTemplate = `.${basename}.paratix.XXXXXX`
+    // R-0000517: `set -eu` so a failed `mktemp`/`mv`/`chmod`/`chown` surfaces
+    // as a non-zero exit code the caller translates into a `CommandError`
+    // instead of a silently-succeeding finalize. R-0000141: the folded
+    // dirname-symlink guard aborts before the in-destination `mktemp` runs.
+    return `set -eu
+${this.buildDirSymlinkCheckScript(directory)}if ! ${targetGuard}; then
+  printf '%s\n' 'target path must not be a directory or symlink' >&2
+  exit 1
+fi
+target_owner=$(stat -c '%u:%g' ${shellQuote(remotePath)} 2>/dev/null || stat -c '%u:%g' ${shellQuote(directory)} 2>/dev/null || printf '0:0')
+target_temp=''
+cleanup() {
+  if [ -n "$target_temp" ]; then
+    rm -f -- "$target_temp"
+  fi
+}
+trap cleanup EXIT
+target_temp=$(mktemp -p ${shellQuote(directory)} -- ${shellQuote(finalTemplate)})
+[ -n "$target_temp" ] || exit 1
+mv -T -- ${shellQuote(temporaryPath)} "$target_temp"
+chmod ${shellQuote(mode)} "$target_temp"
+chown "$target_owner" "$target_temp"
+mv -T -- "$target_temp" ${shellQuote(remotePath)}
+trap - EXIT
+sha256sum -- ${shellQuote(remotePath)} 2>/dev/null || printf 'paratix-hash-failed\n'
+`
+  }
+
+  /**
+   * Build the root finalize+hash command. The destination is moved into place
+   * only when it is neither a directory nor a symlink, and hashed only after a
+   * successful `mv`; a `mv` failure short-circuits before the hash so the
+   * caller sees a finalize `CommandError` rather than a stale-destination hash.
+   *
+   * @param temporaryPath - The staged temp path to move into place.
+   * @param remotePath - The destination path on the remote host.
+   * @returns The finalize+hash command string.
+   */
+  private buildRootFinalizeAndHashScript(temporaryPath: string, remotePath: string): string {
+    const targetGuard = `[ ! -d ${shellQuote(remotePath)} ] && [ ! -L ${shellQuote(remotePath)} ]`
+    return `${targetGuard} && mv -T -- ${shellQuote(temporaryPath)} ${shellQuote(remotePath)} && { sha256sum -- ${shellQuote(remotePath)} 2>/dev/null || printf 'paratix-hash-failed\n'; }`
   }
 
   private buildSecrets(extra?: string[]): SecretSource[] {
@@ -977,6 +1055,65 @@ export class SshConnectionImpl implements SshConnection {
     }
   }
 
+  /**
+   * Classify a raw `sha256sum` reply for the finalized remote file against the
+   * expected digest. Shared by the combined finalize+hash round-trip and the
+   * shell-fallback re-verification.
+   *
+   * @param remotePath - The finalized destination path (for diagnostics).
+   * @param expectedHash - Lowercase hex SHA-256 digest of the intended content.
+   * @param rawHash - Raw stdout of the finalize+hash or verify command.
+   * @returns `"matches"`, `"empty"` (disk-full indicator) or `"hash-mismatch"`.
+   * @throws {RemoteStatTransientError} When the reply cannot be evaluated into a verdict.
+   */
+  private classifyRemoteHash(
+    remotePath: string,
+    expectedHash: string,
+    rawHash: string
+  ): "empty" | "hash-mismatch" | "matches" {
+    // #82: the finalize+hash script emits `paratix-hash-failed` when it moved
+    // the file into place but could not hash it. That is a transient
+    // verification failure — never a content mismatch — so the caller must
+    // propagate it (retry) instead of entering the Shell-Fallback and
+    // overwriting a file that is already finalized correctly.
+    if (rawHash.includes("paratix-hash-failed")) {
+      throw new RemoteStatTransientError(
+        `[ssh.writeFile: ${remotePath}] could not hash remote file after upload/finalize`
+      )
+    }
+    // R-0000686: mirror the truncation detection from R-0000668 (sha256 /
+    // readFile) for the verify path. When the captured stdout is suffixed
+    // with `CAPTURE_TRUNCATION_MARKER`, the underlying exec hit the 1 MiB
+    // output cap and the trailing 64-hex digest may have been chopped off.
+    // Treat that as a transient verification failure so the caller can
+    // re-run the verify rather than mis-classifying a truncated reply as
+    // a content mismatch (which would then walk into the Shell-Fallback
+    // overwrite path).
+    if (rawHash.endsWith(CAPTURE_TRUNCATION_MARKER)) {
+      throw new RemoteStatTransientError(
+        `[ssh.writeFile: ${remotePath}] sha256sum output exceeds the captured-output cap of ${DEFAULT_MAX_OUTPUT_BYTES} bytes; refusing to derive a verdict from truncated output`
+      )
+    }
+    // `sha256sum -- <file>` prints `<64-hex>  <filename>` on success. Split
+    // on whitespace and take the first token so a stray newline or filename
+    // that contains whitespace cannot confuse the parser.
+    const actualHash = rawHash.trim().split(/\s+/v)[0]?.toLowerCase() ?? ""
+
+    if (!/^[0-9a-f]{64}$/v.test(actualHash)) {
+      throw new RemoteStatTransientError(
+        `[ssh.writeFile: ${remotePath}] could not determine remote file hash after upload/finalize`
+      )
+    }
+
+    const expected = expectedHash.toLowerCase()
+    if (actualHash === expected) return "matches"
+    // Disk-full indicator: the remote file hashes to the canonical empty
+    // SHA-256 even though we expected non-empty content. Caller uses this
+    // verdict to surface a precise "disk full" diagnostic when df agrees.
+    if (actualHash === EMPTY_FILE_SHA256 && expected !== EMPTY_FILE_SHA256) return "empty"
+    return "hash-mismatch"
+  }
+
   private async cleanupPrivilegedRemoteTempFile(remotePath: string): Promise<void> {
     // R-0000565: pass `--` so the mktemp-allocated path cannot be parsed as
     // an `rm` option after a future refactor that loosens the prefix.
@@ -1014,6 +1151,23 @@ export class SshConnectionImpl implements SshConnection {
     } catch (cleanupError) {
       process.stderr.write(
         `Warning: failed to remove temp file ${remotePath}: ${maskSecrets(String(cleanupError), this.buildSecrets())}\n`
+      )
+    }
+  }
+
+  /**
+   * Best-effort cleanup of the staged upload temp file. Extracted from
+   * {@link uploadFile}'s `finally` so the primary method stays within the
+   * statement budget; mirrors {@link cleanupWriteFileTemporaryPath}.
+   *
+   * @param temporaryPath - The staged temp path to remove.
+   */
+  private async cleanupUploadTemporaryPath(temporaryPath: string): Promise<void> {
+    try {
+      await this.cleanupRemoteTempFile(temporaryPath)
+    } catch (cleanupError) {
+      process.stderr.write(
+        `Warning: failed to remove temp file ${temporaryPath}: ${maskSecrets(String(cleanupError), this.buildSecrets())}\n`
       )
     }
   }
@@ -1212,17 +1366,29 @@ export class SshConnectionImpl implements SshConnection {
     prefix: string
   ): Promise<string> {
     const directory = posix.dirname(remotePath)
-    // R-0000141: same dirname-symlink protection as for the privileged path.
-    await this.assertDirnameHasNoSymlinkComponent(directory, remotePath)
     // R-0000565: pass the directory via `-p` and separate the template with
     // `--` so the prefix cannot be parsed as a `mktemp` option after a future
     // refactor that loosens the prefix validation.
     const template = `${prefix}.XXXXXX`
-    const command = `mktemp -p ${shellQuote(directory)} -- ${shellQuote(template)}`
-    const path =
-      this.config.user === "root"
-        ? await this.output(command)
-        : await this.outputWithoutSudo(command)
+    // #82: fold the R-0000141 dirname-symlink guard and the `mktemp` into a
+    // single `set -eu` round-trip. The symlink guard resolves the destination
+    // directory via `realpath -m` and aborts with a dedicated marker (mapped
+    // back to the original diagnostic by `throwIfDirSymlinkMarker`) before the
+    // `mktemp` ever runs, so an attacker cannot redirect the staged temp — and
+    // the subsequent privileged `mv -T` — into a directory they control.
+    const script = `set -eu
+${this.buildDirSymlinkCheckScript(directory)}mktemp -p ${shellQuote(directory)} -- ${shellQuote(template)}
+`
+    let path: string
+    try {
+      path =
+        this.config.user === "root"
+          ? await this.output(script)
+          : await this.outputWithoutSudo(script)
+    } catch (error) {
+      this.throwIfDirSymlinkMarker(error, directory, remotePath)
+      throw error
+    }
     return validateMktempPath(directory, path, prefix)
   }
 
@@ -1330,18 +1496,29 @@ export class SshConnectionImpl implements SshConnection {
    * propagates as {@link RemoteStatTransientError} so the caller can retry
    * instead of acting on a non-verdict result.
    *
+   * #82: the finalized-destination hash is now produced by the combined
+   * finalize+hash round-trip ({@link finalizeAndHashRemoteFile}) and passed in
+   * via `options.remoteHash`, so this method only classifies the verdict — it
+   * no longer issues a separate `sha256sum` exec.
+   *
    * @param options - Verification inputs.
    * @param options.expectedHash - Lowercase hex SHA-256 digest of the local file.
    * @param options.expectedSize - Byte length of the local file (used for disk-full diagnostics).
+   * @param options.remoteHash - Raw stdout of the finalize+hash round-trip.
    * @param options.remotePath - The finalized destination path on the remote host.
    * @throws {Error} When the remote file is empty (disk-full) or its hash does not match.
    */
   private async ensureRemoteUploadFile(options: {
     expectedHash: string
     expectedSize: number
+    remoteHash: string
     remotePath: string
   }): Promise<void> {
-    const verification = await this.verifyRemoteWriteFile(options.remotePath, options.expectedHash)
+    const verification = this.classifyRemoteHash(
+      options.remotePath,
+      options.expectedHash,
+      options.remoteHash
+    )
     if (verification === "matches") return
     if (verification === "empty") {
       const diskInfo = await this.checkRemoteDiskSpace(options.remotePath)
@@ -1364,19 +1541,28 @@ export class SshConnectionImpl implements SshConnection {
     expectedHash: string
     expectedSize: number
     mode: string
+    remoteHash: string
     remotePath: string
   }): Promise<void> {
-    // R-0000476: `verifyRemoteWriteFile` reports the content verdict
+    // R-0000476: `classifyRemoteHash` reports the content verdict
     // ("matches" / "empty" / "hash-mismatch") and throws
-    // `RemoteStatTransientError` when the underlying verification command
-    // cannot be evaluated. The Shell-Fallback only fires for an explicit
+    // `RemoteStatTransientError` when the finalize+hash round-trip could not
+    // produce a usable digest. The Shell-Fallback only fires for an explicit
     // "needs rewrite" verdict — transient verification failures propagate so
     // callers can retry instead of overwriting a remote file that may
     // already be finalized correctly.
     // R-0000522: the verification compares SHA-256 hashes instead of byte
     // counts so an attacker with write access to the destination directory
     // cannot TOCTOU-swap the file content past the verify call.
-    const verification = await this.verifyRemoteWriteFile(options.remotePath, options.expectedHash)
+    // #82: the primary verdict is derived from the hash produced by the
+    // combined finalize+hash round-trip (`options.remoteHash`); the fallback
+    // re-verification below still issues its own `sha256sum` because the
+    // rewrite path does not return a hash.
+    const verification = this.classifyRemoteHash(
+      options.remotePath,
+      options.expectedHash,
+      options.remoteHash
+    )
     if (verification === "matches") return
 
     await this.rewriteRemoteFileViaShell(options.remotePath, options.content, options.mode)
@@ -1434,6 +1620,50 @@ export class SshConnectionImpl implements SshConnection {
       // Cache the failure so further `exec` calls do not re-trigger a prompt.
       this.sudoProbeFailedReason = error instanceof Error ? error : new Error(String(error))
       throw error
+    }
+  }
+
+  /**
+   * Apply the pre-finalize size smoke-test to the `stat`-reported byte count of
+   * the staged temp file. Kept in TypeScript (rather than folded into the
+   * combined shell command) so the disk-full diagnosis and the size-mismatch
+   * error stay identical to the previous `assertRemoteFileSize` behavior.
+   *
+   * @param options - Size-evaluation inputs.
+   * @param options.remotePath - The staged temp path (used for diagnostics).
+   * @param options.expectedSize - The expected byte length of the staged content.
+   * @param options.rawSize - The raw `stat -c '%s'` output captured from the remote.
+   * @param options.operation - Which public method drives this write (for diagnostics).
+   * @throws {Error} When the size is unreadable, indicates disk-full, or mismatches.
+   */
+  private async evaluateStagedFileSize(options: {
+    expectedSize: number
+    operation: "uploadFile" | "writeFile"
+    rawSize: string
+    remotePath: string
+  }): Promise<void> {
+    const { expectedSize, operation, rawSize, remotePath } = options
+    const actualSize = Number(rawSize.trim())
+
+    if (!Number.isFinite(actualSize)) {
+      throw new TypeError(
+        `[ssh.${operation}: ${remotePath}] could not determine remote file size after upload`
+      )
+    }
+
+    if (actualSize === 0 && expectedSize > 0) {
+      const diskInfo = await this.checkRemoteDiskSpace(remotePath)
+      if (diskInfo != null && diskInfo.availableBytes < expectedSize) {
+        throw new Error(
+          `[ssh.${operation}: ${remotePath}] disk full – ${diskInfo.availableBytes} bytes available on ${diskInfo.mountpoint}; the file was written as 0 bytes because there is no space left on the device`
+        )
+      }
+    }
+
+    if (actualSize !== expectedSize) {
+      throw new Error(
+        `[ssh.${operation}: ${remotePath}] remote file size mismatch after upload; expected ${expectedSize} bytes, got ${actualSize}`
+      )
     }
   }
 
@@ -1621,6 +1851,50 @@ export class SshConnectionImpl implements SshConnection {
       throw new Error(
         `Command failed (exit code ${result.exitCode}): ${maskPreparedSecrets(command, secrets)}`
       )
+    }
+  }
+
+  /**
+   * #82: finalize the staged temp file (`mv -T`) AND hash the finalized
+   * destination in a single privileged exec round-trip, returning the raw
+   * `sha256sum` output for the caller to classify.
+   *
+   * R-0000522 / R-0000599: hashing the finalized destination catches a
+   * same-length TOCTOU swap between the staged temp and the privileged move;
+   * computing the digest inside the same script that performs the move keeps
+   * the window to a single remote command instead of a separate network
+   * round-trip. R-0000141: for non-root users the destination dirname-symlink
+   * guard is folded into the same script (the staged temp lives in `/tmp`, so
+   * unlike the root path there was no earlier in-destination `mktemp` to guard).
+   *
+   * A `sha256sum` failure that occurs *after* a successful move emits the
+   * `paratix-hash-failed` marker and still exits 0, so
+   * {@link classifyRemoteHash} reports a transient verification failure rather
+   * than misclassifying a correctly finalized file as a content mismatch.
+   *
+   * @param temporaryPath - The staged temp path to move into place.
+   * @param remotePath - The destination path on the remote host.
+   * @param mode - The validated file mode applied during the non-root finalize.
+   * @returns The raw stdout of the finalize+hash script (a `sha256sum` line or marker).
+   */
+  private async finalizeAndHashRemoteFile(
+    temporaryPath: string,
+    remotePath: string,
+    mode: string
+  ): Promise<string> {
+    validateMode(mode)
+    const script =
+      this.config.user === "root"
+        ? this.buildRootFinalizeAndHashScript(temporaryPath, remotePath)
+        : this.buildNonRootFinalizeAndHashScript(temporaryPath, remotePath, mode)
+    try {
+      const result = await this.exec(script, { silent: true })
+      return result.stdout
+    } catch (error) {
+      // R-0000141: surface the dedicated dirname-symlink diagnostic when the
+      // folded guard fires for the non-root finalize script.
+      this.throwIfDirSymlinkMarker(error, posix.dirname(remotePath), remotePath)
+      throw error
     }
   }
 
@@ -1987,14 +2261,47 @@ trap - EXIT
     }
   }
 
-  private async setRemoteTempMode(remotePath: string, mode: string): Promise<void> {
+  /**
+   * #82: set the staged temp file's mode and read its size back in a single
+   * exec round-trip, then run the pre-finalize size smoke-test. `chmod` and
+   * `stat` are chained with `&&` so a failed `chmod` short-circuits before the
+   * `stat` and surfaces as a `CommandError`, exactly as the previous separate
+   * `setRemoteTempMode` call did.
+   *
+   * R-0000266: the staged temp path is owned by the connecting user (mktemp
+   * staged it under /tmp without sudo). Reading the size through `output` would
+   * funnel the call through `ensureSudoReady` and could fail with a sudo-auth
+   * error after the cached credentials expired. The combined command therefore
+   * runs through the raw (non-sudo) exec path for non-root users so the size
+   * check stays a pure stat call and surfaces a real size mismatch instead of
+   * a sudo prompt failure.
+   *
+   * @param options - Staging inputs.
+   * @param options.temporaryPath - The staged temp path created by `mktemp`.
+   * @param options.mode - The validated file mode to apply before the finalize.
+   * @param options.expectedSize - The expected byte length of the staged content.
+   * @param options.operation - Which public method drives this write (for diagnostics).
+   * @throws {Error} When the staged size does not match `expectedSize`.
+   */
+  private async stageRemoteTempFile(options: {
+    expectedSize: number
+    mode: string
+    operation: "uploadFile" | "writeFile"
+    temporaryPath: string
+  }): Promise<void> {
+    const { expectedSize, mode, operation, temporaryPath } = options
     validateMode(mode)
-    const command = `chmod ${shellQuote(mode)} ${shellQuote(remotePath)}`
-    if (this.config.user === "root") {
-      await this.exec(command, { silent: true })
-      return
-    }
-    await this.execWithoutSudo(command)
+    const command = `chmod ${shellQuote(mode)} ${shellQuote(temporaryPath)} && stat -c '%s' ${shellQuote(temporaryPath)}`
+    const rawSize =
+      this.config.user === "root"
+        ? await this.output(command)
+        : await this.outputWithoutSudo(command)
+    await this.evaluateStagedFileSize({
+      expectedSize,
+      operation,
+      rawSize,
+      remotePath: temporaryPath,
+    })
   }
 
   /**
@@ -2073,6 +2380,27 @@ trap - EXIT
     closing.once("close", () => {
       clearTimeout(fallback)
     })
+  }
+
+  /**
+   * Re-throw the folded dirname-symlink guard's failure as the dedicated
+   * R-0000141 diagnostic when the `paratix-symlink-component` marker is present
+   * in a failed command's stderr; otherwise return so the caller re-throws the
+   * original error unchanged.
+   *
+   * @param error - The error raised by a combined mktemp/finalize round-trip.
+   * @param directory - The destination directory that was guarded.
+   * @param remotePath - The original remote path (for the diagnostic message).
+   * @throws {Error} The mapped symlink diagnostic when the marker is present.
+   */
+  private throwIfDirSymlinkMarker(error: unknown, directory: string, remotePath: string): void {
+    if (!(error instanceof CommandError)) return
+    const match = /paratix-symlink-component (?<resolved>.*)/v.exec(error.fullStderr)
+    if (match?.groups?.resolved == null) return
+    throw new Error(
+      `[ssh.mktemp: ${remotePath}] destination directory ${directory} resolves to ${match.groups.resolved}; refusing to mktemp because at least one path component is a symbolic link`,
+      { cause: error }
+    )
   }
 
   /**
@@ -2181,6 +2509,10 @@ trap - EXIT
     // the full per-command timeout when a sudo prompt hangs (worst-case twice
     // for upload + verify). Only fall back to the privileged `output()` path
     // when the unprivileged read fails with a permission error.
+    // #82: this dedicated `sha256sum` round-trip only runs for the shell
+    // fallback re-verification; the primary write/upload path reuses the hash
+    // returned by the combined finalize+hash round-trip via
+    // {@link classifyRemoteHash}.
     const hashCommand = `sha256sum -- ${shellQuote(remotePath)}`
     let rawHash: string
     try {
@@ -2196,37 +2528,7 @@ trap - EXIT
         { cause: error }
       )
     }
-    // R-0000686: mirror the truncation detection from R-0000668 (sha256 /
-    // readFile) for the verify path. When the captured stdout is suffixed
-    // with `CAPTURE_TRUNCATION_MARKER`, the underlying exec hit the 1 MiB
-    // output cap and the trailing 64-hex digest may have been chopped off.
-    // Treat that as a transient verification failure so the caller can
-    // re-run the verify rather than mis-classifying a truncated reply as
-    // a content mismatch (which would then walk into the Shell-Fallback
-    // overwrite path).
-    if (rawHash.endsWith(CAPTURE_TRUNCATION_MARKER)) {
-      throw new RemoteStatTransientError(
-        `[ssh.writeFile: ${remotePath}] sha256sum output exceeds the captured-output cap of ${DEFAULT_MAX_OUTPUT_BYTES} bytes; refusing to derive a verdict from truncated output`
-      )
-    }
-    // `sha256sum -- <file>` prints `<64-hex>  <filename>` on success. Split
-    // on whitespace and take the first token so a stray newline or filename
-    // that contains whitespace cannot confuse the parser.
-    const actualHash = rawHash.trim().split(/\s+/v)[0]?.toLowerCase() ?? ""
-
-    if (!/^[0-9a-f]{64}$/v.test(actualHash)) {
-      throw new RemoteStatTransientError(
-        `[ssh.writeFile: ${remotePath}] could not determine remote file hash after upload/finalize`
-      )
-    }
-
-    const expected = expectedHash.toLowerCase()
-    if (actualHash === expected) return "matches"
-    // Disk-full indicator: the remote file hashes to the canonical empty
-    // SHA-256 even though we expected non-empty content. Caller uses this
-    // verdict to surface a precise "disk full" diagnostic when df agrees.
-    if (actualHash === EMPTY_FILE_SHA256 && expected !== EMPTY_FILE_SHA256) return "empty"
-    return "hash-mismatch"
+    return this.classifyRemoteHash(remotePath, expectedHash, rawHash)
   }
 
   /**
