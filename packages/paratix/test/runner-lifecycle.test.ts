@@ -417,9 +417,7 @@ describe("runPlaybook failed result diagnostics", () => {
       apply: vi
         .fn()
         .mockRejectedValue(
-          new Error(
-            '[ssh.writeFile: /etc/custom.conf] missing options.mode; pass { mode: "0644" } or another explicit file mode'
-          )
+          new Error('[ssh.writeFile: /etc/custom.conf] invalid options.mode "invalid"')
         ),
       check: vi.fn().mockResolvedValue("needs-apply"),
       name: "custom-config-module",
@@ -436,9 +434,7 @@ describe("runPlaybook failed result diagnostics", () => {
 
     const output = [...consoleLogs, ...consoleErrors].join("\n")
     expect(output).toContain("custom-config-module")
-    expect(output).toContain(
-      '[ssh.writeFile: /etc/custom.conf] missing options.mode; pass { mode: "0644" } or another explicit file mode'
-    )
+    expect(output).toContain('[ssh.writeFile: /etc/custom.conf] invalid options.mode "invalid"')
     expect(output).not.toContain("Cannot read properties of undefined")
     expect(process.exitCode).toBe(1)
   })

@@ -249,20 +249,28 @@ describe("SshConnectionImpl.writeFile — small content", () => {
     expect(vi.mocked(writeFileSync)).not.toHaveBeenCalled()
   })
 
-  it("throws a clear validation error when options.mode is missing instead of crashing with a TypeError", async () => {
+  it("defaults options.mode to 0600 when omitted, matching uploadFile", async () => {
     const client = makeClientWithExecSpy(execSpy)
     const ssh = makeConnectedSsh(client)
     const content = makeSmallContent()
-    const unsafeSsh = ssh as unknown as {
-      writeFile: (
-        remotePath: string,
-        fileContent: string,
-        options?: { mode?: string }
-      ) => Promise<void>
-    }
 
-    await expect(unsafeSsh.writeFile("/etc/config", content)).rejects.toThrow(
-      '[ssh.writeFile: /etc/config] missing options.mode; pass { mode: "0644" } or another explicit file mode'
+    // Act: omit options entirely — the mode must default to "0600".
+    await ssh.writeFile("/etc/config", content)
+
+    // Assert: the staged temp file was chmod'ed to the documented default mode.
+    const executedCommands = commandsOf(execSpy)
+    expect(executedCommands.some((cmd) => cmd.includes("chmod '0600'"))).toBe(true)
+    expect(vi.mocked(sftpUploadContent)).toHaveBeenCalledOnce()
+    expect(vi.mocked(writeFileSync)).not.toHaveBeenCalled()
+  })
+
+  it("throws a clear validation error when options.mode is invalid instead of crashing", async () => {
+    const client = makeClientWithExecSpy(execSpy)
+    const ssh = makeConnectedSsh(client)
+    const content = makeSmallContent()
+
+    await expect(ssh.writeFile("/etc/config", content, { mode: "invalid" })).rejects.toThrow(
+      '[ssh.writeFile: /etc/config] invalid options.mode "invalid"'
     )
     expect(vi.mocked(writeFileSync)).not.toHaveBeenCalled()
     expect(vi.mocked(sftpUpload)).not.toHaveBeenCalled()

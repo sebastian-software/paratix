@@ -1055,10 +1055,10 @@ describe("compose.config — apply", () => {
     mockSsh.writeFile = async (
       path: string,
       content: string,
-      writeOptions: { mode: string }
+      writeOptions?: { mode?: string }
     ): Promise<void> => {
       await Promise.resolve()
-      writtenFiles.push({ content, mode: writeOptions.mode, path })
+      writtenFiles.push({ content, mode: writeOptions?.mode, path })
     }
 
     const mod = compose.config({ content: "broken: yaml: [\n", projectDirectory })
@@ -1097,10 +1097,10 @@ describe("compose.config — apply", () => {
     mockSsh.writeFile = async (
       path: string,
       content: string,
-      writeOptions: { mode: string }
+      writeOptions?: { mode?: string }
     ): Promise<void> => {
       await Promise.resolve()
-      writtenFiles.push({ content, mode: writeOptions.mode, path })
+      writtenFiles.push({ content, mode: writeOptions?.mode, path })
     }
 
     const mod = compose.config({ content: "broken: yaml: [\n", projectDirectory })
@@ -1634,7 +1634,7 @@ describe("compose.systemd — apply", () => {
       .mockResolvedValueOnce(previousUnit)
       .mockResolvedValue(expectedUnit)
     vi.spyOn(mockSsh, "writeFile").mockImplementation(async (path, content, options) => {
-      writtenFiles.push({ content, mode: options.mode, path })
+      writtenFiles.push({ content, mode: options?.mode, path })
       await Promise.resolve()
     })
 
@@ -1668,7 +1668,7 @@ describe("compose.systemd — apply", () => {
       .mockResolvedValueOnce(previousUnit)
       .mockResolvedValue(expectedUnit)
     vi.spyOn(mockSsh, "writeFile").mockImplementation(async (path, content, options) => {
-      writtenFiles.push({ content, mode: options.mode, path })
+      writtenFiles.push({ content, mode: options?.mode, path })
       await Promise.resolve()
     })
 

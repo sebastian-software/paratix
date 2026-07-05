@@ -153,9 +153,9 @@ describe("net.hosts — apply", () => {
     const mockSsh = createMockSsh({
       "cat '/etc/hosts'": { stdout: "127.0.0.1 localhost\n" },
     })
-    const writes: Array<{ content: string; mode: string; path: string }> = []
+    const writes: Array<{ content: string; mode?: string; path: string }> = []
     mockSsh.writeFile = async (path, content, options) => {
-      writes.push({ content, mode: options.mode, path })
+      writes.push({ content, mode: options?.mode, path })
       await Promise.resolve()
     }
 
@@ -312,9 +312,9 @@ describe("net.hosts — apply", () => {
     const mockSsh = createMockSsh({
       "cat '/etc/hosts'": { stdout: "127.0.0.1 localhost\n192.168.1.1 host1\n" },
     })
-    const writes: Array<{ content: string; mode: string; path: string }> = []
+    const writes: Array<{ content: string; mode?: string; path: string }> = []
     mockSsh.writeFile = async (path, content, options) => {
-      writes.push({ content, mode: options.mode, path })
+      writes.push({ content, mode: options?.mode, path })
       await Promise.resolve()
     }
 
@@ -330,9 +330,9 @@ describe("net.hosts — apply", () => {
     const mockSsh = createMockSsh({
       "cat '/etc/hosts'": { stdout: "127.0.0.1 localhost\n192.168.1.1 # old alias\n" },
     })
-    const writes: Array<{ content: string; mode: string; path: string }> = []
+    const writes: Array<{ content: string; mode?: string; path: string }> = []
     mockSsh.writeFile = async (path, content, options) => {
-      writes.push({ content, mode: options.mode, path })
+      writes.push({ content, mode: options?.mode, path })
       await Promise.resolve()
     }
 
@@ -348,9 +348,9 @@ describe("net.hosts — apply", () => {
     const mockSsh = createMockSsh({
       "cat '/etc/hosts'": { stdout: "127.0.0.1 localhost\n192.168.1.1 host1 # keep\n" },
     })
-    const writes: Array<{ content: string; mode: string; path: string }> = []
+    const writes: Array<{ content: string; mode?: string; path: string }> = []
     mockSsh.writeFile = async (path, content, options) => {
-      writes.push({ content, mode: options.mode, path })
+      writes.push({ content, mode: options?.mode, path })
       await Promise.resolve()
     }
 
@@ -366,9 +366,9 @@ describe("net.hosts — apply", () => {
     const mockSsh = createMockSsh({
       "cat '/etc/hosts'": { stdout: "127.0.0.1 localhost\n" },
     })
-    const writes: Array<{ content: string; mode: string; path: string }> = []
+    const writes: Array<{ content: string; mode?: string; path: string }> = []
     mockSsh.writeFile = async (path, content, options) => {
-      writes.push({ content, mode: options.mode, path })
+      writes.push({ content, mode: options?.mode, path })
       await Promise.resolve()
     }
 
@@ -386,9 +386,9 @@ describe("net.hosts — apply", () => {
         stdout: "127.0.0.1 localhost\n10.0.0.1 api\n10.0.0.1 db api\n",
       },
     })
-    const writes: Array<{ content: string; mode: string; path: string }> = []
+    const writes: Array<{ content: string; mode?: string; path: string }> = []
     mockSsh.writeFile = async (path, content, options) => {
-      writes.push({ content, mode: options.mode, path })
+      writes.push({ content, mode: options?.mode, path })
       await Promise.resolve()
     }
 
@@ -407,9 +407,9 @@ describe("net.hosts — apply", () => {
     const mockSsh = createMockSsh({
       "cat '/etc/hosts'": { stdout: "127.0.0.1 localhost\n10.0.0.1   alpha   beta\n" },
     })
-    const writes: Array<{ content: string; mode: string; path: string }> = []
+    const writes: Array<{ content: string; mode?: string; path: string }> = []
     mockSsh.writeFile = async (path, content, options) => {
-      writes.push({ content, mode: options.mode, path })
+      writes.push({ content, mode: options?.mode, path })
       await Promise.resolve()
     }
 
@@ -436,9 +436,9 @@ describe("net.hosts — apply", () => {
     const mockSsh = createMockSsh({
       "cat '/etc/hosts'": { stdout: "127.0.0.1 localhost\n" },
     })
-    const writes: Array<{ content: string; mode: string; path: string }> = []
+    const writes: Array<{ content: string; mode?: string; path: string }> = []
     mockSsh.writeFile = async (path, content, options) => {
-      writes.push({ content, mode: options.mode, path })
+      writes.push({ content, mode: options?.mode, path })
       await Promise.resolve()
     }
 
@@ -497,9 +497,9 @@ describe("net.hosts — apply", () => {
       // read and the guarded re-read just before the write.
       return "127.0.0.1 localhost\n9.9.9.9 intruder\n"
     }
-    const writes: Array<{ content: string; mode: string; path: string }> = []
+    const writes: Array<{ content: string; mode?: string; path: string }> = []
     mockSsh.writeFile = async (path, content, options) => {
-      writes.push({ content, mode: options.mode, path })
+      writes.push({ content, mode: options?.mode, path })
       await Promise.resolve()
     }
 
