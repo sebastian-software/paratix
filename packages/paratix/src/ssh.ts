@@ -35,7 +35,6 @@ import {
   DEFAULT_MAX_OUTPUT_BYTES,
   maskPreparedSecrets,
   maskSecrets,
-  normalizeSshCloseCode,
   prepareSecrets,
   type SecretSource,
   shellQuote,
@@ -190,7 +189,6 @@ const JITTER_BASE = 0.75
 const JITTER_RANGE = 0.5
 const RECONNECT_BASE_DELAY = 1000
 const RECONNECT_MAX_DELAY = 30_000
-const RAW_OUTPUT_ERROR_SNIPPET_LENGTH = 500
 
 type AuthMethod = "agent" | "password" | "privateKey" | null
 type PromptOptions = { abortSignal?: AbortSignal }
@@ -220,19 +218,6 @@ type SshRuntimeState = {
 
 function getAbortReason(signal: AbortSignal): Error {
   return signal.reason instanceof Error ? signal.reason : new Error("SSH operation aborted")
-}
-
-function truncateRawOutputErrorSnippet(text: string): string {
-  let count = 0
-  let sliceEnd = 0
-  for (const char of text) {
-    if (count >= RAW_OUTPUT_ERROR_SNIPPET_LENGTH) {
-      return `${text.slice(0, sliceEnd)}…(truncated)`
-    }
-    sliceEnd += char.length
-    count++
-  }
-  return text
 }
 
 function toError(error: unknown): Error {
@@ -1729,25 +1714,37 @@ ${this.buildDirSymlinkCheckScript(directory)}mktemp -p ${shellQuote(directory)} 
 
   /**
    * Execute a command directly over the SSH transport without sudo wrapping.
-   * Used only by {@link probeSudo} to check whether `sudo` is installed.
+   * Used by the sudo probes ({@link ensureSudoInstalled},
+   * {@link hasPasswordlessSudo}) and the non-root finalize/verify paths
+   * ({@link execWithoutSudo}, {@link outputWithoutSudo}).
+   *
+   * Stream capture, the output byte-cap, secret masking and the signal /
+   * exit-code handling are delegated to {@link collectStreamOutput} — the same
+   * helper {@link execPrepared} uses — so the raw path shares one capping and
+   * one truncation implementation with the sudo path. `ignoreExitCode: true`
+   * preserves the historical contract of returning a non-zero exit code to the
+   * caller instead of throwing; a delivered signal still rejects. `silent: true`
+   * keeps the probe/verify output off the live terminal, matching the previous
+   * discard-stderr / buffer-stdout behavior. Only stdout and the exit code are
+   * surfaced to callers; stderr is captured for masking but not returned.
    *
    * @param command - The raw shell command to run.
    * @returns The exit code and captured stdout.
    */
   private async execRaw(command: string): Promise<{ exitCode: number; stdout: string }> {
     const client = this.ensureClient()
-    return new Promise((resolve, reject) => {
-      const { isSettled, wrappedReject, wrappedResolve } = this.createSettledCallbacks<{
-        exitCode: number
-        stdout: string
-      }>(resolve, reject)
+    // R-0000667: snapshot the secret sink once (as execPrepared does) so both
+    // the timeout message and the collectStreamOutput masking pipeline redact
+    // the same registered-secret material.
+    const secrets = prepareSecrets(this.buildSecrets())
+    const result = await new Promise<ExecResult>((resolve, reject) => {
+      const { isSettled, wrappedReject, wrappedResolve } = this.createSettledCallbacks<ExecResult>(
+        resolve,
+        reject
+      )
       let activeStream: ClientChannel | null = null
       const timer = setTimeout(() => {
         activeStream?.close()
-        // R-0000667: route command interpolation through the same secret sink
-        // execPrepared uses so future callers with secret-bearing commands
-        // cannot leak through verbose error rendering.
-        const secrets = prepareSecrets(this.buildSecrets())
         wrappedReject(
           new Error(
             `Command timed out after ${COMMAND_TIMEOUT}ms: ${maskPreparedSecrets(command, secrets)}`
@@ -1761,77 +1758,23 @@ ${this.buildDirSymlinkCheckScript(directory)}mktemp -p ${shellQuote(directory)} 
             wrappedReject(error)
             return
           }
-          // If the timer already fired (or the promise was otherwise settled) before
-          // ssh2 invoked this callback, we must not attach listeners that can never
-          // resolve the already-rejected promise. Close the stream immediately so
-          // ssh2 releases the channel and discards any buffered data.
+          // If the timer already fired (or the promise was otherwise settled)
+          // before ssh2 invoked this callback, we must not attach listeners that
+          // can never resolve the already-rejected promise. Close the stream
+          // immediately so ssh2 releases the channel and discards buffered data.
           if (isSettled()) {
             stream.close()
             return
           }
           activeStream = stream
-          const chunks: Buffer[] = []
-          let stdoutBytes = 0
-          stream.on("data", (chunk: Buffer) => {
-            if (stdoutBytes > DEFAULT_MAX_OUTPUT_BYTES) return
-            stdoutBytes += chunk.length
-            if (stdoutBytes > DEFAULT_MAX_OUTPUT_BYTES) {
-              const remainingBytes = Math.max(
-                0,
-                DEFAULT_MAX_OUTPUT_BYTES - (stdoutBytes - chunk.length)
-              )
-              if (remainingBytes > 0) {
-                chunks.push(chunk.subarray(0, remainingBytes))
-              }
-              const capturedStdout = Buffer.concat(chunks).toString("utf8")
-              const secrets = prepareSecrets(this.buildSecrets())
-              activeStream?.close()
-              wrappedReject(
-                new Error(
-                  `Command stdout exceeded ${DEFAULT_MAX_OUTPUT_BYTES} bytes: ${maskPreparedSecrets(
-                    command,
-                    secrets
-                  )}\nstdout: ${truncateRawOutputErrorSnippet(
-                    maskPreparedSecrets(capturedStdout, secrets)
-                  )}`
-                )
-              )
-              return
-            }
-            chunks.push(chunk)
-          })
-          stream.on("close", (code: null | number | undefined, signal?: null | string) => {
-            clearTimeout(timer)
-            if (signal != null && signal !== "") {
-              // R-0000667: mask command before interpolating it into the
-              // Error.message; mirrors the secret sink used in execPrepared.
-              const secrets = prepareSecrets(this.buildSecrets())
-              wrappedReject(
-                new Error(
-                  `Command failed with signal ${signal}: ${maskPreparedSecrets(command, secrets)}`
-                )
-              )
-              return
-            }
-            wrappedResolve({
-              exitCode: normalizeSshCloseCode(code),
-              stdout: Buffer.concat(chunks).toString("utf8"),
-            })
-          })
-          // R-0000089: attach error listeners on both the stream and its stderr
-          // channel. ssh2 emits `error` (e.g. EPIPE during the sudo probe path)
-          // synchronously and an unhandled `error` on a ClientChannel crashes
-          // the process. Pattern mirrors `collectStreamOutput` in sshHelpers.ts.
-          stream.on("error", (error: Error) => {
-            clearTimeout(timer)
-            wrappedReject(error)
-          })
-          stream.stderr.on("data", () => {
-            // discard stderr
-          })
-          stream.stderr.on("error", (error: Error) => {
-            clearTimeout(timer)
-            wrappedReject(error)
+          collectStreamOutput({
+            command,
+            options: { ignoreExitCode: true, silent: true },
+            reject: wrappedReject,
+            resolve: wrappedResolve,
+            secrets,
+            stream,
+            timer,
           })
         })
       } catch (error) {
@@ -1840,6 +1783,7 @@ ${this.buildDirSymlinkCheckScript(directory)}mktemp -p ${shellQuote(directory)} 
         wrappedReject(toError(error))
       }
     })
+    return { exitCode: result.code, stdout: result.stdout }
   }
 
   private async execWithoutSudo(command: string): Promise<void> {
@@ -1847,10 +1791,7 @@ ${this.buildDirSymlinkCheckScript(directory)}mktemp -p ${shellQuote(directory)} 
     if (result.exitCode !== 0) {
       // R-0000667: mask the command before interpolating it into the
       // Error.message; mirrors the secret sink used in execPrepared.
-      const secrets = prepareSecrets(this.buildSecrets())
-      throw new Error(
-        `Command failed (exit code ${result.exitCode}): ${maskPreparedSecrets(command, secrets)}`
-      )
+      throw new Error(`Command failed (exit code ${result.exitCode}): ${this.maskCommand(command)}`)
     }
   }
 
@@ -2044,15 +1985,27 @@ trap - EXIT
     return this.config.user === "root" || this.cachedSudoPassword != null
   }
 
+  /**
+   * Single entry point for masking a command string before it is interpolated
+   * into an operator-visible error message. Wraps the repeated
+   * `maskPreparedSecrets(command, prepareSecrets(this.buildSecrets()))` pattern
+   * (R-0000667) so every raw-exec error path redacts the same registered-secret
+   * material — sudo password, op tokens, signed download URLs, … — identically.
+   *
+   * @param command - The command whose secret material must be redacted.
+   * @returns The command with every registered secret variant replaced by the
+   *   redaction placeholder.
+   */
+  private maskCommand(command: string): string {
+    return maskPreparedSecrets(command, prepareSecrets(this.buildSecrets()))
+  }
+
   private async outputWithoutSudo(command: string): Promise<string> {
     const result = await this.execRaw(command)
     if (result.exitCode !== 0) {
       // R-0000667: mask the command before interpolating it into the
       // Error.message; mirrors the secret sink used in execPrepared.
-      const secrets = prepareSecrets(this.buildSecrets())
-      throw new Error(
-        `Command failed (exit code ${result.exitCode}): ${maskPreparedSecrets(command, secrets)}`
-      )
+      throw new Error(`Command failed (exit code ${result.exitCode}): ${this.maskCommand(command)}`)
     }
     return result.stdout.trim()
   }

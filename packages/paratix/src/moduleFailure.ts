@@ -2,7 +2,16 @@ import type { ExecResult, ModuleResult } from "./types.js"
 
 import { CommandError, maskSecrets } from "./sshHelpers.js"
 
-function firstNonEmptyLine(text: string): null | string {
+/**
+ * Return the first non-empty, trimmed line of `text`, or `null` when every
+ * line is blank. Shared across the module layer so command-output summaries
+ * (`failedCommand`, apt rollback diagnostics, …) pick their first meaningful
+ * line identically.
+ *
+ * @param text - Multi-line command output to scan.
+ * @returns The first non-empty trimmed line, or `null` when none exists.
+ */
+export function firstNonEmptyLine(text: string): null | string {
   for (const line of text.split("\n")) {
     const trimmed = line.trim()
     if (trimmed.length > 0) return trimmed
