@@ -1,0 +1,67 @@
+name: Bug report
+description: Report a bug in Paratix
+title: "[Bug]: "
+labels:
+  - bug
+body:
+  - type: input
+    id: version
+    attributes:
+      label: Paratix version
+      description: Run `paratix --version` or check your package.json.
+      placeholder: "0.12.x"
+    validations:
+      required: true
+  - type: input
+    id: node-version
+    attributes:
+      label: Node.js version
+      description: Run `node --version`.
+      placeholder: "v24.x.x"
+    validations:
+      required: true
+  - type: input
+    id: os
+    attributes:
+      label: Operating system
+      placeholder: "Ubuntu 24.04, macOS 15, ..."
+    validations:
+      required: true
+  - type: input
+    id: module
+    attributes:
+      label: Affected module or feature
+      description: Which Paratix module or area is involved? Leave blank if unsure.
+      placeholder: "e.g. service, firewall, quadlet, SSH reconnect"
+    validations:
+      required: false
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Steps to reproduce
+      description: Minimal playbook or command sequence that triggers the bug.
+      placeholder: |
+        1.
+        2.
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+    validations:
+      required: true
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual behavior
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Relevant logs or output
+      description: Run with `--verbose` for more detail. Redact secrets and private keys before pasting.
+      render: text
+    validations:
+      required: false
