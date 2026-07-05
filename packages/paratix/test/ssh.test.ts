@@ -261,92 +261,163 @@ function makeWireHostKey(algorithmName: string, payload: string): Buffer {
 // without each call site having to recompute the hash.
 const HELLO_WORLD_SHA256_HEX = createHash("sha256").update("hello world", "utf8").digest("hex")
 
-// R-0000522: extract the path argument from a `sha256sum -- '<path>'`
-// invocation so the mock can echo back the canonical `<hash>  <filename>`
-// shape that the production parser expects.
-const SHA256SUM_PATH_PATTERN = /sha256sum -- '(?<path>[^']*)'/v
-function extractSha256SumPath(command: string): string {
-  return SHA256SUM_PATH_PATTERN.exec(command)?.groups?.path ?? ""
+// R-0000522: SHA-256 over an empty byte sequence — what `sha256sum` prints for
+// a file finalized as 0 bytes. Drives the "empty" verdict in
+// `classifyRemoteHash` so the shell-fallback branch is exercised.
+const EMPTY_FILE_SHA256_HEX = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+
+// #82: with the batched write path each remote command now bundles several
+// operations, so the mock classifies commands by content rather than call
+// index:
+//
+//   - `sha256sum` + `mv -T`  → combined finalize+verify → emit `finalizeHash`.
+//   - `sha256sum` (no `mv`)  → shell-fallback re-verify  → emit `verifyHash`.
+//   - `stat -c '%s'`         → combined chmod+size stage → emit `size`.
+//   - `df -Pk`               → disk-space probe          → emit `dfOutput`.
+//   - `mktemp` + `-p /tmp`   → non-root prep             → emit `tempPath`.
+//   - `mktemp` + `realpath`  → root prep (combined)      → emit `tempPath`.
+//   - `mktemp` (else)        → privileged shell-fallback mktemp → emit `fallbackTempPath`.
+//   - `realpath` (no mktemp) → shell-fallback dirname probe → echo the directory.
+type StagedExecOptions = {
+  dfOutput?: string
+  fallbackTempPath?: string
+  finalizeHash?: string
+  remotePath: string
+  size?: number
+  tempPath: string
+  verifyHash?: string
 }
 
-function makeWriteFileExecSpy(
+function stagedMktempResponse(command: string, options: StagedExecOptions): string {
+  if (command.includes("-p /tmp")) return options.tempPath
+  if (command.includes("realpath")) return options.tempPath
+  return options.fallbackTempPath ?? options.tempPath
+}
+
+function stagedHashResponse(command: string, options: StagedExecOptions): string {
+  const hash = command.includes("mv -T") ? (options.finalizeHash ?? "") : (options.verifyHash ?? "")
+  return `${hash}  ${options.remotePath}\n`
+}
+
+function stagedResponseData(command: string, options: StagedExecOptions): string {
+  if (command.includes("sha256sum")) return stagedHashResponse(command, options)
+  if (command.includes("stat -c '%s'")) return String(options.size ?? 0)
+  if (command.includes("df -Pk")) return options.dfOutput ?? ""
+  if (command.includes("mktemp")) return stagedMktempResponse(command, options)
+  // Standalone dirname-symlink probe (shell-fallback path). Echo the
+  // destination directory back unchanged so the equality check passes; the
+  // command may be sudo-wrapped (quote-escaped), so derive the directory from
+  // the known remote path rather than parsing the command string.
+  if (command.includes("realpath")) {
+    const { remotePath } = options
+    return remotePath.slice(0, remotePath.lastIndexOf("/")) || "/"
+  }
+  return ""
+}
+
+function makeStagedExec(
+  executedCommands: string[],
+  options: StagedExecOptions
+): ReturnType<typeof vi.fn> {
+  return vi.fn().mockImplementation((command: string, callback: ExecCallback) => {
+    executedCommands.push(command)
+    const stream = makeStream()
+    callback(undefined, stream)
+    stream.emit("data", Buffer.from(stagedResponseData(command, options)))
+    stream.emit("close", 0)
+  })
+}
+
+// Module-scope predicate helpers keep compound conditionals out of test
+// bodies (vitest/no-conditional-in-test).
+function commandStatsPath(command: string, path: string): boolean {
+  return command.includes("stat -c '%s'") && command.includes(path)
+}
+
+function commandRemovesPath(command: string, path: string): boolean {
+  return command.includes("rm -f") && command.includes(path) && !command.includes("mv -T")
+}
+
+function isFallbackMktempCommand(command: string, directory: string): boolean {
+  return (
+    command.includes("mktemp") &&
+    command.includes(directory) &&
+    !command.includes("/tmp") &&
+    !command.includes("sha256sum")
+  )
+}
+
+// #82: exec spy for the non-root path where the folded dirname-symlink guard
+// inside the finalize script rejects the destination directory. prep + stage
+// succeed; the finalize round-trip (identified by `sha256sum` in its text)
+// aborts with the `paratix-symlink-component` marker + exit 20.
+function makeFinalizeSymlinkExec(
   executedCommands: string[],
   tempPath: string,
-  options: { finalizeRealpathDirectory?: string; realpathDirectory?: string } = {}
+  resolvedMarker: string
 ): ReturnType<typeof vi.fn> {
-  const spy = vi.fn()
-  // R-0000141: when the destination directory triggers the dirname-symlink
-  // probe, realpath -m -- runs before the first mktemp. Echo the directory
-  // back unchanged so the validation passes.
-  if (options.realpathDirectory != null) {
-    spy.mockImplementationOnce((_command: string, callback: ExecCallback) => {
-      const stream = makeStream()
-      executedCommands.push(_command)
-      callback(undefined, stream)
-      stream.emit("data", Buffer.from(options.realpathDirectory!))
-      stream.emit("close", 0)
-    })
-  }
-  spy
-    .mockImplementationOnce((_command: string, callback: ExecCallback) => {
-      const stream = makeStream()
-      executedCommands.push(_command)
-      callback(undefined, stream)
+  return vi.fn().mockImplementation((command: string, callback: ExecCallback) => {
+    executedCommands.push(command)
+    const stream = makeStream()
+    callback(undefined, stream)
+    if (command.includes("mktemp -p /tmp")) {
       stream.emit("data", Buffer.from(tempPath))
       stream.emit("close", 0)
-    })
-    .mockImplementationOnce((_command: string, callback: ExecCallback) => {
-      const stream = makeStream()
-      executedCommands.push(_command)
-      callback(undefined, stream)
-      stream.emit("close", 0)
-    })
-    .mockImplementationOnce((_command: string, callback: ExecCallback) => {
-      const stream = makeStream()
-      executedCommands.push(_command)
-      callback(undefined, stream)
+    } else if (command.includes("stat -c '%s'")) {
       stream.emit("data", Buffer.from("11"))
       stream.emit("close", 0)
-    })
-  if (options.finalizeRealpathDirectory != null) {
-    spy.mockImplementationOnce((_command: string, callback: ExecCallback) => {
-      const stream = makeStream()
-      executedCommands.push(_command)
-      callback(undefined, stream)
-      stream.emit("data", Buffer.from(options.finalizeRealpathDirectory!))
+    } else if (command.includes("sha256sum")) {
+      stream.stderr.emit("data", Buffer.from(`paratix-symlink-component ${resolvedMarker}`))
+      stream.emit("close", 20)
+    } else {
       stream.emit("close", 0)
-    })
-  }
-  return spy
-    .mockImplementationOnce((_command: string, callback: ExecCallback) => {
-      const stream = makeStream()
-      executedCommands.push(_command)
-      callback(undefined, stream)
-      stream.emit("close", 0)
-    })
-    .mockImplementationOnce((cmd: string, callback: ExecCallback) => {
-      // R-0000522: post-finalize verification — emit the canonical
-      // `sha256sum -- <file>` output so verifyRemoteWriteFile returns
-      // "matches" and writeFile resolves before the shell fallback is
-      // consulted.
-      const stream = makeStream()
-      executedCommands.push(cmd)
-      callback(undefined, stream)
-      stream.emit("data", Buffer.from(`${HELLO_WORLD_SHA256_HEX}  ${extractSha256SumPath(cmd)}\n`))
-      stream.emit("close", 0)
-    })
-    .mockImplementationOnce((_command: string, callback: ExecCallback) => {
-      const stream = makeStream()
-      executedCommands.push(_command)
-      callback(undefined, stream)
-      stream.emit("close", 0)
-    })
+    }
+  })
 }
 
-// R-0000141: helper that checks whether a command transports content via
-// `printf` (legacy payload pipeline) — not unrelated validation commands.
+// #82: exec spy whose finalize round-trip fails with a generic non-zero exit
+// (e.g. a rejected `mv`). prep + stage succeed; the finalize (identified by
+// `sha256sum`) closes with exit 1 so the caller cleans up the staged temp.
+function makeFinalizeFailExec(
+  executedCommands: string[],
+  tempPath: string
+): ReturnType<typeof vi.fn> {
+  return vi.fn().mockImplementation((command: string, callback: ExecCallback) => {
+    executedCommands.push(command)
+    const stream = makeStream()
+    callback(undefined, stream)
+    if (command.includes("mktemp")) {
+      stream.emit("data", Buffer.from(tempPath))
+      stream.emit("close", 0)
+    } else if (command.includes("stat -c '%s'")) {
+      stream.emit("data", Buffer.from("11"))
+      stream.emit("close", 0)
+    } else if (command.includes("sha256sum")) {
+      stream.emit("close", 1)
+    } else {
+      stream.emit("close", 0)
+    }
+  })
+}
+
+// #82: exec spy for the root path where the combined prep script's folded
+// dirname-symlink guard rejects a symlinked destination component before any
+// staged temp is created.
+function makePrepSymlinkExec(resolvedMarker: string): ReturnType<typeof vi.fn> {
+  return vi.fn().mockImplementationOnce((_command: string, callback: ExecCallback) => {
+    const stream = makeStream()
+    callback(undefined, stream)
+    stream.stderr.emit("data", Buffer.from(`paratix-symlink-component ${resolvedMarker}`))
+    stream.emit("close", 20)
+  })
+}
+
+// The legacy content-transport pipeline embedded the payload as
+// `printf '%s' '<encoded>'`. The batched write scripts (#82) use `printf` only
+// for short diagnostic markers, never to carry content — so the precise
+// `printf '%s' '` shape distinguishes them.
 function isContentTransportPrintf(command: string): boolean {
-  return command.includes("printf") && !command.includes("realpath")
+  return command.includes("printf '%s' '")
 }
 
 function makeSshInstanceWithAgent(
@@ -2626,62 +2697,12 @@ describe("SshConnectionImpl", () => {
       const tempPath = "/tmp/paratix-upload.ABCDEF"
       const remotePath = "/etc/my-app/config.yml"
       const executedCommands: string[] = []
-
-      const execSpy = vi
-        .fn()
-        // [0] mktemp
-        .mockImplementationOnce((_command: string, callback: ExecCallback) => {
-          const stream = makeStream()
-          executedCommands.push(_command)
-          callback(undefined, stream)
-          stream.emit("data", Buffer.from(tempPath))
-          stream.emit("close", 0)
-        })
-        // [1] chmod
-        .mockImplementationOnce((_command: string, callback: ExecCallback) => {
-          const stream = makeStream()
-          executedCommands.push(_command)
-          callback(undefined, stream)
-          stream.emit("close", 0)
-        })
-        // [2] R-0000150: stat -c '%s' on staged temp path (BEFORE finalize)
-        .mockImplementationOnce((_command: string, callback: ExecCallback) => {
-          const stream = makeStream()
-          executedCommands.push(_command)
-          callback(undefined, stream)
-          stream.emit("data", Buffer.from("11"))
-          stream.emit("close", 0)
-        })
-        // [3] realpath dirname-symlink guard before privileged final temp
-        .mockImplementationOnce((_command: string, callback: ExecCallback) => {
-          const stream = makeStream()
-          executedCommands.push(_command)
-          callback(undefined, stream)
-          stream.emit("data", Buffer.from("/etc/my-app"))
-          stream.emit("close", 0)
-        })
-        // [4] mv (finalize via privileged shell script)
-        .mockImplementationOnce((_command: string, callback: ExecCallback) => {
-          const stream = makeStream()
-          executedCommands.push(_command)
-          callback(undefined, stream)
-          stream.emit("close", 0)
-        })
-        // [5] R-0000599: post-finalize SHA-256 verification of remote file
-        .mockImplementationOnce((_command: string, callback: ExecCallback) => {
-          const stream = makeStream()
-          executedCommands.push(_command)
-          callback(undefined, stream)
-          stream.emit("data", Buffer.from(`${MOCK_LOCAL_UPLOAD_SHA256}  ${remotePath}\n`))
-          stream.emit("close", 0)
-        })
-        // [6] rm -f temp
-        .mockImplementationOnce((_command: string, callback: ExecCallback) => {
-          const stream = makeStream()
-          executedCommands.push(_command)
-          callback(undefined, stream)
-          stream.emit("close", 0)
-        })
+      const execSpy = makeStagedExec(executedCommands, {
+        finalizeHash: MOCK_LOCAL_UPLOAD_SHA256,
+        remotePath,
+        size: 11,
+        tempPath,
+      })
 
       const client = makeClientWithExecSpy(execSpy)
       const ssh = makeConnectedSsh(client, { user: "deploy" })
@@ -2690,36 +2711,34 @@ describe("SshConnectionImpl", () => {
 
       await ssh.uploadFile("/local/file.txt", remotePath)
 
-      // R-0000150: size verification runs on the staged temp path BEFORE the
-      // privileged finalize/mv to avoid TOCTOU on the destination.
+      // #82: exactly three exec round-trips besides the SFTP transfer —
+      // prep (mktemp), stage (chmod+stat) and finalize (mv+sha256sum). A
+      // successful finalize consumes the staged temp, so no `rm -f` runs.
+      expect(executedCommands).toHaveLength(3)
       expect(executedCommands[0]).toBe("mktemp -p /tmp -- 'paratix-upload.XXXXXX'")
-      expect(executedCommands[1]).toBe(`chmod '0600' '${tempPath}'`)
-      expect(executedCommands[2]).toContain("stat -c")
-      expect(executedCommands[2]).toContain(tempPath)
-      expect(executedCommands[3]).toContain("realpath -m --")
-      expect(executedCommands[3]).toContain("/etc/my-app")
-      expect(executedCommands[4]).toMatch(/^sudo -n bash -c /v)
-      expect(executedCommands[4]).toContain(tempPath)
-      expect(executedCommands[4]).toContain("target_temp=$(mktemp")
-      // R-0000565: directory and template are now passed via `mktemp -p <dir> -- <template>`,
-      // so the assertion checks for both segments separately instead of the legacy
-      // joined-path style that placed the template under the directory.
-      expect(executedCommands[4]).toContain("'/etc/my-app'")
-      expect(executedCommands[4]).toContain("'.config.yml.paratix.XXXXXX'")
-      expect(executedCommands[4]).toContain("[ ! -d")
-      expect(executedCommands[4]).toContain("[ ! -L")
-      expect(executedCommands[4]).toContain("mv -T -- ")
-      expect(executedCommands[4]).toContain(`'${tempPath}'`)
-      expect(executedCommands[4]).toContain('"$target_temp"')
-      expect(executedCommands[4]).toContain("chmod ")
-      expect(executedCommands[4]).toContain("'0600'")
-      expect(executedCommands[4]).toContain('chown "$target_owner" "$target_temp"')
-      expect(executedCommands[4]).toContain(`'${remotePath}'`)
-      // R-0000599: sha256sum verifies the finalized destination hash matches
-      // the local source.
-      expect(executedCommands[5]).toContain("sha256sum --")
-      expect(executedCommands[5]).toContain(remotePath)
-      expect(executedCommands[6]).toBe(`rm -f -- '${tempPath}'`)
+      // R-0000150 + R-0000266: the staged chmod and size read run in one raw
+      // (non-sudo) round-trip so an expired sudo cache cannot mask a mismatch.
+      expect(executedCommands[1]).toBe(`chmod '0600' '${tempPath}' && stat -c '%s' '${tempPath}'`)
+      // Finalize bundles the folded dirname-symlink guard, the privileged
+      // move and the post-finalize sha256sum, wrapped in sudo.
+      const finalize = executedCommands[2]
+      expect(finalize).toMatch(/^sudo -n bash -c /v)
+      expect(finalize).toContain("realpath -m --")
+      expect(finalize).toContain("target_temp=$(mktemp")
+      // R-0000565: directory and template are passed via `mktemp -p <dir> -- <template>`.
+      expect(finalize).toContain("'/etc/my-app'")
+      expect(finalize).toContain("'.config.yml.paratix.XXXXXX'")
+      expect(finalize).toContain("[ ! -d")
+      expect(finalize).toContain("[ ! -L")
+      expect(finalize).toContain("mv -T -- ")
+      expect(finalize).toContain(`'${tempPath}'`)
+      expect(finalize).toContain('"$target_temp"')
+      expect(finalize).toContain("chmod ")
+      expect(finalize).toContain("'0600'")
+      expect(finalize).toContain('chown "$target_owner" "$target_temp"')
+      expect(finalize).toContain(`'${remotePath}'`)
+      // R-0000599: the destination is hashed inside the same privileged script.
+      expect(finalize).toContain("sha256sum --")
       expect(vi.mocked(sftpUpload)).toHaveBeenCalledWith(
         client,
         "/local/file.txt",
@@ -2740,42 +2759,13 @@ describe("SshConnectionImpl", () => {
       const tempPath = "/tmp/paratix-upload.SYMLNK"
       const remotePath = "/etc/my-app/config.yml"
       const executedCommands: string[] = []
-
-      const execSpy = vi
-        .fn()
-        .mockImplementationOnce((_command: string, callback: ExecCallback) => {
-          const stream = makeStream()
-          executedCommands.push(_command)
-          callback(undefined, stream)
-          stream.emit("data", Buffer.from(tempPath))
-          stream.emit("close", 0)
-        })
-        .mockImplementationOnce((_command: string, callback: ExecCallback) => {
-          const stream = makeStream()
-          executedCommands.push(_command)
-          callback(undefined, stream)
-          stream.emit("close", 0)
-        })
-        .mockImplementationOnce((_command: string, callback: ExecCallback) => {
-          const stream = makeStream()
-          executedCommands.push(_command)
-          callback(undefined, stream)
-          stream.emit("data", Buffer.from("11"))
-          stream.emit("close", 0)
-        })
-        .mockImplementationOnce((_command: string, callback: ExecCallback) => {
-          const stream = makeStream()
-          executedCommands.push(_command)
-          callback(undefined, stream)
-          stream.emit("data", Buffer.from("/var/tmp/attacker/my-app"))
-          stream.emit("close", 0)
-        })
-        .mockImplementationOnce((_command: string, callback: ExecCallback) => {
-          const stream = makeStream()
-          executedCommands.push(_command)
-          callback(undefined, stream)
-          stream.emit("close", 0)
-        })
+      // #82: the finalize script's folded dirname-symlink guard rejects the
+      // attacker-controlled directory with the marker + exit 20.
+      const execSpy = makeFinalizeSymlinkExec(
+        executedCommands,
+        tempPath,
+        "/var/tmp/attacker/my-app"
+      )
 
       const client = makeClientWithExecSpy(execSpy)
       const ssh = makeConnectedSsh(client, { user: "deploy" })
@@ -2786,8 +2776,11 @@ describe("SshConnectionImpl", () => {
         /at least one path component is a symbolic link/v
       )
 
-      expect(executedCommands[3]).toContain("realpath -m --")
-      expect(executedCommands.some((cmd) => cmd.includes("target_temp=$(mktemp"))).toBe(false)
+      const finalize = executedCommands.find((cmd) => cmd.includes("sha256sum"))
+      expect(finalize).toContain("realpath -m --")
+      // The dirname guard is ordered before the in-destination mktemp.
+      expect(finalize!.indexOf("realpath")).toBeLessThan(finalize!.indexOf("target_temp=$(mktemp"))
+      // The staged temp survives the failed finalize, so the finally block rm's it.
       expect(executedCommands).toContain(`rm -f -- '${tempPath}'`)
     })
 
@@ -2798,74 +2791,24 @@ describe("SshConnectionImpl", () => {
       const tempPath = "/remote/paratix-upload.ABCDEF"
       const remotePath = "/remote/path"
       const executedCommands: string[] = []
-
-      const execSpy = vi
-        .fn()
-        // R-0000141: realpath dirname-symlink probe before mktemp
-        .mockImplementationOnce((_command: string, callback: ExecCallback) => {
-          const stream = makeStream()
-          executedCommands.push(_command)
-          callback(undefined, stream)
-          stream.emit("data", Buffer.from("/remote"))
-          stream.emit("close", 0)
-        })
-        // mktemp
-        .mockImplementationOnce((_command: string, callback: ExecCallback) => {
-          const stream = makeStream()
-          executedCommands.push(_command)
-          callback(undefined, stream)
-          stream.emit("data", Buffer.from(tempPath))
-          stream.emit("close", 0)
-        })
-        // chmod
-        .mockImplementationOnce((_command: string, callback: ExecCallback) => {
-          const stream = makeStream()
-          executedCommands.push(_command)
-          callback(undefined, stream)
-          stream.emit("close", 0)
-        })
-        // R-0000150: stat -c '%s' on staged temp path BEFORE finalize
-        .mockImplementationOnce((_command: string, callback: ExecCallback) => {
-          const stream = makeStream()
-          executedCommands.push(_command)
-          callback(undefined, stream)
-          stream.emit("data", Buffer.from("11"))
-          stream.emit("close", 0)
-        })
-        // mv (finalize)
-        .mockImplementationOnce((_command: string, callback: ExecCallback) => {
-          const stream = makeStream()
-          executedCommands.push(_command)
-          callback(undefined, stream)
-          stream.emit("close", 0)
-        })
-        // R-0000599: post-finalize SHA-256 verification of remote file
-        .mockImplementationOnce((_command: string, callback: ExecCallback) => {
-          const stream = makeStream()
-          executedCommands.push(_command)
-          callback(undefined, stream)
-          stream.emit("data", Buffer.from(`${MOCK_LOCAL_UPLOAD_SHA256}  ${remotePath}\n`))
-          stream.emit("close", 0)
-        })
-        // rm
-        .mockImplementationOnce((_command: string, callback: ExecCallback) => {
-          const stream = makeStream()
-          executedCommands.push(_command)
-          callback(undefined, stream)
-          stream.emit("close", 0)
-        })
+      const execSpy = makeStagedExec(executedCommands, {
+        finalizeHash: MOCK_LOCAL_UPLOAD_SHA256,
+        remotePath,
+        size: 11,
+        tempPath,
+      })
 
       const client = makeClientWithExecSpy(execSpy)
       const ssh = makeConnectedSsh(client)
 
       await ssh.uploadFile("/local/file.txt", remotePath)
 
-      expect(executedCommands).toContain(`chmod '0600' '${tempPath}'`)
-      const chmodIndex = executedCommands.indexOf(`chmod '0600' '${tempPath}'`)
-      const mvIndex = executedCommands.indexOf(
-        `[ ! -d '${remotePath}' ] && [ ! -L '${remotePath}' ] && mv -T -- '${tempPath}' '${remotePath}'`
+      const chmodIndex = executedCommands.findIndex((cmd) =>
+        cmd.includes(`chmod '0600' '${tempPath}'`)
       )
+      const mvIndex = executedCommands.findIndex((cmd) => cmd.includes("mv -T"))
       expect(chmodIndex).toBeGreaterThan(-1)
+      expect(mvIndex).toBeGreaterThan(-1)
       expect(chmodIndex).toBeLessThan(mvIndex)
     })
 
@@ -2876,62 +2819,12 @@ describe("SshConnectionImpl", () => {
       const tempPath = "/remote/paratix-upload.ABCDEF"
       const remotePath = "/remote/path"
       const executedCommands: string[] = []
-
-      const execSpy = vi
-        .fn()
-        // R-0000141: realpath dirname-symlink probe before mktemp
-        .mockImplementationOnce((_command: string, callback: ExecCallback) => {
-          const stream = makeStream()
-          executedCommands.push(_command)
-          callback(undefined, stream)
-          stream.emit("data", Buffer.from("/remote"))
-          stream.emit("close", 0)
-        })
-        // mktemp
-        .mockImplementationOnce((_command: string, callback: ExecCallback) => {
-          const stream = makeStream()
-          executedCommands.push(_command)
-          callback(undefined, stream)
-          stream.emit("data", Buffer.from(tempPath))
-          stream.emit("close", 0)
-        })
-        // chmod
-        .mockImplementationOnce((_command: string, callback: ExecCallback) => {
-          const stream = makeStream()
-          executedCommands.push(_command)
-          callback(undefined, stream)
-          stream.emit("close", 0)
-        })
-        // R-0000150: stat -c '%s' on staged temp path BEFORE finalize
-        .mockImplementationOnce((_command: string, callback: ExecCallback) => {
-          const stream = makeStream()
-          executedCommands.push(_command)
-          callback(undefined, stream)
-          stream.emit("data", Buffer.from("11"))
-          stream.emit("close", 0)
-        })
-        // mv (finalize)
-        .mockImplementationOnce((_command: string, callback: ExecCallback) => {
-          const stream = makeStream()
-          executedCommands.push(_command)
-          callback(undefined, stream)
-          stream.emit("close", 0)
-        })
-        // R-0000599: post-finalize SHA-256 verification of remote file
-        .mockImplementationOnce((_command: string, callback: ExecCallback) => {
-          const stream = makeStream()
-          executedCommands.push(_command)
-          callback(undefined, stream)
-          stream.emit("data", Buffer.from(`${MOCK_LOCAL_UPLOAD_SHA256}  ${remotePath}\n`))
-          stream.emit("close", 0)
-        })
-        // rm -f (cleanup in finally)
-        .mockImplementationOnce((_command: string, callback: ExecCallback) => {
-          const stream = makeStream()
-          executedCommands.push(_command)
-          callback(undefined, stream)
-          stream.emit("close", 0)
-        })
+      const execSpy = makeStagedExec(executedCommands, {
+        finalizeHash: MOCK_LOCAL_UPLOAD_SHA256,
+        remotePath,
+        size: 11,
+        tempPath,
+      })
 
       const client = makeClientWithExecSpy(execSpy)
       const ssh = makeConnectedSsh(client)
@@ -2942,8 +2835,7 @@ describe("SshConnectionImpl", () => {
       expect(chmodCommand).toBeDefined()
       expect(chmodCommand).toContain("0644")
       expect(chmodCommand).toContain(tempPath)
-      // chmod must come before mv
-      const mvIndex = executedCommands.findIndex((cmd) => /(?:^| )mv /v.test(cmd))
+      const mvIndex = executedCommands.findIndex((cmd) => cmd.includes("mv -T"))
       const chmodIndex = executedCommands.findIndex((cmd) => cmd.includes("chmod"))
       expect(chmodIndex).toBeLessThan(mvIndex)
     })
@@ -2955,122 +2847,36 @@ describe("SshConnectionImpl", () => {
       const tempPath = "/remote/paratix-upload.ABCDEF"
       const remotePath = "/remote/path"
       const executedCommands: string[] = []
-
-      const execSpy = vi
-        .fn()
-        // R-0000141: realpath dirname-symlink probe before mktemp
-        .mockImplementationOnce((_command: string, callback: ExecCallback) => {
-          const stream = makeStream()
-          executedCommands.push(_command)
-          callback(undefined, stream)
-          stream.emit("data", Buffer.from("/remote"))
-          stream.emit("close", 0)
-        })
-        // mktemp
-        .mockImplementationOnce((_command: string, callback: ExecCallback) => {
-          const stream = makeStream()
-          executedCommands.push(_command)
-          callback(undefined, stream)
-          stream.emit("data", Buffer.from(tempPath))
-          stream.emit("close", 0)
-        })
-        // default chmod 0600
-        .mockImplementationOnce((_command: string, callback: ExecCallback) => {
-          const stream = makeStream()
-          executedCommands.push(_command)
-          callback(undefined, stream)
-          stream.emit("close", 0)
-        })
-        // R-0000150: stat -c '%s' on staged temp path BEFORE finalize
-        .mockImplementationOnce((_command: string, callback: ExecCallback) => {
-          const stream = makeStream()
-          executedCommands.push(_command)
-          callback(undefined, stream)
-          stream.emit("data", Buffer.from("11"))
-          stream.emit("close", 0)
-        })
-        // mv (finalize)
-        .mockImplementationOnce((_command: string, callback: ExecCallback) => {
-          const stream = makeStream()
-          executedCommands.push(_command)
-          callback(undefined, stream)
-          stream.emit("close", 0)
-        })
-        // R-0000599: post-finalize SHA-256 verification of remote file
-        .mockImplementationOnce((_command: string, callback: ExecCallback) => {
-          const stream = makeStream()
-          executedCommands.push(_command)
-          callback(undefined, stream)
-          stream.emit("data", Buffer.from(`${MOCK_LOCAL_UPLOAD_SHA256}  ${remotePath}\n`))
-          stream.emit("close", 0)
-        })
-        // rm -f (cleanup in finally)
-        .mockImplementationOnce((_command: string, callback: ExecCallback) => {
-          const stream = makeStream()
-          executedCommands.push(_command)
-          callback(undefined, stream)
-          stream.emit("close", 0)
-        })
+      const execSpy = makeStagedExec(executedCommands, {
+        finalizeHash: MOCK_LOCAL_UPLOAD_SHA256,
+        remotePath,
+        size: 11,
+        tempPath,
+      })
 
       const client = makeClientWithExecSpy(execSpy)
       const ssh = makeConnectedSsh(client)
 
       await ssh.uploadFile("/local/file.txt", remotePath)
 
-      expect(executedCommands).toContain(`chmod '0600' '${tempPath}'`)
+      expect(executedCommands.some((cmd) => cmd.includes(`chmod '0600' '${tempPath}'`))).toBe(true)
     })
 
     it("cleans up the temporary remote file when mv fails", async () => {
-      // This test documents a bug: uploadFile has no try/finally, so the
-      // temporary remote file created by mktemp is not removed when mv fails.
-      // After the fix, exec must be called with `rm -f` on the temp path.
       const { sftpUpload } = await import("../src/sftp.js")
       vi.mocked(sftpUpload).mockResolvedValue()
 
       const tempPath = "/remote/paratix-upload.ABCDEF"
+      const remotePath = "/remote/file.txt"
       const executedCommands: string[] = []
-
-      const execSpy = vi
-        .fn()
-        // R-0000141: realpath dirname-symlink probe before mktemp
-        .mockImplementationOnce((_command: string, callback: ExecCallback) => {
-          const stream = makeStream()
-          executedCommands.push(_command)
-          callback(undefined, stream)
-          stream.emit("data", Buffer.from("/remote"))
-          stream.emit("close", 0)
-        })
-        // First call: mktemp (via output()) — returns temp path
-        .mockImplementationOnce((_command: string, callback: ExecCallback) => {
-          const stream = makeStream()
-          executedCommands.push(_command)
-          callback(undefined, stream)
-          stream.emit("data", Buffer.from(tempPath))
-          stream.emit("close", 0)
-        })
-        // Second call: mv — fails with non-zero exit code
-        .mockImplementationOnce((_command: string, callback: ExecCallback) => {
-          const stream = makeStream()
-          executedCommands.push(_command)
-          callback(undefined, stream)
-          stream.emit("close", 1)
-        })
-        // Third call: rm -f — the cleanup that should happen in a fixed implementation
-        .mockImplementationOnce((_command: string, callback: ExecCallback) => {
-          const stream = makeStream()
-          executedCommands.push(_command)
-          callback(undefined, stream)
-          stream.emit("close", 0)
-        })
+      // Finalize fails (e.g. mv rejected) with a generic non-zero exit.
+      const execSpy = makeFinalizeFailExec(executedCommands, tempPath)
 
       const client = makeClientWithExecSpy(execSpy)
       const ssh = makeConnectedSsh(client)
 
-      await expect(ssh.uploadFile("/local/file.txt", "/remote/file.txt")).rejects.toThrow(
-        "Command failed"
-      )
+      await expect(ssh.uploadFile("/local/file.txt", remotePath)).rejects.toThrow("Command failed")
 
-      // After the fix: rm -f must be called on the temporary path
       const cleanupCommand = executedCommands.find((cmd) => cmd.includes("rm -f"))
       expect(cleanupCommand).toBeDefined()
       expect(cleanupCommand).toContain(tempPath)
@@ -3082,87 +2888,32 @@ describe("SshConnectionImpl", () => {
       vi.mocked(stat).mockResolvedValueOnce({ size: 42 } as never)
 
       const tempPath = "/remote/paratix-upload.ABCDEF"
+      const remotePath = "/remote/file.txt"
       const executedCommands: string[] = []
-
-      const execSpy = vi
-        .fn()
-        // R-0000141: realpath dirname-symlink probe before mktemp
-        .mockImplementationOnce((_command: string, callback: ExecCallback) => {
-          const stream = makeStream()
-          executedCommands.push(_command)
-          callback(undefined, stream)
-          stream.emit("data", Buffer.from("/remote"))
-          stream.emit("close", 0)
-        })
-        // mktemp
-        .mockImplementationOnce((_command: string, callback: ExecCallback) => {
-          const stream = makeStream()
-          executedCommands.push(_command)
-          callback(undefined, stream)
-          stream.emit("data", Buffer.from(tempPath))
-          stream.emit("close", 0)
-        })
-        // chmod
-        .mockImplementationOnce((_command: string, callback: ExecCallback) => {
-          const stream = makeStream()
-          executedCommands.push(_command)
-          callback(undefined, stream)
-          stream.emit("close", 0)
-        })
-        // R-0000150: stat -c '%s' on staged temp path BEFORE finalize → 0 bytes
-        .mockImplementationOnce((_command: string, callback: ExecCallback) => {
-          const stream = makeStream()
-          executedCommands.push(_command)
-          callback(undefined, stream)
-          stream.emit("data", Buffer.from("0"))
-          stream.emit("close", 0)
-        })
-        // df -Pk (disk space check triggered by 0-byte detection)
-        .mockImplementationOnce((_command: string, callback: ExecCallback) => {
-          const stream = makeStream()
-          executedCommands.push(_command)
-          callback(undefined, stream)
-          stream.emit(
-            "data",
-            Buffer.from(
-              "Filesystem     1024-blocks    Used Available Capacity Mounted on\n/dev/sda1        10000000  5000000   5000000      50% /"
-            )
-          )
-          stream.emit("close", 0)
-        })
-        // rm -f cleanup in finally (mv is never reached because the size
-        // mismatch throws before finalize)
-        .mockImplementationOnce((_command: string, callback: ExecCallback) => {
-          const stream = makeStream()
-          executedCommands.push(_command)
-          callback(undefined, stream)
-          stream.emit("close", 0)
-        })
+      const execSpy = makeStagedExec(executedCommands, {
+        dfOutput:
+          "Filesystem     1024-blocks    Used Available Capacity Mounted on\n/dev/sda1        10000000  5000000   5000000      50% /",
+        // staged size reads back as 0 while the local source is 42 bytes
+        remotePath,
+        size: 0,
+        tempPath,
+      })
 
       const client = makeClientWithExecSpy(execSpy)
       const ssh = makeConnectedSsh(client)
 
-      await expect(ssh.uploadFile("/local/file.txt", "/remote/file.txt")).rejects.toThrow(
+      await expect(ssh.uploadFile("/local/file.txt", remotePath)).rejects.toThrow(
         "remote file size mismatch after upload"
       )
 
-      expect(executedCommands[0]).toContain("realpath -m --")
-      // R-0000150: stat now runs on the staged temp path (before mv).
-      expect(executedCommands[3]).toContain("stat -c")
-      expect(executedCommands[3]).toContain(tempPath)
-      expect(executedCommands[4]).toContain("df -Pk")
-      expect(executedCommands[5]).toContain("rm -f")
-      // mv must not have run — assertRemoteFileSize threw before finalize.
+      // R-0000150: the size check runs on the staged temp path, before finalize.
+      expect(executedCommands.some((cmd) => commandStatsPath(cmd, tempPath))).toBe(true)
+      expect(executedCommands.some((cmd) => cmd.includes("df -Pk"))).toBe(true)
       expect(executedCommands.some((cmd) => cmd.includes("mv -T"))).toBe(false)
+      expect(executedCommands.some((cmd) => cmd.includes("rm -f"))).toBe(true)
     })
 
     it("verifies the staged temp size BEFORE the privileged mv to avoid TOCTOU (R-0000150 regression)", async () => {
-      // Regression: assertRemoteFileSize ran AFTER the privileged finalize
-      // (mv -T). An attacker with write access to the destination directory
-      // could swap the final file between the move and the stat, so the
-      // verification reported a size for an attacker-controlled inode rather
-      // than the file Paratix actually wrote. The fix verifies the size on
-      // the staged temp path before the move.
       const { sftpUpload } = await import("../src/sftp.js")
       vi.mocked(sftpUpload).mockResolvedValue()
       vi.mocked(stat).mockResolvedValueOnce({ size: 11 } as never)
@@ -3170,87 +2921,28 @@ describe("SshConnectionImpl", () => {
       const tempPath = "/remote/paratix-upload.STAGED"
       const remotePath = "/remote/file.txt"
       const executedCommands: string[] = []
-
-      const execSpy = vi
-        .fn()
-        // realpath dirname-symlink probe
-        .mockImplementationOnce((_command: string, callback: ExecCallback) => {
-          const stream = makeStream()
-          executedCommands.push(_command)
-          callback(undefined, stream)
-          stream.emit("data", Buffer.from("/remote"))
-          stream.emit("close", 0)
-        })
-        // mktemp
-        .mockImplementationOnce((_command: string, callback: ExecCallback) => {
-          const stream = makeStream()
-          executedCommands.push(_command)
-          callback(undefined, stream)
-          stream.emit("data", Buffer.from(tempPath))
-          stream.emit("close", 0)
-        })
-        // chmod
-        .mockImplementationOnce((_command: string, callback: ExecCallback) => {
-          const stream = makeStream()
-          executedCommands.push(_command)
-          callback(undefined, stream)
-          stream.emit("close", 0)
-        })
-        // R-0000150: stat against the temp path
-        .mockImplementationOnce((_command: string, callback: ExecCallback) => {
-          const stream = makeStream()
-          executedCommands.push(_command)
-          callback(undefined, stream)
-          stream.emit("data", Buffer.from("11"))
-          stream.emit("close", 0)
-        })
-        // mv (finalize)
-        .mockImplementationOnce((_command: string, callback: ExecCallback) => {
-          const stream = makeStream()
-          executedCommands.push(_command)
-          callback(undefined, stream)
-          stream.emit("close", 0)
-        })
-        // R-0000599: post-finalize SHA-256 verification of remote file
-        .mockImplementationOnce((_command: string, callback: ExecCallback) => {
-          const stream = makeStream()
-          executedCommands.push(_command)
-          callback(undefined, stream)
-          stream.emit("data", Buffer.from(`${MOCK_LOCAL_UPLOAD_SHA256}  ${remotePath}\n`))
-          stream.emit("close", 0)
-        })
-        // rm -f cleanup
-        .mockImplementationOnce((_command: string, callback: ExecCallback) => {
-          const stream = makeStream()
-          executedCommands.push(_command)
-          callback(undefined, stream)
-          stream.emit("close", 0)
-        })
+      const execSpy = makeStagedExec(executedCommands, {
+        finalizeHash: MOCK_LOCAL_UPLOAD_SHA256,
+        remotePath,
+        size: 11,
+        tempPath,
+      })
 
       const client = makeClientWithExecSpy(execSpy)
       const ssh = makeConnectedSsh(client)
 
       await ssh.uploadFile("/local/file.txt", remotePath)
 
-      // The stat -c '%s' command must reference the staged temp path,
-      // never the final destination.
-      const statIndex = executedCommands.findIndex((cmd) => cmd.includes("stat -c"))
+      const statIndex = executedCommands.findIndex((cmd) => cmd.includes("stat -c '%s'"))
       expect(statIndex).toBeGreaterThan(-1)
       expect(executedCommands[statIndex]).toContain(tempPath)
       expect(executedCommands[statIndex]).not.toContain(remotePath)
 
-      // The stat must run BEFORE any mv -T command.
       const mvIndex = executedCommands.findIndex((cmd) => cmd.includes("mv -T"))
       expect(mvIndex).toBeGreaterThan(statIndex)
     })
 
     it("runs stat -c '%s' on the user-owned temp path without sudo wrapping for non-root users (R-0000266 regression)", async () => {
-      // Regression: assertRemoteFileSize used `output()`, which routes through
-      // ensureSudoReady → sudo bash -c. After the cached sudo credentials
-      // expired between upload and the post-upload size check, the TOCTOU
-      // verification surfaced a sudo-auth error instead of a real size
-      // mismatch. The fix routes the stat call for non-root users through the
-      // raw exec path (outputWithoutSudo), mirroring setRemoteTempMode.
       const { sftpUpload } = await import("../src/sftp.js")
       vi.mocked(sftpUpload).mockResolvedValue()
       vi.mocked(stat).mockResolvedValueOnce({ size: 11 } as never)
@@ -3258,84 +2950,29 @@ describe("SshConnectionImpl", () => {
       const tempPath = "/tmp/paratix-upload.ABCDEF"
       const remotePath = "/etc/my-app/config.yml"
       const executedCommands: string[] = []
-
-      const execSpy = vi
-        .fn()
-        // [0] mktemp
-        .mockImplementationOnce((_command: string, callback: ExecCallback) => {
-          const stream = makeStream()
-          executedCommands.push(_command)
-          callback(undefined, stream)
-          stream.emit("data", Buffer.from(tempPath))
-          stream.emit("close", 0)
-        })
-        // [1] chmod (non-root path uses raw exec without sudo)
-        .mockImplementationOnce((_command: string, callback: ExecCallback) => {
-          const stream = makeStream()
-          executedCommands.push(_command)
-          callback(undefined, stream)
-          stream.emit("close", 0)
-        })
-        // [2] stat -c '%s' on staged temp path — must run RAW, no sudo
-        .mockImplementationOnce((_command: string, callback: ExecCallback) => {
-          const stream = makeStream()
-          executedCommands.push(_command)
-          callback(undefined, stream)
-          stream.emit("data", Buffer.from("11"))
-          stream.emit("close", 0)
-        })
-        // [3] realpath dirname-symlink guard before privileged final temp
-        .mockImplementationOnce((_command: string, callback: ExecCallback) => {
-          const stream = makeStream()
-          executedCommands.push(_command)
-          callback(undefined, stream)
-          stream.emit("data", Buffer.from("/etc/my-app"))
-          stream.emit("close", 0)
-        })
-        // [4] mv (privileged finalize)
-        .mockImplementationOnce((_command: string, callback: ExecCallback) => {
-          const stream = makeStream()
-          executedCommands.push(_command)
-          callback(undefined, stream)
-          stream.emit("close", 0)
-        })
-        // [5] R-0000599: post-finalize SHA-256 verification of remote file
-        .mockImplementationOnce((_command: string, callback: ExecCallback) => {
-          const stream = makeStream()
-          executedCommands.push(_command)
-          callback(undefined, stream)
-          stream.emit("data", Buffer.from(`${MOCK_LOCAL_UPLOAD_SHA256}  ${remotePath}\n`))
-          stream.emit("close", 0)
-        })
-        // [6] rm -f temp
-        .mockImplementationOnce((_command: string, callback: ExecCallback) => {
-          const stream = makeStream()
-          executedCommands.push(_command)
-          callback(undefined, stream)
-          stream.emit("close", 0)
-        })
+      const execSpy = makeStagedExec(executedCommands, {
+        finalizeHash: MOCK_LOCAL_UPLOAD_SHA256,
+        remotePath,
+        size: 11,
+        tempPath,
+      })
 
       const client = makeClientWithExecSpy(execSpy)
       const ssh = makeConnectedSsh(client, { user: "deploy" })
-      // Allow the privileged finalize step to run as `sudo -n bash -c …` without
-      // tripping the probe path; the focus of this test is the stat call,
-      // which must remain raw regardless of sudo state.
       const internals = ssh as unknown as Record<string, unknown>
       internals.cachedSudoPassword = null
       internals.sudoReady = true
 
       await ssh.uploadFile("/local/file.txt", remotePath)
 
-      const statIndex = executedCommands.findIndex((cmd) => cmd.includes("stat -c"))
+      const statIndex = executedCommands.findIndex((cmd) => cmd.includes("stat -c '%s'"))
       expect(statIndex).toBeGreaterThan(-1)
       // Must reference the user-owned staged temp path.
       expect(executedCommands[statIndex]).toContain(tempPath)
       // Must NOT be wrapped in sudo (raw exec via outputWithoutSudo).
-      // A sudo-wrapped form would prefix `sudo -n bash -c` or set `SUDO_PROMPT`.
       expect(executedCommands[statIndex]).not.toMatch(/^sudo /v)
       expect(executedCommands[statIndex]).not.toMatch(/^SUDO_PROMPT=/v)
-      // The privileged finalize (mv) step must still be wrapped in sudo, to
-      // prove the test exercises the non-root code path.
+      // The privileged finalize (mv) step must still be wrapped in sudo.
       const mvIndex = executedCommands.findIndex((cmd) => cmd.includes("mv -T"))
       expect(mvIndex).toBeGreaterThan(-1)
       expect(executedCommands[mvIndex]).toMatch(/^sudo -n bash -c /v)
@@ -3354,9 +2991,11 @@ describe("SshConnectionImpl", () => {
       const tempPath = "/tmp/paratix-write.ABCDEF"
       const remotePath = "/etc/systemd/system/my-app.service"
       const executedCommands: string[] = []
-
-      const execSpy = makeWriteFileExecSpy(executedCommands, tempPath, {
-        finalizeRealpathDirectory: "/etc/systemd/system",
+      const execSpy = makeStagedExec(executedCommands, {
+        finalizeHash: HELLO_WORLD_SHA256_HEX,
+        remotePath,
+        size: 11,
+        tempPath,
       })
 
       const client = makeClientWithExecSpy(execSpy)
@@ -3366,34 +3005,26 @@ describe("SshConnectionImpl", () => {
 
       await ssh.writeFile(remotePath, "hello world", { mode: "0600" })
 
+      // #82: prep, stage and finalize — three round-trips, no trailing rm.
+      expect(executedCommands).toHaveLength(3)
       expect(executedCommands[0]).toBe("mktemp -p /tmp -- 'paratix-write.XXXXXX'")
-      expect(executedCommands[1]).toBe(`chmod '0600' '${tempPath}'`)
-      expect(executedCommands[2]).toContain("stat -c")
-      expect(executedCommands[2]).toContain(tempPath)
-      expect(executedCommands[3]).toContain("realpath -m --")
-      expect(executedCommands[3]).toContain("/etc/systemd/system")
-      expect(executedCommands[4]).toMatch(/^sudo -n bash -c /v)
-      expect(executedCommands[4]).toContain(tempPath)
-      expect(executedCommands[4]).toContain("target_temp=$(mktemp")
-      // R-0000565: directory and template are now passed via `mktemp -p <dir> -- <template>`.
-      expect(executedCommands[4]).toContain("'/etc/systemd/system'")
-      expect(executedCommands[4]).toContain("'.my-app.service.paratix.XXXXXX'")
-      expect(executedCommands[4]).toContain("[ ! -d")
-      expect(executedCommands[4]).toContain("[ ! -L")
-      expect(executedCommands[4]).toContain("mv -T -- ")
-      expect(executedCommands[4]).toContain(`'${tempPath}'`)
-      expect(executedCommands[4]).toContain('"$target_temp"')
-      expect(executedCommands[4]).toContain("chmod ")
-      expect(executedCommands[4]).toContain("'0600'")
-      expect(executedCommands[4]).toContain('chown "$target_owner" "$target_temp"')
-      expect(executedCommands[4]).toContain(`'${remotePath}'`)
-      // R-0000522: the post-finalize verification hashes the remote file
-      // via sha256sum instead of comparing sizes — closes the TOCTOU
-      // window where an attacker could swap the inode for a same-length
-      // file past the verify call.
-      expect(executedCommands[5]).toContain("sha256sum --")
-      expect(executedCommands[5]).toContain(remotePath)
-      expect(executedCommands[6]).toBe(`rm -f -- '${tempPath}'`)
+      expect(executedCommands[1]).toBe(`chmod '0600' '${tempPath}' && stat -c '%s' '${tempPath}'`)
+      const finalize = executedCommands[2]
+      expect(finalize).toMatch(/^sudo -n bash -c /v)
+      expect(finalize).toContain("realpath -m --")
+      expect(finalize).toContain("target_temp=$(mktemp")
+      expect(finalize).toContain("'/etc/systemd/system'")
+      expect(finalize).toContain("'.my-app.service.paratix.XXXXXX'")
+      expect(finalize).toContain("[ ! -d")
+      expect(finalize).toContain("[ ! -L")
+      expect(finalize).toContain("mv -T -- ")
+      expect(finalize).toContain(`'${tempPath}'`)
+      expect(finalize).toContain('"$target_temp"')
+      expect(finalize).toContain("chmod ")
+      expect(finalize).toContain("'0600'")
+      expect(finalize).toContain('chown "$target_owner" "$target_temp"')
+      expect(finalize).toContain(`'${remotePath}'`)
+      expect(finalize).toContain("sha256sum --")
       expect(vi.mocked(sftpUploadContent)).toHaveBeenCalledOnce()
     })
 
@@ -3404,9 +3035,11 @@ describe("SshConnectionImpl", () => {
       const tempPath = "/tmp/paratix-write.SYMLNK"
       const remotePath = "/etc/systemd/system/my-app.service"
       const executedCommands: string[] = []
-      const execSpy = makeWriteFileExecSpy(executedCommands, tempPath, {
-        finalizeRealpathDirectory: "/var/tmp/attacker/system",
-      })
+      const execSpy = makeFinalizeSymlinkExec(
+        executedCommands,
+        tempPath,
+        "/var/tmp/attacker/system"
+      )
 
       const client = makeClientWithExecSpy(execSpy)
       const ssh = makeConnectedSsh(client, { user: "deploy" })
@@ -3417,8 +3050,9 @@ describe("SshConnectionImpl", () => {
         /at least one path component is a symbolic link/v
       )
 
-      expect(executedCommands[3]).toContain("realpath -m --")
-      expect(executedCommands.some((cmd) => cmd.includes("target_temp=$(mktemp"))).toBe(false)
+      const finalize = executedCommands.find((cmd) => cmd.includes("sha256sum"))
+      expect(finalize).toContain("realpath -m --")
+      expect(finalize!.indexOf("realpath")).toBeLessThan(finalize!.indexOf("target_temp=$(mktemp"))
       expect(executedCommands).toContain(`rm -f -- '${tempPath}'`)
       expect(vi.mocked(sftpUploadContent)).toHaveBeenCalledOnce()
     })
@@ -3428,23 +3062,26 @@ describe("SshConnectionImpl", () => {
       vi.mocked(sftpUploadContent).mockResolvedValue()
 
       const tempPath = "/remote/paratix-write.ABCDEF"
+      const remotePath = "/remote/plain.txt"
       const executedCommands: string[] = []
-
-      const execSpy = makeWriteFileExecSpy(executedCommands, tempPath, {
-        realpathDirectory: "/remote",
+      const execSpy = makeStagedExec(executedCommands, {
+        finalizeHash: HELLO_WORLD_SHA256_HEX,
+        remotePath,
+        size: 11,
+        tempPath,
       })
 
       const client = makeClientWithExecSpy(execSpy)
       const ssh = makeConnectedSsh(client)
 
-      await ssh.writeFile("/remote/plain.txt", "hello world", { mode: "0600" })
+      await ssh.writeFile(remotePath, "hello world", { mode: "0600" })
 
-      expect(executedCommands).toContain(`chmod '0600' '${tempPath}'`)
-      const chmodIndex = executedCommands.indexOf(`chmod '0600' '${tempPath}'`)
-      const mvIndex = executedCommands.indexOf(
-        `[ ! -d '/remote/plain.txt' ] && [ ! -L '/remote/plain.txt' ] && mv -T -- '${tempPath}' '/remote/plain.txt'`
+      const chmodIndex = executedCommands.findIndex((cmd) =>
+        cmd.includes(`chmod '0600' '${tempPath}'`)
       )
+      const mvIndex = executedCommands.findIndex((cmd) => cmd.includes("mv -T"))
       expect(chmodIndex).toBeGreaterThan(-1)
+      expect(mvIndex).toBeGreaterThan(-1)
       expect(chmodIndex).toBeLessThan(mvIndex)
     })
 
@@ -3453,28 +3090,25 @@ describe("SshConnectionImpl", () => {
       vi.mocked(sftpUploadContent).mockResolvedValue()
 
       const tempPath = "/remote/paratix-write.ABCDEF"
+      const remotePath = "/remote/plain.txt"
       const executedCommands: string[] = []
-
-      const execSpy = makeWriteFileExecSpy(executedCommands, tempPath, {
-        realpathDirectory: "/remote",
+      const execSpy = makeStagedExec(executedCommands, {
+        finalizeHash: HELLO_WORLD_SHA256_HEX,
+        remotePath,
+        size: 11,
+        tempPath,
       })
 
       const client = makeClientWithExecSpy(execSpy)
       const ssh = makeConnectedSsh(client)
 
-      await ssh.writeFile("/remote/plain.txt", "hello world", { mode: "0600" })
+      await ssh.writeFile(remotePath, "hello world", { mode: "0600" })
 
-      // SFTP content upload must have been called — atomic path
       expect(vi.mocked(sftpUploadContent)).toHaveBeenCalledOnce()
-
-      // printf must NOT have been used as the content-write path (i.e.
-      // `printf '%s' '<base64-or-payload>'`).
       expect(executedCommands.some((cmd) => isContentTransportPrintf(cmd))).toBe(false)
-
-      // mktemp and mv confirm atomic write path
       expect(executedCommands.some((cmd) => cmd.includes("mktemp"))).toBe(true)
-      expect(executedCommands.some((cmd) => cmd === `chmod '0600' '${tempPath}'`)).toBe(true)
-      expect(executedCommands.some((cmd) => cmd.includes("mv"))).toBe(true)
+      expect(executedCommands.some((cmd) => cmd.includes(`chmod '0600' '${tempPath}'`))).toBe(true)
+      expect(executedCommands.some((cmd) => cmd.includes("mv -T"))).toBe(true)
     })
 
     it("runs chmod on temp file before mv when mode option is provided", async () => {
@@ -3482,25 +3116,26 @@ describe("SshConnectionImpl", () => {
       vi.mocked(sftpUploadContent).mockResolvedValue()
 
       const tempPath = "/remote/paratix-write.ABCDEF"
+      const remotePath = "/remote/path"
       const executedCommands: string[] = []
-
-      const execSpy = makeWriteFileExecSpy(executedCommands, tempPath, {
-        realpathDirectory: "/remote",
+      const execSpy = makeStagedExec(executedCommands, {
+        finalizeHash: HELLO_WORLD_SHA256_HEX,
+        remotePath,
+        size: 11,
+        tempPath,
       })
 
       const client = makeClientWithExecSpy(execSpy)
       const ssh = makeConnectedSsh(client)
 
-      await ssh.writeFile("/remote/path", "hello world", { mode: "0755" })
+      await ssh.writeFile(remotePath, "hello world", { mode: "0755" })
 
       expect(vi.mocked(sftpUploadContent)).toHaveBeenCalledOnce()
-
       const chmodCommand = executedCommands.find((cmd) => cmd.includes("chmod"))
       expect(chmodCommand).toBeDefined()
       expect(chmodCommand).toContain("0755")
       expect(chmodCommand).toContain(tempPath)
-      // chmod must come before mv
-      const mvIndex = executedCommands.findIndex((cmd) => /(?:^| )mv /v.test(cmd))
+      const mvIndex = executedCommands.findIndex((cmd) => cmd.includes("mv -T"))
       const chmodIndex = executedCommands.findIndex((cmd) => cmd.includes("chmod"))
       expect(chmodIndex).toBeLessThan(mvIndex)
     })
@@ -3514,40 +3149,15 @@ describe("SshConnectionImpl", () => {
       const remotePath = "/etc/apt/sources.list.d/docker.list"
       const destinationDirectory = "/etc/apt/sources.list.d"
       const executedCommands: string[] = []
-
-      // R-0000522: positions 5 and 13 now respond to `sha256sum -- '<path>'`
-      // instead of `stat -c '%s'`. Slot 5 echoes the canonical empty-file
-      // SHA-256 so verifyRemoteWriteFile reports "empty" and the shell
-      // fallback runs. Slot 13 echoes the hash of "hello world" so the
-      // post-fallback verification settles on "matches" and writeFile
-      // resolves.
-      const emptySha256 = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
-      const helloWorldSha256 = HELLO_WORLD_SHA256_HEX
-      const commandStdout: Array<(command: string) => string> = [
-        () => initialTempPath,
-        () => "",
-        () => "11",
-        () => destinationDirectory,
-        () => "",
-        (command) => `${emptySha256}  ${extractSha256SumPath(command)}\n`,
-        () => destinationDirectory,
-        () => fallbackTempPath,
-        () => "",
-        () => "",
-        () => destinationDirectory,
-        () => "",
-        () => "",
-        (command) => `${helloWorldSha256}  ${extractSha256SumPath(command)}\n`,
-        () => "",
-      ]
-      let commandIndex = 0
-      const execSpy = vi.fn().mockImplementation((command: string, callback: ExecCallback) => {
-        const stream = makeStream()
-        executedCommands.push(command)
-        callback(undefined, stream)
-        stream.emit("data", Buffer.from(commandStdout[commandIndex](command)))
-        commandIndex += 1
-        stream.emit("close", 0)
+      // Finalize verdict is "empty" → shell fallback; the post-fallback
+      // re-verification settles on "matches".
+      const execSpy = makeStagedExec(executedCommands, {
+        fallbackTempPath,
+        finalizeHash: EMPTY_FILE_SHA256_HEX,
+        remotePath,
+        size: 11,
+        tempPath: initialTempPath,
+        verifyHash: HELLO_WORLD_SHA256_HEX,
       })
 
       const client = makeClientWithExecSpy(execSpy)
@@ -3559,46 +3169,33 @@ describe("SshConnectionImpl", () => {
         ssh.writeFile(remotePath, "hello world", { mode: "0644" })
       ).resolves.toBeUndefined()
 
-      // R-0000141: a realpath probe runs before the privileged mktemp
-      expect(executedCommands[3]).toContain("realpath -m --")
-      expect(executedCommands[3]).toContain(destinationDirectory)
-      expect(executedCommands[6]).toContain("realpath -m --")
-      expect(executedCommands[6]).toContain(destinationDirectory)
-      expect(executedCommands[7]).toMatch(/^sudo -n bash -c /v)
-      // R-0000565: the privileged mktemp is now `mktemp -p <dir> -- <template>`,
-      // so directory and template are separate segments instead of a joined
-      // path. Assert both are present in the sudo-bash command.
-      expect(executedCommands[7]).toContain("'/etc/apt/sources.list.d'")
-      expect(executedCommands[7]).toContain("'paratix-write.XXXXXX'")
-      expect(executedCommands[8]).toContain(fallbackTempPath)
-      expect(executedCommands[8]).not.toContain(initialTempPath)
-      expect(executedCommands[10]).toContain("realpath -m --")
-      expect(executedCommands[10]).toContain(destinationDirectory)
-      expect(executedCommands[14]).toBe(`rm -f -- '${initialTempPath}'`)
+      // The shell-fallback mktemp targets the destination directory, not /tmp.
+      const fallbackMktemp = executedCommands.find((cmd) =>
+        isFallbackMktempCommand(cmd, destinationDirectory)
+      )
+      expect(fallbackMktemp).toBeDefined()
+      expect(executedCommands.some((cmd) => cmd.includes("base64 -d"))).toBe(true)
+      // The (empty) finalize already consumed the initial staged temp via `mv`,
+      // so no standalone cleanup ever removes it. `cleanupRemoteTempFile` runs
+      // raw (non-sudo) for the connecting user, so the literal command would be
+      // unescaped — assert it never appears.
+      expect(executedCommands).not.toContain(`rm -f -- '${initialTempPath}'`)
+      // The privileged fallback temp IS cleaned up via a standalone `rm -f`
+      // (sudo-wrapped, hence quote-escaped, and distinct from the finalize
+      // script that also references the path alongside `mv`).
+      expect(executedCommands.some((cmd) => commandRemovesPath(cmd, fallbackTempPath))).toBe(true)
     })
 
     it("rejects writeFile when a destination dirname component is a symlink (R-0000141 regression)", async () => {
-      // Regression: validateMktempPath only checked the textual prefix of
-      // the mktemp output, so when a destination component (e.g.
-      // `/etc/sudoers.d` replaced by a symlink) pointed at attacker
-      // territory, mktemp would create the file in the attacker's directory
-      // and the subsequent `mv -T` would overwrite paths the operator did
-      // not intend. The fix runs `realpath -m --` against the dirname and
-      // refuses to mktemp when the resolved path differs from the literal
-      // one.
       const { sftpUploadContent } = await import("../src/sftp.js")
       vi.mocked(sftpUploadContent).mockResolvedValue()
 
       const remotePath = "/etc/sudoers.d/paratix.conf"
-      const realpathResolved = "/var/tmp/attacker/sudoers.d"
 
-      const execSpy = vi.fn().mockImplementationOnce((_command: string, callback: ExecCallback) => {
-        const stream = makeStream()
-        callback(undefined, stream)
-        // realpath returns the (different) resolved path → must reject
-        stream.emit("data", Buffer.from(realpathResolved))
-        stream.emit("close", 0)
-      })
+      // #82: the R-0000141 dirname-symlink guard is folded into the combined
+      // prep script; a symlinked component aborts the prep round-trip with the
+      // marker + exit 20 before any staged temp is created.
+      const execSpy = makePrepSymlinkExec("/var/tmp/attacker/sudoers.d")
 
       const client = makeClientWithExecSpy(execSpy)
       const ssh = makeConnectedSsh(client)
@@ -3606,6 +3203,7 @@ describe("SshConnectionImpl", () => {
       await expect(ssh.writeFile(remotePath, "x", { mode: "0440" })).rejects.toThrow(
         /at least one path component is a symbolic link/v
       )
+      expect(vi.mocked(sftpUploadContent)).not.toHaveBeenCalled()
     })
   })
 
