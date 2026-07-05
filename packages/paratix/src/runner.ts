@@ -60,6 +60,39 @@ const ASCII_ESC = 0x1b
 const ANSI_SHOW_CURSOR = `${String.fromCharCode(ASCII_ESC)}[?25h`
 
 /**
+ * Live SSH connections that must be torn down synchronously if the process is
+ * about to exit through a path that never reaches
+ * {@link teardownPlaybookResources} — most notably the last-resort
+ * `unhandledRejection`/`uncaughtException` handlers installed in `cli.ts`.
+ *
+ * The second-SIGINT teardown path force-destroys the connection through its
+ * own closure reference; this registry is the shared mechanism that lets the
+ * process-level handlers reach the same connection(s) without duplicating the
+ * shutdown state. A `Set` (rather than a single slot) keeps parallel
+ * `runPlaybook` invocations that share the process independent: each registers
+ * its own connection and clears it again on teardown.
+ */
+const activeSshConnections = new Set<SshConnectionImpl>()
+
+/**
+ * Register a freshly created SSH connection so the last-resort cleanup path can
+ * force-destroy it. Called from the shutdown-state `setSsh` choke point.
+ * @param connection - The live SSH connection to track for last-resort teardown.
+ */
+function registerActiveSsh(connection: SshConnectionImpl): void {
+  activeSshConnections.add(connection)
+}
+
+/**
+ * Drop a connection from the active registry once its run has torn it down the
+ * normal way, so the last-resort path never touches an already-closed socket.
+ * @param connection - The SSH connection to stop tracking after normal teardown.
+ */
+function unregisterActiveSsh(connection: SshConnectionImpl): void {
+  activeSshConnections.delete(connection)
+}
+
+/**
  * Best-effort terminal/secret cleanup performed before `process.exit` on a
  * second SIGINT/SIGTERM. Each step is wrapped in a try/catch so a failure in
  * one step never prevents the others from running.
@@ -87,6 +120,32 @@ function performShutdownBestEffortCleanup(): void {
   } catch {
     // ignore: secret sink should never throw, but guard defensively
   }
+}
+
+/**
+ * Last-resort cleanup for the process-level `unhandledRejection` /
+ * `uncaughtException` handlers in `cli.ts`. A promise rejection escaping an
+ * ssh2 event callback never reaches {@link teardownPlaybookResources} or the
+ * signal path, so without this hook the terminal can stay in raw mode / with a
+ * hidden cursor, registered secrets stay in the sink, and the underlying
+ * socket is never destroyed before `process.exit`.
+ *
+ * It reuses the exact same building blocks as the second-SIGINT teardown:
+ * {@link performShutdownBestEffortCleanup} restores the terminal and clears
+ * secrets, and every registered SSH connection is force-destroyed
+ * synchronously so no ssh2 callback survives the imminent exit. Each step is
+ * best-effort and the registry is drained so a second invocation is a no-op.
+ */
+export function performLastResortCleanup(): void {
+  performShutdownBestEffortCleanup()
+  for (const connection of activeSshConnections) {
+    try {
+      connection.forceDestroy()
+    } catch {
+      // ignore: force-destroy is best-effort on the way to process.exit
+    }
+  }
+  activeSshConnections.clear()
 }
 
 /**
@@ -147,6 +206,10 @@ function setupShutdownHandlers(): ShutdownState {
     promptAbortSignal: promptAbortController.signal,
     setSsh(connection: SshConnectionImpl) {
       ssh = connection
+      // Share the connection with the process-level last-resort handlers so a
+      // rejection that escapes the async pipeline can still force-destroy the
+      // socket synchronously (mirrors the second-SIGINT `forceDestroy` above).
+      registerActiveSsh(connection)
     },
     shutdownAbortSignal: shutdownAbortController.signal,
     shutdownSignal: () => receivedSignal,
@@ -1192,6 +1255,7 @@ function teardownPlaybookResources(parameters: {
   // installed by `withRunnerAbortSignal` in `runPlaybook`. The scope ends
   // automatically once the wrapped body returns, so no explicit clear is
   // needed here and a parallel run is no longer affected.
+  if (parameters.ssh != null) unregisterActiveSsh(parameters.ssh)
   parameters.ssh?.disconnect()
 }
 

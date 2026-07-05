@@ -15,7 +15,7 @@ import { runWithFirstRunFlag, runWithoutFirstRunFlag } from "./firstRunContext.j
 import { describeHostValidationFailure, validateHostLabel } from "./hostValidation.js"
 import { applyModuleFilter, collectModuleNames, parseFilterNames } from "./moduleFilter.js"
 import { printCliHeader } from "./output.js"
-import { type RunOptions, runPlaybook } from "./runner.js"
+import { performLastResortCleanup, type RunOptions, runPlaybook } from "./runner.js"
 import { maskRegisteredSecrets } from "./secretSink.js"
 import { collectSshConfigErrors } from "./serverDefinitionValidation.js"
 
@@ -956,8 +956,91 @@ export function collectEnvironment(
   return Object.assign(accumulator, previous, { [key]: value_ })
 }
 
+/**
+ * Guards {@link handleLastResortError} against re-entry. A rejection thrown
+ * while the handler itself runs cleanup (or a second unhandled rejection
+ * arriving in the same tick) must not restart the teardown or clobber the
+ * already-assigned exit code — this mirrors the idempotent second-signal guard
+ * in `runner.ts`.
+ */
+let lastResortHandled = false
+
+/**
+ * Default non-zero exit code used when a rejection or exception escapes the
+ * async pipeline and no more specific code has been assigned yet.
+ */
+const LAST_RESORT_EXIT_CODE = 1
+
+/**
+ * Last-resort handler for `unhandledRejection` / `uncaughtException`. A promise
+ * rejection escaping an ssh2 event callback never reaches the normal
+ * `runApplyCommand` catch block or the SIGINT/SIGTERM teardown, so without this
+ * the terminal can stay in raw mode with a hidden cursor, registered secrets
+ * stay in the sink, and the SSH socket is never destroyed. The handler runs the
+ * same best-effort cleanup as the signal path and assigns a non-zero exit code.
+ *
+ * The masked diagnostic is printed BEFORE {@link performLastResortCleanup}
+ * runs, because cleanup clears the secret sink and the registered secrets must
+ * still be present to redact the message and stack.
+ *
+ * @param error - The rejection reason or thrown value that escaped the pipeline.
+ */
+export function handleLastResortError(error: unknown): void {
+  if (lastResortHandled) return
+  lastResortHandled = true
+  // Print first (still redacted via the secret sink), then tear down.
+  printExceptionError(error, false)
+  performLastResortCleanup()
+  if (process.exitCode === undefined || process.exitCode === 0) {
+    process.exitCode = LAST_RESORT_EXIT_CODE
+  }
+}
+
+/**
+ * Resets the idempotency guard so tests can exercise
+ * {@link handleLastResortError} more than once. Production code never needs to
+ * clear the flag — the handler runs at most once per process lifetime.
+ */
+export function resetLastResortHandlerForTests(): void {
+  lastResortHandled = false
+}
+
+/**
+ * Forces the process to terminate on the next macrotask after
+ * {@link handleLastResortError} assigned the exit code. `unhandledRejection` /
+ * `uncaughtException` fire after the main pipeline has lost the ability to
+ * short-circuit the event loop; without an explicit exit, pending I/O (stdin
+ * left in raw mode, detached promises) can keep the process alive long enough
+ * to swallow the exit code. `setImmediate` runs after the handler returns so
+ * the assigned `exitCode` is preserved. (Mirrors `create-paratix`.)
+ */
+function forceExitAfterHandling(): void {
+  setImmediate(() => {
+    // eslint-disable-next-line node/no-process-exit
+    process.exit(process.exitCode ?? LAST_RESORT_EXIT_CODE)
+  })
+}
+
+/**
+ * Installs the process-level last-resort handlers. Called once before any SSH
+ * work starts so a rejection escaping the async pipeline is still funnelled
+ * through {@link handleLastResortError} instead of Node's default trace with no
+ * terminal / secret / socket cleanup.
+ */
+export function installLastResortErrorHandlers(): void {
+  process.on("unhandledRejection", (reason) => {
+    handleLastResortError(reason)
+    forceExitAfterHandling()
+  })
+  process.on("uncaughtException", (error) => {
+    handleLastResortError(error)
+    forceExitAfterHandling()
+  })
+}
+
 // Only parse when executed directly, not when imported (e.g. in tests)
 const entryScript = process.argv[1]
 if (isDirectCliExecution(import.meta.url, entryScript)) {
+  installLastResortErrorHandlers()
   await program.parseAsync()
 }
