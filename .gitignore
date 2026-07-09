@@ -15,3 +15,5 @@ init-test.sh
 .claude/scheduled_tasks.lock
 .sf-plugin/.*
 .sf-plugin/memory.json
+.firmo/*
+!.firmo/config.json

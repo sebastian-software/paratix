@@ -18,10 +18,12 @@ const EXEC_OPTS = { ignoreExitCode: true, silent: true } as const
 const UNIT_NAME_PATTERN = /^[\w@.\-]+$/v
 const COMPOSE_CONFIG_MODE = "0600"
 const COMPOSE_CONFIG_STAGING_PREFIX = ".compose.yml.paratix-staging"
+const COMPOSE_IMAGE_INSPECT_FORMAT = "{{.Id}}\\n{{range .RepoDigests}}{{.}}\\n{{end}}"
 const SYSTEMD_UNIT_MODE = "0644"
 const SYSTEMD_UNIT_STAGING_PREFIX = ".compose-systemd-unit.paratix-staging"
 const C0_CONTROL_MAX_CODE_POINT = 31
 const DELETE_CONTROL_CODE_POINT = 127
+const COMPOSE_CONFIG_JSON_MAX_BYTES = 1_048_576
 
 type ComposeSystemdMaskSnapshot = "masked" | "unmasked"
 
@@ -40,6 +42,7 @@ type ComposeSystemdTargetSnapshot = {
 }
 
 type ComposeRuntime = "docker" | "podman"
+type ComposeImageSnapshot = Map<string, null | string>
 
 function requireComposeSsh(
   ssh: null | SshConnection,
@@ -100,16 +103,6 @@ const COMPOSE_UP_ACTION_KEYWORDS_REGEX = /^(?:Creating|Recreating|Starting|Start
  */
 function composeUpReportedChange(composeOutput: string): boolean {
   return COMPOSE_UP_ACTION_KEYWORDS_REGEX.test(composeOutput)
-}
-
-// R-0000560: same anchoring for `compose pull`. The previous
-// `output.includes("Pulling") || output.includes("Downloaded")` matched
-// any substring in image names or container logs and produced false
-// "changed" results when no image was actually pulled.
-const COMPOSE_PULL_ACTION_REGEX = /^(?:Pulling|Downloaded)\s/mv
-
-function composePullReportedChange(composeOutput: string): boolean {
-  return COMPOSE_PULL_ACTION_REGEX.test(composeOutput)
 }
 
 function validateComposeUpServices(services: string[] | undefined): void {
@@ -201,6 +194,194 @@ function parseComposeProjectName(stdout: string, projectDirectory: string): null
   } catch {
     return null
   }
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value)
+}
+
+function readComposeServiceImage(service: unknown): null | string {
+  if (!isRecord(service)) return null
+  const { image } = service
+  return typeof image === "string" && image.trim() !== "" ? image : null
+}
+
+function collectComposeConfigImages(services: Record<string, unknown>): string[] {
+  const images = new Set<string>()
+  for (const service of Object.values(services)) {
+    const image = readComposeServiceImage(service)
+    if (image !== null) images.add(image)
+  }
+  return [...images].sort()
+}
+
+function parseComposeConfigImages(stdout: string): null | string[] {
+  if (Buffer.byteLength(stdout, "utf8") > COMPOSE_CONFIG_JSON_MAX_BYTES) return null
+
+  try {
+    const parsed: unknown = JSON.parse(stdout)
+    if (!isRecord(parsed)) return null
+
+    const { services } = parsed
+    if (!isRecord(services)) return null
+    return collectComposeConfigImages(services)
+  } catch {
+    return null
+  }
+}
+
+function buildComposeImageInspectCommand(runtime: ComposeRuntime, image: string): string {
+  return `${runtime} image inspect --format '${COMPOSE_IMAGE_INSPECT_FORMAT}' -- ${shellQuote(image)}`
+}
+
+function getComposeImageRepository(image: string): string {
+  const digestSeparatorIndex = image.indexOf("@")
+  if (digestSeparatorIndex !== -1) return image.slice(0, digestSeparatorIndex)
+
+  const lastSlashIndex = image.lastIndexOf("/")
+  const lastColonIndex = image.lastIndexOf(":")
+  return lastColonIndex > lastSlashIndex ? image.slice(0, lastColonIndex) : image
+}
+
+function readComposeImageIdentifierFromInspectOutput(image: string, output: string): null | string {
+  const lines = output.split("\n").filter((line) => line.length > 0)
+  if (lines.length === 0) return null
+
+  const [id, ...repoDigests] = lines
+  const repository = getComposeImageRepository(image)
+  for (const repoDigest of repoDigests) {
+    const separatorIndex = repoDigest.indexOf("@")
+    if (separatorIndex === -1) continue
+    const repo = repoDigest.slice(0, separatorIndex)
+    const digest = repoDigest.slice(separatorIndex + 1)
+    if (repo === repository && digest.length > 0) return digest
+  }
+  return id.length > 0 ? id : null
+}
+
+async function resolveComposeConfigImages(parameters: {
+  projectDirectory: string
+  runtime: ComposeRuntime
+  ssh: SshConnection
+}): Promise<ModuleResult | string[]> {
+  const result = await parameters.ssh.exec(
+    `${composeCommand(parameters.runtime, parameters.projectDirectory)} config --format json`,
+    EXEC_OPTS
+  )
+  if (result.code !== 0) {
+    return failedCommand(
+      `[compose.pull] failed to resolve images for ${parameters.projectDirectory}`,
+      result
+    )
+  }
+
+  const images = parseComposeConfigImages(result.stdout)
+  if (images === null) {
+    return failed(
+      `[compose.pull] failed to parse compose config images for ${parameters.projectDirectory}`
+    )
+  }
+  return images
+}
+
+async function inspectComposeImageBeforePull(parameters: {
+  image: string
+  runtime: ComposeRuntime
+  ssh: SshConnection
+}): Promise<null | string> {
+  const result = await parameters.ssh.exec(
+    buildComposeImageInspectCommand(parameters.runtime, parameters.image),
+    EXEC_OPTS
+  )
+  if (result.code !== 0) return null
+  return readComposeImageIdentifierFromInspectOutput(parameters.image, result.stdout)
+}
+
+async function inspectComposeImageAfterPull(parameters: {
+  image: string
+  projectDirectory: string
+  runtime: ComposeRuntime
+  ssh: SshConnection
+}): Promise<ModuleResult | string> {
+  const result = await parameters.ssh.exec(
+    buildComposeImageInspectCommand(parameters.runtime, parameters.image),
+    EXEC_OPTS
+  )
+  if (result.code !== 0) {
+    return failedCommand(
+      `[compose.pull] image inspect failed for ${parameters.image} in ${parameters.projectDirectory}`,
+      result
+    )
+  }
+
+  const imageIdentifier = readComposeImageIdentifierFromInspectOutput(
+    parameters.image,
+    result.stdout
+  )
+  if (imageIdentifier === null) {
+    return failed(
+      `[compose.pull] image inspect returned no digest or image ID for ${parameters.image} in ${parameters.projectDirectory}`
+    )
+  }
+  return imageIdentifier
+}
+
+async function snapshotComposeImagesBeforePull(parameters: {
+  images: string[]
+  runtime: ComposeRuntime
+  ssh: SshConnection
+}): Promise<ComposeImageSnapshot> {
+  return new Map(
+    await Promise.all(
+      parameters.images.map(
+        async (image) =>
+          [
+            image,
+            await inspectComposeImageBeforePull({
+              image,
+              runtime: parameters.runtime,
+              ssh: parameters.ssh,
+            }),
+          ] as const
+      )
+    )
+  )
+}
+
+async function snapshotComposeImagesAfterPull(parameters: {
+  images: string[]
+  projectDirectory: string
+  runtime: ComposeRuntime
+  ssh: SshConnection
+}): Promise<ComposeImageSnapshot | ModuleResult> {
+  const entries = await Promise.all(
+    parameters.images.map(async (image) => ({
+      image,
+      imageIdentifier: await inspectComposeImageAfterPull({
+        image,
+        projectDirectory: parameters.projectDirectory,
+        runtime: parameters.runtime,
+        ssh: parameters.ssh,
+      }),
+    }))
+  )
+
+  const snapshot: ComposeImageSnapshot = new Map()
+  for (const { image, imageIdentifier } of entries) {
+    if (typeof imageIdentifier !== "string") return imageIdentifier
+    snapshot.set(image, imageIdentifier)
+  }
+  return snapshot
+}
+
+function composeImageSnapshotChanged(parameters: {
+  after: ComposeImageSnapshot
+  before: ComposeImageSnapshot
+}): boolean {
+  for (const [image, afterIdentifier] of parameters.after) {
+    if (parameters.before.get(image) !== afterIdentifier) return true
+  }
+  return false
 }
 
 async function resolveComposeProjectName(parameters: {
@@ -1400,6 +1581,19 @@ export const compose = {
         })
         if (typeof runtime !== "string") return runtime
 
+        const images = await resolveComposeConfigImages({
+          projectDirectory,
+          runtime,
+          ssh: connection,
+        })
+        if (!Array.isArray(images)) return images
+
+        const beforePull = await snapshotComposeImagesBeforePull({
+          images,
+          runtime,
+          ssh: connection,
+        })
+
         const result = await connection.exec(
           `${composeCommand(runtime, projectDirectory)} pull 2>&1`,
           EXEC_OPTS
@@ -1407,7 +1601,19 @@ export const compose = {
         if (result.code !== 0)
           return failedCommand(`[compose.pull] failed for ${projectDirectory}`, result)
 
-        return { status: composePullReportedChange(result.stdout) ? "changed" : "ok" }
+        const afterPull = await snapshotComposeImagesAfterPull({
+          images,
+          projectDirectory,
+          runtime,
+          ssh: connection,
+        })
+        if (!(afterPull instanceof Map)) return afterPull
+
+        return {
+          status: composeImageSnapshotChanged({ after: afterPull, before: beforePull })
+            ? "changed"
+            : "ok",
+        }
       },
       // eslint-disable-next-line @typescript-eslint/require-await -- Interface requires async
       async check(): Promise<"needs-apply" | "ok"> {
