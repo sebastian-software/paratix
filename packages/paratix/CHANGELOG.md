@@ -1,5 +1,27 @@
 # Changelog
 
+## [0.13.0](https://github.com/sebastian-software/paratix/compare/paratix-v0.12.8...paratix-v0.13.0) (2026-07-09)
+
+
+### Features
+
+* **paratix:** add --filter flag to run selected recipes and skip the rest ([#98](https://github.com/sebastian-software/paratix/issues/98)) ([04cb293](https://github.com/sebastian-software/paratix/commit/04cb293c366083959e882dfb53257e3e5da394d7))
+
+
+### Bug Fixes
+
+* detect compose pull changes by image identifier ([#120](https://github.com/sebastian-software/paratix/issues/120)) ([429be69](https://github.com/sebastian-software/paratix/commit/429be69ad49f0552784ecd3c5a8e1565584b1f28))
+* **paratix:** add last-resort error handlers so the CLI cleans up terminal, secrets, and SSH on unexpected errors ([#103](https://github.com/sebastian-software/paratix/issues/103)) ([e61d7ac](https://github.com/sebastian-software/paratix/commit/e61d7acb1a0f24140d386f8503a19e10b53e0426))
+* **paratix:** correct JSDoc examples to use pkg.installed instead of non-existent apt.installed ([#100](https://github.com/sebastian-software/paratix/issues/100)) ([d331f15](https://github.com/sebastian-software/paratix/commit/d331f15139dcf2496b079406cb3cb4c2cd26486a))
+* **paratix:** give reboots a 300s reconnect window and stop the attempt cap from cutting it short ([#104](https://github.com/sebastian-software/paratix/issues/104)) ([473d416](https://github.com/sebastian-software/paratix/commit/473d4165c71af2948b45dcac24ec1b5cef0c8280))
+* **paratix:** stop shipping source maps in the npm package ([#102](https://github.com/sebastian-software/paratix/issues/102)) ([5812df4](https://github.com/sebastian-software/paratix/commit/5812df411a5dcfb63fc8e2a957c0f9bb95eeb3e1))
+* **paratix:** use df -Pk so disk-full diagnosis is correct under POSIXLY_CORRECT ([#105](https://github.com/sebastian-software/paratix/issues/105)) ([aabb4e3](https://github.com/sebastian-software/paratix/commit/aabb4e3220ed371366e52c34037b360f6476fe2f))
+
+
+### Performance Improvements
+
+* **paratix:** batch remote file-write round-trips from ~6 to ~3 ([#107](https://github.com/sebastian-software/paratix/issues/107)) ([9865ea5](https://github.com/sebastian-software/paratix/commit/9865ea5fb3c76347a54afce6d601f36a1bad1461))
+
 ## [0.12.8](https://github.com/sebastian-software/paratix/compare/paratix-v0.12.7...paratix-v0.12.8) (2026-07-03)
 
 
