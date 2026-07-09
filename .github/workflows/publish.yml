@@ -5,6 +5,15 @@ on:
     branches:
       - main
   workflow_dispatch:
+    inputs:
+      mode:
+        description: "Publish mode"
+        required: true
+        default: "release"
+        type: choice
+        options:
+          - release
+          - recover-create-paratix
 
 concurrency:
   group: "${{ github.workflow }}-${{ github.ref }}"
@@ -130,4 +139,4 @@ jobs:
       - if: github.event_name == 'push'
         run: node scripts/publishWorkspacePackages.mjs release
       - if: github.event_name == 'workflow_dispatch'
-        run: node scripts/publishWorkspacePackages.mjs recover-create-paratix
+        run: node scripts/publishWorkspacePackages.mjs "${{ inputs.mode }}"
