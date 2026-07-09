@@ -96,12 +96,10 @@ jobs:
     timeout-minutes: 30
     permissions:
       contents: read
-      # `id-token: write` is only required for npm Sigstore provenance.
-      # Provenance is intentionally disabled while this repository is private
-      # (see R-0001025 in scripts/publishWorkspacePackages.mjs), so the
-      # OIDC token permission is dropped here. Re-add `id-token: write` and
-      # restore `--provenance` in the publish script once the repository is
-      # made public.
+      # pnpm/npm request an OIDC token for npm trusted publishing even though
+      # provenance is disabled while this repository is private (see R-0001025
+      # in scripts/publishWorkspacePackages.mjs).
+      id-token: write
     steps:
       # actions/checkout@v6
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd
