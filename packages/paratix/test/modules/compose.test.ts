@@ -30,6 +30,24 @@ function composeCmd(runtime: "docker" | "podman"): string {
 }
 
 type ExecLike = SshConnection["exec"]
+type SequentialExecResult = { code?: number; stderr?: string; stdout?: string }
+
+const composeConfigCommand = `${composeCmd("podman")} config --format json`
+const composeImage = "docker.io/library/nginx:latest"
+const composeInspectFormat = "{{.Id}}\\n{{range .RepoDigests}}{{.}}\\n{{end}}"
+const composeImageInspectCommand = `podman image inspect --format '${composeInspectFormat}' -- '${composeImage}'`
+
+function composeConfigWithImages(...images: string[]): string {
+  return JSON.stringify({
+    services: Object.fromEntries(
+      images.map((image, index) => [`service${String(index)}`, { image }])
+    ),
+  })
+}
+
+function composeImageInspectStdout(identifier: string): string {
+  return `${identifier}\n${composeImage}@${identifier}\n`
+}
 
 function buildValidationFailingExec(
   originalExec: ExecLike,
@@ -95,6 +113,22 @@ function buildSequentialMktempExec(
     mockSsh.calls.push(command)
     mockSsh.execCalls.push({ command, options })
     return { code: 0, stderr: "", stdout: outputs.shift() ?? "" }
+  }
+}
+
+function buildSequentialCommandExec(parameters: {
+  commandToOverride: string
+  mockSsh: ReturnType<typeof createComposeMockSsh>
+  originalExec: ExecLike
+  results: SequentialExecResult[]
+}): ExecLike {
+  return async (command, options) => {
+    if (command !== parameters.commandToOverride) return parameters.originalExec(command, options)
+    await Promise.resolve()
+    parameters.mockSsh.calls.push(command)
+    parameters.mockSsh.execCalls.push({ command, options })
+    const result = parameters.results.shift() ?? {}
+    return { code: result.code ?? 0, stderr: result.stderr ?? "", stdout: result.stdout ?? "" }
   }
 }
 
@@ -343,35 +377,79 @@ describe("compose.pull — apply", () => {
     expect(result.status).toBe("failed")
   })
 
-  it("returns changed when output contains Pulling", async () => {
+  it("returns ok when image identifiers stay stable even if output contains Pulling", async () => {
     const mockSsh = createComposeMockSsh({
       [`${composeCmd("podman")} pull 2>&1`]: {
         code: 0,
         stdout: "Pulling from registry...",
       },
+      [composeConfigCommand]: { code: 0, stdout: composeConfigWithImages(composeImage) },
+      [composeImageInspectCommand]: {
+        code: 0,
+        stdout: composeImageInspectStdout("sha256:stable-digest"),
+      },
     })
     const mod = compose.pull({ projectDirectory })
     const result = await mod.apply(mockSsh, emptyEnv)
-    expect(result.status).toBe("changed")
+    expect(result.status).toBe("ok")
   })
 
-  it("returns changed when output contains Downloaded", async () => {
+  it("returns changed when an image identifier changes", async () => {
     const mockSsh = createComposeMockSsh({
       [`${composeCmd("podman")} pull 2>&1`]: {
         code: 0,
         stdout: "Downloaded newer image for nginx:latest",
       },
+      [composeConfigCommand]: { code: 0, stdout: composeConfigWithImages(composeImage) },
     })
+    mockSsh.exec = buildSequentialCommandExec({
+      commandToOverride: composeImageInspectCommand,
+      mockSsh,
+      originalExec: mockSsh.exec,
+      results: [
+        { stdout: composeImageInspectStdout("sha256:old-digest") },
+        { stdout: composeImageInspectStdout("sha256:new-digest") },
+      ],
+    })
+
     const mod = compose.pull({ projectDirectory })
     const result = await mod.apply(mockSsh, emptyEnv)
     expect(result.status).toBe("changed")
   })
 
-  it("returns ok when output contains no change indicators", async () => {
+  it("returns changed when an image was missing before pull", async () => {
     const mockSsh = createComposeMockSsh({
       [`${composeCmd("podman")} pull 2>&1`]: {
         code: 0,
         stdout: "Image is up to date",
+      },
+      [composeConfigCommand]: { code: 0, stdout: composeConfigWithImages(composeImage) },
+    })
+    mockSsh.exec = buildSequentialCommandExec({
+      commandToOverride: composeImageInspectCommand,
+      mockSsh,
+      originalExec: mockSsh.exec,
+      results: [
+        { code: 1, stderr: "image not found" },
+        { stdout: composeImageInspectStdout("sha256:new-digest") },
+      ],
+    })
+
+    const mod = compose.pull({ projectDirectory })
+    const result = await mod.apply(mockSsh, emptyEnv)
+    expect(result.status).toBe("changed")
+  })
+
+  it("returns ok when output contains no change indicators and identifiers stay stable", async () => {
+    const mockSsh = createComposeMockSsh({
+      [`${composeCmd("podman")} pull 2>&1`]: {
+        code: 0,
+        stdout: "Image is up to date",
+      },
+      [composeConfigCommand]: { code: 0, stdout: composeConfigWithImages(composeImage) },
+      [composeImageInspectCommand]: {
+        code: 0,
+        stdout: composeImageInspectStdout("sha256:stable-digest"),
       },
     })
     const mod = compose.pull({ projectDirectory })
@@ -382,11 +460,50 @@ describe("compose.pull — apply", () => {
   it("returns failed when pull command fails", async () => {
     const mockSsh = createComposeMockSsh({
       [`${composeCmd("podman")} pull 2>&1`]: { code: 1, stderr: "pull failed" },
+      [composeConfigCommand]: { code: 0, stdout: composeConfigWithImages(composeImage) },
+      [composeImageInspectCommand]: {
+        code: 0,
+        stdout: composeImageInspectStdout("sha256:stable-digest"),
+      },
     })
     const mod = compose.pull({ projectDirectory })
     const result = await mod.apply(mockSsh, emptyEnv)
     expect(result.status).toBe("failed")
     expect(result.error).toBeInstanceOf(Error)
+  })
+
+  it("returns failed when compose config cannot be resolved", async () => {
+    const mockSsh = createComposeMockSsh({
+      [composeConfigCommand]: { code: 1, stderr: "bad compose file" },
+    })
+    const mod = compose.pull({ projectDirectory })
+    const result = await mod.apply(mockSsh, emptyEnv)
+    expect(result.status).toBe("failed")
+    expect(String(result.error)).toContain("failed to resolve images")
+  })
+
+  it("returns failed when post-pull image inspect fails", async () => {
+    const mockSsh = createComposeMockSsh({
+      [`${composeCmd("podman")} pull 2>&1`]: {
+        code: 0,
+        stdout: "Downloaded newer image for nginx:latest",
+      },
+      [composeConfigCommand]: { code: 0, stdout: composeConfigWithImages(composeImage) },
+    })
+    mockSsh.exec = buildSequentialCommandExec({
+      commandToOverride: composeImageInspectCommand,
+      mockSsh,
+      originalExec: mockSsh.exec,
+      results: [
+        { stdout: composeImageInspectStdout("sha256:old-digest") },
+        { code: 1, stderr: "inspect failed" },
+      ],
+    })
+
+    const mod = compose.pull({ projectDirectory })
+    const result = await mod.apply(mockSsh, emptyEnv)
+    expect(result.status).toBe("failed")
+    expect(String(result.error)).toContain("image inspect failed")
   })
 })
 
@@ -399,6 +516,11 @@ describe("compose — project directory handling (issue #60)", () => {
   it("never passes --project-directory and runs compose from the project directory", async () => {
     const mockSsh = createComposeMockSsh({
       [`${composeCmd("podman")} pull 2>&1`]: { code: 0, stdout: "Image is up to date" },
+      [composeConfigCommand]: { code: 0, stdout: composeConfigWithImages(composeImage) },
+      [composeImageInspectCommand]: {
+        code: 0,
+        stdout: composeImageInspectStdout("sha256:stable-digest"),
+      },
     })
     const mod = compose.pull({ projectDirectory })
     await mod.apply(mockSsh, emptyEnv)
