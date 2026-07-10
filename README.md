@@ -99,13 +99,15 @@ If you are starting on GitHub, use this README as the overview and then jump int
 - [packages/paratix/README.md](./packages/paratix/README.md)
 - [packages/create-paratix/README.md](./packages/create-paratix/README.md)
 
-## User Guide
+## Documentation
 
-- [TypeScript API and Module Reference](./packages/paratix/llm-guide.md)
-- [User-guide overview](./docs/user-guide/README.md)
-- [Troubleshooting](./docs/user-guide/troubleshooting.md)
-- [Choosing between Paratix, Ansible, and pyinfra](./docs/user-guide/comparison.md)
-- [Migration notes](./docs/user-guide/migration.md)
+- [TypeScript API, module, and agent reference](./packages/paratix/llm-guide.md) — the current normative reference
+- [User-guide overview](./docs/user-guide/README.md) — current user documentation, including [troubleshooting](./docs/user-guide/troubleshooting.md), [tool comparison](./docs/user-guide/comparison.md), and [migration notes](./docs/user-guide/migration.md)
+- [`docs/adr/`](./docs/adr/) — durable architecture decision records
+- [`docs/plan/`](./docs/plan/) — time-bound implementation plans, including completed work; not a current product reference
+- `docs/review/` — historical review reports when present
+- [`docs/review-areas.md`](./docs/review-areas.md) — the current internal review scope
+- [`docs/module.md`](./docs/module.md) and [`docs/initialbeschreibung.md`](./docs/initialbeschreibung.md) — historical design documents
 
 ## License
 

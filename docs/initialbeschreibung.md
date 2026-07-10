@@ -1,5 +1,10 @@
 # Paratix — Idempotentes VPS-Setup-Tool in TypeScript
 
+> **Historisches Dokument (12.03.2026):** Dies ist die ursprüngliche
+> Projektbeschreibung und keine normative Referenz für den aktuellen
+> Funktionsumfang. Die aktuelle Modul- und Agentenreferenz steht im
+> [Paratix LLM Guide](../packages/paratix/llm-guide.md).
+
 ## Überblick
 
 Paratix ist ein CLI-Tool, das lokal läuft und sich per SSH auf Zielserver

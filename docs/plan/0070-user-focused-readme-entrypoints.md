@@ -23,11 +23,11 @@ Jede README soll mit einer kurzen Marketing-Einführung starten, danach Features
 
 ## Betroffene Dateien
 
-| Datei                                                                                      | Beschreibung                                              |
-| ------------------------------------------------------------------------------------------ | --------------------------------------------------------- |
-| [README.md](/Users/bs5/Developer/sebastian-gmbh-paratix/README.md)                         | Neu als GitHub-Einstieg mit Produktfokus strukturiert     |
-| [README.md](/Users/bs5/Developer/sebastian-gmbh-paratix/packages/paratix/README.md)        | Neu als npm-Einstieg für das `paratix`-Paket strukturiert |
-| [README.md](/Users/bs5/Developer/sebastian-gmbh-paratix/packages/create-paratix/README.md) | Neu als npm-Einstieg für das Scaffold-Paket strukturiert  |
+| Datei                                                | Beschreibung                                              |
+| ---------------------------------------------------- | --------------------------------------------------------- |
+| [README.md](../../README.md)                         | Neu als GitHub-Einstieg mit Produktfokus strukturiert     |
+| [README.md](../../packages/paratix/README.md)        | Neu als npm-Einstieg für das `paratix`-Paket strukturiert |
+| [README.md](../../packages/create-paratix/README.md) | Neu als npm-Einstieg für das Scaffold-Paket strukturiert  |
 
 ## Implementierungsdetails
 
