@@ -10,6 +10,10 @@ const DEFAULT_TERMINAL_COLUMNS = 100
 const MIN_PACKAGE_COLUMNS_WIDTH = 24
 const MIN_PACKAGE_COLUMN_WIDTH = 18
 const MIN_ANIMATED_LINE_COLUMNS = 8
+const ELAPSED_DISPLAY_THRESHOLD_MS = 1000
+const MILLISECONDS_PER_SECOND = 1000
+const MILLISECONDS_PER_MINUTE = 60_000
+const SECONDS_PER_MINUTE = 60
 
 export type DisplayModule = {
   detail?: string
@@ -70,6 +74,36 @@ function getPackageColumns(parameters: {
 function getPackageSummaryDetail(packageCount: number, detail?: string): string {
   const packageLabel = packageCount === 1 ? "1 package" : `${packageCount} packages`
   return detail == null ? packageLabel : `${packageLabel} · ${detail}`
+}
+
+/**
+ * Format a module's elapsed run time as an adaptive, human-readable suffix.
+ *
+ * Returns `undefined` below a 1-second threshold so very fast checks stay free
+ * of any time annotation. Under 60 seconds the value is rendered in seconds with
+ * a single decimal place (e.g. `3.2s`); from 60 seconds on it switches to whole
+ * minutes and seconds with a zero-padded seconds field (e.g. `1m 05s`). Negative
+ * or non-finite inputs are treated defensively as below the threshold.
+ *
+ * The final result line derives its value from the same function independently
+ * of the live spinner frames, so a module that crosses the 1-second threshold
+ * only just before finishing still shows a static time on its result line even
+ * if no live frame ever rendered one.
+ *
+ * @param elapsedMs - The elapsed time in milliseconds.
+ * @returns The formatted elapsed text, or `undefined` when nothing should show.
+ */
+export function formatModuleElapsed(elapsedMs: number): string | undefined {
+  if (!Number.isFinite(elapsedMs) || elapsedMs < ELAPSED_DISPLAY_THRESHOLD_MS) return undefined
+
+  if (elapsedMs < MILLISECONDS_PER_MINUTE) {
+    return `${(elapsedMs / MILLISECONDS_PER_SECOND).toFixed(1)}s`
+  }
+
+  const totalSeconds = Math.floor(elapsedMs / MILLISECONDS_PER_SECOND)
+  const minutes = Math.floor(totalSeconds / SECONDS_PER_MINUTE)
+  const seconds = totalSeconds % SECONDS_PER_MINUTE
+  return `${minutes}m ${String(seconds).padStart(2, "0")}s`
 }
 
 export function fitAnimatedModuleLine(line: string, columns?: number): string {

@@ -15,10 +15,10 @@
     }
   },
   "plan": {
-    "markerLanguage": "de"
+    "markerLanguage": "de",
+    "dir": "docs/plan"
   },
   "delivery": {
-    "enabled": true,
     "baseBranch": "origin/main",
     "branchPrefix": "firmo",
     "completion": "pr",
