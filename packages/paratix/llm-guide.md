@@ -157,9 +157,12 @@ export default server({
 
 ### `command`
 
-| Method          | Signature                                                                                | Idempotent        |
-| --------------- | ---------------------------------------------------------------------------------------- | ----------------- |
-| `command.shell` | `(cmd: string, options?: { check?: string; name?: string; secrets?: string[] }): Module` | Only with `check` |
+| Method          | Signature                                                                                                  | Idempotent        |
+| --------------- | ---------------------------------------------------------------------------------------------------------- | ----------------- |
+| `command.shell` | `(cmd: string, options?: { check?: string; name?: string; secrets?: string[]; timeout?: number }): Module` | Only with `check` |
+
+`command.shell` accepts `timeout` in milliseconds to limit the runtime of the applied command. The
+idempotency guard configured through `check` is not affected by this timeout.
 
 ### `cron`
 

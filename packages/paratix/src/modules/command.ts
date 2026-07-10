@@ -1,6 +1,12 @@
 import { failed, failedCommand } from "../moduleFailure.js"
 import { maskSecrets } from "../sshHelpers.js"
-import { type Module, type ModuleResult, NEEDS_APPLY, type SshConnection } from "../types.js"
+import {
+  type ExecOptions,
+  type Module,
+  type ModuleResult,
+  NEEDS_APPLY,
+  type SshConnection,
+} from "../types.js"
 
 function rejectControlCharacters(label: string, value: string): void {
   if (value.includes("\0") || value.includes("\r") || value.includes("\n")) {
@@ -19,6 +25,19 @@ async function commandCheckPassed(
     silent: true,
   })
   return result.code === 0
+}
+
+function commandExecOptions(
+  secrets: string[],
+  options: { timeout?: number } | undefined
+): ExecOptions {
+  const execOptions: ExecOptions = {
+    ignoreExitCode: true,
+    secrets,
+    silent: true,
+  }
+  if (options?.timeout !== undefined) execOptions.timeout = options.timeout
+  return execOptions
 }
 
 /**
@@ -43,6 +62,7 @@ export const command = {
    *   If it exits `0`, the command is considered already done.
    * @param options.name - An optional display name shown in the run output.
    * @param options.secrets - Secret values that must be redacted from command output.
+   * @param options.timeout - Maximum runtime for the command in milliseconds.
    * @returns A Module that executes the shell command.
    *
    * @example
@@ -51,7 +71,10 @@ export const command = {
    *   name: "install my-tool",
    * })
    */
-  shell(cmd: string, options?: { check?: string; name?: string; secrets?: string[] }): Module {
+  shell(
+    cmd: string,
+    options?: { check?: string; name?: string; secrets?: string[]; timeout?: number }
+  ): Module {
     rejectControlCharacters("command.shell cmd", cmd)
     if (options?.check != null) {
       rejectControlCharacters("command.shell options.check", options.check)
@@ -64,11 +87,7 @@ export const command = {
         if (options?.check != null && (await commandCheckPassed(ssh, options.check, secrets))) {
           return { status: "ok" }
         }
-        const result = await ssh.exec(cmd, {
-          ignoreExitCode: true,
-          secrets,
-          silent: true,
-        })
+        const result = await ssh.exec(cmd, commandExecOptions(secrets, options))
         if (result.code !== 0) {
           return failedCommand(`[${moduleName}] command failed`, {
             ...result,

@@ -111,6 +111,61 @@ describe("command.shell — apply with exit code 0", () => {
 })
 
 // ---------------------------------------------------------------------------
+// apply — timeout
+// ---------------------------------------------------------------------------
+
+describe("command.shell — apply timeout", () => {
+  it("passes a configured timeout only to the command", async () => {
+    const mockSsh = createMockSshWithOptions({
+      "install-tool": { code: 0 },
+      "which tool": { code: 1 },
+    })
+    const mod = command.shell("install-tool", { check: "which tool", timeout: 15_000 })
+    const result = await mod.apply(mockSsh, emptyEnv)
+
+    expect(result.status).toBe("changed")
+    expect(mockSsh.execCalls).toStrictEqual([
+      {
+        command: "which tool",
+        options: { ignoreExitCode: true, secrets: [], silent: true },
+      },
+      {
+        command: "install-tool",
+        options: { ignoreExitCode: true, secrets: [], silent: true, timeout: 15_000 },
+      },
+    ])
+  })
+
+  it("omits the timeout option when it is undefined", async () => {
+    const mockSsh = createMockSshWithOptions({ "echo hello": { code: 0 } })
+    const mod = command.shell("echo hello", { timeout: undefined })
+    const result = await mod.apply(mockSsh, emptyEnv)
+
+    expect(result.status).toBe("changed")
+    expect(mockSsh.execCalls).toStrictEqual([
+      {
+        command: "echo hello",
+        options: { ignoreExitCode: true, secrets: [], silent: true },
+      },
+    ])
+  })
+
+  it("passes a zero timeout to the command", async () => {
+    const mockSsh = createMockSshWithOptions({ "echo hello": { code: 0 } })
+    const mod = command.shell("echo hello", { timeout: 0 })
+    const result = await mod.apply(mockSsh, emptyEnv)
+
+    expect(result.status).toBe("changed")
+    expect(mockSsh.execCalls).toStrictEqual([
+      {
+        command: "echo hello",
+        options: { ignoreExitCode: true, secrets: [], silent: true, timeout: 0 },
+      },
+    ])
+  })
+})
+
+// ---------------------------------------------------------------------------
 // apply — failed command
 // ---------------------------------------------------------------------------
 
