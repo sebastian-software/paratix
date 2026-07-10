@@ -13,12 +13,50 @@ import {
   stopLiveModuleOutput,
   withRecipeOutputScope,
 } from "../src/output.js"
+import { formatModuleElapsed } from "../src/outputFormatting.js"
 import { clearRegisteredSecrets, registerSecret } from "../src/secretSink.js"
 import { CommandError } from "../src/sshHelpers.js"
 
 function bindOptionalStdoutMethod(name: "clearLine" | "cursorTo") {
   const method = process.stdout[name] as ((...args: never[]) => unknown) | undefined
   return method == null ? undefined : method.bind(process.stdout)
+}
+
+function setTTY(): {
+  originalClearLine: ReturnType<typeof bindOptionalStdoutMethod>
+  originalCursorTo: ReturnType<typeof bindOptionalStdoutMethod>
+  originalIsTTY: boolean | undefined
+} {
+  const originalIsTTY = process.stdout.isTTY
+  const originalClearLine = bindOptionalStdoutMethod("clearLine")
+  const originalCursorTo = bindOptionalStdoutMethod("cursorTo")
+
+  Object.defineProperty(process.stdout, "isTTY", { configurable: true, value: true })
+  Object.defineProperty(process.stdout, "clearLine", {
+    configurable: true,
+    value: vi.fn(() => true),
+  })
+  Object.defineProperty(process.stdout, "cursorTo", {
+    configurable: true,
+    value: vi.fn(() => true),
+  })
+
+  return { originalClearLine, originalCursorTo, originalIsTTY }
+}
+
+function restoreTTY(saved: ReturnType<typeof setTTY>): void {
+  Object.defineProperty(process.stdout, "isTTY", {
+    configurable: true,
+    value: saved.originalIsTTY,
+  })
+  Object.defineProperty(process.stdout, "clearLine", {
+    configurable: true,
+    value: saved.originalClearLine,
+  })
+  Object.defineProperty(process.stdout, "cursorTo", {
+    configurable: true,
+    value: saved.originalCursorTo,
+  })
 }
 
 describe("renderCliHeader", () => {
@@ -976,5 +1014,224 @@ describe("printCommandFailure", () => {
 
     const output = consoleErrors.join("\n")
     expect(output).toContain("something went wrong")
+  })
+})
+
+// ---------------------------------------------------------------------------
+// formatModuleElapsed
+// ---------------------------------------------------------------------------
+
+describe("formatModuleElapsed", () => {
+  it("returns undefined just below the 1-second threshold", () => {
+    expect(formatModuleElapsed(999)).toBeUndefined()
+  })
+
+  it("returns '1.0s' at exactly the 1-second threshold", () => {
+    expect(formatModuleElapsed(1000)).toBe("1.0s")
+  })
+
+  it("formats a mid-range value with one decimal place", () => {
+    expect(formatModuleElapsed(3200)).toBe("3.2s")
+  })
+
+  it("formats a value just under 60 seconds in seconds", () => {
+    expect(formatModuleElapsed(59_900)).toBe("59.9s")
+  })
+
+  it("switches to minutes-and-seconds format at exactly 60 seconds", () => {
+    expect(formatModuleElapsed(60_000)).toBe("1m 00s")
+  })
+
+  it("zero-pads the seconds field in minutes-and-seconds format", () => {
+    expect(formatModuleElapsed(65_300)).toBe("1m 05s")
+  })
+
+  it("returns undefined for a negative elapsed value", () => {
+    expect(formatModuleElapsed(-5)).toBeUndefined()
+  })
+
+  it("returns undefined for NaN", () => {
+    expect(formatModuleElapsed(Number.NaN)).toBeUndefined()
+  })
+
+  it("returns undefined for Infinity", () => {
+    expect(formatModuleElapsed(Number.POSITIVE_INFINITY)).toBeUndefined()
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Module elapsed-time display (live spinner counter + static result suffix)
+// ---------------------------------------------------------------------------
+
+describe("module elapsed-time display", () => {
+  let consoleLogs: string[]
+
+  beforeEach(() => {
+    consoleLogs = []
+    vi.spyOn(console, "log").mockImplementation((...args: unknown[]) => {
+      consoleLogs.push(args.map(String).join(" "))
+    })
+  })
+
+  afterEach(() => {
+    resetLiveOutputForTests()
+    clearRegisteredSecrets()
+    vi.restoreAllMocks()
+    vi.useRealTimers()
+  })
+
+  it("shows a live elapsed counter on a spinner frame once past the 1-second threshold (TTY)", () => {
+    vi.useFakeTimers()
+    const writes: string[] = []
+    vi.spyOn(process.stdout, "write").mockImplementation((chunk: string | Uint8Array) => {
+      writes.push(String(chunk))
+      return true
+    })
+    const saved = setTTY()
+
+    try {
+      startModuleSpinner("service.restart: app")
+      vi.advanceTimersByTime(3200)
+      // Trigger the next spinner frame (interval fires every 80ms).
+      vi.advanceTimersByTime(80)
+
+      const runningWrite = writes.findLast((entry) => entry.includes("running"))
+      expect(runningWrite).toBeDefined()
+      expect(runningWrite).toMatch(/\d{1,3}\.\ds/v)
+    } finally {
+      stopLiveModuleOutput(true)
+      restoreTTY(saved)
+    }
+  })
+
+  it("does not show an elapsed suffix on a spinner frame below the 1-second threshold (TTY)", () => {
+    vi.useFakeTimers()
+    const writes: string[] = []
+    vi.spyOn(process.stdout, "write").mockImplementation((chunk: string | Uint8Array) => {
+      writes.push(String(chunk))
+      return true
+    })
+    const saved = setTTY()
+
+    try {
+      startModuleSpinner("service.restart: app")
+      vi.advanceTimersByTime(400)
+      // Trigger a spinner frame while still below the threshold.
+      vi.advanceTimersByTime(80)
+
+      const runningWrite = writes.find((entry) => entry.includes("running"))
+      expect(runningWrite).toBeDefined()
+      expect(runningWrite).not.toMatch(/\d{1,3}\.\ds/v)
+    } finally {
+      stopLiveModuleOutput(true)
+      restoreTTY(saved)
+    }
+  })
+
+  it("renders a static elapsed suffix on the final result line (TTY)", () => {
+    vi.useFakeTimers()
+    const writes: string[] = []
+    vi.spyOn(process.stdout, "write").mockImplementation((chunk: string | Uint8Array) => {
+      writes.push(String(chunk))
+      return true
+    })
+    const saved = setTTY()
+
+    try {
+      startModuleSpinner("service.restart: app")
+      vi.advanceTimersByTime(3200)
+      printModuleResult("service.restart: app", "changed")
+
+      const changedWrite = writes.find((entry) => entry.includes("changed"))
+      expect(changedWrite).toBeDefined()
+      expect(changedWrite).toMatch(/\d{1,3}\.\ds/v)
+    } finally {
+      stopLiveModuleOutput(true)
+      restoreTTY(saved)
+    }
+  })
+
+  it("renders the static elapsed suffix on the final result line in non-TTY output", () => {
+    vi.useFakeTimers()
+    const originalIsTTY = process.stdout.isTTY
+    Object.defineProperty(process.stdout, "isTTY", { configurable: true, value: false })
+
+    try {
+      startModuleSpinner("service.restart: app")
+      vi.advanceTimersByTime(3200)
+      printModuleResult("service.restart: app", "changed")
+
+      expect(consoleLogs).toHaveLength(1)
+      expect(consoleLogs[0]).toContain("changed")
+      expect(consoleLogs[0]).toMatch(/\d{1,3}\.\ds/v)
+    } finally {
+      Object.defineProperty(process.stdout, "isTTY", {
+        configurable: true,
+        value: originalIsTTY,
+      })
+    }
+  })
+
+  it("formats the elapsed suffix in minutes-and-seconds once past the 60-second mark", () => {
+    vi.useFakeTimers()
+    const originalIsTTY = process.stdout.isTTY
+    Object.defineProperty(process.stdout, "isTTY", { configurable: true, value: false })
+
+    try {
+      startModuleSpinner("service.restart: app")
+      vi.advanceTimersByTime(65_300)
+      printModuleResult("service.restart: app", "changed")
+
+      expect(consoleLogs).toHaveLength(1)
+      expect(consoleLogs[0]).toContain("1m 05s")
+    } finally {
+      Object.defineProperty(process.stdout, "isTTY", {
+        configurable: true,
+        value: originalIsTTY,
+      })
+    }
+  })
+
+  it("consumes the recorded start time exactly once so a second result line has no elapsed suffix", () => {
+    vi.useFakeTimers()
+    const originalIsTTY = process.stdout.isTTY
+    Object.defineProperty(process.stdout, "isTTY", { configurable: true, value: false })
+
+    try {
+      startModuleSpinner("service.restart: app")
+      vi.advanceTimersByTime(3200)
+      printModuleResult("service.restart: app", "changed")
+      printModuleResult("service.restart: app", "ok")
+
+      expect(consoleLogs).toHaveLength(2)
+      expect(consoleLogs[0]).toMatch(/\d{1,3}\.\ds/v)
+      expect(consoleLogs[1]).not.toMatch(/\d{1,3}\.\ds/v)
+    } finally {
+      Object.defineProperty(process.stdout, "isTTY", {
+        configurable: true,
+        value: originalIsTTY,
+      })
+    }
+  })
+
+  it("clears the recorded start time via resetLiveOutputForTests", () => {
+    vi.useFakeTimers()
+    const originalIsTTY = process.stdout.isTTY
+    Object.defineProperty(process.stdout, "isTTY", { configurable: true, value: false })
+
+    try {
+      startModuleSpinner("service.restart: app")
+      vi.advanceTimersByTime(3200)
+      resetLiveOutputForTests()
+      printModuleResult("service.restart: app", "ok")
+
+      expect(consoleLogs).toHaveLength(1)
+      expect(consoleLogs[0]).not.toMatch(/\d{1,3}\.\ds/v)
+    } finally {
+      Object.defineProperty(process.stdout, "isTTY", {
+        configurable: true,
+        value: originalIsTTY,
+      })
+    }
   })
 })

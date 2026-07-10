@@ -4,7 +4,7 @@ import pc from "picocolors"
 import type { ModuleStatus } from "./types.js"
 
 import { inspectRedactedDiagnosticValue } from "./errorRedaction.js"
-import { fitAnimatedModuleLine, formatDisplayModule } from "./outputFormatting.js"
+import { fitAnimatedModuleLine, formatDisplayModule, formatModuleElapsed } from "./outputFormatting.js"
 import { maskRegisteredSecrets } from "./secretSink.js"
 import { CommandError } from "./sshHelpers.js"
 import { sanitizeTerminalText } from "./terminalSanitizer.js"
@@ -64,6 +64,11 @@ type ActiveSpinner = {
 }
 
 type LiveOutputState = {
+  // Start timestamp (Date.now()) of the single active module, or null when no
+  // module has begun. Mirrors the one-slot spinner invariant: each
+  // startModuleSpinner records the start and the matching result line consumes
+  // it exactly once.
+  activeModuleStartedAt: null | number
   activeRecipeGuideDepths: number[]
   // The single active spinner, or null when no line is being animated.
   activeSpinner: ActiveSpinner | null
@@ -93,6 +98,7 @@ function getSharedLiveOutputState(): LiveOutputState {
   const existing = registry[LIVE_OUTPUT_STATE_KEY]
   if (existing != null) return existing
   const created: LiveOutputState = {
+    activeModuleStartedAt: null,
     activeRecipeGuideDepths: [],
     activeSpinner: null,
     cursorHidden: false,
@@ -216,21 +222,40 @@ export async function withRecipeOutputScope<T>(
   }
 }
 
+// Compute the currently formatted elapsed text for the single active module,
+// or undefined when no module has started or the run time is still below the
+// display threshold. Reads Date.now() so both the live spinner frames and the
+// final result line share one adaptive format.
+//
+// Invariant: every result line MUST be preceded by a startModuleSpinner call
+// for the same module — that call sets activeModuleStartedAt and the matching
+// result line consumes it exactly once. A result line printed without a fresh
+// startModuleSpinner would otherwise inherit a stale/foreign start time. All
+// current callers (regular, recipe child, recipe parent, dry-run, signal)
+// honour this; interrupt paths simply leave the value to be overwritten by the
+// next startModuleSpinner and never print a result line themselves.
+function getActiveModuleElapsed(): string | undefined {
+  if (liveOutputState.activeModuleStartedAt == null) return undefined
+  return formatModuleElapsed(Date.now() - liveOutputState.activeModuleStartedAt)
+}
+
 function renderModuleLine(parameters: {
   detail?: string
+  elapsed?: string
   extraGuideDepths?: number[]
   name: string
   status: DisplayStatus
   waitingFrame?: string
 }): string {
-  const { detail, extraGuideDepths = [], name, status, waitingFrame } = parameters
+  const { detail, elapsed, extraGuideDepths = [], name, status, waitingFrame } = parameters
   const baseIndent = getModuleIndent()
   const indent = buildGuideIndent(baseIndent, { extraGuideDepths })
   const icon = getModuleIcon(status, waitingFrame)
   const statusText = getModuleStatusText(status)
   const detailSuffix = detail == null ? "" : `  ${pc.dim(detail)}`
+  const elapsedSuffix = elapsed == null ? "" : `  ${pc.dim(elapsed)}`
   const alignedNameWidth = Math.max(MODULE_NAME_WIDTH - baseIndent.length, MIN_MODULE_NAME_WIDTH)
-  return `${indent}${icon}  ${name.padEnd(alignedNameWidth)}  ${statusText}${detailSuffix}`
+  return `${indent}${icon}  ${name.padEnd(alignedNameWidth)}  ${statusText}${detailSuffix}${elapsedSuffix}`
 }
 
 // Hide the terminal cursor before the spinner starts rewriting the current
@@ -281,6 +306,10 @@ export function stopLiveModuleOutput(clearCurrentLine = false): void {
 }
 
 export function startModuleSpinner(name: string, detail?: string): void {
+  // Record the start timestamp before the TTY guard so the non-animated path
+  // (pipe/log) still knows when the module began and can render the static
+  // elapsed value on its result line.
+  liveOutputState.activeModuleStartedAt = Date.now()
   if (!supportsAnimatedModuleOutput()) return
 
   clearPendingRecipeClosureGuides()
@@ -303,6 +332,7 @@ export function startModuleSpinner(name: string, detail?: string): void {
       writeAnimatedModuleLine(
         renderModuleLine({
           detail: spinner.detail,
+          elapsed: getActiveModuleElapsed(),
           name: displayModule.name,
           status: "waiting",
           waitingFrame: SPINNER_FRAMES[spinner.frameIndex],
@@ -320,6 +350,7 @@ export function startModuleSpinner(name: string, detail?: string): void {
   writeAnimatedModuleLine(
     renderModuleLine({
       detail: displayModule.detail,
+      elapsed: getActiveModuleElapsed(),
       name: displayModule.name,
       status: "waiting",
       waitingFrame: SPINNER_FRAMES[0],
@@ -332,6 +363,7 @@ export function resetLiveOutputForTests(): void {
   // Defensive: stopAnimatedModuleLine already restores the cursor, but reset
   // the flag explicitly so test isolation never leaves a stale hidden state.
   liveOutputState.cursorHidden = false
+  liveOutputState.activeModuleStartedAt = null
   liveOutputState.activeRecipeGuideDepths = []
   clearPendingRecipeClosureGuides()
   liveOutputState.recipeOutputDepth = -1
@@ -427,8 +459,13 @@ function printRenderedModuleResult(parameters: {
     status: parameters.status,
     terminalColumns: process.stdout.columns,
   })
+  // Consume the active module's start time exactly once for the main status
+  // line so the static value never bleeds onto later recipe parent lines.
+  const elapsed = getActiveModuleElapsed()
+  liveOutputState.activeModuleStartedAt = null
   const line = renderModuleLine({
     detail: displayModule.detail,
+    elapsed,
     extraGuideDepths,
     name: displayModule.name,
     status: parameters.status,
