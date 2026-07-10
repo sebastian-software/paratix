@@ -7,4 +7,4 @@ Use these guides alongside the package READMEs:
 3. [Migration notes](./migration.md) lists upgrades that require action in an existing Paratix project.
 
 For the complete TypeScript API and built-in module reference, see the
-[`paratix` package guide](../../packages/paratix/llm-guide.md).
+[TypeScript API and Module Reference](../../packages/paratix/llm-guide.md).

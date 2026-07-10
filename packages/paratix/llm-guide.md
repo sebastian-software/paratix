@@ -1,10 +1,17 @@
-# Paratix -- LLM Code Guide
+# Paratix TypeScript API and Module Reference
 
-> This file helps LLMs write correct Paratix code. Read this before generating playbooks or modules.
+This is the complete reference for writing Paratix playbooks and custom modules. It covers the
+TypeScript API, built-in modules, authoring patterns, and common mistakes.
 
 ## Overview
 
 Paratix is a CLI tool for idempotent VPS configuration via SSH using TypeScript playbooks. Each playbook exports a `server()` definition containing an ordered list of modules that are checked and applied over SSH. Modules follow a check/apply pattern: `check` determines if work is needed, `apply` enforces the desired state.
+
+## Agent authoring guidance
+
+When generating or changing Paratix playbooks or custom modules, automated coding agents should use
+this document as the complete API reference. Read the relevant API and module sections before making
+changes, and follow the [Do's and Don'ts](#dos-and-donts) and [testing patterns](#testing-patterns).
 
 ## Imports
 

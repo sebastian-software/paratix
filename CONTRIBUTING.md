@@ -65,8 +65,7 @@ pnpm format
 
 ## Authoring guidance
 
-For Paratix-specific API patterns and common mistakes, read
-[`packages/paratix/llm-guide.md`](./packages/paratix/llm-guide.md).
+Read the complete Paratix [TypeScript API and Module Reference](./packages/paratix/llm-guide.md).
 
 If you use an AI assistant or agent for code changes, point it at [`AGENTS.md`](./AGENTS.md) first — it
 covers the project conventions that matter most for automated tooling.

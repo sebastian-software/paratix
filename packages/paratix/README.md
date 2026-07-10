@@ -145,7 +145,7 @@ Options:
 ## Documentation
 
 - For project scaffolding, see [`create-paratix`](https://www.npmjs.com/package/create-paratix).
-- For detailed authoring guidance and module reference inside this repo, see [llm-guide.md](./llm-guide.md).
+- See the complete [TypeScript API and Module Reference](./llm-guide.md).
 - For common runtime and connection failures, see [Troubleshooting](../../docs/user-guide/troubleshooting.md).
 - Before upgrading an existing project, see the [migration notes](../../docs/user-guide/migration.md).
 
