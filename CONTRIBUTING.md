@@ -70,6 +70,13 @@ Read the complete Paratix [TypeScript API and Module Reference](./packages/parat
 If you use an AI assistant or agent for code changes, point it at [`AGENTS.md`](./AGENTS.md) first — it
 covers the project conventions that matter most for automated tooling.
 
+## Documentation language
+
+Write current, normative, and new public documentation in English. Historical or time-bound
+records may remain in their original language when the English documentation map or an English
+historical-document notice clearly identifies their role. Code identifiers, quotations, and
+immutable external names are exempt from this policy.
+
 ## Commit messages
 
 This project uses [Conventional Commits](https://www.conventionalcommits.org/) and

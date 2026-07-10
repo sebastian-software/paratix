@@ -1,8 +1,8 @@
 # Paratix — Idempotentes VPS-Setup-Tool in TypeScript
 
-> **Historisches Dokument (12.03.2026):** Dies ist die ursprüngliche
-> Projektbeschreibung und keine normative Referenz für den aktuellen
-> Funktionsumfang. Die aktuelle Modul- und Agentenreferenz steht im
+> **Historical document (2026-03-12):** This is the original project description,
+> not a normative reference for the current feature set. The current module and
+> agent reference is the
 > [Paratix LLM Guide](../packages/paratix/llm-guide.md).
 
 ## Überblick

@@ -1,38 +1,38 @@
 # ADR-0001: Unconditional temp file cleanup in SSH uploads
 
 **Status:** Accepted
-**Datum:** 2026-03-19
-**Kontext:** /refactor — Design-Review von `uploadFile`/`writeFile`
+**Date:** 2026-03-19
+**Context:** /refactor - design review of `uploadFile`/`writeFile`
 
-## Kontext
+## Context
 
-Die Methoden `uploadFile` (ssh.ts:296-314) und `writeFile` (ssh.ts:332-366) verwenden ein
-atomic-write-Pattern: Inhalt wird in eine Temp-Datei geschrieben und per `mv` an den Zielort
-verschoben. Im `finally`-Block wird `rm -f` auf die Temp-Datei ausgeführt — unabhängig davon,
-ob `mv` erfolgreich war.
+The `uploadFile` (ssh.ts:296-314) and `writeFile` (ssh.ts:332-366) methods use an
+atomic-write pattern: content is written to a temporary file and moved to its destination with
+`mv`. The `finally` block runs `rm -f` on the temporary file regardless of whether `mv`
+succeeded.
 
-Ein Refactoring-Vorschlag war, ein `moved`-Flag einzuführen und `rm -f` nur auszuführen wenn
-`mv` nicht erfolgreich war (moved-Flag-Pattern). Dadurch würde der redundante `rm -f`-Aufruf
-nach erfolgreichem `mv` vermieden.
+A refactoring proposal suggested introducing a `moved` flag and running `rm -f` only when
+`mv` had not succeeded (the moved-flag pattern). This would avoid the redundant `rm -f` call
+after a successful `mv`.
 
-## Entscheidung
+## Decision
 
-Das aktuelle Verhalten (unconditional `rm -f` im `finally`-Block) wird beibehalten.
+Keep the current behavior: unconditional `rm -f` in the `finally` block.
 
-## Begründung
+## Rationale
 
-- **Harmloser No-Op:** Nach erfolgreichem `mv` existiert die Temp-Datei nicht mehr. `rm -f`
-  gibt bei nicht existierenden Dateien keinen Fehler zurück — der Aufruf ist ein No-Op.
-- **Robuste Cleanup-Garantie:** Der `finally`-Block stellt sicher, dass die Temp-Datei in
-  jedem Fehlerfall aufgeräumt wird — bei Fehlern in `sftpUpload`, `chmod` oder `mv`.
-  Ein `moved`-Flag würde zusätzliche Komplexität einführen ohne das Verhalten zu verbessern.
-- **Einfachheit:** Das unconditional Pattern ist leichter zu lesen und zu warten. Ein
-  `moved`-Flag müsste korrekt gesetzt werden und wäre eine zusätzliche Fehlerquelle.
-- **Kein Performance-Impact:** Ein einzelner `rm -f`-Aufruf auf eine nicht existierende Datei
-  hat keine messbare Performance-Auswirkung.
+- **Harmless no-op:** After a successful `mv`, the temporary file no longer exists. `rm -f`
+  does not return an error for a nonexistent file; the call is a no-op.
+- **Robust cleanup guarantee:** The `finally` block ensures that the temporary file is cleaned
+  up in every failure case, including errors in `sftpUpload`, `chmod`, or `mv`. A `moved` flag
+  would add complexity without improving the behavior.
+- **Simplicity:** The unconditional pattern is easier to read and maintain. A `moved` flag
+  would have to be set correctly and would introduce another potential source of errors.
+- **No performance impact:** A single `rm -f` call on a nonexistent file has no measurable
+  performance impact.
 
-## Quelle
+## Source
 
-- **Finding:** uploadFile/writeFile finally-Block cleanup
-- **Schweregrad:** Hinweis
-- **Dateien:** packages/paratix/src/ssh.ts:296-314, packages/paratix/src/ssh.ts:332-366
+- **Finding:** uploadFile/writeFile finally-block cleanup
+- **Severity:** Note
+- **Files:** packages/paratix/src/ssh.ts:296-314, packages/paratix/src/ssh.ts:332-366

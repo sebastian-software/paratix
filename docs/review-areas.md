@@ -1,29 +1,29 @@
-# Review-Bereiche
+# Review Areas
 
-1. Security (kritisch), unter anderem:
-   - SSH-Verbindungsmanagement (ssh.ts, sshHelpers.ts) – Private-Key-Handling, Sudo-Passwort-Caching, Reconnect-Logik
-   - Remote Command Execution (command.ts) – Shell-Injection-Risiken, Secrets-Masking
-   - Download-Modul (download.ts) – Header-Injection, Checksum-Verifizierung, URL-Escaping
-   - SFTP/File-Operationen (sftp.ts, file.ts) – Temp-File-Handling, atomare Schreibvorgänge, Berechtigungen
-   - Template-System (template.ts) – Injection über Platzhalter-Werte
-   - Environment/Secrets (environment.ts) – .env-Parsing, Secret-Leaking in Logs/Fehlermeldungen
-   - TOTP-Implementierung (totp.ts) – Korrektheit der RFC 6238/4226 Umsetzung
-2. Robustheit & Fehlerbehandlung, unter anderem:
-   - Idempotenz-Garantien – Verhalten der Module bei Netzwerk-Abbrüchen, Timeouts, halben Zuständen
-   - Reconnect-Logik – Exponential Backoff, Verhalten bei SSH-Port-Änderungen
-   - Graceful Shutdown – SIGINT/SIGTERM-Handling, offene SFTP-Transfers
-   - Error Recovery – Was passiert bei Fehlern mitten in einer Playbook-Ausführung?
-3. Testabdeckung & -qualität, unter anderem:
-   - Mocking vs. Integration – Tests nutzen gemockte SSH-Verbindungen; gibt es auch E2E-Tests gegen echte Server?
-   - Edge Cases – Leere Eingaben, Unicode, sehr große Dateien, Race Conditions
-   - Modul-Testabdeckung – Alle 17+ Module ausreichend getestet?
-4. Code-Qualität & Architektur, unter anderem:
-   - TypeScript Strict Mode – Nutzung von any, Type Assertions, ungeprüfte Casts
-   - Dependency Review – ssh2 als kritische Dependency (Aktualität, bekannte CVEs)
-   - Konsistenz der Module (einheitliches Error-Handling, Logging, Rückgabewerte)
-   - Runner-Logik (runner.ts, runnerHelpers.ts) – Orchestrierung, Signal-System
-5. Ops & DX, unter anderem:
-   - CLI-Validierung (cli.ts) – Fehlermeldungen, Input-Sanitierung
-   - Dry-Run-Modus – Vollständigkeit und Zuverlässigkeit
-   - Logging & Observability – Ausreichend für Debugging im Produktiveinsatz?
-   - create-paratix Scaffolding – Erzeugt es sichere Defaults?
+1. Security (critical), including:
+   - SSH connection management (ssh.ts, sshHelpers.ts) - private key handling, sudo password caching, reconnect logic
+   - Remote command execution (command.ts) - shell injection risks, secret masking
+   - Download module (download.ts) - header injection, checksum verification, URL escaping
+   - SFTP/file operations (sftp.ts, file.ts) - temporary file handling, atomic writes, permissions
+   - Template system (template.ts) - injection through placeholder values
+   - Environment/secrets (environment.ts) - .env parsing, secret leakage in logs/error messages
+   - TOTP implementation (totp.ts) - correctness of the RFC 6238/4226 implementation
+2. Robustness and error handling, including:
+   - Idempotency guarantees - module behavior during network interruptions, timeouts, partial states
+   - Reconnect logic - exponential backoff, behavior after SSH port changes
+   - Graceful shutdown - SIGINT/SIGTERM handling, active SFTP transfers
+   - Error recovery - what happens when errors occur during playbook execution?
+3. Test coverage and quality, including:
+   - Mocking vs. integration - tests use mocked SSH connections; are there also E2E tests against real servers?
+   - Edge cases - empty inputs, Unicode, very large files, race conditions
+   - Module test coverage - are all 17+ modules sufficiently tested?
+4. Code quality and architecture, including:
+   - TypeScript strict mode - use of `any`, type assertions, unchecked casts
+   - Dependency review - ssh2 as a critical dependency (currency, known CVEs)
+   - Module consistency (uniform error handling, logging, return values)
+   - Runner logic (runner.ts, runnerHelpers.ts) - orchestration, signal system
+5. Operations and developer experience, including:
+   - CLI validation (cli.ts) - error messages, input sanitization
+   - Dry-run mode - completeness and reliability
+   - Logging and observability - sufficient for debugging in production?
+   - create-paratix scaffolding - does it produce secure defaults?

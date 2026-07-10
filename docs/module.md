@@ -1,8 +1,8 @@
 # Paratix — Modulkatalog
 
-> **Historisches Dokument (12.03.2026):** Dieser geplante Modulkatalog ist keine
-> normative Referenz für den aktuellen Funktionsumfang. Die aktuelle Modul- und
-> Agentenreferenz steht im [Paratix LLM Guide](../packages/paratix/llm-guide.md).
+> **Historical document (2026-03-12):** This planned module catalog is not a
+> normative reference for the current feature set. The current module and agent
+> reference is the [Paratix LLM Guide](../packages/paratix/llm-guide.md).
 
 Alle Module, die durch das Paratix Plugin-System implementiert werden sollen.
 Jedes Modul implementiert die Plugin-Schnittstelle (`check` / `apply`) und ist
