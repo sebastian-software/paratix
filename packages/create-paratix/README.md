@@ -102,6 +102,8 @@ pnpm create paratix my-server --host deploy.example.com --initial-user deploy --
 
 Edit `server.ts` and extend the generated baseline with your own services, files, deployments, and runtime configuration. The scaffold is meant to get you to a safe and productive starting point quickly, not to lock you into a fixed project shape.
 
+For changes to generated project structure, CLI usage, and bootstrap defaults, see the [migration notes](../../docs/user-guide/migration.md). Connection failures in a generated project are covered by the [troubleshooting guide](../../docs/user-guide/troubleshooting.md).
+
 ## License
 
 MIT — Copyright 2026 [Sebastian Software GmbH](https://sebastian-software.com)

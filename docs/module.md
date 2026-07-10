@@ -4,8 +4,8 @@ Alle Module, die durch das Paratix Plugin-System implementiert werden sollen.
 Jedes Modul implementiert die Plugin-Schnittstelle (`check` / `apply`) und ist
 idempotent, sofern nicht anders vermerkt.
 
-> Abgeleitet aus [initialbeschreibung.md](./initialbeschreibung.md) und
-> [ansible.md](./ansible.md).
+> Abgeleitet aus [initialbeschreibung.md](./initialbeschreibung.md). For a current comparison with
+> other automation tools, see [Choosing an automation tool](./user-guide/comparison.md).
 
 ---
 
