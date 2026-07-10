@@ -4,7 +4,11 @@ import pc from "picocolors"
 import type { ModuleStatus } from "./types.js"
 
 import { inspectRedactedDiagnosticValue } from "./errorRedaction.js"
-import { fitAnimatedModuleLine, formatDisplayModule, formatModuleElapsed } from "./outputFormatting.js"
+import {
+  fitAnimatedModuleLine,
+  formatDisplayModule,
+  formatModuleElapsed,
+} from "./outputFormatting.js"
 import { maskRegisteredSecrets } from "./secretSink.js"
 import { CommandError } from "./sshHelpers.js"
 import { sanitizeTerminalText } from "./terminalSanitizer.js"
@@ -210,14 +214,14 @@ function getContinuationIndent(): string {
   return `${getModuleIndent()}   `
 }
 
-export async function withRecipeOutputScope<T>(
-  scopedOperation: () => Promise<T> | T
-): Promise<T> {
+export async function withRecipeOutputScope<T>(scopedOperation: () => Promise<T> | T): Promise<T> {
   liveOutputState.recipeOutputDepth += 1
   try {
     return await scopedOperation()
   } finally {
-    liveOutputState.activeRecipeGuideDepths = liveOutputState.activeRecipeGuideDepths.filter((depth) => depth !== liveOutputState.recipeOutputDepth)
+    liveOutputState.activeRecipeGuideDepths = liveOutputState.activeRecipeGuideDepths.filter(
+      (depth) => depth !== liveOutputState.recipeOutputDepth
+    )
     liveOutputState.pendingRecipeClosureGuideDepths = [liveOutputState.recipeOutputDepth]
     liveOutputState.recipeOutputDepth -= 1
   }
@@ -380,7 +384,10 @@ export function printRecipeHeader(name: string): void {
   const header = pc.bold(pc.blue(`[${name}]`))
   console.log(`${buildGuideIndent(getRecipeHeaderIndent())}${header}`)
   if (liveOutputState.recipeOutputDepth >= 0) {
-    liveOutputState.activeRecipeGuideDepths = [...liveOutputState.activeRecipeGuideDepths, liveOutputState.recipeOutputDepth]
+    liveOutputState.activeRecipeGuideDepths = [
+      ...liveOutputState.activeRecipeGuideDepths,
+      liveOutputState.recipeOutputDepth,
+    ]
   }
 }
 
@@ -688,7 +695,9 @@ function printCauseChain(error: Error): void {
       if (visited.has(cause)) return
       visited.add(cause)
     }
-    console.error(pc.red(`${getErrorIndent()}Cause: ${maskRegisteredSecrets(formatCauseValue(cause))}`))
+    console.error(
+      pc.red(`${getErrorIndent()}Cause: ${maskRegisteredSecrets(formatCauseValue(cause))}`)
+    )
     // R-0000580: when a `CommandError` appears as a cause it carries the full
     // stdout/stderr of the failed remote command. Emit those streams the same
     // way `printVerboseCommandError` does so the operator does not lose the
