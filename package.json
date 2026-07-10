@@ -9,7 +9,7 @@
     "test:integration": "pnpm --filter paratix test:integration",
     "typecheck": "pnpm typecheck:root && pnpm typecheck:packages",
     "typecheck:root": "tsc -p tsconfig.root.json --noEmit",
-    "typecheck:packages": "pnpm -r --filter './packages/*' exec tsc --noEmit && pnpm -r --filter './packages/*' exec tsc -p tsconfig.typecheck.json",
+    "typecheck:packages": "pnpm -r --filter './packages/*' exec tsc --noEmit && pnpm -r --filter './packages/*' exec tsc -p tsconfig.typecheck.json && pnpm --filter @sebastian-gmbh/paratix-website typecheck",
     "lint": "concurrently --kill-others-on-fail --passthrough-arguments --names lint:oxlint,lint:eslint 'pnpm lint:oxlint' 'pnpm lint:eslint'",
     "lint:oxlint": "oxlint -c oxlint.config.ts",
     "lint:eslint": "eslint --max-warnings=0",

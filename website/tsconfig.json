@@ -1,0 +1,26 @@
+{
+  "include": [
+    ".react-router/types/**/*",
+    "app/**/*.ts",
+    "app/**/*.tsx",
+    "react-router.config.ts",
+    "test/**/*.mjs",
+    "vite.config.ts"
+  ],
+  "exclude": ["build", "node_modules"],
+  "compilerOptions": {
+    "allowJs": true,
+    "checkJs": true,
+    "lib": ["DOM", "DOM.Iterable", "ES2022"],
+    "types": ["node", "vite/client"],
+    "target": "ES2022",
+    "module": "ESNext",
+    "moduleResolution": "Bundler",
+    "jsx": "react-jsx",
+    "strict": true,
+    "skipLibCheck": true,
+    "noEmit": true,
+    "allowImportingTsExtensions": true,
+    "rootDirs": [".", "./.react-router/types"]
+  }
+}

@@ -36,9 +36,20 @@ export default defineConfig({
   ignorePatterns: [
     "**/node_modules/**",
     "**/dist/**",
+    "**/build/**",
+    "**/.react-router/**",
     ".sf-plugin/**",
     "sebastian-gmbh-paratix-test/**",
     "packages/create-paratix/create-paratix-scaffold-test/**",
   ],
-  overrides,
+  overrides: [
+    {
+      files: ["website/app/routes/**/*.tsx"],
+      rules: {
+        "max-lines": "off",
+        "max-lines-per-function": "off",
+      },
+    },
+    ...overrides,
+  ],
 })
