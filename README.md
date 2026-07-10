@@ -99,6 +99,13 @@ If you are starting on GitHub, use this README as the overview and then jump int
 - [packages/paratix/README.md](./packages/paratix/README.md)
 - [packages/create-paratix/README.md](./packages/create-paratix/README.md)
 
+## User Guide
+
+- [User-guide overview](./docs/user-guide/README.md)
+- [Troubleshooting](./docs/user-guide/troubleshooting.md)
+- [Choosing between Paratix, Ansible, and pyinfra](./docs/user-guide/comparison.md)
+- [Migration notes](./docs/user-guide/migration.md)
+
 ## License
 
 MIT — Copyright 2026 [Sebastian Software GmbH](https://sebastian-software.com)
