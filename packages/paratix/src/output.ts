@@ -168,7 +168,8 @@ function buildGuideIndent(
     extraGuideDepths?: number[]
   }
 ): string {
-  const indentCharacters = Array.from(baseIndent)
+  // eslint-disable-next-line @typescript-eslint/no-misused-spread -- indentation contains fixed-width guide characters only
+  const indentCharacters = [...baseIndent]
   const guideDepths = [
     ...(options?.activeGuideDepths ?? liveOutputState.activeRecipeGuideDepths),
     ...(options?.extraGuideDepths ?? []),
@@ -648,6 +649,9 @@ function printVerboseGenericError(error: Error): void {
  * values surface their message; other values are rendered through
  * a bounded inspector so primitives and plain objects still carry diagnostic
  * context without dumping unbounded text.
+ *
+ * @param cause - Cause-chain value to format.
+ * @returns A bounded, redacted textual representation of the cause.
  */
 function formatCauseValue(cause: unknown): string {
   if (cause instanceof Error) return cause.message
