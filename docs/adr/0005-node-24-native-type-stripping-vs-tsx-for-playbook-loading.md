@@ -1,97 +1,158 @@
-# 0005 — Node-24-natives Type-Stripping vs. tsx für Playbook-Loading
+# 0005 - Node 24 Native Type Stripping vs. tsx for Playbook Loading
 
 ## Status
 
-Angenommen — ADR-only, kein Produktiv-Swap in diesem Schritt. Der nativ-first-Loader ist als Folgeschritt vorbereitet und wird erst mit grüner Integrationssuite scharfgeschaltet.
+Accepted - ADR only; no production swap in this step. The native-first loader is prepared as a
+follow-up and will be enabled only after the integration suite passes.
 
-## Kontext
+## Context
 
 Issue: sebastian-software/paratix#84
 Epic: sebastian-software/paratix#97
 
-`paratix` zieht `tsx` (`^4.22.3`) als **Produktions-Dependency**. `tsx` benötigt zur Laufzeit `esbuild` (`~0.28.0`) inklusive plattformspezifischer Binaries. Zur Laufzeit wird `tsx` an genau einer Stelle genutzt: `packages/paratix/src/cli.ts:569` importiert `tsx/esm/api` lazy und ruft `register()`, um `.ts`/`.mts`/`.cts`-Playbooks per globalem ESM-Loader-Hook ladbar zu machen (`loadServerDefinitionFromFile`, `registerTsxForTypeScriptEntry`).
+`paratix` includes `tsx` (`^4.22.3`) as a **production dependency**. At runtime, `tsx` requires
+`esbuild` (`~0.28.0`), including platform-specific binaries. `tsx` is used at exactly one runtime
+location: `packages/paratix/src/cli.ts:569` lazily imports `tsx/esm/api` and calls `register()` to
+make `.ts`/`.mts`/`.cts` playbooks loadable through a global ESM loader hook
+(`loadServerDefinitionFromFile`, `registerTsxForTypeScriptEntry`).
 
-`paratix` verlangt bereits `engines.node >= 24.0.0`. Node hat natives Type-Stripping für `.ts`-Dateien seit v22.18.0 / v23.6.0 standardmäßig aktiv (`--experimental-strip-types` ist per Default eingeschaltet, `--no-strip-types` deaktiviert es). Für alle von `paratix` unterstützten Runtimes (>= 24) ist natives Stripping also ohne Flag verfügbar. `--experimental-transform-types` (für nicht-erasable Syntax wie `enum`/`namespace`) bleibt opt-in.
+`paratix` already requires `engines.node >= 24.0.0`. Node has enabled native type stripping for
+`.ts` files by default since v22.18.0 / v23.6.0 (`--experimental-strip-types` is enabled by
+default; `--no-strip-types` disables it). Native stripping is therefore available without a flag
+on every runtime supported by `paratix` (>= 24). `--experimental-transform-types`, which handles
+non-erasable syntax such as `enum`/`namespace`, remains opt-in.
 
-Damit stellt sich die Frage: Kann natives Stripping `tsx` beim Laden scaffoldeter Playbooks ersetzen und so den ~20-MB-esbuild-Fußabdruck aus jeder `paratix`-Installation entfernen?
+This raises the question: Can native stripping replace `tsx` when loading scaffolded playbooks and
+remove the approximately 20 MB esbuild footprint from every `paratix` installation?
 
-## Analyse
+## Analysis
 
-### Was `pnpm create paratix` generiert
+### What `pnpm create paratix` Generates
 
-- `packages/create-paratix/src/templates.ts` erzeugt genau eine `server.ts` pro Projekt (Root-Bootstrap- oder Admin-Variante).
-- Der generierte Code nutzt **ausschließlich erasable Syntax**: bare-specifier-Imports (`import { … } from "paratix"`, `… from "paratix/modules"`), `const`-Deklarationen, Objektliterale und Funktionsaufrufe. Es kommen **keine** Typannotationen, `enum`s, `namespace`s, Decorators, Parameter-Properties oder relativen `.ts`-Importe vor.
-- Der generierte `tsconfig.json` (`TSCONFIG_TEMPLATE`) verwendet `moduleResolution: "Bundler"`, aber **kein** `paths`-Mapping — es gibt also keine Alias-Auflösung, die zur Laufzeit ohnehin weder von nativem Stripping noch von `tsx` erfüllt würde.
-- Das generierte `package.json` (`scaffoldFiles.ts`) listet `tsx` weiterhin als devDependency des Zielprojekts (neben `typescript`, `eslint`, `prettier`), unabhängig von der `paratix`-Prod-Dependency.
+- `packages/create-paratix/src/templates.ts` generates exactly one `server.ts` per project, in
+  either the root-bootstrap or admin variant.
+- The generated code uses **only erasable syntax**: bare-specifier imports
+  (`import { … } from "paratix"`, `… from "paratix/modules"`), `const` declarations, object
+  literals, and function calls. It contains **no** type annotations, `enum`s, `namespace`s,
+  decorators, parameter properties, or relative `.ts` imports.
+- The generated `tsconfig.json` (`TSCONFIG_TEMPLATE`) uses `moduleResolution: "Bundler"` but has
+  **no** `paths` mapping. There is therefore no alias resolution that would be unsupported at
+  runtime by either native stripping or `tsx`.
+- The generated `package.json` (`scaffoldFiles.ts`) continues to list `tsx` as a devDependency of
+  the target project, alongside `typescript`, `eslint`, and `prettier`, independently of the
+  `paratix` production dependency.
 
-### Praktische Verifikation (Node 26.3.1, dieser Worktree)
+### Practical Verification (Node 26.3.1, This Worktree)
 
-Beide real gerenderten Template-Varianten wurden mit einem Stub-`paratix`-Paket **ohne `tsx` und ohne Flags** nativ importiert:
+Both rendered template variants were imported natively with a stub `paratix` package, **without
+`tsx` and without flags**:
 
-- Root-Variante: `import()` erfolgreich, `default.run` mit 11 Modulen.
-- Admin-Variante: `import()` erfolgreich, `default.run` mit 10 Modulen.
-- Gegenprobe mit `--no-strip-types`: `ERR_UNKNOWN_FILE_EXTENSION` für `.ts` — bestätigt, dass das native Stripping der aktivierende Mechanismus ist.
-- `templates.ts` selbst (mit Union-Typen und Typannotationen) wird ebenfalls nativ gestrippt und ausgeführt.
+- Root variant: `import()` succeeded; `default.run` contained 11 modules.
+- Admin variant: `import()` succeeded; `default.run` contained 10 modules.
+- Control test with `--no-strip-types`: `.ts` produced `ERR_UNKNOWN_FILE_EXTENSION`, confirming
+  that native stripping is the enabling mechanism.
+- `templates.ts` itself, including union types and type annotations, was also stripped and run
+  natively.
 
-**Ergebnis: Scaffoldete Playbooks sind mit nativem Type-Stripping voll kompatibel.**
+**Result: Scaffolded playbooks are fully compatible with native type stripping.**
 
-### Grenzen des nativen Strippings (belegt)
+### Verified Limits of Native Stripping
 
-Native Stripping-Mode lehnt Syntax ab, die `tsx` (esbuild) transformiert:
+Native stripping mode rejects syntax that `tsx` (esbuild) transforms:
 
-- `enum` → `ERR_UNSUPPORTED_TYPESCRIPT_SYNTAX` (zuverlässiger, eindeutiger Diskriminator).
-- extensionsloser relativer Import (`import … from "./dep"`) → `ERR_MODULE_NOT_FOUND`.
-- `.js`-Specifier, der auf `./dep.ts` zeigt (`import … from "./dep.js"`) → `ERR_MODULE_NOT_FOUND`.
+- `enum` -> `ERR_UNSUPPORTED_TYPESCRIPT_SYNTAX` (a reliable, unambiguous discriminator).
+- Extensionless relative import (`import … from "./dep"`) -> `ERR_MODULE_NOT_FOUND`.
+- A `.js` specifier that points to `./dep.ts` (`import … from "./dep.js"`) ->
+  `ERR_MODULE_NOT_FOUND`.
 
-Die beiden `ERR_MODULE_NOT_FOUND`-Fälle sind **nicht** eindeutig von einer echt fehlenden Dependency (Tippfehler, nicht installiertes npm-Paket) unterscheidbar.
+The two `ERR_MODULE_NOT_FOUND` cases are **not** unambiguously distinguishable from a genuinely
+missing dependency, such as a typo or an uninstalled npm package.
 
-### Fallback-Mechanik (belegt, Node 26.3.1)
+### Verified Fallback Mechanics (Node 26.3.1)
 
-Getestet wurde „nativ zuerst, bei Fehler `tsx.register()` und erneuter `import()` derselben URL":
+The test sequence was "try native loading first; on failure, call `tsx.register()` and import the
+same URL again":
 
-- `enum.ts`: nativ scheitert mit `ERR_UNSUPPORTED_TYPESCRIPT_SYNTAX`, Retry nach `tsx.register()` **erfolgreich** (Node cached den Compile-Fehler nicht).
-- `.js`→`.ts`-Import: nativ scheitert mit `ERR_MODULE_NOT_FOUND`, Retry nach `tsx.register()` **erfolgreich**.
+- `enum.ts`: native loading failed with `ERR_UNSUPPORTED_TYPESCRIPT_SYNTAX`; retrying after
+  `tsx.register()` **succeeded** because Node did not cache the compilation error.
+- `.js` -> `.ts` import: native loading failed with `ERR_MODULE_NOT_FOUND`; retrying after
+  `tsx.register()` **succeeded**.
 
-Mechanisch funktioniert der nativ-first-Loader mit `tsx`-Fallback auf Node 26 also für beide Fehlerklassen.
+Mechanically, the native-first loader with a `tsx` fallback therefore works for both error classes
+on Node 26.
 
-### Fußabdruck-Messung (dieser Worktree, pnpm-Store)
+### Footprint Measurement (This Worktree, pnpm Store)
 
-| Artefakt                                           | Größe                         |
-| -------------------------------------------------- | ----------------------------- |
-| `tsx@4.22.4`                                       | 668 KB                        |
-| `esbuild@0.28.1` (JS)                              | ~10 MB                        |
-| `@esbuild/darwin-arm64@0.28.1` (Plattform-Binary)  | ~10 MB                        |
-| **`tsx`-Laufzeit-Closure gesamt (eine Plattform)** | **~20,6 MB pro Installation** |
+| Artifact                                         | Size                          |
+| ------------------------------------------------ | ----------------------------- |
+| `tsx@4.22.4`                                     | 668 KB                        |
+| `esbuild@0.28.1` (JS)                            | ~10 MB                        |
+| `@esbuild/darwin-arm64@0.28.1` (platform binary) | ~10 MB                        |
+| **Total `tsx` runtime closure (one platform)**   | **~20.6 MB per installation** |
 
-Dieser Betrag wird aktuell in **jede** `paratix`-Installation als Prod-Dependency gezogen. Der Fußabdruck-Gewinn entsteht **nur**, wenn `tsx` entfernt oder nach `optionalDependencies` verschoben wird. Bleibt `tsx` verpflichtender Fallback, ist der Gewinn null.
+This amount is currently added to **every** `paratix` installation as a production dependency.
+The footprint benefit exists **only** if `tsx` is removed or moved to `optionalDependencies`. If
+`tsx` remains a mandatory fallback, the benefit is zero.
 
-## Entscheidung
+## Decision
 
-1. Die Machbarkeit ist für den Default-Fall belegt: **natives Stripping trägt scaffoldete Playbooks vollständig** (kein `tsx`, kein Flag, Node >= 24).
-2. In diesem Schritt erfolgt **keine Produktiv-Codeänderung** am Playbook-Loading und **keine** Änderung der `paratix`-Dependencies.
-3. Der nativ-first-Loader wird als Folgeschritt vorbereitet und **erst mit grüner Integrationssuite** scharfgeschaltet — diese ist laut Issue #84 der eigentliche Gate und war in dieser Umgebung mangels Docker/Colima nicht ausführbar.
+1. Feasibility is established for the default case: **native stripping fully supports scaffolded
+   playbooks** (no `tsx`, no flag, Node >= 24).
+2. This step makes **no production code change** to playbook loading and **no** change to the
+   `paratix` dependencies.
+3. The native-first loader will be prepared as a follow-up and **enabled only after the integration
+   suite passes**. According to Issue #84, that suite is the actual gate and could not be run in
+   this environment because Docker/Colima was unavailable.
 
-## Begründung
+## Rationale
 
-Playbook-Loading ist ein sicherheits- und zuverlässigkeitsrelevanter Kern. Trotz belegter Machbarkeit bleiben Risiken, die **ausschließlich** über die Docker-gestützte Integrationssuite abgesichert werden können und lokal (`pnpm agent:check`, Unit-/dist-Tests) nicht abschließend beweisbar sind:
+Playbook loading is a security- and reliability-sensitive core function. Despite the demonstrated
+feasibility, risks remain that can be covered **only** by the Docker-backed integration suite and
+cannot be proven conclusively by local `pnpm agent:check`, unit tests, or dist tests:
 
-- **Node-24-Floor ungetestet:** Alle Messungen liefen auf Node 26.3.1. Die unterstützte Untergrenze ist Node 24. Modul-Cache-Verhalten bei fehlgeschlagenem Load und Stripping-Details variieren historisch zwischen Node-Minors; die Fallback-Recovery muss auf Node 24.x real bestätigt werden.
-- **Fehler-Maskierung auf dem `ERR_MODULE_NOT_FOUND`-Pfad:** Ein Fallback bei `ERR_MODULE_NOT_FOUND` kann eine echt fehlende Dependency hinter einem `tsx`-Retry verbergen. Ist `tsx` (als optionale Dependency) nicht installiert, erhält der Nutzer die irreführende „install tsx"-Meldung (`handleTsxLoadFailure`) statt der korrekten „module not found"-Diagnose. Eine engere Variante (Fallback nur bei `ERR_UNSUPPORTED_TYPESCRIPT_SYNTAX`) vermeidet das, verschiebt aber extensionslose und `.js`→`.ts`-Importe zu harten Fehlern.
-- **Doppelte Top-Level-Ausführung:** Schlägt ein nativer Import erst nach teilweiser Modulgraph-Auswertung fehl, führt der `tsx`-Retry seiteneffektbehafteten Top-Level-Code erneut aus. Playbooks sind überwiegend deklarativ (`server({…})`), enthalten aber Top-Level-Statements (z. B. `isFirstRun()`), sodass Doppelausführung nicht ohne E2E-Abdeckung ausgeschlossen werden kann.
-- **Der eigentliche Gate fehlt hier:** Ohne die Integrationssuite lässt sich ein Swap im Kern-Loading-Pfad nicht zweifelsfrei absichern. Die konservative Regel für diesen Kern lautet: im Zweifel kein Scharfschalten.
+- **Node 24 floor untested:** All measurements used Node 26.3.1, while the supported lower bound is
+  Node 24. Module-cache behavior after failed loads and stripping details have historically varied
+  across Node minor releases. Fallback recovery must be verified on an actual Node 24.x runtime.
+- **Error masking on the `ERR_MODULE_NOT_FOUND` path:** Falling back on
+  `ERR_MODULE_NOT_FOUND` can obscure a genuinely missing dependency behind a `tsx` retry. If
+  `tsx`, as an optional dependency, is not installed, the user receives the misleading "install
+  tsx" message (`handleTsxLoadFailure`) instead of the correct "module not found" diagnosis. A
+  narrower approach that falls back only on `ERR_UNSUPPORTED_TYPESCRIPT_SYNTAX` avoids this issue
+  but turns extensionless and `.js` -> `.ts` imports into hard failures.
+- **Duplicate top-level execution:** If a native import fails only after partially evaluating the
+  module graph, the `tsx` retry executes side-effectful top-level code again. Playbooks are mostly
+  declarative (`server({…})`) but can contain top-level statements such as `isFirstRun()`, so
+  duplicate execution cannot be ruled out without E2E coverage.
+- **The actual gate is unavailable here:** Without the integration suite, a swap in the core
+  loading path cannot be verified conclusively. The conservative rule for this core path is not to
+  enable the change when in doubt.
 
-Da der Fußabdruck-Gewinn zwingend an `tsx → optionalDependencies` gekoppelt ist und genau diese Änderung den Kern-Loading-Pfad und dessen Fehlerpfad berührt, wäre ein Swap ohne grüne Integrationssuite unverantwortlich. Die Machbarkeit ist belegt; die Freigabe ist es noch nicht.
+Because the footprint benefit necessarily depends on moving `tsx` to `optionalDependencies`, and
+that exact change affects both the core loading path and its error path, a swap without a passing
+integration suite would be irresponsible. Feasibility is established; approval is not.
 
-## Empfohlener Folgeschritt (mit Integrations-Gate scharfzuschalten)
+## Recommended Follow-up (Enable Only with an Integration Gate)
 
-1. In `loadServerDefinitionFromFile`/`registerTsxForTypeScriptEntry`: für TypeScript-Entries zuerst **nativ** `import(fileUrl)` versuchen, `tsx` **nicht** vorab registrieren.
-2. Fallback konservativ nur bei `ERR_UNSUPPORTED_TYPESCRIPT_SYNTAX` (eindeutiger Diskriminator): `tsx.register()` und einmaliger Retry derselben `fileUrl`. `ERR_MODULE_NOT_FOUND` bleibt zunächst ein harter, ehrlicher Fehler, um Diagnose-Maskierung zu vermeiden; eine Erweiterung auf extensionslose/`.js`→`.ts`-Importe erst nach expliziter Integrationsabdeckung.
-3. `tsx` von `dependencies` nach `optionalDependencies` in `packages/paratix/package.json` verschieben; der bestehende `isMissingTsxDependencyError`/`handleTsxLoadFailure`-Pfad deckt die „tsx nicht installiert"-Meldung bereits ab.
-4. Gate: `agent:check:integration` (Docker/Colima) grün auf Node 24.x **und** Node 26.x, inklusive Szenarien für scaffoldete Playbooks, `enum`-Fallback und fehlende-Dependency-Diagnose. Fußabdruck vorher/nachher erneut messen und dokumentieren.
+1. In `loadServerDefinitionFromFile`/`registerTsxForTypeScriptEntry`, try native
+   `import(fileUrl)` first for TypeScript entries; do **not** register `tsx` in advance.
+2. Fall back conservatively only on `ERR_UNSUPPORTED_TYPESCRIPT_SYNTAX`, the unambiguous
+   discriminator: call `tsx.register()` and retry the same `fileUrl` once.
+   `ERR_MODULE_NOT_FOUND` initially remains a hard, honest error to avoid masking the diagnosis.
+   Extend support for extensionless and `.js` -> `.ts` imports only after adding explicit
+   integration coverage.
+3. Move `tsx` from `dependencies` to `optionalDependencies` in `packages/paratix/package.json`.
+   The existing `isMissingTsxDependencyError`/`handleTsxLoadFailure` path already covers the "tsx
+   not installed" message.
+4. Gate: `agent:check:integration` (Docker/Colima) must pass on Node 24.x **and** Node 26.x,
+   including scenarios for scaffolded playbooks, the `enum` fallback, and missing-dependency
+   diagnostics. Measure and document the footprint again before and after the change.
 
-## Quelle
+## Source
 
-- Issue sebastian-software/paratix#84 — tsx durch Node-24-natives Type-Stripping ersetzen (Prod-`esbuild` ~10 MB entfernen).
+- Issue sebastian-software/paratix#84 - replace tsx with Node 24 native type stripping (remove the
+  approximately 10 MB production `esbuild` dependency).
 - Epic sebastian-software/paratix#97.
-- Laufzeitnutzung: `packages/paratix/src/cli.ts:569` (`import("tsx/esm/api")`), `loadServerDefinitionFromFile` / `registerTsxForTypeScriptEntry`.
-- Scaffold: `packages/create-paratix/src/templates.ts`, `packages/create-paratix/src/scaffoldFiles.ts`.
+- Runtime usage: `packages/paratix/src/cli.ts:569` (`import("tsx/esm/api")`),
+  `loadServerDefinitionFromFile` / `registerTsxForTypeScriptEntry`.
+- Scaffold: `packages/create-paratix/src/templates.ts`,
+  `packages/create-paratix/src/scaffoldFiles.ts`.

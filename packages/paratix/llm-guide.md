@@ -219,9 +219,9 @@ very slow artifact hosts or large downloads.
 | `file.stat`       | `(remotePath: string): Module`                                                                                      | No (always-applies) |
 | `file.template`   | `(remotePath: string, templatePath: string, options?: { mode?: string; owner?: string; strict?: boolean }): Module` | Yes                 |
 
-**Hinweis zu `file.copy` und Default-Mode:** Wenn `options.mode` weggelassen wird, setzt `file.copy` den Modus auf den dokumentierten Default `0644`. Der Modus wird sowohl beim Hochladen (`uploadFile` mit `{ mode }`) als auch in `check` gegen den Soll-Wert verglichen, damit nachfolgende Läufe Mode-Drift (z. B. manuelles `chmod 0600`) als `needs-apply` erkennen. Wer ein restriktiveres Recht braucht (z. B. für Secrets), übergibt explizit `{ mode: "0600" }`.
+**Note on `file.copy` and the default mode:** When `options.mode` is omitted, `file.copy` sets the mode to the documented default of `0644`. The mode is applied during upload (`uploadFile` with `{ mode }`) and compared with the desired value in `check`, so subsequent runs detect mode drift (for example, a manual `chmod 0600`) as `needs-apply`. Pass `{ mode: "0600" }` explicitly when more restrictive permissions are required, such as for secrets.
 
-**Hinweis zu `file.line`:** Der `line`-Wert muss eine einzelne Zeile ohne CR/LF sein. Für mehrzeilige Inhalte `file.block` verwenden.
+**Note on `file.line`:** The `line` value must be a single line without CR/LF characters. Use `file.block` for multiline content.
 
 ### `git`
 
@@ -349,7 +349,7 @@ rsync SSH process and does not depend on a local `known_hosts` entry.
 | `ssh.authorizedKeys` | `(user: string, key: string, options?: { state?: "absent" \| "present" }): Module`                                                     | Yes        |
 | `ssh.knownHosts`     | `(host: string, options?: { expectedFingerprint?: string; port?: number; publicKey?: string; state?: "absent" \| "present" }): Module` | Yes        |
 
-**Trust-Anchor-Pflicht für `ssh.knownHosts` (state `present`):** Im Default-State `present` muss entweder `expectedFingerprint` oder `publicKey` gesetzt sein. Ohne Trust Anchor wirft der Modul-Konstruktor sofort, denn `check` würde sonst jeden vorhandenen `known_hosts`-Eintrag (auch ältere, möglicherweise kompromittierte TOFU-Akzeptanzen) als „ok" werten und den Anchor-Vergleich überspringen. Für `state: "absent"` ist kein Anchor nötig — dort wird der Eintrag ohnehin entfernt.
+**Trust anchor requirement for `ssh.knownHosts` (`state: "present"`):** In the default `present` state, either `expectedFingerprint` or `publicKey` must be set. Without a trust anchor, the module constructor throws immediately because `check` would otherwise treat any existing `known_hosts` entry, including older and potentially compromised TOFU acceptances, as `ok` and skip the anchor comparison. No anchor is required for `state: "absent"`, because that state removes the entry.
 
 ### `sshd`
 
@@ -673,7 +673,7 @@ fail("This branch should be unreachable")
 
 ### `firstRun.stop(message?)`
 
-Stoppt den aktuellen Lauf kontrolliert, wenn Paratix mit `--first-run` gestartet wurde. Nützlich als explizite Staging-Grenze in Bootstrap-Playbooks.
+Stops the current run cleanly when Paratix was started with `--first-run`. Useful as an explicit staging boundary in bootstrap playbooks.
 
 ```typescript
 firstRun.stop("Bootstrap foundation complete; rerun without --first-run to continue.")
@@ -681,7 +681,7 @@ firstRun.stop("Bootstrap foundation complete; rerun without --first-run to conti
 
 ### `signals.flush(message?)`
 
-Führt alle aktuell offenen Signale des aktiven Scopes sofort aus und setzt deren Pending-Zustand zurück.
+Immediately runs all currently pending signals in the active scope and clears their pending state.
 
 ```typescript
 signals.flush("Reload services before the next bootstrap stage")
@@ -749,20 +749,20 @@ Rules:
 
 Diff-producing built-in modules:
 
-| Modul                                       | Diff-Inhalt                                                                                                                                                                             |
-| ------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `file.copy`                                 | Unified diff zwischen Remote-Datei und lokaler Quelle.                                                                                                                                  |
-| `file.template`                             | Unified diff zwischen Remote-Datei und gerendertem Template.                                                                                                                            |
-| `sysctl.set`                                | `key = old → new` für die Soll-Konfiguration.                                                                                                                                           |
-| `hostname.set`                              | `hostname = old → new`.                                                                                                                                                                 |
-| `swap.file`                                 | Diff des `/etc/fstab`-Eintrags (oder Entfernung der Zeile bei `state: "absent"`).                                                                                                       |
-| `swap.swappiness`                           | `vm.swappiness = old → new` (via `sysctl.set`).                                                                                                                                         |
-| `swap.vfsCachePressure`                     | `vm.vfs_cache_pressure = old → new` (via `sysctl.set`).                                                                                                                                 |
-| `cron.job` / `cron.absent`                  | Unified diff der Crontab des Ziel-Users.                                                                                                                                                |
-| `timer.scheduled` (present)                 | Konkatenierte Diffs der `.service`- und `.timer`-Unit-Dateien.                                                                                                                          |
-| `timer.scheduled` (absent) / `timer.absent` | Liste der zu entfernenden Unit-Dateien.                                                                                                                                                 |
-| `net.hosts`                                 | Unified diff von `/etc/hosts`.                                                                                                                                                          |
-| `quadlet.container`                         | Unified diff der `.container`-Unit-Datei. Wenn die Datei bereits passt, das `daemon-reload`-Flag aber fehlt, erscheint zusätzlich `(dry-run, daemon-reload pending)` als Detail-Suffix. |
+| Module                                      | Diff content                                                                                                                                                                         |
+| ------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `file.copy`                                 | Unified diff between the remote file and the local source.                                                                                                                           |
+| `file.template`                             | Unified diff between the remote file and the rendered template.                                                                                                                      |
+| `sysctl.set`                                | `key = old → new` for the desired configuration.                                                                                                                                     |
+| `hostname.set`                              | `hostname = old → new`.                                                                                                                                                              |
+| `swap.file`                                 | Diff of the `/etc/fstab` entry (or removal of the line for `state: "absent"`).                                                                                                       |
+| `swap.swappiness`                           | `vm.swappiness = old → new` (via `sysctl.set`).                                                                                                                                      |
+| `swap.vfsCachePressure`                     | `vm.vfs_cache_pressure = old → new` (via `sysctl.set`).                                                                                                                              |
+| `cron.job` / `cron.absent`                  | Unified diff of the target user's crontab.                                                                                                                                           |
+| `timer.scheduled` (present)                 | Concatenated diffs of the `.service` and `.timer` unit files.                                                                                                                        |
+| `timer.scheduled` (absent) / `timer.absent` | List of unit files to remove.                                                                                                                                                        |
+| `net.hosts`                                 | Unified diff of `/etc/hosts`.                                                                                                                                                        |
+| `quadlet.container`                         | Unified diff of the `.container` unit file. If the file already matches but the `daemon-reload` flag is missing, `(dry-run, daemon-reload pending)` also appears as a detail suffix. |
 
 ### Implementing a Diff for a Custom Module
 
@@ -817,7 +817,7 @@ The diff string is plain text — no ANSI codes. The output layer applies colors
 4. For idempotency with `command.shell()`, always provide a `check` command.
 5. Use `{{KEY|shell}}` or `{{KEY|raw}}` placeholders in `.tmpl` files — strict mode is on by default and bare `{{KEY}}` will throw. Provide values via `env` in `server()`.
 6. Use `service.restart()` and `service.reload()` as `signals` in recipes, not directly in `run`.
-7. Use `signals.flush()` only als expliziten Checkpoint, wenn gestufte Flows einen vorgezogenen Signal-Flush brauchen.
+7. Use `signals.flush()` only as an explicit checkpoint when staged flows require an early signal flush.
 8. Always pass a date string to `package.upgrade()` and `package.update()` -- it is the idempotency key.
 9. Specify `ssh.ports` as an array -- the runner tries each port in order.
 10. Custom modules must implement both `check` and `apply`, both async.
@@ -838,9 +838,9 @@ The diff string is plain text — no ANSI codes. The output layer applies colors
 9. Do NOT use template syntax `{{key}}` in TypeScript code -- templates are only for files rendered via `file.template()`.
 10. Do NOT use `signals` on the top-level `server()` when you mean a recipe signal -- `server.signals` fire when ANY module in `run` changed.
 11. Do NOT treat `signals.flush()` as a global queue flush -- it only affects the current scope.
-12. `signals.flush()` flusht immer nur den aktuellen Scope:
-    - in einer Recipe deren Recipe-Signale
-    - auf Top-Level `server(...).signals`
+12. `signals.flush()` always flushes only the current scope:
+    - inside a recipe, that recipe's signals
+    - at the top level, `server(...).signals`
 13. Do NOT call `server()` without all required fields (`name`, `host`, `ssh`, `run`) -- it throws at construction time. `name` and `host` must not be empty strings.
 14. Do NOT use empty arrays for `ssh.ports` or empty strings for `ssh.user`/`ssh.privateKey` -- validation rejects these. `ssh.privateKey` may be omitted entirely to use the SSH agent instead.
 15. Do NOT return loose `meta: { ... }` maps from custom modules -- always use typed meta entries.

@@ -1,48 +1,47 @@
 # ADR-0002: Defer broad integration matrix expansion
 
 **Status:** Accepted
-**Datum:** 2026-03-19
-**Kontext:** /build-feature — Review-Finding R-001 zu breiterer Modulintegrationsmatrix
+**Date:** 2026-03-19
+**Context:** /build-feature - review finding R-001 about a broader module integration matrix
 
-## Kontext
+## Context
 
-Der Review-Bericht `review-report-2026-03-19.md` enthält mit R-001 ein wichtiges Finding:
-Die reale Server-Abdeckung in `packages/paratix/test/integration/paratix.integration.test.ts`
-ist bewusst schmal und deckt aktuell nur SSH-Basisverhalten sowie die Modulfamilien `file`,
-`command` und `download` gegen einen echten Host ab. Ein großer Teil der öffentlichen
-Moduloberfläche bleibt weiterhin mock-validiert.
+Review report `review-report-2026-03-19.md` contains an important finding, R-001: real-server
+coverage in `packages/paratix/test/integration/paratix.integration.test.ts` is deliberately
+narrow and currently covers only basic SSH behavior and the `file`, `command`, and `download`
+module families against a real host. Much of the public module surface remains validated only
+with mocks.
 
-Im aktuellen Ausbau der Integrationsstrategie wurden bereits ein verlässlicher
-Integrationspfad (`agent:check:integration`) sowie zusätzliche echte Server-Szenarien
-für die bestehenden Schwerpunktbereiche umgesetzt. Die weitergehende Forderung aus R-001,
-auch Module wie `apt/package`, `service/systemd`, `cron`, `sshd`, `net`, `mount`,
-`user/group`, `git` oder `rsync` in die echte Integrationsmatrix aufzunehmen, würde den
-Scope deutlich erweitern.
+The latest expansion of the integration strategy already established a reliable integration
+path (`agent:check:integration`) and added real-server scenarios for the existing focus areas.
+The broader request in R-001 to include modules such as `apt/package`, `service/systemd`, `cron`,
+`sshd`, `net`, `mount`, `user/group`, `git`, or `rsync` in the real integration matrix would
+expand the scope significantly.
 
-## Entscheidung
+## Decision
 
-R-001 wird vorläufig nicht umgesetzt. Die reale Integrationsmatrix bleibt zunächst bewusst
-auf SSH-Basisverhalten sowie `file`, `command` und `download` beschränkt.
+Defer R-001 for now. Keep the real integration matrix deliberately limited to basic SSH behavior
+and the `file`, `command`, and `download` module families.
 
-## Begründung
+## Rationale
 
-- **Bewusste Scope-Begrenzung:** Der aktuelle Integrationspfad sollte zuerst stabil,
-  reproduzierbar und im Review einsetzbar werden. Eine breite Modulintegrationsmatrix
-  hätte den Scope des letzten Ausbaus deutlich überschritten.
-- **Hoher Infrastrukturaufwand:** Viele der in R-001 genannten Module benötigen für
-  belastbare E2E-Tests zusätzliche Systemdienste, Netzwerk-Setup oder zustandsbehaftete
-  OS-Umgebung. Das würde den Testcontainer und die Testlogik erheblich komplexer machen.
-- **Fragilitätsrisiko:** Eine schnelle Ausweitung auf zahlreiche stark OS-gebundene Module
-  würde die Integrationssuite langsamer und störanfälliger machen, bevor der aktuelle
-  Kernpfad ausreichend lange stabil im Einsatz war.
-- **Priorisierung:** Die bisher priorisierten echten Pfade (`file`, `command`, `download`,
-  SSH/SFTP/Reconnect) adressieren bereits zentrale Risiken rund um Shell-Quoting,
-  Dateizustand, Transfers und reale Host-Kommunikation.
-- **Follow-up statt Verwerfen:** Das Finding bleibt fachlich gültig. Es wird nicht
-  negiert, sondern bewusst als späteres Follow-up zurückgestellt.
+- **Deliberate scope limit:** The current integration path first needed to become stable,
+  reproducible, and usable in reviews. A broad module integration matrix would have substantially
+  exceeded the scope of the latest expansion.
+- **High infrastructure cost:** Many modules named in R-001 require additional system services,
+  network setup, or stateful operating-system environments for meaningful E2E tests. This would
+  make the test container and test logic considerably more complex.
+- **Fragility risk:** Rapidly expanding coverage to many modules that depend heavily on the
+  operating system would make the integration suite slower and more failure-prone before the
+  current core path has proved stable in use for long enough.
+- **Prioritization:** The real paths prioritized so far (`file`, `command`, `download`,
+  SSH/SFTP/reconnect) already address central risks involving shell quoting, file state,
+  transfers, and communication with real hosts.
+- **Follow-up rather than rejection:** The finding remains technically valid. It is not negated,
+  but deliberately deferred as a later follow-up.
 
-## Quelle
+## Source
 
-- **Finding:** R-001 — Reale Server-Abdeckung endet bei 4 Modulfamilien, der Rest ist weiter nur mock-validiert
-- **Schweregrad:** Wichtig
-- **Dateien:** review-report-2026-03-19.md, packages/paratix/test/integration/paratix.integration.test.ts
+- **Finding:** R-001 - Real-server coverage ends at four module families; the remainder is still validated only with mocks
+- **Severity:** Important
+- **Files:** review-report-2026-03-19.md, packages/paratix/test/integration/paratix.integration.test.ts
