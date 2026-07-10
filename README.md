@@ -101,6 +101,7 @@ If you are starting on GitHub, use this README as the overview and then jump int
 
 ## User Guide
 
+- [TypeScript API and Module Reference](./packages/paratix/llm-guide.md)
 - [User-guide overview](./docs/user-guide/README.md)
 - [Troubleshooting](./docs/user-guide/troubleshooting.md)
 - [Choosing between Paratix, Ansible, and pyinfra](./docs/user-guide/comparison.md)
