@@ -277,12 +277,12 @@ that are expected to respond more slowly.
 
 Import with renaming: `import { package as pkg } from "paratix/modules"`. The word `package` is reserved in JavaScript, so you must alias it.
 
-| Method              | Signature                                                          | Idempotent           |
-| ------------------- | ------------------------------------------------------------------ | -------------------- |
-| `package.installed` | `(...packagesAndOptions: Array<string \| UpgradeOptions>): Module` | Yes                  |
-| `package.absent`    | `(...packagesAndOptions: Array<string \| UpgradeOptions>): Module` | Yes                  |
-| `package.update`    | `(date: string, options?: UpgradeOptions): Module`                 | Yes (versioned flag) |
-| `package.upgrade`   | `(date: string, options?: UpgradeOptions): Module`                 | Yes (versioned flag) |
+| Method              | Signature                                                                         | Idempotent           |
+| ------------------- | --------------------------------------------------------------------------------- | -------------------- |
+| `package.installed` | `(...packagesAndOptions: Array<string \| PackageSpec \| UpgradeOptions>): Module` | Yes                  |
+| `package.absent`    | `(...packagesAndOptions: Array<string \| PackageSpec \| UpgradeOptions>): Module` | Yes                  |
+| `package.update`    | `(date: string, options?: UpgradeOptions): Module`                                | Yes (versioned flag) |
+| `package.upgrade`   | `(date: string, options?: UpgradeOptions): Module`                                | Yes (versioned flag) |
 
 #### `UpgradeOptions`
 
@@ -293,16 +293,67 @@ type UpgradeOptions = {
 }
 ```
 
-For `package.installed` / `package.absent`, pass the options object as the **last** argument
-after the package names; existing variadic call sites such as `pkg.installed("git", "curl")`
-keep working unchanged. Use a longer `timeout` for slow operations on production servers
-with large update backlogs:
+Für `package.installed` / `package.absent` wird das Options-Objekt als **letztes** Argument
+nach den Paketnamen übergeben; bestehende variadische Aufrufe wie `pkg.installed("git", "curl")`
+funktionieren unverändert weiter. Verwende einen höheren `timeout` für langsame Operationen auf
+Produktionsservern mit großem Update-Rückstand:
 
 ```typescript
 pkg.upgrade("2026-05-01", { timeout: 900_000 })
 pkg.installed("texlive-full", { timeout: 900_000 })
 apt.distUpgrade("2026-05-01", { timeout: 1_200_000 })
 ```
+
+#### `PackageSpec` — Versions-Pinning
+
+```typescript
+type PackageSpec = {
+  name: string
+  version?: string // Exakte Zielversion. Ohne `version` wird nur die Anwesenheit erzwungen.
+}
+```
+
+Ein Paket kann auf eine exakte Version festgenagelt werden, indem statt eines Strings ein
+`PackageSpec`-Objekt übergeben wird. Ein bloßer String `"grafana"` ist äquivalent zu
+`{ name: "grafana" }` (kein Pin). Die paketmanager-spezifische Syntax (`name=version`,
+`name-version`) wird **niemals** als Pass-through-String akzeptiert — ein String mit `=` bleibt
+ein ungültiger Paketname. Die Argumente werden über ihre **Form** unterschieden, nicht über die
+Position: ein Objekt **mit** `name`-Feld ist ein `PackageSpec` (darf auch an letzter Stelle
+stehen), ein Objekt **ohne** `name`-Feld an letzter Position ist das `UpgradeOptions`-Objekt.
+
+```typescript
+pkg.installed({ name: "grafana", version: "13.1.0" })
+pkg.installed("curl", { name: "grafana", version: "13.1.0" }, { timeout: 600_000 })
+```
+
+Übersetzung des Install-Tokens je Paketmanager:
+
+| Paketmanager | Install-Token  | Beispiel               |
+| ------------ | -------------- | ---------------------- |
+| apt          | `name=version` | `grafana=13.1.0`       |
+| apk          | `name=version` | `grafana=13.1.0-r0`    |
+| dnf / yum    | `name-version` | `grafana-13.1.0-1.el9` |
+
+Semantik:
+
+- **`check`** vergleicht die installierte gegen die gepinnte Version; jede Abweichung ergibt
+  `needs-apply`. Ohne gepinnte Version bleibt es eine reine Anwesenheitsprüfung.
+- **`apply`** installiert exakt die gepinnte Version — auch als **Downgrade**. Für apt wird bei
+  gepinnter Version automatisch `--allow-downgrades` ergänzt; für dnf/yum wird bei einer bereits
+  installierten höheren Version `dnf downgrade` / `yum downgrade` statt `install` verwendet
+  (apk installiert die exakte Version auch abwärts ohne Extra-Flag). Die Richtungsbestimmung für
+  dnf/yum nutzt einen versionsbewussten Vergleich auf dem Zielhost (`sort -V`), damit mehrstellige
+  Komponenten wie `13.9.0` vs. `13.10.0` korrekt geordnet werden.
+- Nach der Installation wird zusätzlich die Version verifiziert: eine Teil- oder Falschversions-
+  Installation meldet `failed`, nicht `changed`.
+- **Kein Hold.** Es wird ausschließlich die Version installiert — es werden **keine**
+  `apt-mark hold`-Marker und **keine** `preferences.d`-Dateien angelegt. Ohne einen erneuten
+  Lauf mit gepinnter Version kann ein späterer `apt upgrade` das Paket also wieder anheben.
+
+Gültige Versionen beginnen alphanumerisch und dürfen `[A-Za-z0-9]` sowie `. + ~ : _ -` enthalten
+(deckt apt-Epoch/Revision wie `1:2.3-1ubuntu0.2` und rpm-`version-release` wie `13.1.0-1.el9` ab).
+Whitespace und Shell-Metazeichen werden abgelehnt. `package.absent` ist rein namensbasiert; ein
+`PackageSpec` mit gesetzter `version` führt dort zu einem klaren Fehler.
 
 ### `quadlet`
 

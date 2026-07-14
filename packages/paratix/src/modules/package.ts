@@ -8,64 +8,27 @@ import {
   type SshConnection,
 } from "../types.js"
 import { hasFlag, setVersionedFlag } from "./moduleHelpers.js"
+import {
+  describePackages,
+  getInstalledVersion,
+  type NormalizedPackage,
+  type PackageArgument,
+  type PackageManager,
+  runVersionedInstall,
+  splitPackagesAndOptions,
+  type UpgradeOptions,
+  validatePackages,
+  versionsEqual,
+} from "./packageVersion.js"
+
+export type { PackageSpec, UpgradeOptions } from "./packageVersion.js"
 
 const EXEC_OPTS = { ignoreExitCode: true, silent: true } as const
-
-/** Per-call overrides for package operations that can take a long time. */
-export type UpgradeOptions = {
-  /** Override the SSH layer's command timeout (milliseconds). */
-  timeout?: number
-}
 
 function execOptions(options?: UpgradeOptions): ExecOptions {
   if (options?.timeout === undefined) return EXEC_OPTS
   return { ...EXEC_OPTS, timeout: options.timeout }
 }
-
-function splitPackagesAndOptions(values: ReadonlyArray<string | UpgradeOptions>): {
-  options: undefined | UpgradeOptions
-  packages: string[]
-} {
-  const packages: string[] = []
-  let options: undefined | UpgradeOptions
-  for (const [index, value] of values.entries()) {
-    if (typeof value === "string") {
-      packages.push(value)
-    } else if (index === values.length - 1) {
-      options = value
-    }
-  }
-  return { options, packages }
-}
-
-// R-0000812: reject both leading and trailing affix characters in addition
-// to whitespace and option-like prefixes. A trailing `-` is `apt`'s
-// "remove this package" suffix, a trailing `+` is "(re)install this
-// package" — accepting either would let a caller smuggle a state change
-// past `pkg.installed`/`pkg.absent` even though the surrounding command
-// uses the `--` argument terminator. A leading `+` is also disallowed:
-// while `apt` does not treat it as an option, some downstream tooling
-// does, so we keep the allowlist tight.
-const PACKAGE_NAME_PATTERN = /^[a-z0-9][a-z0-9+._\-]*[a-z0-9.]$/v
-
-function validatePackageNames(moduleName: string, packages: readonly string[]): void {
-  if (packages.length === 0) {
-    throw new Error(`${moduleName}: at least one package name is required`)
-  }
-
-  for (const packageName of packages) {
-    // Single-character names are permitted only if they consist of a single
-    // lowercase alnum character — the multi-character regex above requires
-    // a trailing non-affix character which forbids the single-char case.
-    const isSingleAlnum = packageName.length === 1 && /^[a-z0-9]$/v.test(packageName)
-    if (!isSingleAlnum && !PACKAGE_NAME_PATTERN.test(packageName)) {
-      throw new Error(`${moduleName}: invalid package name ${JSON.stringify(packageName)}`)
-    }
-  }
-}
-
-/** Supported system package managers. */
-type PackageManager = "apk" | "apt" | "dnf" | "yum"
 
 /**
  * Per-connection cache for the detected package manager (avoids repeated SSH
@@ -80,7 +43,7 @@ const pmCache = new WeakMap<SshConnection, PackageManager>()
 // R-0000534: pass `--` as the argument-list terminator for every supported
 // package manager (including apk) so package names that look like options
 // can never be interpreted as flags. Defense-in-depth alongside the strict
-// package-name validation in `validatePackageNames`.
+// package-name validation in `validatePackages`.
 const INSTALL_COMMANDS = {
   apk: (pkgs: string) => `apk add -- ${pkgs}`,
   apt: (pkgs: string) => `DEBIAN_FRONTEND=noninteractive apt-get install -y -- ${pkgs}`,
@@ -208,14 +171,39 @@ export async function isPackageInstalled(
   }
 }
 
+/**
+ * Determine whether a package satisfies its desired state on the target.
+ *
+ * Without a pinned version this is a pure presence check (today's behavior).
+ * With a pinned version the installed version must exactly equal the pin
+ * (see {@link versionsEqual}).
+ *
+ * @param ssh - Active SSH connection to the remote host.
+ * @param pm - Detected package manager.
+ * @param target - The normalized package with an optional pinned version.
+ * @returns `true` when the package is present and (if pinned) at the pin.
+ */
+async function isPackageSatisfied(
+  ssh: SshConnection,
+  pm: PackageManager,
+  target: NormalizedPackage
+): Promise<boolean> {
+  if (target.version === undefined) {
+    return isPackageInstalled(ssh, pm, target.name)
+  }
+  const installed = await getInstalledVersion(ssh, pm, target.name)
+  if (installed === null) return false
+  return versionsEqual({ installed, pinned: target.version, pm, ssh })
+}
+
 async function hasAnyMissingPackage(
   ssh: SshConnection,
   pm: PackageManager,
-  packages: readonly string[]
+  packages: readonly NormalizedPackage[]
 ): Promise<boolean> {
-  for (const packageName of packages) {
+  for (const package_ of packages) {
     // eslint-disable-next-line no-await-in-loop -- probe packages sequentially to avoid SSH-channel pressure
-    if (!(await isPackageInstalled(ssh, pm, packageName))) return true
+    if (!(await isPackageSatisfied(ssh, pm, package_))) return true
   }
   return false
 }
@@ -227,16 +215,19 @@ async function hasAnyMissingPackage(
 // skip packages without erroring). Re-check each requested
 // package individually and surface the still-missing names as a
 // failed result instead of optimistically reporting `changed`.
+// R-0000812 (version pinning): post-install verification checks the pinned
+// version, not just presence. A partial or wrong-version install must surface
+// as `failed`, never a false `changed`.
 async function collectStillMissingPackages(
   ssh: SshConnection,
   pm: PackageManager,
-  packages: readonly string[]
+  packages: readonly NormalizedPackage[]
 ): Promise<string[]> {
   const stillMissing: string[] = []
-  for (const verifyName of packages) {
+  for (const package_ of packages) {
     // eslint-disable-next-line no-await-in-loop -- post-install verification per package
-    if (!(await isPackageInstalled(ssh, pm, verifyName))) {
-      stillMissing.push(verifyName)
+    if (!(await isPackageSatisfied(ssh, pm, package_))) {
+      stillMissing.push(package_.name)
     }
   }
   return stillMissing
@@ -244,23 +235,30 @@ async function collectStillMissingPackages(
 
 async function runInstallAndVerify(parameters: {
   options: undefined | UpgradeOptions
-  packages: readonly string[]
+  packages: readonly NormalizedPackage[]
   pm: PackageManager
   ssh: SshConnection
 }): Promise<ModuleResult> {
   const { options, packages, pm, ssh } = parameters
-  const quoted = packages.map((p) => shellQuote(p)).join(" ")
-  const result = await ssh.exec(INSTALL_COMMANDS[pm](quoted), execOptions(options))
-  if (result.code !== 0) {
-    return failedCommand(
-      `[package.installed: ${packages.join(", ")}] package installation failed`,
-      result
-    )
-  }
+  const label = describePackages(packages)
+
+  // Run any required downgrades and the install (with `--allow-downgrades` for
+  // pinned apt packages); the version-aware orchestration lives in
+  // `packageVersion.ts`.
+  const failure = await runVersionedInstall({
+    baseInstall: INSTALL_COMMANDS[pm],
+    execOpts: execOptions(options),
+    label,
+    packages,
+    pm,
+    ssh,
+  })
+  if (failure) return failure
+
   const stillMissing = await collectStillMissingPackages(ssh, pm, packages)
   if (stillMissing.length > 0) {
     return failed(
-      `[package.installed: ${packages.join(", ")}] packages still missing after install: ${stillMissing.join(", ")}`
+      `[package.installed: ${label}] packages still missing after install: ${stillMissing.join(", ")}`
     )
   }
   return { status: "changed" }
@@ -295,25 +293,36 @@ export const pkg = {
    * Pass an `UpgradeOptions` object as the last argument to override the SSH
    * timeout for slow remove operations.
    *
-   * @param packagesAndOptions - One or more package names, optionally followed
-   *   by an `UpgradeOptions` object as the last argument.
+   * @param packagesAndOptions - One or more package names (bare strings or
+   *   `PackageSpec` objects without a `version`), optionally followed by an
+   *   `UpgradeOptions` object as the last argument.
    * @returns A Module that removes the packages if any are present.
    *
    * @example
    * pkg.absent("vim", "nano")
    * pkg.absent("vim", "nano", { timeout: 600_000 })
    */
-  absent(...packagesAndOptions: Array<string | UpgradeOptions>): Module {
+  absent(...packagesAndOptions: PackageArgument[]): Module {
     const { options, packages } = splitPackagesAndOptions(packagesAndOptions)
-    validatePackageNames("package.absent", packages)
+    validatePackages("package.absent", packages)
+    // `absent` is presence-based; a version pin has no meaning here and must
+    // not be silently ignored — reject it loudly.
+    for (const p of packages) {
+      if (p.version !== undefined) {
+        throw new Error(
+          `package.absent: version pinning is not supported (package ${JSON.stringify(p.name)})`
+        )
+      }
+    }
+    const names = packages.map((p) => p.name)
+    const label = names.join(", ")
     return {
       async apply(ssh: null | SshConnection): Promise<ModuleResult> {
-        if (!ssh)
-          return failed(`[package.absent: ${packages.join(", ")}] SSH connection is required`)
+        if (!ssh) return failed(`[package.absent: ${label}] SSH connection is required`)
         const pm = await detectPackageManager(ssh)
-        if (!pm) return missingPackageManager(`package.absent: ${packages.join(", ")}`)
+        if (!pm) return missingPackageManager(`package.absent: ${label}`)
         let anyInstalled = false
-        for (const packageName of packages) {
+        for (const packageName of names) {
           // eslint-disable-next-line no-await-in-loop
           if (await isPackageInstalled(ssh, pm, packageName)) {
             anyInstalled = true
@@ -321,13 +330,10 @@ export const pkg = {
           }
         }
         if (!anyInstalled) return { status: "ok" }
-        const quoted = packages.map((p) => shellQuote(p)).join(" ")
+        const quoted = names.map((p) => shellQuote(p)).join(" ")
         const result = await ssh.exec(REMOVE_COMMANDS[pm](quoted), execOptions(options))
         if (result.code !== 0) {
-          return failedCommand(
-            `[package.absent: ${packages.join(", ")}] package removal failed`,
-            result
-          )
+          return failedCommand(`[package.absent: ${label}] package removal failed`, result)
         }
         return { status: "changed" }
       },
@@ -335,13 +341,13 @@ export const pkg = {
         if (!ssh) return NEEDS_APPLY
         const pm = await detectPackageManager(ssh)
         if (!pm) return NEEDS_APPLY
-        for (const p of packages) {
+        for (const p of names) {
           // eslint-disable-next-line no-await-in-loop
           if (await isPackageInstalled(ssh, pm, p)) return NEEDS_APPLY
         }
         return "ok"
       },
-      name: `package.absent: ${packages.join(", ")}`,
+      name: `package.absent: ${label}`,
     }
   },
 
@@ -354,24 +360,32 @@ export const pkg = {
    * Pass an `UpgradeOptions` object as the last argument to override the SSH
    * timeout for slow install operations.
    *
-   * @param packagesAndOptions - One or more package names, optionally followed
-   *   by an `UpgradeOptions` object as the last argument.
+   * Pass a `PackageSpec` (`{ name, version }`) to pin a package to an exact
+   * version; `check` then reports drift against the installed version and
+   * `apply` converges on the pin, including a downgrade. No package holds are
+   * created — only the requested version is installed.
+   *
+   * @param packagesAndOptions - One or more packages (bare name strings or
+   *   `PackageSpec` objects), optionally followed by an `UpgradeOptions` object
+   *   as the last argument.
    * @returns A Module that installs missing packages.
    *
    * @example
    * pkg.installed("git", "curl", "unzip")
    * pkg.installed("texlive-full", { timeout: 900_000 })
+   * pkg.installed({ name: "grafana", version: "13.1.0" })
    */
-  installed(...packagesAndOptions: Array<string | UpgradeOptions>): Module {
+  installed(...packagesAndOptions: PackageArgument[]): Module {
     const { options, packages } = splitPackagesAndOptions(packagesAndOptions)
-    validatePackageNames("package.installed", packages)
+    validatePackages("package.installed", packages)
+    const label = describePackages(packages)
     return {
       async apply(ssh: null | SshConnection): Promise<ModuleResult> {
         if (!ssh) {
-          return failed(`[package.installed: ${packages.join(", ")}] SSH connection is required`)
+          return failed(`[package.installed: ${label}] SSH connection is required`)
         }
         const pm = await detectPackageManager(ssh)
-        if (!pm) return missingPackageManager(`package.installed: ${packages.join(", ")}`)
+        if (!pm) return missingPackageManager(`package.installed: ${label}`)
         const anyMissing = await hasAnyMissingPackage(ssh, pm, packages)
         if (!anyMissing) return { status: "ok" }
         return runInstallAndVerify({ options, packages, pm, ssh })
@@ -382,11 +396,11 @@ export const pkg = {
         if (!pm) return NEEDS_APPLY
         for (const p of packages) {
           // eslint-disable-next-line no-await-in-loop
-          if (!(await isPackageInstalled(ssh, pm, p))) return NEEDS_APPLY
+          if (!(await isPackageSatisfied(ssh, pm, p))) return NEEDS_APPLY
         }
         return "ok"
       },
-      name: `package.installed: ${packages.join(", ")}`,
+      name: `package.installed: ${label}`,
     }
   },
 

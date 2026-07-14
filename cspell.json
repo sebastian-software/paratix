@@ -199,6 +199,7 @@
     "syscalls",
     "dearmored",
     "gnupg",
+    "grafana",
     "trustdb",
     "umasks",
     "userdel",
