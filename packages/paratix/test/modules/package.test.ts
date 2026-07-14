@@ -1,7 +1,7 @@
 /* eslint-disable no-template-curly-in-string -- Shell dpkg-query format strings, not JS templates */
 import { describe, expect, it } from "vitest"
 
-import type { ExecOptions } from "../../src/types.js"
+import type { ExecOptions, ExecResult } from "../../src/types.js"
 
 import { detectPackageManager, pkg } from "../../src/modules/package.js"
 import { CommandError } from "../../src/sshHelpers.js"
@@ -191,38 +191,43 @@ function makeAlwaysMissingPackageTest(
 // single boolean once the given install/downgrade command has executed.
 // ---------------------------------------------------------------------------
 
-// Build exec()/output() overrides so `queryCommand` yields `before` until
-// `installCommand` has run via exec(), then `after`. The install command and
-// its options are recorded. Returns the overrides for the test body to assign
-// (assigning inside the helper would trip `no-param-reassign`).
-function makeVersionOutputOverride(
+// Build an exec() override so the apt/apk `queryCommand` reports `before` (as
+// stdout) until `installCommand` has run via exec(), then `after`. apt and apk
+// both query the installed version via ssh.exec (with a tolerant non-zero exit),
+// so the query and the install share a single exec override. The install
+// command and its options are recorded. `beforeCode` models the query's exit
+// code before install (default 0); the very-first-install case stubs `1` here.
+function makeVersionExecOverride(
   ssh: MockSsh,
   parameters: {
     after: string
     before: string
+    beforeCode?: number
     installCommand: string
     queryCommand: string
   }
-): { exec: MockSsh["exec"]; output: MockSsh["output"] } {
-  const { after, before, installCommand, queryCommand } = parameters
-  const originalOutput = ssh.output.bind(ssh)
+): MockSsh["exec"] {
+  const { after, before, beforeCode = 0, installCommand, queryCommand } = parameters
   const originalExec = ssh.exec.bind(ssh)
   let installed = false
-  return {
-    async exec(command, options) {
-      if (command !== installCommand) return originalExec(command, options)
+  const respond = async (command: string, options: ExecOptions | undefined, result: ExecResult) => {
+    ssh.calls.push(command)
+    ssh.execCalls.push({ command, options })
+    await Promise.resolve()
+    return result
+  }
+  return async (command, options) => {
+    if (command === installCommand) {
       installed = true
-      ssh.calls.push(command)
-      ssh.execCalls.push({ command, options })
-      await Promise.resolve()
-      return { code: 0, stderr: "", stdout: "" }
-    },
-    async output(command) {
-      if (command !== queryCommand) return originalOutput(command)
-      await Promise.resolve()
-      ssh.calls.push(command)
-      return installed ? after : before
-    },
+      return respond(command, options, { code: 0, stderr: "", stdout: "" })
+    }
+    if (command === queryCommand) {
+      const result = installed
+        ? { code: 0, stderr: "", stdout: after }
+        : { code: beforeCode, stderr: "", stdout: before }
+      return respond(command, options, result)
+    }
+    return originalExec(command, options)
   }
 }
 
@@ -522,14 +527,12 @@ describe("pkg.installed version pinning", () => {
       ...APT_FOUND,
       "dpkg --compare-versions '13.1.0' eq '13.1.0'": { code: 0 },
     })
-    const aptOverride = makeVersionOutputOverride(ssh, {
+    ssh.exec = makeVersionExecOverride(ssh, {
       after: "13.1.0",
       before: "",
       installCommand,
       queryCommand: "dpkg-query -W -f='${Version}' 'grafana' 2>/dev/null",
     })
-    ssh.exec = aptOverride.exec
-    ssh.output = aptOverride.output
     const mod = pkg.installed({ name: "grafana", version: "13.1.0" })
     expect(await mod.apply(ssh, emptyEnv)).toStrictEqual({ status: "changed" })
     expect(ssh.calls).toContain(installCommand)
@@ -557,17 +560,83 @@ describe("pkg.installed version pinning", () => {
   it("builds name=version token for apk", async () => {
     const installCommand = "apk add -- 'grafana=13.1.0-r0'"
     const ssh = createMockSsh({ ...APK_FOUND })
-    const apkOverride = makeVersionOutputOverride(ssh, {
+    ssh.exec = makeVersionExecOverride(ssh, {
       after: "grafana-13.1.0-r0 = 13.1.0-r0",
       before: "",
       installCommand,
       queryCommand: "apk version -v 'grafana'",
     })
-    ssh.exec = apkOverride.exec
-    ssh.output = apkOverride.output
     const mod = pkg.installed({ name: "grafana", version: "13.1.0-r0" })
     expect(await mod.apply(ssh, emptyEnv)).toStrictEqual({ status: "changed" })
     expect(ssh.calls).toContain(installCommand)
+  })
+
+  // first-install of a not-yet-installed pinned package
+  //
+  // Regression: querying the installed version of an absent package exits
+  // non-zero (`dpkg-query`/`apk version` exit 1). getInstalledVersion must
+  // treat that as "not installed" (null) rather than throwing — otherwise the
+  // very first install of a pinned package aborts before the install runs.
+
+  it("apply installs a pinned apt package that is not yet installed", async () => {
+    const queryCommand = "dpkg-query -W -f='${Version}' 'grafana' 2>/dev/null"
+    const installCommand =
+      "DEBIAN_FRONTEND=noninteractive apt-get install -y --allow-downgrades -- 'grafana=13.1.0'"
+    const ssh = createMockSsh({
+      ...APT_FOUND,
+      // Post-install verification: installed 13.1.0 equals the pin.
+      "dpkg --compare-versions '13.1.0' eq '13.1.0'": { code: 0 },
+    })
+    // Pre-install: the version query exits 1 (package absent) → null, so the
+    // install must proceed instead of throwing. Post-install: it reports 13.1.0.
+    ssh.exec = makeVersionExecOverride(ssh, {
+      after: "13.1.0",
+      before: "",
+      beforeCode: 1,
+      installCommand,
+      queryCommand,
+    })
+    const mod = pkg.installed({ name: "grafana", version: "13.1.0" })
+    expect(await mod.apply(ssh, emptyEnv)).toStrictEqual({ status: "changed" })
+    expect(ssh.calls).toContain(installCommand)
+  })
+
+  it("apply installs a pinned apk package that is not yet installed", async () => {
+    const queryCommand = "apk version -v 'grafana'"
+    const installCommand = "apk add -- 'grafana=13.1.0-r0'"
+    const ssh = createMockSsh({ ...APK_FOUND })
+    // Pre-install: `apk version -v` exits 1 (package absent) → null, so the
+    // install proceeds. Post-install: it reports the pinned version.
+    ssh.exec = makeVersionExecOverride(ssh, {
+      after: "grafana-13.1.0-r0 = 13.1.0-r0",
+      before: "",
+      beforeCode: 1,
+      installCommand,
+      queryCommand,
+    })
+    const mod = pkg.installed({ name: "grafana", version: "13.1.0-r0" })
+    expect(await mod.apply(ssh, emptyEnv)).toStrictEqual({ status: "changed" })
+    expect(ssh.calls).toContain(installCommand)
+  })
+
+  it("check returns needs-apply for an absent pinned apt package (non-zero query)", async () => {
+    const ssh = createMockSsh({
+      ...APT_FOUND,
+      // dpkg-query for an absent package exits 1; must not throw → not installed.
+      "dpkg-query -W -f='${Version}' 'grafana' 2>/dev/null": { code: 1, stdout: "" },
+    })
+    const mod = pkg.installed({ name: "grafana", version: "13.1.0" })
+    expect(await mod.check(ssh, emptyEnv)).toBe("needs-apply")
+  })
+
+  it("check returns needs-apply for an absent pinned apk package (non-zero query)", async () => {
+    const ssh = createMockSsh({
+      ...APK_FOUND,
+      // `apk version -v` for an absent package exits non-zero; must not throw → not installed.
+      "apk version -v 'grafana'": { code: 1, stdout: "" },
+    })
+    const mod = pkg.installed({ name: "grafana", version: "13.1.0-r0" })
+    expect(await mod.check(ssh, emptyEnv)).toBe("needs-apply")
   })
 
   // check semantics
@@ -623,14 +692,12 @@ describe("pkg.installed version pinning", () => {
       // Pre-install drift check: installed 14.0.0 != pinned 13.1.0.
       "dpkg --compare-versions '14.0.0' eq '13.1.0'": { code: 1 },
     })
-    const aptOverride = makeVersionOutputOverride(ssh, {
+    ssh.exec = makeVersionExecOverride(ssh, {
       after: "13.1.0",
       before: "14.0.0",
       installCommand,
       queryCommand: "dpkg-query -W -f='${Version}' 'grafana' 2>/dev/null",
     })
-    ssh.exec = aptOverride.exec
-    ssh.output = aptOverride.output
     const mod = pkg.installed({ name: "grafana", version: "13.1.0" })
     expect(await mod.apply(ssh, emptyEnv)).toStrictEqual({ status: "changed" })
     expect(ssh.calls).toContain(installCommand)
