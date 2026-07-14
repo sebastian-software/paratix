@@ -170,10 +170,15 @@ function parseApkVersion(out: string, packageName: string): null | string {
  * - apt: `dpkg-query -W -f='${Version}'` → the full Debian version
  *   (including epoch/revision), e.g. `1:2.3-1ubuntu0.2`. Presence is derived
  *   from a non-empty result.
- * - dnf/yum (rpm): `rpm -q --qf '%{VERSION}-%{RELEASE}'` → `version-release`
- *   (e.g. `13.1.0-1.el9`). This matches the `name-version` install token, so
- *   a user pinning `13.1.0-1.el9` compares equal. A missing package makes
- *   `rpm -q` exit non-zero, which we map to `null`.
+ * - dnf/yum (rpm): `rpm -q --qf '%|EPOCH?{%{EPOCH}:}:{}|%{VERSION}-%{RELEASE}\n'`
+ *   → `[epoch:]version-release`. The epoch-conditional prints an `epoch:`
+ *   prefix only when an epoch is set (e.g. `1:2.0-1`) and nothing otherwise
+ *   (e.g. `13.1.0-1.el9`), so an epoch-qualified pin is not lost. The trailing
+ *   `\n` separates the (rare) case of multiple installed versions — installonly
+ *   packages such as the kernel — instead of concatenating them into an
+ *   unusable blob; we take the last line as the representative version. Exact
+ *   pinning of installonly packages with several versions installed at once is
+ *   out of scope. A missing package makes `rpm -q` exit non-zero → `null`.
  * - apk: `apk version -v <name>` prints `<name-version> <op> <candidate>`;
  *   the trailing `-version` segment of the first field is the installed
  *   version. When the package is absent the command prints nothing, yielding
@@ -199,11 +204,19 @@ export async function getInstalledVersion(
     const aptVersion = raw.trim()
     return aptVersion.length > 0 ? aptVersion : null
   }
-  // dnf / yum (rpm)
-  const result = await ssh.exec(`rpm -q --qf '%{VERSION}-%{RELEASE}' ${quoted}`, VERSION_EXEC_OPTS)
+  // dnf / yum (rpm): epoch-aware, newline-terminated query — see the doc above.
+  const result = await ssh.exec(
+    `rpm -q --qf '%|EPOCH?{%{EPOCH}:}:{}|%{VERSION}-%{RELEASE}\\n' ${quoted}`,
+    VERSION_EXEC_OPTS
+  )
   if (result.code !== 0) return null
-  const rpmVersion = result.stdout.trim()
-  return rpmVersion.length > 0 ? rpmVersion : null
+  const lines = result.stdout
+    .split("\n")
+    .map((line) => line.trim())
+    .filter((line) => line.length > 0)
+  // Multiple lines → installonly package with several versions installed; use
+  // the last one as the representative. Zero lines → treat as not installed.
+  return lines.at(-1) ?? null
 }
 
 // Compare the installed version of a pinned package against the pin for exact
@@ -271,11 +284,19 @@ async function installedIsHigher(
   pinned: string
 ): Promise<boolean> {
   if (installed === pinned) return false
-  // `sort -V` puts the higher version last; if that last line equals the
-  // installed version, the installed one is higher → downgrade needed.
-  return ssh.test(
-    `test "$(printf '%s\\n%s\\n' ${shellQuote(pinned)} ${shellQuote(installed)} | sort -V | tail -n1)" = ${shellQuote(installed)}`
+  const result = await ssh.exec(
+    `printf '%s\\n%s\\n' ${shellQuote(pinned)} ${shellQuote(installed)} | sort -V | tail -n1`,
+    VERSION_EXEC_OPTS
   )
+  // Only a successful `sort -V` (coreutils, always present on dnf/yum hosts) is
+  // authoritative: the higher version sorts last, so if it equals the installed
+  // version a downgrade is required. If the pipeline could not run (non-zero
+  // exit) we do NOT assume a downgrade — a plain install converges for the
+  // common upgrade/equal case, and a genuinely required downgrade on such a
+  // host then surfaces as a clear post-install verification failure rather than
+  // a silent wrong action.
+  if (result.code !== 0) return false
+  return result.stdout.trim() === installed
 }
 
 // Decide, per package, whether an rpm-based install must instead go through

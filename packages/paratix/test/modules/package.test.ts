@@ -259,10 +259,16 @@ function makeRpmVersionExecOverride(
 }
 
 // Build the exact `sort -V` version-comparison command that
-// `collectDowngradeTokens` issues via ssh.test to decide the dnf/yum direction.
+// `collectDowngradeTokens` issues via ssh.exec to decide the dnf/yum direction.
 // `installed` is the version reported by rpm, `pinned` the requested version.
+// The command prints the higher version (last line); the caller stubs stdout.
 function sortVCommand(installed: string, pinned: string): string {
-  return `test "$(printf '%s\\n%s\\n' '${pinned}' '${installed}' | sort -V | tail -n1)" = '${installed}'`
+  return `printf '%s\\n%s\\n' '${pinned}' '${installed}' | sort -V | tail -n1`
+}
+
+// The epoch-aware, newline-terminated rpm query issued by getInstalledVersion.
+function rpmQueryCommand(name: string): string {
+  return `rpm -q --qf '%|EPOCH?{%{EPOCH}:}:{}|%{VERSION}-%{RELEASE}\\n' '${name}'`
 }
 
 // ---------------------------------------------------------------------------
@@ -533,14 +539,15 @@ describe("pkg.installed version pinning", () => {
     const installCommand = "dnf install -y -- 'grafana-13.1.0-1.el9'"
     const ssh = createMockSsh({
       ...DNF_FOUND,
-      // Installed 12.0.0-1.el9 is NOT higher than pinned 13.1.0-1.el9 → install.
-      [sortVCommand("12.0.0-1.el9", "13.1.0-1.el9")]: { code: 1 },
+      // Installed 12.0.0-1.el9 is NOT higher than pinned 13.1.0-1.el9 → install
+      // (sort -V puts the pinned version last).
+      [sortVCommand("12.0.0-1.el9", "13.1.0-1.el9")]: { code: 0, stdout: "13.1.0-1.el9\n" },
     })
     ssh.exec = makeRpmVersionExecOverride(ssh, {
       after: "13.1.0-1.el9",
       before: "12.0.0-1.el9",
       mutatingCommand: installCommand,
-      queryCommand: "rpm -q --qf '%{VERSION}-%{RELEASE}' 'grafana'",
+      queryCommand: rpmQueryCommand("grafana"),
     })
     const mod = pkg.installed({ name: "grafana", version: "13.1.0-1.el9" })
     expect(await mod.apply(ssh, emptyEnv)).toStrictEqual({ status: "changed" })
@@ -588,7 +595,7 @@ describe("pkg.installed version pinning", () => {
   it("check returns needs-apply when a pinned package is absent (dnf)", async () => {
     const ssh = createMockSsh({
       ...DNF_FOUND,
-      "rpm -q --qf '%{VERSION}-%{RELEASE}' 'grafana'": { code: 1, stdout: "" },
+      [rpmQueryCommand("grafana")]: { code: 1, stdout: "" },
     })
     const mod = pkg.installed({ name: "grafana", version: "13.1.0-1.el9" })
     expect(await mod.check(ssh, emptyEnv)).toBe("needs-apply")
@@ -634,14 +641,14 @@ describe("pkg.installed version pinning", () => {
     const ssh = createMockSsh({
       ...DNF_FOUND,
       // Installed 14.0.0 IS higher than pinned 13.1.0 → downgrade.
-      [sortVCommand("14.0.0", "13.1.0")]: { code: 0 },
+      [sortVCommand("14.0.0", "13.1.0")]: { code: 0, stdout: "14.0.0\n" },
     })
     // Installed 14.0.0 initially (higher → downgrade), then 13.1.0.
     ssh.exec = makeRpmVersionExecOverride(ssh, {
       after: "13.1.0",
       before: "14.0.0",
       mutatingCommand: downgradeCommand,
-      queryCommand: "rpm -q --qf '%{VERSION}-%{RELEASE}' 'grafana'",
+      queryCommand: rpmQueryCommand("grafana"),
     })
     const mod = pkg.installed({ name: "grafana", version: "13.1.0" })
     expect(await mod.apply(ssh, emptyEnv)).toStrictEqual({ status: "changed" })
@@ -654,13 +661,13 @@ describe("pkg.installed version pinning", () => {
     const ssh = createMockSsh({
       ...DNF_FOUND,
       // Installed 12.0.0 is NOT higher than pinned 13.1.0 → install.
-      [sortVCommand("12.0.0", "13.1.0")]: { code: 1 },
+      [sortVCommand("12.0.0", "13.1.0")]: { code: 0, stdout: "13.1.0\n" },
     })
     ssh.exec = makeRpmVersionExecOverride(ssh, {
       after: "13.1.0",
       before: "12.0.0",
       mutatingCommand: installCommand,
-      queryCommand: "rpm -q --qf '%{VERSION}-%{RELEASE}' 'grafana'",
+      queryCommand: rpmQueryCommand("grafana"),
     })
     const mod = pkg.installed({ name: "grafana", version: "13.1.0" })
     expect(await mod.apply(ssh, emptyEnv)).toStrictEqual({ status: "changed" })
@@ -676,14 +683,14 @@ describe("pkg.installed version pinning", () => {
     const ssh = createMockSsh({
       ...DNF_FOUND,
       // 13.9.0-1 is NOT higher than 13.10.0-1 → install (a lexical compare would
-      // wrongly pick downgrade here).
-      [sortVCommand("13.9.0-1", "13.10.0-1")]: { code: 1 },
+      // wrongly pick downgrade here). sort -V puts 13.10.0-1 last.
+      [sortVCommand("13.9.0-1", "13.10.0-1")]: { code: 0, stdout: "13.10.0-1\n" },
     })
     ssh.exec = makeRpmVersionExecOverride(ssh, {
       after: "13.10.0-1",
       before: "13.9.0-1",
       mutatingCommand: installCommand,
-      queryCommand: "rpm -q --qf '%{VERSION}-%{RELEASE}' 'grafana'",
+      queryCommand: rpmQueryCommand("grafana"),
     })
     const mod = pkg.installed({ name: "grafana", version: "13.10.0-1" })
     expect(await mod.apply(ssh, emptyEnv)).toStrictEqual({ status: "changed" })
@@ -696,19 +703,66 @@ describe("pkg.installed version pinning", () => {
     const ssh = createMockSsh({
       ...DNF_FOUND,
       // 13.10.0-1 IS higher than 13.9.0-1 → downgrade (a lexical compare would
-      // wrongly pick install here).
-      [sortVCommand("13.10.0-1", "13.9.0-1")]: { code: 0 },
+      // wrongly pick install here). sort -V puts 13.10.0-1 last.
+      [sortVCommand("13.10.0-1", "13.9.0-1")]: { code: 0, stdout: "13.10.0-1\n" },
     })
     ssh.exec = makeRpmVersionExecOverride(ssh, {
       after: "13.9.0-1",
       before: "13.10.0-1",
       mutatingCommand: downgradeCommand,
-      queryCommand: "rpm -q --qf '%{VERSION}-%{RELEASE}' 'grafana'",
+      queryCommand: rpmQueryCommand("grafana"),
     })
     const mod = pkg.installed({ name: "grafana", version: "13.9.0-1" })
     expect(await mod.apply(ssh, emptyEnv)).toStrictEqual({ status: "changed" })
     expect(ssh.calls).toContain(downgradeCommand)
     expect(ssh.calls).not.toContain("dnf install -y -- 'grafana-13.9.0-1'")
+  })
+
+  // Finding 3 regression: when the `sort -V` pipeline cannot run (non-zero
+  // exit, e.g. no compatible sort on the host) we do NOT assume a downgrade —
+  // a plain `dnf install` is used rather than wrongly routing to `downgrade`.
+  it("apply falls back to dnf install when sort -V is unavailable", async () => {
+    const installCommand = "dnf install -y -- 'grafana-13.1.0'"
+    const ssh = createMockSsh({
+      ...DNF_FOUND,
+      // Pipeline not runnable → installedIsHigher must return false → install.
+      [sortVCommand("14.0.0", "13.1.0")]: { code: 1 },
+    })
+    ssh.exec = makeRpmVersionExecOverride(ssh, {
+      after: "13.1.0",
+      before: "14.0.0",
+      mutatingCommand: installCommand,
+      queryCommand: rpmQueryCommand("grafana"),
+    })
+    const mod = pkg.installed({ name: "grafana", version: "13.1.0" })
+    expect(await mod.apply(ssh, emptyEnv)).toStrictEqual({ status: "changed" })
+    expect(ssh.calls).toContain(installCommand)
+    expect(ssh.calls).not.toContain("dnf downgrade -y -- 'grafana-13.1.0'")
+  })
+
+  // Finding 1 regression: an epoch-qualified pin (`1:2.0-1`) must not report
+  // drift. The epoch-aware rpm query reports `1:2.0-1`, matching the pin.
+  it("check reports ok for an epoch-qualified pin (dnf)", async () => {
+    const ssh = createMockSsh({
+      ...DNF_FOUND,
+      [rpmQueryCommand("grafana")]: { code: 0, stdout: "1:2.0-1\n" },
+    })
+    const mod = pkg.installed({ name: "grafana", version: "1:2.0-1" })
+    expect(await mod.check(ssh, emptyEnv)).toBe("ok")
+  })
+
+  // Finding 2 regression: for an installonly package with several installed
+  // versions, rpm prints one per line. The module uses the LAST line, not the
+  // concatenated blob `4.18.0-15.14.0-1`.
+  it("check uses the last line for multiple installed rpm versions", async () => {
+    const ssh = createMockSsh({
+      ...DNF_FOUND,
+      [rpmQueryCommand("kernel")]: { code: 0, stdout: "4.18.0-1\n5.14.0-1\n" },
+    })
+    const okMod = pkg.installed({ name: "kernel", version: "5.14.0-1" })
+    expect(await okMod.check(ssh, emptyEnv)).toBe("ok")
+    const driftMod = pkg.installed({ name: "kernel", version: "4.18.0-15.14.0-1" })
+    expect(await driftMod.check(ssh, emptyEnv)).toBe("needs-apply")
   })
 
   // post-install verification
