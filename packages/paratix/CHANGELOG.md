@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.15.1](https://github.com/sebastian-software/paratix/compare/paratix-v0.15.0...paratix-v0.15.1) (2026-07-14)
+
+
+### Bug Fixes
+
+* **paratix:** tolerate non-zero version query on first install ([#140](https://github.com/sebastian-software/paratix/issues/140)) ([a19ee14](https://github.com/sebastian-software/paratix/commit/a19ee14655d78a944c09269e51709ac07bcb6d8d))
+
 ## [0.15.0](https://github.com/sebastian-software/paratix/compare/paratix-v0.14.0...paratix-v0.15.0) (2026-07-14)
 
 
