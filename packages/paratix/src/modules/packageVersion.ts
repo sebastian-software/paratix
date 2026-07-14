@@ -165,10 +165,16 @@ function parseApkVersion(out: string, packageName: string): null | string {
  * Return the installed version of a package as reported by the package
  * manager, or `null` when the package is not installed.
  *
- * The reported format is chosen to match the `version` a user pins:
+ * The reported format is chosen to match the `version` a user pins.
+ *
+ * Consistently across apt, apk and rpm a non-zero exit of the query command is
+ * treated as "not installed" (`null`): querying a package that is not yet
+ * installed exits non-zero (e.g. the very first install of a pinned package),
+ * so this must not throw — otherwise the install never runs.
  *
  * - apt: `dpkg-query -W -f='${Version}'` → the full Debian version
- *   (including epoch/revision), e.g. `1:2.3-1ubuntu0.2`. Presence is derived
+ *   (including epoch/revision), e.g. `1:2.3-1ubuntu0.2`. A missing package
+ *   makes `dpkg-query` exit non-zero → `null`; otherwise presence is derived
  *   from a non-empty result.
  * - dnf/yum (rpm): `rpm -q --qf '%|EPOCH?{%{EPOCH}:}:{}|%{VERSION}-%{RELEASE}\n'`
  *   → `[epoch:]version-release`. The epoch-conditional prints an `epoch:`
@@ -181,8 +187,8 @@ function parseApkVersion(out: string, packageName: string): null | string {
  *   out of scope. A missing package makes `rpm -q` exit non-zero → `null`.
  * - apk: `apk version -v <name>` prints `<name-version> <op> <candidate>`;
  *   the trailing `-version` segment of the first field is the installed
- *   version. When the package is absent the command prints nothing, yielding
- *   `null`.
+ *   version. When the package is absent the command exits non-zero (or prints
+ *   nothing), yielding `null`.
  *
  * @param ssh - Active SSH connection to the remote host.
  * @param pm - Detected package manager.
@@ -196,12 +202,17 @@ export async function getInstalledVersion(
 ): Promise<null | string> {
   const quoted = shellQuote(packageName)
   if (pm === "apk") {
-    const raw = await ssh.output(`apk version -v ${quoted}`)
-    return parseApkVersion(raw.trim(), packageName)
+    const apkResult = await ssh.exec(`apk version -v ${quoted}`, VERSION_EXEC_OPTS)
+    if (apkResult.code !== 0) return null
+    return parseApkVersion(apkResult.stdout.trim(), packageName)
   }
   if (pm === "apt") {
-    const raw = await ssh.output(`dpkg-query -W -f='\${Version}' ${quoted} 2>/dev/null`)
-    const aptVersion = raw.trim()
+    const aptResult = await ssh.exec(
+      `dpkg-query -W -f='\${Version}' ${quoted} 2>/dev/null`,
+      VERSION_EXEC_OPTS
+    )
+    if (aptResult.code !== 0) return null
+    const aptVersion = aptResult.stdout.trim()
     return aptVersion.length > 0 ? aptVersion : null
   }
   // dnf / yum (rpm): epoch-aware, newline-terminated query — see the doc above.
