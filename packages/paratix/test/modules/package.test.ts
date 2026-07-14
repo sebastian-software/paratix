@@ -629,6 +629,16 @@ describe("pkg.installed version pinning", () => {
     expect(await mod.check(ssh, emptyEnv)).toBe("needs-apply")
   })
 
+  it("check returns needs-apply for an absent pinned apk package (non-zero query)", async () => {
+    const ssh = createMockSsh({
+      ...APK_FOUND,
+      // `apk version -v` for an absent package exits non-zero; must not throw → not installed.
+      "apk version -v 'grafana'": { code: 1, stdout: "" },
+    })
+    const mod = pkg.installed({ name: "grafana", version: "13.1.0-r0" })
+    expect(await mod.check(ssh, emptyEnv)).toBe("needs-apply")
+  })
+
   // check semantics
 
   it("check returns ok when the pinned version is installed (apt)", async () => {
