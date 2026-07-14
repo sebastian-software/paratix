@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.15.0](https://github.com/sebastian-software/paratix/compare/paratix-v0.14.0...paratix-v0.15.0) (2026-07-14)
+
+
+### Features
+
+* **paratix:** support version pinning in package.installed ([#137](https://github.com/sebastian-software/paratix/issues/137)) ([1bd5410](https://github.com/sebastian-software/paratix/commit/1bd5410582cbe169915e3b53af478373910836fb))
+
 ## [0.14.0](https://github.com/sebastian-software/paratix/compare/paratix-v0.13.0...paratix-v0.14.0) (2026-07-14)
 
 
