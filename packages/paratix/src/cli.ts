@@ -809,6 +809,24 @@ export function exitAfterApplyError(error: unknown, verbose: boolean): never {
   process.exit(exitCode)
 }
 
+/**
+ * Render a subcommand's options as an indented help block for the top-level
+ * `paratix --help`. Commander only lists subcommand *names* in the parent
+ * help, so flags such as `--filter` otherwise stay hidden under
+ * `paratix <command> --help`. Flags and descriptions are read straight from the
+ * command definition, so this block can never drift from the real options.
+ *
+ * @param command - The subcommand whose options should be surfaced.
+ * @returns A newline-separated help block (blank line, header, aligned rows).
+ */
+export function renderSubcommandOptionsHelp(command: Command): string {
+  const flagsWidth = Math.max(...command.options.map((option) => option.flags.length))
+  const rows = command.options.map(
+    (option) => `  ${option.flags.padEnd(flagsWidth)}  ${option.description}`
+  )
+  return ["", `Options for "paratix ${command.name()} <file>":`, ...rows].join("\n")
+}
+
 const program = new Command()
 
 program
@@ -816,7 +834,7 @@ program
   .description("Idempotent VPS setup tool in TypeScript")
   .version(PACKAGE_DISPLAY_VERSION)
 
-program
+const applyCommand = program
   .command("apply <file>")
   .description("Apply a server definition")
   .option(
@@ -829,8 +847,13 @@ program
     "Only check, do not apply. Some modules validate prospective config but cannot verify runtime restarts.",
     false
   )
-  .option("--env <key=value...>", "Set env values", collectEnvironment, {})
-  .option("--env-file <path>", "Load dotenv file")
+  .option(
+    "--env <key=value...>",
+    "Set environment values passed to the playbook (repeatable; key=value).",
+    collectEnvironment,
+    {}
+  )
+  .option("--env-file <path>", "Load environment values from a dotenv file.")
   .option(
     "--filter <names>",
     "Run only the named recipes/modules (comma-separated, repeatable). Every other node is shown as skipped.",
@@ -869,6 +892,13 @@ program
       exitAfterApplyError(error, options.verbose as boolean)
     }
   })
+
+// R-0001200: `apply` is the only command that carries flags, so a user who
+// types `paratix --help` sees just the subcommand name and never discovers
+// `--filter` and friends without knowing to run `paratix apply --help` first.
+// Surface the apply options directly in the top-level help. The block is
+// rendered from the live option definitions above, so it can never drift.
+program.addHelpText("after", () => renderSubcommandOptionsHelp(applyCommand))
 
 export function parsePositiveNumber(value: string, options: { max?: number } = {}): number {
   const parsed = Number(value)

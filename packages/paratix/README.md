@@ -119,19 +119,21 @@ Paratix can also manage file-backed swap directly. Use `swap.file(...)` to provi
 
 ## CLI
 
+`paratix --help` lists these options directly, so they are discoverable without drilling into `paratix apply --help` first.
+
 ```text
 paratix apply <file> [options]
 
 Options:
-  --diff
-  --dry-run
-  --env <key=value>
-  --env-file <path>
-  --filter <names>
-  --first-run
-  --reconnect-timeout <seconds>
-  --verbose
-  --help
+  --diff                         Combined with --dry-run: unified diff per changed module
+  --dry-run                      Only check, do not apply (some runtime restarts stay unverified)
+  --env <key=value...>           Set environment values for the playbook (repeatable)
+  --env-file <path>              Load environment values from a dotenv file
+  --filter <names>               Run only the named recipes/modules (comma-separated, repeatable)
+  --first-run                    Set PARATIX_FIRST_RUN=true before loading the playbook
+  --reconnect-timeout <seconds>  SSH reconnect timeout for reboots/port changes (max 86400)
+  --verbose                      Show full stack traces on error
+  --help                         Show help
 ```
 
 `--filter <names>` restricts the run to the named recipes and modules. Names are matched anywhere in the tree, and every node that is not selected is shown as `skipped` instead of being executed. The option is comma-separated and repeatable, so `--filter rybbit,palamedes-examples` and `--filter rybbit --filter palamedes-examples` are equivalent. Selecting a recipe runs its whole subtree; a recipe that is not selected but contains a selected descendant is still descended into, so only the matching children run while its siblings are skipped. If several nodes share the same name, every one of them is selected. An unknown filter name aborts the run before it connects (exit code 2). The final run summary counts only top-level nodes, so nested skipped nodes are still shown but are not added to the `skipped` tally. `--filter` composes with `--dry-run` and the other flags.

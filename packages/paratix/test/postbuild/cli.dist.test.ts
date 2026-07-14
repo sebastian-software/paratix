@@ -243,6 +243,37 @@ describe("dist CLI", () => {
     }
   })
 
+  it("surfaces every apply option in the top-level --help output", () => {
+    const packageJson = JSON.parse(
+      readFileSync(join(packageRootDirectory, "package.json"), "utf8")
+    ) as {
+      bin: { paratix: string }
+    }
+    const distCliPath = resolve(packageRootDirectory, packageJson.bin.paratix)
+
+    const helpOutput = execFileSync(process.execPath, [distCliPath, "--help"], {
+      cwd: packageRootDirectory,
+      encoding: "utf8",
+      killSignal: "SIGTERM",
+      maxBuffer: CLI_COMMAND_MAX_BUFFER,
+      timeout: CLI_COMMAND_TIMEOUT_MS,
+    })
+
+    expect(helpOutput).toContain('Options for "paratix apply <file>":')
+    for (const flag of [
+      "--diff",
+      "--dry-run",
+      "--env <key=value...>",
+      "--env-file <path>",
+      "--filter <names>",
+      "--first-run",
+      "--reconnect-timeout <seconds>",
+      "--verbose",
+    ]) {
+      expect(helpOutput).toContain(flag)
+    }
+  })
+
   it("reports authentication errors for a valid playbook before apply can run", () => {
     const packageJson = JSON.parse(
       readFileSync(join(packageRootDirectory, "package.json"), "utf8")
