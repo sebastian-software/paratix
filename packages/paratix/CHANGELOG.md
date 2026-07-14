@@ -1,5 +1,19 @@
 # Changelog
 
+## [0.14.0](https://github.com/sebastian-software/paratix/compare/paratix-v0.13.0...paratix-v0.14.0) (2026-07-14)
+
+
+### Features
+
+* **paratix:** allow command timeout override ([#133](https://github.com/sebastian-software/paratix/issues/133)) ([0d1ca85](https://github.com/sebastian-software/paratix/commit/0d1ca85d361283a251a0d0a40c22ff97e391a49b))
+* **paratix:** show live and final task run time in apply output ([#128](https://github.com/sebastian-software/paratix/issues/128)) ([0b881ee](https://github.com/sebastian-software/paratix/commit/0b881ee0fea9567ca03d7491fe46406e2c56d1e6))
+* prepare the Paratix product website ([#132](https://github.com/sebastian-software/paratix/issues/132)) ([721cd94](https://github.com/sebastian-software/paratix/commit/721cd94c422d881fe55fcaea20bb500d38fddf0c))
+
+
+### Bug Fixes
+
+* **paratix:** surface apply options in top-level --help ([#135](https://github.com/sebastian-software/paratix/issues/135)) ([b490a7a](https://github.com/sebastian-software/paratix/commit/b490a7a8ec999404ff0f6482461cf97545c81a7e))
+
 ## [0.13.0](https://github.com/sebastian-software/paratix/compare/paratix-v0.12.8...paratix-v0.13.0) (2026-07-09)
 
 
