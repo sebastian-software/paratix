@@ -1591,13 +1591,21 @@ export const compose = {
         // rejects `config --format json` with exit 2), skip the before/after
         // snapshots and fall back to a plain pull, reporting `changed`
         // conservatively so downstream change-gated handlers still fire.
-        const beforePull = images
-          ? await snapshotComposeImagesBeforePull({
-              images,
-              runtime,
-              ssh: connection,
-            })
-          : null
+        if (images === null) {
+          const fallbackResult = await connection.exec(
+            `${composeCommand(runtime, projectDirectory)} pull 2>&1`,
+            EXEC_OPTS
+          )
+          if (fallbackResult.code !== 0)
+            return failedCommand(`[compose.pull] failed for ${projectDirectory}`, fallbackResult)
+          return { status: "changed" }
+        }
+
+        const beforePull = await snapshotComposeImagesBeforePull({
+          images,
+          runtime,
+          ssh: connection,
+        })
 
         const result = await connection.exec(
           `${composeCommand(runtime, projectDirectory)} pull 2>&1`,
@@ -1605,8 +1613,6 @@ export const compose = {
         )
         if (result.code !== 0)
           return failedCommand(`[compose.pull] failed for ${projectDirectory}`, result)
-
-        if (images === null || beforePull === null) return { status: "changed" }
 
         const afterPull = await snapshotComposeImagesAfterPull({
           images,
