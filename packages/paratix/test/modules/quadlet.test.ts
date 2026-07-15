@@ -1297,6 +1297,49 @@ describe("quadlet.network", () => {
     expect(result.detail).toBeUndefined()
   })
 
+  it("omits the advisory on a flag-only re-apply when the content is unchanged", async () => {
+    // The on-disk unit already matches the desired content; only the reload
+    // flag is absent. apply still writes and reloads (status "changed"), but
+    // no settings changed, so the live-network advisory must not fire and the
+    // existence probe must be skipped.
+    const content = [
+      "[Unit]",
+      "Description=Podman network: app",
+      "",
+      "[Network]",
+      "NetworkName=app",
+    ].join("\n")
+    const filePath = networkFilePath("app")
+    const ssh = createMockSsh(
+      {
+        [`[ -e '${filePath}' ]`]: { code: 0 },
+        [`[ -L '${filePath}' ]`]: { code: 1 },
+        [`cat '${filePath}'`]: { code: 0, stdout: content },
+        [`stat -c '%a' '${filePath}'`]: { code: 0, stdout: "644\n" },
+        "mkdir -p '/etc/containers/systemd'": { code: 0 },
+        "mkdir -p /var/lib/paratix/flags": { code: 0 },
+        "podman network exists -- 'app'": { code: 0 },
+        "systemctl daemon-reload": { code: 0 },
+      },
+      {
+        responseStubs: [
+          {
+            command:
+              /^find \/var\/lib\/paratix\/flags -maxdepth 1 -type f -name 'quadlet-network-[0-9a-f]{16}-\*' ! -name '\*\.lock' -delete && touch \/var\/lib\/paratix\/flags\/'quadlet-network-[0-9a-f]{16}-[0-9a-f]{16}'$/v,
+            result: { code: 0 },
+          },
+        ],
+      }
+    )
+    vi.spyOn(ssh, "writeFile").mockResolvedValue()
+
+    const result = await quadlet.network({ name: "app" }).apply(ssh, emptyEnv)
+
+    expect(result.status).toBe("changed")
+    expect(result.detail).toBeUndefined()
+    expect(ssh.calls).not.toContain("podman network exists -- 'app'")
+  })
+
   it("returns failed when no SSH connection is available", async () => {
     const { apply } = quadlet.network({ name: "app" })
     const result = await apply(null, emptyEnv)

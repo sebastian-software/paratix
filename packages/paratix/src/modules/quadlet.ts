@@ -325,32 +325,34 @@ export const quadlet = {
     return {
       async _applyDryRun(ssh: null | SshConnection): Promise<ModuleResult> {
         if (!ssh) return { status: "changed" }
-        // Read-only probe (safe in dry-run) so the operator sees upfront that a
-        // live network would not be recreated by the pending change.
-        const liveHint = (await podmanNetworkExists(ssh, options.name))
-          ? quadletNetworkLiveHint(options.name)
-          : undefined
         const diff = await buildQuadletDryRunDiff(ssh, filePath, content)
         if (diff != null) {
+          // Content actually changes: the live-network advisory is relevant
+          // here (and only when a network of the same name is already live).
+          const liveHint = (await podmanNetworkExists(ssh, options.name))
+            ? quadletNetworkLiveHint(options.name)
+            : undefined
           return liveHint == null
             ? { diff, status: "changed" }
             : { _dryRunDetail: liveHint, diff, status: "changed" }
         }
+        // Content already converged; apply would only persist the reload flag
+        // and re-run daemon-reload. No settings change, so no live-network
+        // advisory — otherwise a flag-only re-apply would misleadingly tell the
+        // operator to remove an unchanged network.
         const flagPresent = await hasFlag(ssh, reloadFlag.flagName)
-        if (flagPresent) {
-          return liveHint == null
-            ? { status: "changed" }
-            : { _dryRunDetail: liveHint, status: "changed" }
-        }
-        const pendingDetail =
-          liveHint == null
-            ? "(dry-run, daemon-reload pending)"
-            : `(dry-run, daemon-reload pending) — ${liveHint}`
-        return { _dryRunDetail: pendingDetail, status: "changed" }
+        return flagPresent
+          ? { status: "changed" }
+          : { _dryRunDetail: "(dry-run, daemon-reload pending)", status: "changed" }
       },
       _dryRunDiffProducer: true,
       async apply(ssh: null | SshConnection): Promise<ModuleResult> {
         if (!ssh) return failed(`[quadlet.network: ${options.name}] SSH connection is required`)
+        // Capture whether the unit content actually changes *before* the write.
+        // `applyQuadletFile` always writes and reports `changed` (so the reload
+        // flag gets persisted), even on a flag-only re-apply of already-matching
+        // content. The advisory must only fire on a genuine settings change.
+        const contentChanges = (await buildQuadletDryRunDiff(ssh, filePath, content)) != null
         const result = await applyQuadletFile({
           content,
           filePath,
@@ -361,9 +363,9 @@ export const quadlet = {
         if (result.status !== "changed") return result
         const flagFailure = await setVersionedFlag(ssh, reloadFlag.flagName, reloadFlag.flagPrefix)
         if (flagFailure) return flagFailure
-        // Advisory only: the unit already converged. Surface that a live
-        // network keeps its old settings until removed.
-        if (await podmanNetworkExists(ssh, options.name)) {
+        // Advisory only: a real content change landed but a live network keeps
+        // its old settings until it is removed.
+        if (contentChanges && (await podmanNetworkExists(ssh, options.name))) {
           return { ...result, detail: quadletNetworkLiveHint(options.name) }
         }
         return result
