@@ -186,6 +186,8 @@ the idiomatic way to ensure a previously installed cron job is gone.
 | `compose.restart` | `(options: { projectDirectory: string; runtime?: "docker" \| "podman" }): Module`                                    | No         |
 | `compose.systemd` | `(options: { detached?: boolean; name?: string; projectDirectory: string; runtime?: "docker" \| "podman" }): Module` | Yes        |
 
+> **`compose.pull` change detection:** `compose.pull` compares image digests before and after the pull to report `ok` (nothing new) vs `changed`. This needs `compose config --format json`. With `runtime: "podman"`, when the compose provider is the Python `podman-compose` (which does not support `--format json`), digest-based detection is unavailable: the pull still runs, but always reports `changed`. The Docker and Compose v2 paths are unaffected.
+
 ### `download`
 
 | Method            | Signature                                                                                                                                                                                                                                                                                                                    | Idempotent |

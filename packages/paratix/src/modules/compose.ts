@@ -259,29 +259,28 @@ function readComposeImageIdentifierFromInspectOutput(image: string, output: stri
   return id.length > 0 ? id : null
 }
 
+// Enumerate the images declared in the compose config for the digest-based
+// change detection of `compose.pull`. Returns `null` to signal "enumeration
+// unavailable" — NOT a hard error. This happens when `config --format json`
+// exits non-zero (e.g. the Python `podman-compose` provider does not support
+// `--format json` and aborts with exit 2, issue #142) or when its output is
+// not parseable / exceeds the size cap. The caller (`compose.pull`) then falls
+// back to a plain `compose pull` without change detection instead of aborting
+// the whole action; a genuinely broken compose project still surfaces its
+// error at the subsequent `pull`. Mirrors the tolerant behaviour of
+// `resolveComposeProjectName`.
 async function resolveComposeConfigImages(parameters: {
   projectDirectory: string
   runtime: ComposeRuntime
   ssh: SshConnection
-}): Promise<ModuleResult | string[]> {
+}): Promise<null | string[]> {
   const result = await parameters.ssh.exec(
     `${composeCommand(parameters.runtime, parameters.projectDirectory)} config --format json`,
     EXEC_OPTS
   )
-  if (result.code !== 0) {
-    return failedCommand(
-      `[compose.pull] failed to resolve images for ${parameters.projectDirectory}`,
-      result
-    )
-  }
+  if (result.code !== 0) return null
 
-  const images = parseComposeConfigImages(result.stdout)
-  if (images === null) {
-    return failed(
-      `[compose.pull] failed to parse compose config images for ${parameters.projectDirectory}`
-    )
-  }
-  return images
+  return parseComposeConfigImages(result.stdout)
 }
 
 async function inspectComposeImageBeforePull(parameters: {
@@ -1586,7 +1585,21 @@ export const compose = {
           runtime,
           ssh: connection,
         })
-        if (!Array.isArray(images)) return images
+
+        // Digest-based change detection needs the image list. When it is
+        // unavailable (images === null — e.g. the podman-compose provider
+        // rejects `config --format json` with exit 2), skip the before/after
+        // snapshots and fall back to a plain pull, reporting `changed`
+        // conservatively so downstream change-gated handlers still fire.
+        if (images === null) {
+          const fallbackResult = await connection.exec(
+            `${composeCommand(runtime, projectDirectory)} pull 2>&1`,
+            EXEC_OPTS
+          )
+          if (fallbackResult.code !== 0)
+            return failedCommand(`[compose.pull] failed for ${projectDirectory}`, fallbackResult)
+          return { status: "changed" }
+        }
 
         const beforePull = await snapshotComposeImagesBeforePull({
           images,
