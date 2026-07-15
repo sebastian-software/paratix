@@ -472,14 +472,85 @@ describe("compose.pull — apply", () => {
     expect(result.error).toBeInstanceOf(Error)
   })
 
-  it("returns failed when compose config cannot be resolved", async () => {
+  // Issue #142: with the Python `podman-compose` provider, `config --format
+  // json` is unsupported and exits 2. compose.pull must fall back to a plain
+  // pull (without digest-based change detection) instead of aborting the whole
+  // action. The fallback reports `changed` conservatively.
+  it("falls back to a plain pull and reports changed when config enumeration is unsupported", async () => {
     const mockSsh = createComposeMockSsh({
-      [composeConfigCommand]: { code: 1, stderr: "bad compose file" },
+      [`${composeCmd("podman")} pull 2>&1`]: { code: 0, stdout: "Pulling repro_web ... done" },
+      [composeConfigCommand]: {
+        code: 2,
+        stderr: "podman-compose: error: unrecognized arguments: --format json",
+      },
+    })
+    const mod = compose.pull({ projectDirectory })
+    const result = await mod.apply(mockSsh, emptyEnv)
+    expect(result.status).toBe("changed")
+    // Change detection is skipped entirely: no before/after image inspect runs.
+    for (const call of mockSsh.calls) {
+      expect(call).not.toContain("image inspect")
+    }
+  })
+
+  it("falls back to a plain pull when compose config output is not parseable", async () => {
+    const mockSsh = createComposeMockSsh({
+      [`${composeCmd("podman")} pull 2>&1`]: { code: 0, stdout: "Image is up to date" },
+      [composeConfigCommand]: { code: 0, stdout: "not valid json" },
+    })
+    const mod = compose.pull({ projectDirectory })
+    const result = await mod.apply(mockSsh, emptyEnv)
+    expect(result.status).toBe("changed")
+    for (const call of mockSsh.calls) {
+      expect(call).not.toContain("image inspect")
+    }
+  })
+
+  it("returns failed when the fallback pull itself fails", async () => {
+    const mockSsh = createComposeMockSsh({
+      [`${composeCmd("podman")} pull 2>&1`]: { code: 1, stderr: "network unreachable" },
+      [composeConfigCommand]: {
+        code: 2,
+        stderr: "podman-compose: error: unrecognized arguments: --format json",
+      },
     })
     const mod = compose.pull({ projectDirectory })
     const result = await mod.apply(mockSsh, emptyEnv)
     expect(result.status).toBe("failed")
-    expect(String(result.error)).toContain("failed to resolve images")
+    expect(result.error).toBeInstanceOf(Error)
+    expect(String(result.error)).toContain("[compose.pull] failed for")
+  })
+
+  it("falls back to a plain pull when compose config output exceeds the JSON size cap", async () => {
+    // R-0000710: parseComposeConfigImages rejects stdout above the 1 MiB cap,
+    // which must degrade to the fallback rather than a hard failure.
+    const oversized = `{"services":{"web":{"image":"${"x".repeat(1_100_000)}"}}}`
+    const mockSsh = createComposeMockSsh({
+      [`${composeCmd("podman")} pull 2>&1`]: { code: 0, stdout: "Image is up to date" },
+      [composeConfigCommand]: { code: 0, stdout: oversized },
+    })
+    const mod = compose.pull({ projectDirectory })
+    const result = await mod.apply(mockSsh, emptyEnv)
+    expect(result.status).toBe("changed")
+    for (const call of mockSsh.calls) {
+      expect(call).not.toContain("image inspect")
+    }
+  })
+
+  it("uses the digest path (not the fallback) for an empty image list and reports ok", async () => {
+    // An empty services list yields [] (truthy) — digest detection still runs
+    // with nothing to compare → ok. This is distinct from the null fallback,
+    // and confirms the pull output text is ignored on the digest path.
+    const mockSsh = createComposeMockSsh({
+      [`${composeCmd("podman")} pull 2>&1`]: { code: 0, stdout: "Downloaded newer image" },
+      [composeConfigCommand]: { code: 0, stdout: JSON.stringify({ services: {} }) },
+    })
+    const mod = compose.pull({ projectDirectory })
+    const result = await mod.apply(mockSsh, emptyEnv)
+    expect(result.status).toBe("ok")
+    for (const call of mockSsh.calls) {
+      expect(call).not.toContain("image inspect")
+    }
   })
 
   it("returns failed when post-pull image inspect fails", async () => {
