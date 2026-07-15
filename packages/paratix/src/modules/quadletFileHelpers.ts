@@ -62,11 +62,13 @@ async function snapshotQuadletFile(
   }
 }
 
-async function restoreQuadletFileSnapshot(
-  ssh: SshConnection,
-  filePath: string,
+async function restoreQuadletFileSnapshot(parameters: {
+  filePath: string
+  label: string
   snapshot: QuadletFileSnapshot
-): Promise<void> {
+  ssh: SshConnection
+}): Promise<void> {
+  const { filePath, label, snapshot, ssh } = parameters
   if (snapshot.exists) {
     // R-0000603: defense in depth — refuse to restore through a symlink that
     // may have appeared between the apply-time guard and rollback. The apply
@@ -74,7 +76,7 @@ async function restoreQuadletFileSnapshot(
     // afterwards must not let `ssh.writeFile` follow it to an arbitrary
     // target during rollback.
     if (await isSymlink(ssh, filePath)) {
-      throw new Error(`[quadlet.container] refuses to restore through symlink at ${filePath}`)
+      throw new Error(`[${label}] refuses to restore through symlink at ${filePath}`)
     }
     await ssh.writeFile(filePath, snapshot.content, { mode: snapshot.mode })
     return
@@ -85,16 +87,21 @@ async function restoreQuadletFileSnapshot(
 export async function applyQuadletFile(parameters: {
   content: string
   filePath: string
+  label?: string
   name: string
   ssh: SshConnection
 }): Promise<ModuleResult> {
+  // The label identifies the calling module in diagnostics. It defaults to
+  // `quadlet.container` so existing container callers keep their exact error
+  // strings; `quadlet.network` passes its own label.
+  const label = parameters.label ?? "quadlet.container"
   const mkdirResult = await parameters.ssh.exec(CONTAINERS_SYSTEMD_DIRECTORY_COMMAND, {
     ignoreExitCode: true,
     silent: true,
   })
   if (mkdirResult.code !== 0) {
     return failedCommand(
-      `[quadlet.container: ${parameters.name}] failed to create quadlet directory`,
+      `[${label}: ${parameters.name}] failed to create quadlet directory`,
       mkdirResult
     )
   }
@@ -107,13 +114,18 @@ export async function applyQuadletFile(parameters: {
   // hardening pattern.
   if (await isSymlink(parameters.ssh, parameters.filePath)) {
     return failed(
-      `[quadlet.container: ${parameters.name}] refuses to write through symlink at ${parameters.filePath}`
+      `[${label}: ${parameters.name}] refuses to write through symlink at ${parameters.filePath}`
     )
   }
 
   const snapshot = await snapshotQuadletFile(parameters.ssh, parameters.filePath)
   const restoreSnapshot = async (): Promise<void> => {
-    await restoreQuadletFileSnapshot(parameters.ssh, parameters.filePath, snapshot)
+    await restoreQuadletFileSnapshot({
+      filePath: parameters.filePath,
+      label,
+      snapshot,
+      ssh: parameters.ssh,
+    })
   }
   try {
     await parameters.ssh.writeFile(parameters.filePath, parameters.content, {
@@ -122,7 +134,7 @@ export async function applyQuadletFile(parameters: {
   } catch (error) {
     const reason = error instanceof Error ? error.message : String(error)
     return withRollbackFailure(
-      failed(`[quadlet.container: ${parameters.name}] failed to write quadlet file: ${reason}`),
+      failed(`[${label}: ${parameters.name}] failed to write quadlet file: ${reason}`),
       restoreSnapshot,
       "quadlet apply failed"
     )
@@ -134,10 +146,7 @@ export async function applyQuadletFile(parameters: {
   })
   if (daemonReload.code === 0) return { status: "changed" }
   return withRollbackFailure(
-    failedCommand(
-      `[quadlet.container: ${parameters.name}] systemctl daemon-reload failed`,
-      daemonReload
-    ),
+    failedCommand(`[${label}: ${parameters.name}] systemctl daemon-reload failed`, daemonReload),
     restoreSnapshot,
     "quadlet apply failed"
   )

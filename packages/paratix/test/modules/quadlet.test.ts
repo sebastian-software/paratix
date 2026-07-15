@@ -1147,3 +1147,355 @@ describe("quadlet.updateImage", () => {
     expect(result.status).toBe("failed")
   })
 })
+
+function networkFilePath(name: string): string {
+  return `/etc/containers/systemd/${name}.network`
+}
+
+function buildNetworkReloadFlag(name: string, content: string): string {
+  return `quadlet-network-${sha256String(name).slice(0, 16)}-${sha256String(content).slice(0, 16)}`
+}
+
+function buildNetworkReloadFlagCheck(name: string, content: string): string {
+  return `[ -f /var/lib/paratix/flags/'${buildNetworkReloadFlag(name, content)}' ]`
+}
+
+function createNetworkApplySsh(options: { networkExists?: boolean } = {}) {
+  return createMockSsh(
+    {
+      "mkdir -p '/etc/containers/systemd'": { code: 0 },
+      "mkdir -p /var/lib/paratix/flags": { code: 0 },
+      "systemctl daemon-reload": { code: 0 },
+    },
+    {
+      responseStubs: [
+        {
+          command: /^\[ -e '\/etc\/containers\/systemd\/[^']+\.network' \]$/v,
+          result: { code: 1 },
+        },
+        {
+          command: /^\[ -L '\/etc\/containers\/systemd\/[^']+\.network' \]$/v,
+          result: { code: 1 },
+        },
+        {
+          command:
+            /^find \/var\/lib\/paratix\/flags -maxdepth 1 -type f -name 'quadlet-network-[0-9a-f]{16}-\*' ! -name '\*\.lock' -delete && touch \/var\/lib\/paratix\/flags\/'quadlet-network-[0-9a-f]{16}-[0-9a-f]{16}'$/v,
+          result: { code: 0 },
+        },
+        {
+          command: /^podman network exists -- '[^']+'$/v,
+          result: { code: options.networkExists === true ? 0 : 1 },
+        },
+      ],
+    }
+  )
+}
+
+describe("quadlet.network", () => {
+  it("generates the full [Network] section in the documented order", async () => {
+    const mod = quadlet.network({
+      description: "App backend network",
+      disableDns: false,
+      dns: ["10.89.0.1", "10.89.0.2"],
+      driver: "bridge",
+      gateway: "10.89.0.1",
+      internal: true,
+      ipamDriver: "host-local",
+      ipRange: "10.89.0.128/25",
+      ipv6: true,
+      label: { env: "prod", tier: "backend" },
+      name: "app",
+      options: { isolate: "true", mtu: "1500" },
+      podmanArgs: ["--opt vlan=100"],
+      subnet: "10.89.0.0/24",
+    })
+
+    const ssh = createNetworkApplySsh()
+    const writeFile = vi.spyOn(ssh, "writeFile").mockResolvedValue()
+
+    const result = await mod.apply(ssh, emptyEnv)
+
+    expect(result.status).toBe("changed")
+    expect(writeFile).toHaveBeenCalledWith(
+      networkFilePath("app"),
+      [
+        "[Unit]",
+        "Description=App backend network",
+        "",
+        "[Network]",
+        "NetworkName=app",
+        "Driver=bridge",
+        "IPAMDriver=host-local",
+        "Internal=true",
+        "IPv6=true",
+        "DisableDNS=false",
+        "Subnet=10.89.0.0/24",
+        "Gateway=10.89.0.1",
+        "IPRange=10.89.0.128/25",
+        "DNS=10.89.0.1",
+        "DNS=10.89.0.2",
+        "Options=isolate=true",
+        "Options=mtu=1500",
+        "Label=env=prod",
+        "Label=tier=backend",
+        "PodmanArgs=--opt vlan=100",
+      ].join("\n"),
+      { mode: "0644" }
+    )
+  })
+
+  it("generates a minimal unit with only name set", async () => {
+    const mod = quadlet.network({ name: "app" })
+
+    const ssh = createNetworkApplySsh()
+    const writeFile = vi.spyOn(ssh, "writeFile").mockResolvedValue()
+
+    await mod.apply(ssh, emptyEnv)
+
+    expect(writeFile.mock.calls[0][1]).toBe(
+      ["[Unit]", "Description=Podman network: app", "", "[Network]", "NetworkName=app"].join("\n")
+    )
+  })
+
+  it("apply writes the .network file, reloads systemd, and persists the flag", async () => {
+    const mod = quadlet.network({ internal: true, name: "app" })
+    const ssh = createNetworkApplySsh()
+    const writeFile = vi.spyOn(ssh, "writeFile").mockResolvedValue()
+
+    const result = await mod.apply(ssh, emptyEnv)
+
+    expect(result.status).toBe("changed")
+    expect(result.detail).toBeUndefined()
+    expect(ssh.calls).toContain("mkdir -p '/etc/containers/systemd'")
+    expect(ssh.calls).toContain("systemctl daemon-reload")
+    expect(writeFile).toHaveBeenCalledWith(networkFilePath("app"), expect.any(String), {
+      mode: "0644",
+    })
+  })
+
+  it("appends an advisory detail when the live network already exists", async () => {
+    const mod = quadlet.network({ name: "app", subnet: "10.89.0.0/24" })
+    const ssh = createNetworkApplySsh({ networkExists: true })
+    vi.spyOn(ssh, "writeFile").mockResolvedValue()
+
+    const result = await mod.apply(ssh, emptyEnv)
+
+    expect(result.status).toBe("changed")
+    expect(result.detail).toContain("already exists")
+    expect(result.detail).toContain("app")
+    expect(ssh.calls).toContain("podman network exists -- 'app'")
+  })
+
+  it("omits the advisory detail when podman network exists cannot confirm the network", async () => {
+    const mod = quadlet.network({ name: "app" })
+    const ssh = createNetworkApplySsh({ networkExists: false })
+    vi.spyOn(ssh, "writeFile").mockResolvedValue()
+
+    const result = await mod.apply(ssh, emptyEnv)
+
+    expect(result.status).toBe("changed")
+    expect(result.detail).toBeUndefined()
+  })
+
+  it("omits the advisory on a flag-only re-apply when the content is unchanged", async () => {
+    // The on-disk unit already matches the desired content; only the reload
+    // flag is absent. apply still writes and reloads (status "changed"), but
+    // no settings changed, so the live-network advisory must not fire and the
+    // existence probe must be skipped.
+    const content = [
+      "[Unit]",
+      "Description=Podman network: app",
+      "",
+      "[Network]",
+      "NetworkName=app",
+    ].join("\n")
+    const filePath = networkFilePath("app")
+    const ssh = createMockSsh(
+      {
+        [`[ -e '${filePath}' ]`]: { code: 0 },
+        [`[ -L '${filePath}' ]`]: { code: 1 },
+        [`cat '${filePath}'`]: { code: 0, stdout: content },
+        [`stat -c '%a' '${filePath}'`]: { code: 0, stdout: "644\n" },
+        "mkdir -p '/etc/containers/systemd'": { code: 0 },
+        "mkdir -p /var/lib/paratix/flags": { code: 0 },
+        "podman network exists -- 'app'": { code: 0 },
+        "systemctl daemon-reload": { code: 0 },
+      },
+      {
+        responseStubs: [
+          {
+            command:
+              /^find \/var\/lib\/paratix\/flags -maxdepth 1 -type f -name 'quadlet-network-[0-9a-f]{16}-\*' ! -name '\*\.lock' -delete && touch \/var\/lib\/paratix\/flags\/'quadlet-network-[0-9a-f]{16}-[0-9a-f]{16}'$/v,
+            result: { code: 0 },
+          },
+        ],
+      }
+    )
+    vi.spyOn(ssh, "writeFile").mockResolvedValue()
+
+    const result = await quadlet.network({ name: "app" }).apply(ssh, emptyEnv)
+
+    expect(result.status).toBe("changed")
+    expect(result.detail).toBeUndefined()
+    expect(ssh.calls).not.toContain("podman network exists -- 'app'")
+  })
+
+  it("returns failed when no SSH connection is available", async () => {
+    const { apply } = quadlet.network({ name: "app" })
+    const result = await apply(null, emptyEnv)
+
+    expect(result.status).toBe("failed")
+  })
+
+  it("check returns ok when the remote unit matches and the flag is present", async () => {
+    const content = [
+      "[Unit]",
+      "Description=Podman network: app",
+      "",
+      "[Network]",
+      "NetworkName=app",
+    ].join("\n")
+    const filePath = networkFilePath("app")
+    const ssh = createMockSsh({
+      [`[ -e '${filePath}' ]`]: { code: 0 },
+      [`[ -L '${filePath}' ]`]: { code: 1 },
+      [`cat '${filePath}'`]: { code: 0, stdout: content },
+      [`stat -c '%a' '${filePath}'`]: { code: 0, stdout: "644\n" },
+      [buildNetworkReloadFlagCheck("app", content)]: { code: 0 },
+    })
+
+    const result = await quadlet.network({ name: "app" }).check(ssh, emptyEnv)
+
+    expect(result).toBe("ok")
+  })
+
+  it("check returns needs-apply when the daemon-reload flag is missing", async () => {
+    const content = [
+      "[Unit]",
+      "Description=Podman network: app",
+      "",
+      "[Network]",
+      "NetworkName=app",
+    ].join("\n")
+    const filePath = networkFilePath("app")
+    const ssh = createMockSsh({
+      [`[ -e '${filePath}' ]`]: { code: 0 },
+      [`[ -L '${filePath}' ]`]: { code: 1 },
+      [`cat '${filePath}'`]: { code: 0, stdout: content },
+      [`stat -c '%a' '${filePath}'`]: { code: 0, stdout: "644\n" },
+      [buildNetworkReloadFlagCheck("app", content)]: { code: 1 },
+    })
+
+    const result = await quadlet.network({ name: "app" }).check(ssh, emptyEnv)
+
+    expect(result).toBe("needs-apply")
+  })
+
+  it("check returns needs-apply when the unit file is missing", async () => {
+    const filePath = networkFilePath("app")
+    const ssh = createMockSsh({
+      [`[ -e '${filePath}' ]`]: { code: 1 },
+      [`[ -L '${filePath}' ]`]: { code: 1 },
+    })
+
+    const result = await quadlet.network({ name: "app" }).check(ssh, emptyEnv)
+
+    expect(result).toBe("needs-apply")
+  })
+
+  it("check returns needs-apply when the on-disk unit content differs", async () => {
+    const filePath = networkFilePath("app")
+    const ssh = createMockSsh({
+      [`[ -e '${filePath}' ]`]: { code: 0 },
+      [`[ -L '${filePath}' ]`]: { code: 1 },
+      [`cat '${filePath}'`]: { code: 0, stdout: "[Network]\nNetworkName=stale\n" },
+    })
+
+    const result = await quadlet.network({ name: "app" }).check(ssh, emptyEnv)
+
+    expect(result).toBe("needs-apply")
+  })
+
+  it("uses a reload-flag namespace distinct from quadlet.container for the same name", () => {
+    const content = [
+      "[Unit]",
+      "Description=Podman network: app",
+      "",
+      "[Network]",
+      "NetworkName=app",
+    ].join("\n")
+    expect(buildNetworkReloadFlag("app", content)).toContain("quadlet-network-")
+    expect(buildNetworkReloadFlag("app", content)).not.toBe(buildReloadFlag("app", content))
+  })
+
+  it("_applyDryRun returns a diff when the on-disk unit differs", async () => {
+    const filePath = networkFilePath("app")
+    const ssh = createMockSsh({
+      [`[ -e '${filePath}' ]`]: { code: 0 },
+      [`cat '${filePath}'`]: { code: 0, stdout: "[Network]\nNetworkName=old\n" },
+      "podman network exists -- 'app'": { code: 1 },
+    })
+
+    const mod = quadlet.network({ name: "app" })
+    const result = await mod._applyDryRun?.(ssh, emptyEnv)
+
+    expect(result?.status).toBe("changed")
+    expect(result?.diff).toContain("NetworkName=app")
+    expect(result?._dryRunDetail).toBeUndefined()
+  })
+
+  it("_applyDryRun surfaces the advisory detail when the live network exists", async () => {
+    const filePath = networkFilePath("app")
+    const ssh = createMockSsh({
+      [`[ -e '${filePath}' ]`]: { code: 0 },
+      [`cat '${filePath}'`]: { code: 0, stdout: "[Network]\nNetworkName=old\n" },
+      "podman network exists -- 'app'": { code: 0 },
+    })
+
+    const mod = quadlet.network({ name: "app" })
+    const result = await mod._applyDryRun?.(ssh, emptyEnv)
+
+    expect(result?.diff).toContain("NetworkName=app")
+    expect(result?._dryRunDetail).toContain("already exists")
+  })
+
+  it("throws when the network name is invalid", () => {
+    expect(() => {
+      quadlet.network({ name: "../evil" })
+    }).toThrow(/name must match/v)
+  })
+
+  it("throws when the network name looks like a systemctl option", () => {
+    expect(() => {
+      quadlet.network({ name: "--internal" })
+    }).toThrow(/name must not start with '-'/v)
+  })
+
+  it("throws when a value contains control characters", () => {
+    expect(() => {
+      quadlet.network({ name: "app", subnet: "10.0.0.0/24\ninjected" })
+    }).toThrow("values must not contain control characters")
+  })
+
+  it("renders Label and Options as repeated key=value lines sorted by key", async () => {
+    // Build the records with deliberately unsorted insertion order so the
+    // assertion proves the module sorts, not the source literal.
+    const label: Record<string, string> = {}
+    label.beta = "b"
+    label.alpha = "a"
+    const networkOptions: Record<string, string> = {}
+    networkOptions.mtu = "1500"
+    networkOptions.isolate = "true"
+    const mod = quadlet.network({ label, name: "sorted", options: networkOptions })
+    const ssh = createNetworkApplySsh()
+    const writeFile = vi.spyOn(ssh, "writeFile").mockResolvedValue()
+
+    await mod.apply(ssh, emptyEnv)
+
+    const content = writeFile.mock.calls[0][1]
+    expect(content.indexOf("Label=alpha=a")).toBeLessThan(content.indexOf("Label=beta=b"))
+    expect(content.indexOf("Options=isolate=true")).toBeLessThan(
+      content.indexOf("Options=mtu=1500")
+    )
+  })
+})
