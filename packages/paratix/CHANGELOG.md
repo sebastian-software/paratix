@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.16.0](https://github.com/sebastian-software/paratix/compare/paratix-v0.15.1...paratix-v0.16.0) (2026-07-15)
+
+
+### Features
+
+* **paratix:** add quadlet.network module for isolated multi-container stacks ([#146](https://github.com/sebastian-software/paratix/issues/146)) ([ebfb941](https://github.com/sebastian-software/paratix/commit/ebfb9413bfa4b3b0ff96f8be7a98880fc81dfbb3))
+
+
+### Bug Fixes
+
+* **paratix:** fall back to plain pull when podman-compose lacks config --format json ([#144](https://github.com/sebastian-software/paratix/issues/144)) ([7602aa1](https://github.com/sebastian-software/paratix/commit/7602aa167a8954c679d37032300554a00efc782e))
+
 ## [0.15.1](https://github.com/sebastian-software/paratix/compare/paratix-v0.15.0...paratix-v0.15.1) (2026-07-14)
 
 
