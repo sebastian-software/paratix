@@ -24,6 +24,11 @@ import {
   readQuadletImageIdentifierFromInspectOutput,
 } from "./quadletImageInspectHelpers.js"
 import {
+  generateNetworkQuadlet,
+  getQuadletNetworkFilePath,
+  type QuadletNetworkOptions,
+} from "./quadletNetworkHelpers.js"
+import {
   validateQuadletAuthFilePath,
   validateQuadletImageValue,
   validateQuadletName,
@@ -33,13 +38,14 @@ const QUADLET_RELOAD_HASH_LENGTH = 16
 const SYSTEMCTL = "systemctl"
 
 function buildQuadletReloadFlag(
+  kind: string,
   name: string,
   content: string
 ): {
   flagName: string
   flagPrefix: string
 } {
-  const flagPrefix = `quadlet-container-${sha256String(name).slice(0, QUADLET_RELOAD_HASH_LENGTH)}-`
+  const flagPrefix = `quadlet-${kind}-${sha256String(name).slice(0, QUADLET_RELOAD_HASH_LENGTH)}-`
   return {
     flagName: `${flagPrefix}${sha256String(content).slice(0, QUADLET_RELOAD_HASH_LENGTH)}`,
     flagPrefix,
@@ -173,18 +179,18 @@ async function applyQuadletImageUpdate(
 }
 
 /**
- * Build the dry-run diff for a `quadlet.container` mutation by comparing
- * the remote unit file against the desired content. Returns `undefined`
- * when either side cannot be read (missing file is treated as empty, but a
- * permission error returns `undefined` so the caller falls back to the
- * generic `(dry-run)` suffix without leaking diagnostics).
+ * Build the dry-run diff for a Quadlet unit mutation (`.container` or
+ * `.network`) by comparing the remote unit file against the desired content.
+ * Returns `undefined` when either side cannot be read (missing file is treated
+ * as empty, but a permission error returns `undefined` so the caller falls
+ * back to the generic `(dry-run)` suffix without leaking diagnostics).
  *
  * @param ssh - The SSH connection.
  * @param filePath - Absolute path of the Quadlet unit file on the remote host.
  * @param desired - The desired Quadlet unit content.
  * @returns The unified-diff text, or `undefined` when no diff can be produced.
  */
-async function buildQuadletContainerDryRunDiff(
+async function buildQuadletDryRunDiff(
   ssh: SshConnection,
   filePath: string,
   desired: string
@@ -198,6 +204,38 @@ async function buildQuadletContainerDryRunDiff(
   } catch {
     return undefined
   }
+}
+
+/**
+ * Read-only probe for whether a Podman network with the given name already
+ * exists on the host. `podman network exists` exits 0 when present. Any
+ * non-zero exit — including podman not being installed — is treated as
+ * "not present / cannot determine" so callers simply omit the advisory hint
+ * instead of failing the apply.
+ *
+ * @param ssh - The SSH connection.
+ * @param name - The Podman network name (matches the unit's `NetworkName`).
+ * @returns `true` only when the probe confirms the network exists.
+ */
+async function podmanNetworkExists(ssh: SshConnection, name: string): Promise<boolean> {
+  const result = await ssh.exec(`podman network exists -- ${shellQuote(name)}`, {
+    ignoreExitCode: true,
+    silent: true,
+  })
+  return result.code === 0
+}
+
+/**
+ * Advisory hint emitted when a `quadlet.network` change lands but a network
+ * with the same name is already live. Podman creates a network once; a
+ * `daemon-reload` regenerates the unit but does not push changed
+ * `Subnet`/`Gateway`/… onto the running network until it is removed.
+ *
+ * @param name - The Podman network name.
+ * @returns The hint text for the module result detail.
+ */
+function quadletNetworkLiveHint(name: string): string {
+  return `network '${name}' already exists; the running network is not recreated automatically — remove it to apply changed settings`
 }
 
 /**
@@ -222,12 +260,12 @@ export const quadlet = {
     validateQuadletImageValue("image", options.image)
     const filePath = getQuadletContainerFilePath(options.name)
     const content = generateContainerQuadlet(options)
-    const reloadFlag = buildQuadletReloadFlag(options.name, content)
+    const reloadFlag = buildQuadletReloadFlag("container", options.name, content)
 
     return {
       async _applyDryRun(ssh: null | SshConnection): Promise<ModuleResult> {
         if (!ssh) return { status: "changed" }
-        const diff = await buildQuadletContainerDryRunDiff(ssh, filePath, content)
+        const diff = await buildQuadletDryRunDiff(ssh, filePath, content)
         if (diff != null) return { diff, status: "changed" }
         // R-0001023: the unit file content already converges, but `apply`
         // also persists a versioned reload flag that drives the next
@@ -258,6 +296,85 @@ export const quadlet = {
         return (await hasFlag(ssh, reloadFlag.flagName)) ? "ok" : NEEDS_APPLY
       },
       name: `quadlet.container: ${options.name}`,
+    }
+  },
+
+  /**
+   * Write a Podman Quadlet `.network` definition and reload systemd when it changes.
+   *
+   * Mirrors {@link quadlet.container}: the unit is written atomically to
+   * `/etc/containers/systemd/<name>.network`, symlinks are refused, and
+   * `systemctl daemon-reload` runs when the content changes. Containers
+   * reference the network via their existing `networks` option
+   * (e.g. `networks: ["app.network"]`).
+   *
+   * When the change lands and a network with the same name is already live on
+   * the host, the result carries an advisory detail: Podman does not recreate
+   * a running network, so changed `subnet`/`gateway`/… only take effect after
+   * the network is removed.
+   *
+   * @param options - Configuration for the Quadlet network definition.
+   * @returns A Module that ensures the Quadlet `.network` file is present and up to date.
+   */
+  network(options: QuadletNetworkOptions): Module {
+    validateQuadletName(options.name)
+    const filePath = getQuadletNetworkFilePath(options.name)
+    const content = generateNetworkQuadlet(options)
+    const reloadFlag = buildQuadletReloadFlag("network", options.name, content)
+
+    return {
+      async _applyDryRun(ssh: null | SshConnection): Promise<ModuleResult> {
+        if (!ssh) return { status: "changed" }
+        // Read-only probe (safe in dry-run) so the operator sees upfront that a
+        // live network would not be recreated by the pending change.
+        const liveHint = (await podmanNetworkExists(ssh, options.name))
+          ? quadletNetworkLiveHint(options.name)
+          : undefined
+        const diff = await buildQuadletDryRunDiff(ssh, filePath, content)
+        if (diff != null) {
+          return liveHint == null
+            ? { diff, status: "changed" }
+            : { _dryRunDetail: liveHint, diff, status: "changed" }
+        }
+        const flagPresent = await hasFlag(ssh, reloadFlag.flagName)
+        if (flagPresent) {
+          return liveHint == null
+            ? { status: "changed" }
+            : { _dryRunDetail: liveHint, status: "changed" }
+        }
+        const pendingDetail =
+          liveHint == null
+            ? "(dry-run, daemon-reload pending)"
+            : `(dry-run, daemon-reload pending) — ${liveHint}`
+        return { _dryRunDetail: pendingDetail, status: "changed" }
+      },
+      _dryRunDiffProducer: true,
+      async apply(ssh: null | SshConnection): Promise<ModuleResult> {
+        if (!ssh) return failed(`[quadlet.network: ${options.name}] SSH connection is required`)
+        const result = await applyQuadletFile({
+          content,
+          filePath,
+          label: "quadlet.network",
+          name: options.name,
+          ssh,
+        })
+        if (result.status !== "changed") return result
+        const flagFailure = await setVersionedFlag(ssh, reloadFlag.flagName, reloadFlag.flagPrefix)
+        if (flagFailure) return flagFailure
+        // Advisory only: the unit already converged. Surface that a live
+        // network keeps its old settings until removed.
+        if (await podmanNetworkExists(ssh, options.name)) {
+          return { ...result, detail: quadletNetworkLiveHint(options.name) }
+        }
+        return result
+      },
+      async check(ssh: null | SshConnection): Promise<"needs-apply" | "ok"> {
+        if (!ssh) return NEEDS_APPLY
+        const fileResult = await checkQuadletFile({ content, filePath, ssh })
+        if (fileResult !== "ok") return fileResult
+        return (await hasFlag(ssh, reloadFlag.flagName)) ? "ok" : NEEDS_APPLY
+      },
+      name: `quadlet.network: ${options.name}`,
     }
   },
 

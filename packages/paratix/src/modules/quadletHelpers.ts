@@ -79,7 +79,7 @@ export type QuadletImageUpdateOptions = {
   serviceName?: string
 }
 
-const CONTAINERS_SYSTEMD_DIRECTORY = "/etc/containers/systemd"
+export const CONTAINERS_SYSTEMD_DIRECTORY = "/etc/containers/systemd"
 const QUADLET_ENVIRONMENT_KEY_PATTERN = /^[A-Za-z_]\w*$/v
 // R-0000590: drop `%` from the safe set. systemd treats `%x` sequences as
 // unit-file specifiers (`%h`, `%t`, `%n`, …), and the previous safe set
@@ -103,31 +103,36 @@ const QUADLET_PULL_CHANGED_OUTPUT_PATTERNS = [
 
 function assertQuadletLineValue(key: string, value: string): void {
   if (QUADLET_CONTROL_CHARACTER_PATTERN.test(value)) {
-    throw new Error(`quadlet.container ${key} values must not contain control characters`)
+    // Neutral `quadlet` prefix: this renderer is shared by `quadlet.container`
+    // and `quadlet.network`, so the message must not name a single module.
+    throw new Error(`quadlet ${key} values must not contain control characters`)
   }
 }
 
-function renderQuadletLine(key: string, value: string): string {
+export function renderQuadletLine(key: string, value: string): string {
   assertQuadletLineValue(key, value)
   return `${key}=${value}`
 }
 
-function renderQuadletRepeated(key: string, values: string[]): string[] {
+export function renderQuadletRepeated(key: string, values: string[]): string[] {
   return values.map((value) => renderQuadletLine(key, value))
 }
 
-function renderQuadletKeyValue(key: string, record: Record<string, string>): string[] {
+export function renderQuadletKeyValue(key: string, record: Record<string, string>): string[] {
   return Object.entries(record)
     .sort(([left], [right]) => left.localeCompare(right))
     .map(([k, v]) => renderQuadletLine(key, `${k}=${v}`))
 }
 
-function maybeRenderQuadletLine(key: string, value: null | string | undefined): null | string {
+export function maybeRenderQuadletLine(
+  key: string,
+  value: null | string | undefined
+): null | string {
   if (value == null || value === "") return null
   return renderQuadletLine(key, value)
 }
 
-function maybeRenderQuadletBool(key: string, value: boolean | undefined): null | string {
+export function maybeRenderQuadletBool(key: string, value: boolean | undefined): null | string {
   if (value == null) return null
   return renderQuadletLine(key, String(value))
 }
@@ -137,7 +142,7 @@ function maybeRenderQuadletNumber(key: string, value: number | undefined): null 
   return renderQuadletLine(key, String(value))
 }
 
-function compactQuadletLines(lines: Array<null | string>): string[] {
+export function compactQuadletLines(lines: Array<null | string>): string[] {
   return lines.filter((line): line is string => line != null)
 }
 
