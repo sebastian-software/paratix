@@ -68,4 +68,28 @@ The Paratix CLI also suggests a global installation, but a project-local depende
 
 **Verify:** Connect with SSH directly, then rerun Paratix and confirm that it reconnects within the configured window.
 
+## A package step reports `changed` on every run
+
+**Symptom:** `package.update`, `package.upgrade` or `apt.distUpgrade` reports `changed` on every apply, even when the playbook and its date arguments have not changed.
+
+**Likely cause:** Two causes look identical in the output.
+
+Before 0.17.0, several calls of the same dated module shared one host-global marker namespace, so each call deleted the other's marker on every run and neither could ever converge. Two calls of the same module with different dates are the signature of this.
+
+Otherwise the step is converging correctly but its work is genuinely empty: these modules report `changed` whenever their dated marker is absent, including when the package manager had nothing to upgrade.
+
+**Diagnose:** Read the step's status detail. `no packages upgraded` means the marker was missing but the system was already current; a count such as `12 packages upgraded` means real work happened. `marker was missing, package index refreshed` is the expected detail for `package.update`. If the detail is absent entirely, the installed version predates it — upgrade before diagnosing further.
+
+Inspect the markers on the host to confirm which dates are recorded:
+
+```bash
+sudo ls -la /var/lib/paratix/flags/
+```
+
+Each dated call must have its own file. A call whose marker is missing after a successful run indicates the pre-0.17.0 behavior.
+
+**Fix:** Upgrade to 0.17.0 or newer, where each dated call keeps its own marker. No playbook change is required, and existing markers stay valid. On a host that ran an affected version, the previously evicted call runs once more and reports `changed`; from the next run on it reports `ok`.
+
+**Verify:** Apply the playbook twice without changing it. The second run must report `ok` for every dated module.
+
 [Back to the user guide](./README.md)
