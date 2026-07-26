@@ -1,0 +1,42 @@
+# Effective Flow project setup
+
+## Status
+
+Active
+
+## Context
+
+This ADR holds this project's tracked Effective Flow configuration. `.effective-flow/` is a pure
+runtime directory and completely gitignored.
+
+The values were migrated from the former `.firmo/config.json`. The legacy key
+`plan.markerLanguage: de` became `language.workflow: de`, which now governs the complete plan and
+review artifact rather than only its status marker. The `firmo` branch prefix and the
+`.firmo/.worktrees` base directories are kept deliberately so existing branches and the registered
+worktree stay consistent.
+
+## Configuration
+
+| Key                               | Value             |
+| --------------------------------- | ----------------- |
+| review.profile                    | focused           |
+| review.autoConfirmScope           | false             |
+| review.designDecisionSources      | standard          |
+| review.validation                 | full              |
+| applyReview.defaultCommitStrategy | null              |
+| applyReview.finalValidation       | full              |
+| applyReview.stashPolicy           | interactive       |
+| applyReview.worktree.baseDir      | .firmo/.worktrees |
+| applyReview.worktree.setup        | auto              |
+| language.project                  | en                |
+| language.workflow                 | de                |
+| plan.dir                          | docs/plan         |
+| delivery.baseBranch               | origin/main       |
+| delivery.branchPrefix             | firmo             |
+| delivery.completion               | pr                |
+| delivery.returnBranch             | auto              |
+| worktree.enabled                  | true              |
+| worktree.setup                    | auto              |
+| worktree.baseDir                  | .firmo/.worktrees |
+| tracker.mode                      | remote            |
+| tracker.remoteToolOverride        | auto              |
