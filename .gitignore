@@ -15,5 +15,4 @@ tmp/
 sebastian-gmbh-paratix-test
 init-test.sh
 .claude/scheduled_tasks.lock
-.firmo/*
-!.firmo/config.json
+.effective-flow/
