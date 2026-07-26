@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.16.1](https://github.com/sebastian-software/paratix/compare/paratix-v0.16.0...paratix-v0.16.1) (2026-07-26)
+
+
+### Bug Fixes
+
+* **paratix:** match numerically declared owner and group in drift checks ([#151](https://github.com/sebastian-software/paratix/issues/151)) ([1a6da4e](https://github.com/sebastian-software/paratix/commit/1a6da4ef73495b095f605f33095521c431be9d7f)), closes [#147](https://github.com/sebastian-software/paratix/issues/147)
+
 ## [0.16.0](https://github.com/sebastian-software/paratix/compare/paratix-v0.15.1...paratix-v0.16.0) (2026-07-15)
 
 
