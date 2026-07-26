@@ -224,6 +224,15 @@ very slow artifact hosts or large downloads.
 | `file.stat`       | `(remotePath: string): Module`                                                                                      | No (always-applies) |
 | `file.template`   | `(remotePath: string, templatePath: string, options?: { mode?: string; owner?: string; strict?: boolean }): Module` | Yes                 |
 
+**Note on `owner` and `group` values:** Every ownership option accepts either a POSIX name or a
+numeric id — `owner: "www-data:www-data"` and `owner: "65532:65532"` are both valid, and the two
+components may be mixed (`owner: "root:65532"`). Numeric ids are the only option for accounts that
+have no passwd or group entry on the target host, such as `65532` in distroless images or `70` in
+the postgres image. Drift detection compares the declared value against both the name and the id
+reported by the host, so a numerically declared owner converges to `status: "ok"` like a named one.
+`file.properties` keeps `owner` and `group` as separate options and therefore rejects a combined
+`"user:group"` spec.
+
 **Note on `file.copy` and the default mode:** When `options.mode` is omitted, `file.copy` sets the mode to the documented default of `0644`. The mode is applied during upload (`uploadFile` with `{ mode }`) and compared with the desired value in `check`, so subsequent runs detect mode drift (for example, a manual `chmod 0600`) as `needs-apply`. Pass `{ mode: "0600" }` explicitly when more restrictive permissions are required, such as for secrets.
 
 **Note on `file.line`:** The `line` value must be a single line without CR/LF characters. Use `file.block` for multiline content.

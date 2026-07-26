@@ -7,11 +7,25 @@ const EXEC_OPTS = { ignoreExitCode: true, silent: true } as const
 
 export type FileOwnership = {
   group: string
+  groupId: string
   mode: string
   owner: string
+  ownerId: string
 }
 
 const DEFAULT_FILE_WRITE_MODE = "0644"
+
+/**
+ * Ownership snapshot used when `stat` fails. Every field stays empty so the
+ * drift comparison reports "needs re-apply" instead of a partial match.
+ */
+const EMPTY_OWNERSHIP: FileOwnership = {
+  group: "",
+  groupId: "",
+  mode: "",
+  owner: "",
+  ownerId: "",
+}
 
 export function assertValidChownOwnershipSpec(ownerSpec: string): void {
   if (ownerSpec === "") {
@@ -118,27 +132,44 @@ export async function readOwnership(
   // out of check/apply. Empty fields make the subsequent drift-comparison
   // treat the file as needing re-apply, mirroring fileExtra.ts:390-393 and
   // download.ts:206-217.
-  const result = await ssh.exec(`stat -c '%a %U %G' ${shellQuote(remotePath)}`, EXEC_OPTS)
-  if (result.code !== 0) return { group: "", mode: "", owner: "" }
-  const [mode = "", owner = "", group = ""] = result.stdout.trim().split(/\s+/v)
-  return { group, mode, owner }
+  //
+  // The numeric `%u %g` columns are read alongside the `%U %G` names so a
+  // numerically declared owner can be compared without a second remote call.
+  // See `ownershipComponentMatches` for why both representations are needed.
+  const result = await ssh.exec(`stat -c '%a %U %G %u %g' ${shellQuote(remotePath)}`, EXEC_OPTS)
+  if (result.code !== 0) return { ...EMPTY_OWNERSHIP }
+  const [mode = "", owner = "", group = "", ownerId = "", groupId = ""] = result.stdout
+    .trim()
+    .split(/\s+/v)
+  return { group, groupId, mode, owner, ownerId }
 }
 
 export function normalizeMode(mode: string): string {
   return mode.startsWith("0") ? mode : `0${mode}`
 }
 
-function ownershipComponentMatches(expected: string, actual: string): boolean {
-  return expected === "" || actual === expected
-}
-
-function groupOwnershipMatches(
-  expectsGroup: boolean,
-  expectedGroup: string,
-  actualGroup: string
-): boolean {
-  if (!expectsGroup) return true
-  return ownershipComponentMatches(expectedGroup, actualGroup)
+/**
+ * Compare one declared ownership component against the state reported by
+ * `stat`, accepting either the name (`%U`/`%G`) or the numeric id (`%u`/`%g`).
+ *
+ * A numeric declaration such as `"65532:65532"` can never equal a name, and
+ * `stat -c '%U'` reports `UNKNOWN` for ids without a passwd entry — distroless
+ * (65532) and the postgres image (70) have no name to declare instead. Without
+ * the numeric comparison every such declaration reported drift on every run and
+ * re-fired the recipe's signals.
+ *
+ * Accepting either representation is unambiguous here because
+ * `USER_NAME_PATTERN` in `posixNames.ts` forbids names starting with a digit,
+ * so a paratix-managed account is never confusable with an id.
+ *
+ * @param expected - The declared component; an empty string matches anything.
+ * @param actual - The name reported by `stat -c '%U'` / `'%G'`.
+ * @param actualId - The id reported by `stat -c '%u'` / `'%g'`.
+ * @returns `true` when the declaration matches the name or the id.
+ */
+function ownershipComponentMatches(expected: string, actual: string, actualId: string): boolean {
+  if (expected === "") return true
+  return actual === expected || actualId === expected
 }
 
 export async function resolveWriteMode(
@@ -208,10 +239,10 @@ export function ownershipMatches(
   if (options?.owner == null) return true
 
   const expectsGroup = options.owner.includes(":")
-  const [expectedOwner, expectedGroup = ""] = options.owner.split(":", 2)
-  if (!ownershipComponentMatches(expectedOwner, current.owner)) return false
-  if (!groupOwnershipMatches(expectsGroup, expectedGroup, current.group)) return false
-  return true
+  const [expectedOwner = "", expectedGroup = ""] = options.owner.split(":", 2)
+  if (!ownershipComponentMatches(expectedOwner, current.owner, current.ownerId)) return false
+  if (!expectsGroup) return true
+  return ownershipComponentMatches(expectedGroup, current.group, current.groupId)
 }
 
 export function createMetadataModule(

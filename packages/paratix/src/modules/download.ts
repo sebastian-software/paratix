@@ -60,8 +60,10 @@ type DownloadParameters = {
 
 type DownloadOwnership = {
   group: string
+  groupId: string
   mode: string
   owner: string
+  ownerId: string
 }
 
 const DEFAULT_CURL_CONNECT_TIMEOUT_MS = 10_000
@@ -262,17 +264,45 @@ async function readDownloadOwnership(
   // CommandError out of check/apply. Empty fields make the subsequent
   // drift-comparison treat the file as needing re-apply, mirroring the
   // crontab/R-0000272 pattern.
-  const result = await conn.exec(`stat -c '%a %U %G' ${shellQuote(destination)}`, {
+  const result = await conn.exec(`stat -c '%a %U %G %u %g' ${shellQuote(destination)}`, {
     ignoreExitCode: true,
     silent: true,
   })
-  if (result.code !== 0) return { group: "", mode: "", owner: "" }
+  if (result.code !== 0) return { group: "", groupId: "", mode: "", owner: "", ownerId: "" }
   // R-0000253: split on any whitespace run (mirrors mount.ts/archive.ts)
   // because BusyBox/POSIX `stat` implementations may emit tabs or multiple
   // spaces between the columns, which broke the previous single-space
   // split and produced empty owner/group fields.
-  const [mode = "", owner = "", group = ""] = result.stdout.trim().split(/\s+/v)
-  return { group, mode, owner }
+  //
+  // The numeric `%u %g` columns let a numerically declared owner/group match
+  // without a second remote call; see `downloadComponentMatches`.
+  const [mode = "", owner = "", group = "", ownerId = "", groupId = ""] = result.stdout
+    .trim()
+    .split(/\s+/v)
+  return { group, groupId, mode, owner, ownerId }
+}
+
+/**
+ * Compare one declared owner/group against the state reported by stat,
+ * accepting either the name (`%U`/`%G`) or the numeric id (`%u`/`%g`).
+ *
+ * Mirrors `ownershipComponentMatches` in `fileMetadataHelpers.ts`. Without the
+ * numeric comparison a declaration such as `owner: "999"` reported drift on
+ * every run, because `stat -c '%U'` answers with a name — or `UNKNOWN` for ids
+ * that have no passwd entry at all.
+ *
+ * @param expected - The declared component, or `undefined` when not requested.
+ * @param actual - The name reported by stat.
+ * @param actualId - The id reported by stat.
+ * @returns `true` when nothing was requested or the declaration matches.
+ */
+function downloadComponentMatches(
+  expected: string | undefined,
+  actual: string,
+  actualId: string
+): boolean {
+  if (expected == null) return true
+  return actual === expected || actualId === expected
 }
 
 function downloadOwnershipMatches(
@@ -280,8 +310,8 @@ function downloadOwnershipMatches(
   options: BaseDownloadOptions
 ): boolean {
   if (options.mode != null && current.mode !== options.mode.replace(/^0+/v, "")) return false
-  if (options.owner != null && current.owner !== options.owner) return false
-  if (options.group != null && current.group !== options.group) return false
+  if (!downloadComponentMatches(options.owner, current.owner, current.ownerId)) return false
+  if (!downloadComponentMatches(options.group, current.group, current.groupId)) return false
   return true
 }
 
@@ -652,8 +682,8 @@ function downloadModeDrifted(current: DownloadOwnership, options: BaseDownloadOp
 
 function downloadOwnerDrifted(current: DownloadOwnership, options: BaseDownloadOptions): boolean {
   return (
-    (options.owner != null && current.owner !== options.owner) ||
-    (options.group != null && current.group !== options.group)
+    !downloadComponentMatches(options.owner, current.owner, current.ownerId) ||
+    !downloadComponentMatches(options.group, current.group, current.groupId)
   )
 }
 

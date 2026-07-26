@@ -26,7 +26,10 @@ const createMockSsh: typeof createBaseMockSsh = (responses, options) =>
       { command: /^\[ -f '\/(?:opt|usr)\//v, result: { code: 1 } },
       // eslint-disable-next-line security/detect-unsafe-regex -- bounded character class, not user input
       { command: /^\[ -L '\/(?:opt|tmp|usr|var)(?:\/[^']*)?' \]$/v, result: { code: 1 } },
-      { command: /^stat -c '%a %U %G' '\/(?:opt|usr)\//v, result: { stdout: "644 root root" } },
+      {
+        command: /^stat -c '%a %U %G %u %g' '\/(?:opt|usr)\//v,
+        result: { stdout: "644 root root 0 0" },
+      },
       // R-0000673: createDownloadTargetDirectory walks each ancestor of the
       // download dirname and creates missing levels with a per-level
       // [ ! -L ] guard rather than a single `mkdir -p`. The stub matches the
@@ -524,7 +527,7 @@ describe("download.url", () => {
       const mockSsh = createMockSsh({
         [`[ -f '${destination}' ]`]: { code: 0 },
         [`sha256sum '${destination}'`]: { stdout: `${sha256}  ${destination}` },
-        [`stat -c '%a %U %G' '${destination}'`]: { stdout: "644 root root" },
+        [`stat -c '%a %U %G %u %g' '${destination}'`]: { stdout: "644 root root 0 0" },
       })
       const mod = download.url(destination, url, { mode: "0755", sha256 })
       const result = await mod.check(mockSsh, emptyEnv)
@@ -534,7 +537,7 @@ describe("download.url", () => {
     it("returns needs-apply when owner and group drift without sha256", async () => {
       const mockSsh = createMockSsh({
         [`[ -f '${destination}' ]`]: { code: 0 },
-        [`stat -c '%a %U %G' '${destination}'`]: { stdout: "755 root wheel" },
+        [`stat -c '%a %U %G %u %g' '${destination}'`]: { stdout: "755 root wheel 0 10" },
       })
       const mod = download.url(destination, url, {
         ...allowUnverifiedDownload,
@@ -1223,7 +1226,7 @@ describe("download.url", () => {
           [`[ -e '${destination}' ]`]: { code: 0 },
           [`[ -f '${destination}' ]`]: { code: 0 },
           [`sha256sum '${destination}'`]: { stdout: `${sha256}  ${destination}` },
-          [`stat -c '%a %U %G' '${destination}'`]: { stdout: "755 deploy staff" },
+          [`stat -c '%a %U %G %u %g' '${destination}'`]: { stdout: "755 deploy staff 1001 50" },
         })
         const mod = download.url(destination, url, {
           group: "staff",
@@ -1233,10 +1236,43 @@ describe("download.url", () => {
         })
         const result = await mod.apply(mockSsh, emptyEnv)
         expect(result.status).toBe("ok")
-        expect(mockSsh.calls).toContain(`stat -c '%a %U %G' '${destination}'`)
+        expect(mockSsh.calls).toContain(`stat -c '%a %U %G %u %g' '${destination}'`)
         expect(mockSsh.calls.every((c) => !c.startsWith("chmod"))).toBe(true)
         expect(mockSsh.calls.every((c) => !c.startsWith("chown"))).toBe(true)
         expect(mockSsh.calls.every((c) => !c.startsWith("curl"))).toBe(true)
+      })
+
+      it("returns ok when a numeric owner and group match the remote ids", async () => {
+        const mockSsh = createMockSsh({
+          [`[ -e '${destination}' ]`]: { code: 0 },
+          [`[ -f '${destination}' ]`]: { code: 0 },
+          [`sha256sum '${destination}'`]: { stdout: `${sha256}  ${destination}` },
+          // The redis image owns its config as 999:1000; `stat -c '%U'` answers
+          // with a name, so a name-only comparison reported drift every run.
+          [`stat -c '%a %U %G %u %g' '${destination}'`]: { stdout: "644 redis paratix 999 1000" },
+        })
+        const mod = download.url(destination, url, {
+          group: "1000",
+          mode: "0644",
+          owner: "999",
+          sha256,
+        })
+        const result = await mod.apply(mockSsh, emptyEnv)
+        expect(result.status).toBe("ok")
+        expect(mockSsh.calls).toContain(`stat -c '%a %U %G %u %g' '${destination}'`)
+        expect(mockSsh.calls.every((c) => !c.startsWith("chown"))).toBe(true)
+        expect(mockSsh.calls.every((c) => !c.startsWith("chgrp"))).toBe(true)
+      })
+
+      it("returns needs-apply when a numeric owner does not match the remote uid", async () => {
+        const mockSsh = createMockSsh({
+          [`[ -f '${destination}' ]`]: { code: 0 },
+          [`sha256sum '${destination}'`]: { stdout: `${sha256}  ${destination}` },
+          [`stat -c '%a %U %G %u %g' '${destination}'`]: { stdout: "644 root root 0 0" },
+        })
+        const mod = download.url(destination, url, { owner: "65532", sha256 })
+        const result = await mod.check(mockSsh, emptyEnv)
+        expect(result).toBe("needs-apply")
       })
 
       // R-0000253 regression: BusyBox/POSIX `stat` may emit tabs or multiple
@@ -1249,7 +1285,7 @@ describe("download.url", () => {
           [`[ -e '${destination}' ]`]: { code: 0 },
           [`[ -f '${destination}' ]`]: { code: 0 },
           [`sha256sum '${destination}'`]: { stdout: `${sha256}  ${destination}` },
-          [`stat -c '%a %U %G' '${destination}'`]: { stdout: "755\tdeploy   staff" },
+          [`stat -c '%a %U %G %u %g' '${destination}'`]: { stdout: "755\tdeploy   staff 1001 50" },
         })
         const mod = download.url(destination, url, {
           group: "staff",
@@ -1268,7 +1304,7 @@ describe("download.url", () => {
           [`[ -e '${destination}' ]`]: { code: 0 },
           [`[ -f '${destination}' ]`]: { code: 0 },
           [`sha256sum '${destination}'`]: { stdout: `${sha256}  ${destination}` },
-          [`stat -c '%a %U %G' '${destination}'`]: { stdout: "755 root staff" },
+          [`stat -c '%a %U %G %u %g' '${destination}'`]: { stdout: "755 root staff 0 50" },
         })
         const mod = download.url(destination, url, {
           group: "staff",
@@ -1291,7 +1327,7 @@ describe("download.url", () => {
           [`[ -f '${destination}' ]`]: { code: 0 },
           [`[ -L '/usr/local/bin' ]`]: { code: 0 },
           [`sha256sum '${destination}'`]: { stdout: `${sha256}  ${destination}` },
-          [`stat -c '%a %U %G' '${destination}'`]: { stdout: "644 root staff" },
+          [`stat -c '%a %U %G %u %g' '${destination}'`]: { stdout: "644 root staff 0 50" },
         })
         const mod = download.url(destination, url, {
           group: "staff",
@@ -1777,7 +1813,7 @@ describe("download.github", () => {
     it("returns needs-apply when owner or group drift", async () => {
       const mockSsh = createMockSsh({
         [`[ -f '${destination}' ]`]: { code: 0 },
-        [`stat -c '%a %U %G' '${destination}'`]: { stdout: "755 root wheel" },
+        [`stat -c '%a %U %G %u %g' '${destination}'`]: { stdout: "755 root wheel 0 10" },
       })
       const mod = download.github(destination, {
         ...allowUnverifiedDownload,
@@ -2274,7 +2310,7 @@ describe("download.large", () => {
         [`[ -f '${destination}' ]`]: { code: 0 },
         [`[ -f /var/lib/paratix/flags/'${flagName}' ]`]: { code: 0 },
         [`sha256sum '${destination}'`]: { stdout: `${sha256}  ${destination}` },
-        [`stat -c '%a %U %G' '${destination}'`]: { stdout: "644 root root" },
+        [`stat -c '%a %U %G %u %g' '${destination}'`]: { stdout: "644 root root 0 0" },
       })
       const mod = download.large(destination, url, { mode: "0600", sha256 })
       const result = await mod.check(mockSsh, emptyEnv)
@@ -2285,7 +2321,7 @@ describe("download.large", () => {
       const mockSsh = createMockSsh({
         [`[ -f '${destination}' ]`]: { code: 0 },
         [`[ -f /var/lib/paratix/flags/'${flagName}' ]`]: { code: 0 },
-        [`stat -c '%a %U %G' '${destination}'`]: { stdout: "644 root wheel" },
+        [`stat -c '%a %U %G %u %g' '${destination}'`]: { stdout: "644 root wheel 0 10" },
       })
       const mod = download.large(destination, url, {
         ...allowUnverifiedDownload,
@@ -2416,7 +2452,7 @@ describe("download.large", () => {
         [`[ -f '${destination}' ]`]: { code: 0 },
         [`[ -f /var/lib/paratix/flags/'${flagName}' ]`]: { code: 0 },
         [`sha256sum '${destination}'`]: { stdout: `${sha256}  ${destination}` },
-        [`stat -c '%a %U %G' '${destination}'`]: { stdout: "644 root root" },
+        [`stat -c '%a %U %G %u %g' '${destination}'`]: { stdout: "644 root root 0 0" },
       })
       const mod = download.large(destination, url, { mode: "0755", sha256 })
       const result = await mod.apply(mockSsh, emptyEnv)

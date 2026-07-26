@@ -1136,6 +1136,48 @@ describe.skip("Paratix integration", () => {
     }
   })
 
+  it("converges a numerically declared owner instead of reporting changed on every apply", async () => {
+    const ssh = await connectSsh([getEnvironment().primaryPort], {}, "root")
+    const remoteBase = `/root/integration-${randomUUID()}`
+    const remoteDirectory = `${remoteBase}/numeric-owner`
+    // 65532 has no passwd or group entry on the Ubuntu base image, so
+    // `stat -c '%U %G'` answers UNKNOWN and only the numeric columns can
+    // confirm that the declared ownership is already in place.
+    const numericOwner = "65532:65532"
+
+    let primaryError: unknown
+    try {
+      const directoryModule = file.directory(remoteDirectory, {
+        mode: "0700",
+        owner: numericOwner,
+      })
+
+      await expect(directoryModule.apply(ssh, emptyEnv)).resolves.toMatchObject({
+        status: "changed",
+      })
+
+      expect(await ssh.output(`stat -c '%a %u %g' ${shellQuote(remoteDirectory)}`)).toContain(
+        "700 65532 65532"
+      )
+
+      // The second apply must converge: before the numeric comparison this
+      // reported "changed" forever and re-fired the recipe's signals.
+      await expect(directoryModule.apply(ssh, emptyEnv)).resolves.toMatchObject({ status: "ok" })
+      await expectModuleCheckOk(directoryModule, ssh)
+    } catch (error) {
+      primaryError = error
+      throw error
+    } finally {
+      await runCleanupSteps(
+        [
+          removeRemoteDirectoryStep(ssh, remoteBase, "remove remote numeric owner test directory"),
+          disconnectSshStep(ssh),
+        ],
+        primaryError
+      )
+    }
+  })
+
   it("converges unicode file, template, and block modules to verifiable remote state", async () => {
     const ssh = await connectSsh([getEnvironment().primaryPort], {}, "root")
     const remoteBase = `/root/integration-${randomUUID()}-äöü`

@@ -60,7 +60,7 @@ async function concatFragmentsSafely(
 // R-0000705: `normalizeMode` and `resolveWriteMode` are consolidated in
 // `fileMetadataHelpers` so callers across the file module share the same
 // existence probe, mode-read fallback and "0"-prefix normalization. The
-// helper version uses `readOwnership` (`stat -c '%a %U %G'`) so the
+// helper version uses `readOwnership` (`stat -c '%a %U %G %u %g'`) so the
 // ownership snapshot is reusable, but for callers that only need the mode
 // the additional fields are inert.
 
@@ -371,7 +371,8 @@ export function block(remotePath: string, options: BlockOptions): Module {
 }
 
 /**
- * Read the current mode/owner/group triple from `stat -c '%a %U %G'`.
+ * Read the current mode/owner/group triple plus the numeric uid/gid from
+ * `stat -c '%a %U %G %u %g'`.
  *
  * @param ssh - The SSH connection.
  * @param remotePath - Path to the file or directory on the remote host.
@@ -380,16 +381,21 @@ export function block(remotePath: string, options: BlockOptions): Module {
 async function readPropertiesState(
   ssh: SshConnection,
   remotePath: string
-): Promise<{ group: string; mode: string; owner: string }> {
+): Promise<PropertiesState> {
   // R-0000558: route the stat call through ssh.exec with ignoreExitCode so a
   // transient stat failure (file removed between the symlink probe and the
   // metadata read, EACCES, EIO, …) does not propagate as a raw CommandError
   // out of check/apply. Empty fields make the subsequent drift-comparison
   // treat the file as needing re-apply, mirroring crontab/R-0000272.
-  const result = await ssh.exec(`stat -c '%a %U %G' ${shellQuote(remotePath)}`, EXEC_OPTS)
-  if (result.code !== 0) return { group: "", mode: "", owner: "" }
-  const [mode = "", owner = "", group = ""] = result.stdout.trim().split(/\s+/v)
-  return { group, mode, owner }
+  //
+  // The numeric `%u %g` columns support numerically declared owners/groups;
+  // see `propertiesComponentMatches`.
+  const result = await ssh.exec(`stat -c '%a %U %G %u %g' ${shellQuote(remotePath)}`, EXEC_OPTS)
+  if (result.code !== 0) return { group: "", groupId: "", mode: "", owner: "", ownerId: "" }
+  const [mode = "", owner = "", group = "", ownerId = "", groupId = ""] = result.stdout
+    .trim()
+    .split(/\s+/v)
+  return { group, groupId, mode, owner, ownerId }
 }
 
 /**
@@ -405,7 +411,13 @@ function modeMatches(current: string, desired: string): boolean {
 }
 
 /** State observed by {@link applyOwnershipDrift}. */
-type PropertiesState = { group: string; mode: string; owner: string }
+type PropertiesState = {
+  group: string
+  groupId: string
+  mode: string
+  owner: string
+  ownerId: string
+}
 
 /** Desired settings passed by the caller. */
 type PropertiesOptions = { group?: string; mode?: string; owner?: string }
@@ -417,10 +429,57 @@ type DriftContext = {
   ssh: SshConnection
 }
 
+/** A bare uid/gid, e.g. `"65532"` — accepted wherever a name is accepted. */
+const NUMERIC_ID_PATTERN = /^\d+$/v
+
+/**
+ * Accept a numeric uid/gid in addition to a POSIX name for `file.properties`.
+ *
+ * The shared `assertValidUserName` / `assertValidGroupName` from
+ * `posixNames.ts` must stay strict: `user`, `ssh`, `cron` and `rsync` rely on
+ * them to reject account names that start with a digit, and they double as the
+ * guard that keeps `chown`/`chgrp` option injection (`--reference=…`) out of
+ * the rendered command. This wrapper therefore widens only the ownership
+ * surface, and only by an all-digit id — never a `user:group` spec, which
+ * `file.properties` expresses through its separate `owner` and `group` options.
+ *
+ * @param value - The declared owner or group.
+ * @param kind - Which option is being validated, used in the error message.
+ * @throws {Error} When the value is neither a valid POSIX name nor a bare id.
+ */
+function assertValidOwnershipComponent(value: string, kind: "group" | "user"): void {
+  if (NUMERIC_ID_PATTERN.test(value)) return
+  if (kind === "user") assertValidUserName(value)
+  else assertValidGroupName(value)
+}
+
+/**
+ * Compare one declared ownership component against the state reported by stat,
+ * accepting either the name (`%U`/`%G`) or the numeric id (`%u`/`%g`).
+ *
+ * Mirrors `ownershipComponentMatches` in `fileMetadataHelpers.ts`: a numeric
+ * declaration can never equal a name, and `stat -c '%U'` reports `UNKNOWN` for
+ * ids without a passwd entry, so a name-only comparison reported drift on every
+ * run for uids that have no name to declare instead.
+ *
+ * @param expected - The declared component, or `undefined` when not requested.
+ * @param actual - The name reported by stat.
+ * @param actualId - The id reported by stat.
+ * @returns `true` when nothing was requested or the declaration matches.
+ */
+function propertiesComponentMatches(
+  expected: string | undefined,
+  actual: string,
+  actualId: string
+): boolean {
+  if (expected == null) return true
+  return actual === expected || actualId === expected
+}
+
 function assertValidPropertiesOptions(options: PropertiesOptions): void {
   if (options.mode != null) validateMode(options.mode)
-  if (options.owner != null) assertValidUserName(options.owner)
-  if (options.group != null) assertValidGroupName(options.group)
+  if (options.owner != null) assertValidOwnershipComponent(options.owner, "user")
+  if (options.group != null) assertValidOwnershipComponent(options.group, "group")
 }
 
 /** Result of a drift step: a failure result, "changed", or "unchanged". */
@@ -458,8 +517,12 @@ async function applyModeDrift(context: DriftContext): Promise<DriftStepResult> {
  */
 async function maybeApplyCombinedChown(context: DriftContext): Promise<DriftStepResult> {
   const { current, options, remotePath, ssh } = context
-  const ownerNeedsUpdate = options.owner != null && current.owner !== options.owner
-  const groupNeedsUpdate = options.group != null && current.group !== options.group
+  const ownerNeedsUpdate =
+    options.owner != null &&
+    !propertiesComponentMatches(options.owner, current.owner, current.ownerId)
+  const groupNeedsUpdate =
+    options.group != null &&
+    !propertiesComponentMatches(options.group, current.group, current.groupId)
   if (!ownerNeedsUpdate || !groupNeedsUpdate || options.owner == null || options.group == null) {
     return false
   }
@@ -480,7 +543,12 @@ async function maybeApplyCombinedChown(context: DriftContext): Promise<DriftStep
  */
 async function maybeApplySingleChown(context: DriftContext): Promise<DriftStepResult> {
   const { current, options, remotePath, ssh } = context
-  if (options.owner == null || current.owner === options.owner) return false
+  if (
+    options.owner == null ||
+    propertiesComponentMatches(options.owner, current.owner, current.ownerId)
+  ) {
+    return false
+  }
   const result = await ssh.exec(renderGuardedChownCommand(options.owner, remotePath), EXEC_OPTS)
   if (result.code !== 0) {
     return failedCommand(`[file.properties: ${remotePath}] chown failed`, result)
@@ -497,7 +565,12 @@ async function maybeApplySingleChown(context: DriftContext): Promise<DriftStepRe
  */
 async function maybeApplySingleChgrp(context: DriftContext): Promise<DriftStepResult> {
   const { current, options, remotePath, ssh } = context
-  if (options.group == null || current.group === options.group) return false
+  if (
+    options.group == null ||
+    propertiesComponentMatches(options.group, current.group, current.groupId)
+  ) {
+    return false
+  }
   const result = await ssh.exec(renderGuardedChgrpCommand(options.group, remotePath), EXEC_OPTS)
   if (result.code !== 0) {
     return failedCommand(`[file.properties: ${remotePath}] chgrp failed`, result)
@@ -527,7 +600,7 @@ async function applyOwnershipDrift(context: DriftContext): Promise<DriftStepResu
 /**
  * Set file or directory ownership and permissions on the remote host.
  * Only the attributes specified in `options` are checked and applied. Drift
- * is detected via `stat -c '%a %U %G'` so `apply` only invokes the relevant
+ * is detected via `stat -c '%a %U %G %u %g'` so `apply` only invokes the relevant
  * `chmod`/`chown`/`chgrp` for fields that actually differ from the desired
  * state. When all desired fields already match, `apply` returns `status: "ok"`
  * instead of falsely reporting a change.
@@ -571,11 +644,11 @@ export function properties(remotePath: string, options: PropertiesOptions): Modu
       // them. Defer the failure to apply so the dedicated error surfaces.
       if (await isSymlink(ssh, remotePath)) return NEEDS_APPLY
 
-      const { group, mode, owner } = await readPropertiesState(ssh, remotePath)
+      const { group, groupId, mode, owner, ownerId } = await readPropertiesState(ssh, remotePath)
 
       if (options.mode != null && !modeMatches(mode, options.mode)) return NEEDS_APPLY
-      if (options.owner != null && owner !== options.owner) return NEEDS_APPLY
-      if (options.group != null && group !== options.group) return NEEDS_APPLY
+      if (!propertiesComponentMatches(options.owner, owner, ownerId)) return NEEDS_APPLY
+      if (!propertiesComponentMatches(options.group, group, groupId)) return NEEDS_APPLY
 
       return "ok"
     },

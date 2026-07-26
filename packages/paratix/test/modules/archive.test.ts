@@ -175,10 +175,10 @@ function createOwnerCheckExecTracker(mockSsh: MockSsh, originalExec: MockSsh["ex
   return createTrackedExec(mockSsh, originalExec, {
     isTrackedCommand: (command) =>
       command.startsWith(`[ -e '${destination}/app/file-`) ||
-      command.startsWith(`stat -c '%U %G' -- '${destination}/app/file-`),
+      command.startsWith(`stat -c '%U %G %u %g' -- '${destination}/app/file-`),
     resultForCommand: (command) =>
       command.startsWith("stat ")
-        ? { code: 0, stderr: "", stdout: "www-data www-data\n" }
+        ? { code: 0, stderr: "", stdout: "www-data www-data 33 33\n" }
         : { code: 0, stderr: "", stdout: "" },
   })
 }
@@ -425,9 +425,9 @@ describe("archive.extract — check", () => {
         code: 0,
         stdout: JSON.stringify([`${destination}/app/file`]),
       },
-      [`stat -c '%U %G' -- '${destination}/app/file'`]: {
+      [`stat -c '%U %G %u %g' -- '${destination}/app/file'`]: {
         code: 0,
-        stdout: "www-data www-data\n",
+        stdout: "www-data www-data 33 33\n",
       },
       [`test -d '${destination}'`]: { code: 0 },
       [`test -f '${marker}'`]: { code: 0 },
@@ -448,9 +448,9 @@ describe("archive.extract — check", () => {
         code: 0,
         stdout: JSON.stringify([`${destination}/app/file`]),
       },
-      [`stat -c '%U %G' -- '${destination}/app/file'`]: {
+      [`stat -c '%U %G %u %g' -- '${destination}/app/file'`]: {
         code: 0,
-        stdout: "root root\n",
+        stdout: "root root 0 0\n",
       },
       [`test -d '${destination}'`]: { code: 0 },
       [`test -f '${marker}'`]: { code: 0 },
@@ -460,7 +460,7 @@ describe("archive.extract — check", () => {
     const result = await mod.check(mockSsh, emptyEnv)
     expect(result).toBe("needs-apply")
     expect(mockSsh.calls).toContain(`cat '${ownerPathsMarker}'`)
-    expect(mockSsh.calls).toContain(`stat -c '%U %G' -- '${destination}/app/file'`)
+    expect(mockSsh.calls).toContain(`stat -c '%U %G %u %g' -- '${destination}/app/file'`)
     expect(mockSsh.calls).not.toContain(`cat '${marker}'`)
   })
 
@@ -500,7 +500,7 @@ describe("archive.extract — check", () => {
     expect(result).toBe("ok")
     expect(
       mockSsh.calls.filter((command) =>
-        command.startsWith(`stat -c '%U %G' -- '${destination}/app/file-`)
+        command.startsWith(`stat -c '%U %G %u %g' -- '${destination}/app/file-`)
       )
     ).toHaveLength(memberPaths.length)
     expect(ownerExecTracker.maxActive()).toBeLessThanOrEqual(archiveOwnerMemberConcurrencyLimit)
@@ -586,9 +586,9 @@ describe("archive.extract — check", () => {
         code: 1,
         stderr: `cat: '${ownerPathsMarker}': Permission denied`,
       },
-      [`stat -c '%U %G' -- '${destination}/app/file'`]: {
+      [`stat -c '%U %G %u %g' -- '${destination}/app/file'`]: {
         code: 0,
-        stdout: "root root\n",
+        stdout: "root root 0 0\n",
       },
       [`tar -tvzf '${src}'`]: { code: 0, stdout: safeTarListing },
       [`test -d '${destination}'`]: { code: 0 },
@@ -600,7 +600,7 @@ describe("archive.extract — check", () => {
     expect(result).toBe("needs-apply")
     expect(mockSsh.calls).toContain(`cat '${ownerPathsMarker}'`)
     expect(mockSsh.calls).toContain(`tar -tvzf '${src}'`)
-    expect(mockSsh.calls).toContain(`stat -c '%U %G' -- '${destination}/app/file'`)
+    expect(mockSsh.calls).toContain(`stat -c '%U %G %u %g' -- '${destination}/app/file'`)
   })
 
   it("computes local sha256 when upload is true without uploading", async () => {
@@ -652,9 +652,9 @@ describe("archive.extract — check", () => {
         code: 0,
         stdout: JSON.stringify([`${destination}/app/file`]),
       },
-      [`stat -c '%U %G' -- '${destination}/app/file'`]: {
+      [`stat -c '%U %G %u %g' -- '${destination}/app/file'`]: {
         code: 0,
-        stdout: "www-data www-data\n",
+        stdout: "www-data www-data 33 33\n",
       },
       [`test -d '${destination}'`]: { code: 0 },
       [`test -f '${localMarker}'`]: { code: 0 },
@@ -688,9 +688,9 @@ describe("archive.extract — check", () => {
         code: 0,
         stdout: JSON.stringify([`${destination}/app/file`]),
       },
-      [`stat -c '%U %G' -- '${destination}/app/file'`]: {
+      [`stat -c '%U %G %u %g' -- '${destination}/app/file'`]: {
         code: 0,
-        stdout: "root root\n",
+        stdout: "root root 0 0\n",
       },
       [`test -d '${destination}'`]: { code: 0 },
       [`test -f '${localMarker}'`]: { code: 0 },
@@ -705,7 +705,7 @@ describe("archive.extract — check", () => {
     const result = await mod.check(mockSsh, emptyEnv)
     expect(result).toBe("needs-apply")
     expect(mockSsh.calls).toContain(`cat '${ownerPathsMarker}'`)
-    expect(mockSsh.calls).toContain(`stat -c '%U %G' -- '${destination}/app/file'`)
+    expect(mockSsh.calls).toContain(`stat -c '%U %G %u %g' -- '${destination}/app/file'`)
     expect(mockSsh.calls).not.toContain(`cat '${localMarker}'`)
     expect(mockSsh.uploadFile).not.toHaveBeenCalled()
   })
@@ -2114,9 +2114,9 @@ describe("archive.extract — apply", () => {
         code: 0,
         stdout: JSON.stringify([`${destination}/app/file`]),
       },
-      [`stat -c '%U %G' -- '${destination}/app/file'`]: {
+      [`stat -c '%U %G %u %g' -- '${destination}/app/file'`]: {
         code: 0,
-        stdout: "www-data www-data\n",
+        stdout: "www-data www-data 33 33\n",
       },
       [`tar -tvzf '${src}'`]: { code: 0, stdout: driftedTarListing },
       [`test -d '${destination}'`]: { code: 0 },
@@ -2147,9 +2147,9 @@ describe("archive.extract — apply", () => {
         code: 1,
         stderr: "cat: No such file or directory",
       },
-      [`stat -c '%U %G' -- '${destination}/app/file'`]: {
+      [`stat -c '%U %G %u %g' -- '${destination}/app/file'`]: {
         code: 0,
-        stdout: "www-data www-data\n",
+        stdout: "www-data www-data 33 33\n",
       },
       [`tar -tvzf '${src}'`]: { code: 0, stdout: safeTarListing },
       [`test -d '${destination}'`]: { code: 0 },
@@ -2162,6 +2162,67 @@ describe("archive.extract — apply", () => {
 
     expect(result).toBe("ok")
     expect(mockSsh.calls).toContain(`tar -tvzf '${src}'`)
+  })
+
+  it("returns ok when a numeric owner matches the extracted member ids", async () => {
+    const ownerPathsMarker = `${marker}.owner-paths`
+    const mockSsh = createMockSsh({
+      [`[ -e '${destination}/app/file' ] || [ -L '${destination}/app/file' ]`]: { code: 0 },
+      [`[ -f '${destination}/app/file' ] && [ ! -L '${destination}/app/file' ]`]: { code: 0 },
+      [`cat '${marker}'`]: { code: 0, stdout: archiveSha },
+      [`cat '${membersMarker}'`]: {
+        code: 0,
+        stdout: JSON.stringify([{ kind: "file", path: `${destination}/app/file` }]),
+      },
+      [`cat '${ownerPathsMarker}'`]: {
+        code: 0,
+        stdout: JSON.stringify([`${destination}/app/file`]),
+      },
+      // No passwd or group entry for 65532, so GNU coreutils answers UNKNOWN
+      // for the name columns; only the numeric columns can match.
+      [`stat -c '%U %G %u %g' -- '${destination}/app/file'`]: {
+        code: 0,
+        stdout: "UNKNOWN UNKNOWN 65532 65532\n",
+      },
+      [`test -d '${destination}'`]: { code: 0 },
+      [`test -f '${marker}'`]: { code: 0 },
+    })
+    vi.spyOn(mockSsh, "sha256").mockResolvedValue(archiveSha)
+
+    const mod = archive.extract(src, destination, { owner: "65532:65532" })
+    const result = await mod.check(mockSsh, emptyEnv)
+
+    expect(result).toBe("ok")
+    expect(mockSsh.calls).toContain(`stat -c '%U %G %u %g' -- '${destination}/app/file'`)
+  })
+
+  it("returns needs-apply when a numeric owner does not match the extracted member ids", async () => {
+    const ownerPathsMarker = `${marker}.owner-paths`
+    const mockSsh = createMockSsh({
+      [`[ -e '${destination}/app/file' ] || [ -L '${destination}/app/file' ]`]: { code: 0 },
+      [`[ -f '${destination}/app/file' ] && [ ! -L '${destination}/app/file' ]`]: { code: 0 },
+      [`cat '${marker}'`]: { code: 0, stdout: archiveSha },
+      [`cat '${membersMarker}'`]: {
+        code: 0,
+        stdout: JSON.stringify([{ kind: "file", path: `${destination}/app/file` }]),
+      },
+      [`cat '${ownerPathsMarker}'`]: {
+        code: 0,
+        stdout: JSON.stringify([`${destination}/app/file`]),
+      },
+      [`stat -c '%U %G %u %g' -- '${destination}/app/file'`]: {
+        code: 0,
+        stdout: "root root 0 0\n",
+      },
+      [`test -d '${destination}'`]: { code: 0 },
+      [`test -f '${marker}'`]: { code: 0 },
+    })
+    vi.spyOn(mockSsh, "sha256").mockResolvedValue(archiveSha)
+
+    const mod = archive.extract(src, destination, { owner: "65532:65532" })
+    const result = await mod.check(mockSsh, emptyEnv)
+
+    expect(result).toBe("needs-apply")
   })
 
   it("R-0000162: rejects a poisoned mktemp -d output for the staging directory", async () => {
