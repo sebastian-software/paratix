@@ -142,12 +142,12 @@ export default server({
 
 ### `apt`
 
-| Method            | Signature                                                                                | Idempotent           |
-| ----------------- | ---------------------------------------------------------------------------------------- | -------------------- |
-| `apt.debconf`     | `(packageName: string, selections: Record<string, string>): Module`                      | Yes                  |
-| `apt.distUpgrade` | `(date: string, options?: UpgradeOptions): Module`                                       | Yes (versioned flag) |
-| `apt.key`         | `(name: string, url: string, options: { fingerprint: string }): Module`                  | Yes                  |
-| `apt.repository`  | `(nameOrPpa: string, source?: string, options?: { signedBy?: false \| string }): Module` | Yes                  |
+| Method            | Signature                                                                                | Idempotent       |
+| ----------------- | ---------------------------------------------------------------------------------------- | ---------------- |
+| `apt.debconf`     | `(packageName: string, selections: Record<string, string>): Module`                      | Yes              |
+| `apt.distUpgrade` | `(date: string, options?: UpgradeOptions): Module`                                       | Yes (dated flag) |
+| `apt.key`         | `(name: string, url: string, options: { fingerprint: string }): Module`                  | Yes              |
+| `apt.repository`  | `(nameOrPpa: string, source?: string, options?: { signedBy?: false \| string }): Module` | Yes              |
 
 ### `archive`
 
@@ -288,12 +288,12 @@ that are expected to respond more slowly.
 
 Import with renaming: `import { package as pkg } from "paratix/modules"`. The word `package` is reserved in JavaScript, so you must alias it.
 
-| Method              | Signature                                                                         | Idempotent           |
-| ------------------- | --------------------------------------------------------------------------------- | -------------------- |
-| `package.installed` | `(...packagesAndOptions: Array<string \| PackageSpec \| UpgradeOptions>): Module` | Yes                  |
-| `package.absent`    | `(...packagesAndOptions: Array<string \| PackageSpec \| UpgradeOptions>): Module` | Yes                  |
-| `package.update`    | `(date: string, options?: UpgradeOptions): Module`                                | Yes (versioned flag) |
-| `package.upgrade`   | `(date: string, options?: UpgradeOptions): Module`                                | Yes (versioned flag) |
+| Method              | Signature                                                                         | Idempotent       |
+| ------------------- | --------------------------------------------------------------------------------- | ---------------- |
+| `package.installed` | `(...packagesAndOptions: Array<string \| PackageSpec \| UpgradeOptions>): Module` | Yes              |
+| `package.absent`    | `(...packagesAndOptions: Array<string \| PackageSpec \| UpgradeOptions>): Module` | Yes              |
+| `package.update`    | `(date: string, options?: UpgradeOptions): Module`                                | Yes (dated flag) |
+| `package.upgrade`   | `(date: string, options?: UpgradeOptions): Module`                                | Yes (dated flag) |
 
 #### `UpgradeOptions`
 
@@ -885,7 +885,7 @@ The diff string is plain text — no ANSI codes. The output layer applies colors
 5. Use `{{KEY|shell}}` or `{{KEY|raw}}` placeholders in `.tmpl` files — strict mode is on by default and bare `{{KEY}}` will throw. Provide values via `env` in `server()`.
 6. Use `service.restart()` and `service.reload()` as `signals` in recipes, not directly in `run`.
 7. Use `signals.flush()` only as an explicit checkpoint when staged flows require an early signal flush.
-8. Always pass a date string to `package.upgrade()` and `package.update()` -- it is the idempotency key.
+8. Always pass a date string to `package.upgrade()` and `package.update()` -- it is the idempotency key. Each distinct date keeps its own flag file, so several calls with different dates coexist; a date that was already applied stays applied and is not re-run.
 9. Specify `ssh.ports` as an array -- the runner tries each port in order.
 10. Custom modules must implement both `check` and `apply`, both async.
 11. Use `shellQuote()` when interpolating dynamic values into shell commands.
