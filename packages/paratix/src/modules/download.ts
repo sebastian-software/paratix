@@ -13,7 +13,11 @@ import {
   hasSensitiveQueryParameters,
   validateHeaderPair,
 } from "./curlHelpers.js"
-import { renderGuardedChmodCommand, renderGuardedChownCommand } from "./fileMetadataHelpers.js"
+import {
+  ownershipComponentMatches,
+  renderGuardedChmodCommand,
+  renderGuardedChownCommand,
+} from "./fileMetadataHelpers.js"
 import { applyWithFlagLock, hasFlag, setVersionedFlag } from "./moduleHelpers.js"
 import { validateHttpUrl } from "./netHelpers.js"
 
@@ -283,13 +287,8 @@ async function readDownloadOwnership(
 }
 
 /**
- * Compare one declared owner/group against the state reported by stat,
- * accepting either the name (`%U`/`%G`) or the numeric id (`%u`/`%g`).
- *
- * Mirrors `ownershipComponentMatches` in `fileMetadataHelpers.ts`. Without the
- * numeric comparison a declaration such as `owner: "999"` reported drift on
- * every run, because `stat -c '%U'` answers with a name — or `UNKNOWN` for ids
- * that have no passwd entry at all.
+ * Apply the shared ownership comparison to an optional download option,
+ * treating an unset option as "nothing requested".
  *
  * @param expected - The declared component, or `undefined` when not requested.
  * @param actual - The name reported by stat.
@@ -302,7 +301,7 @@ function downloadComponentMatches(
   actualId: string
 ): boolean {
   if (expected == null) return true
-  return actual === expected || actualId === expected
+  return ownershipComponentMatches(expected, actual, actualId)
 }
 
 function downloadOwnershipMatches(

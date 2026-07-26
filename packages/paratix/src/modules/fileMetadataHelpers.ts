@@ -148,6 +148,21 @@ export function normalizeMode(mode: string): string {
   return mode.startsWith("0") ? mode : `0${mode}`
 }
 
+/** A bare uid/gid, e.g. `"65532"` — accepted wherever an owner name is. */
+const NUMERIC_ID_PATTERN = /^\d+$/v
+
+/**
+ * Whether a declared ownership component is a bare numeric id rather than a
+ * name. Shared by the validators and the comparison so both agree on what
+ * counts as an id.
+ *
+ * @param value - The declared owner or group component.
+ * @returns `true` when the value consists solely of digits.
+ */
+export function isNumericId(value: string): boolean {
+  return NUMERIC_ID_PATTERN.test(value)
+}
+
 /**
  * Compare one declared ownership component against the state reported by
  * `stat`, accepting either the name (`%U`/`%G`) or the numeric id (`%u`/`%g`).
@@ -158,18 +173,33 @@ export function normalizeMode(mode: string): string {
  * the numeric comparison every such declaration reported drift on every run and
  * re-fired the recipe's signals.
  *
+ * Numeric declarations are compared by value, not by string: `chown` parses its
+ * numeric operand as base 10, so `"065532"` sets exactly the same uid that
+ * `stat -c '%u'` then reports as `"65532"`. Comparing those as strings would
+ * reproduce the very drift loop this helper exists to prevent.
+ *
  * Accepting either representation is unambiguous here because
  * `USER_NAME_PATTERN` in `posixNames.ts` forbids names starting with a digit,
  * so a paratix-managed account is never confusable with an id.
+ *
+ * This is the single ownership comparison shared by `file.*`, `file.properties`,
+ * `download` and `archive.extract`; keeping one copy is what stops the four
+ * drift checks from drifting apart.
  *
  * @param expected - The declared component; an empty string matches anything.
  * @param actual - The name reported by `stat -c '%U'` / `'%G'`.
  * @param actualId - The id reported by `stat -c '%u'` / `'%g'`.
  * @returns `true` when the declaration matches the name or the id.
  */
-function ownershipComponentMatches(expected: string, actual: string, actualId: string): boolean {
+export function ownershipComponentMatches(
+  expected: string,
+  actual: string,
+  actualId: string
+): boolean {
   if (expected === "") return true
-  return actual === expected || actualId === expected
+  if (actual === expected || actualId === expected) return true
+  if (!isNumericId(expected) || !isNumericId(actualId)) return false
+  return Number(expected) === Number(actualId)
 }
 
 export async function resolveWriteMode(

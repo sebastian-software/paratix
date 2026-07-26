@@ -2196,6 +2196,35 @@ describe("archive.extract — apply", () => {
     expect(mockSsh.calls).toContain(`stat -c '%U %G %u %g' -- '${destination}/app/file'`)
   })
 
+  it("returns ok for a leading-zero numeric owner on extracted members", async () => {
+    const ownerPathsMarker = `${marker}.owner-paths`
+    const mockSsh = createMockSsh({
+      [`[ -e '${destination}/app/file' ] || [ -L '${destination}/app/file' ]`]: { code: 0 },
+      [`[ -f '${destination}/app/file' ] && [ ! -L '${destination}/app/file' ]`]: { code: 0 },
+      [`cat '${marker}'`]: { code: 0, stdout: archiveSha },
+      [`cat '${membersMarker}'`]: {
+        code: 0,
+        stdout: JSON.stringify([{ kind: "file", path: `${destination}/app/file` }]),
+      },
+      [`cat '${ownerPathsMarker}'`]: {
+        code: 0,
+        stdout: JSON.stringify([`${destination}/app/file`]),
+      },
+      [`stat -c '%U %G %u %g' -- '${destination}/app/file'`]: {
+        code: 0,
+        stdout: "UNKNOWN UNKNOWN 65532 65532\n",
+      },
+      [`test -d '${destination}'`]: { code: 0 },
+      [`test -f '${marker}'`]: { code: 0 },
+    })
+    vi.spyOn(mockSsh, "sha256").mockResolvedValue(archiveSha)
+
+    const mod = archive.extract(src, destination, { owner: "065532:065532" })
+    const result = await mod.check(mockSsh, emptyEnv)
+
+    expect(result).toBe("ok")
+  })
+
   it("returns needs-apply when a numeric owner does not match the extracted member ids", async () => {
     const ownerPathsMarker = `${marker}.owner-paths`
     const mockSsh = createMockSsh({

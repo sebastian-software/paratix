@@ -1264,6 +1264,20 @@ describe("download.url", () => {
         expect(mockSsh.calls.every((c) => !c.startsWith("chgrp"))).toBe(true)
       })
 
+      it("returns ok for a leading-zero numeric owner and group", async () => {
+        const mockSsh = createMockSsh({
+          [`[ -e '${destination}' ]`]: { code: 0 },
+          [`[ -f '${destination}' ]`]: { code: 0 },
+          [`sha256sum '${destination}'`]: { stdout: `${sha256}  ${destination}` },
+          [`stat -c '%a %U %G %u %g' '${destination}'`]: { stdout: "644 redis paratix 999 1000" },
+        })
+        const mod = download.url(destination, url, { group: "01000", owner: "0999", sha256 })
+        const result = await mod.apply(mockSsh, emptyEnv)
+        expect(result.status).toBe("ok")
+        expect(mockSsh.calls.every((c) => !c.startsWith("chown"))).toBe(true)
+        expect(mockSsh.calls.every((c) => !c.startsWith("chgrp"))).toBe(true)
+      })
+
       it("returns needs-apply when a numeric owner does not match the remote uid", async () => {
         const mockSsh = createMockSsh({
           [`[ -f '${destination}' ]`]: { code: 0 },

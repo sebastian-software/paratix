@@ -13,6 +13,8 @@ import {
 } from "../types.js"
 import { compileUserRegex, hexHashesEqual, sha256String } from "./fileHelpers.js"
 import {
+  isNumericId,
+  ownershipComponentMatches,
   ownershipMatches,
   readOwnership,
   renderGuardedChgrpCommand,
@@ -429,9 +431,6 @@ type DriftContext = {
   ssh: SshConnection
 }
 
-/** A bare uid/gid, e.g. `"65532"` — accepted wherever a name is accepted. */
-const NUMERIC_ID_PATTERN = /^\d+$/v
-
 /**
  * Accept a numeric uid/gid in addition to a POSIX name for `file.properties`.
  *
@@ -448,19 +447,14 @@ const NUMERIC_ID_PATTERN = /^\d+$/v
  * @throws {Error} When the value is neither a valid POSIX name nor a bare id.
  */
 function assertValidOwnershipComponent(value: string, kind: "group" | "user"): void {
-  if (NUMERIC_ID_PATTERN.test(value)) return
+  if (isNumericId(value)) return
   if (kind === "user") assertValidUserName(value)
   else assertValidGroupName(value)
 }
 
 /**
- * Compare one declared ownership component against the state reported by stat,
- * accepting either the name (`%U`/`%G`) or the numeric id (`%u`/`%g`).
- *
- * Mirrors `ownershipComponentMatches` in `fileMetadataHelpers.ts`: a numeric
- * declaration can never equal a name, and `stat -c '%U'` reports `UNKNOWN` for
- * ids without a passwd entry, so a name-only comparison reported drift on every
- * run for uids that have no name to declare instead.
+ * Apply the shared ownership comparison to an optional `file.properties`
+ * option, treating an unset option as "nothing requested".
  *
  * @param expected - The declared component, or `undefined` when not requested.
  * @param actual - The name reported by stat.
@@ -473,7 +467,7 @@ function propertiesComponentMatches(
   actualId: string
 ): boolean {
   if (expected == null) return true
-  return actual === expected || actualId === expected
+  return ownershipComponentMatches(expected, actual, actualId)
 }
 
 function assertValidPropertiesOptions(options: PropertiesOptions): void {

@@ -321,6 +321,20 @@ describe("file.directory", () => {
     expect(result).toBe("ok")
   })
 
+  it("check returns ok for a leading-zero numeric owner, which chown parses as base 10", async () => {
+    const ssh = createMockSsh({
+      "[ -d '/var/lib/limen' ]": { code: 0 },
+      "[ -L '/var/lib/limen' ]": { code: 1 },
+      "stat -c '%a %U %G %u %g' '/var/lib/limen'": { stdout: "700 UNKNOWN UNKNOWN 65532 65532" },
+    })
+
+    // `chown 065532` sets uid 65532, which stat reports without the leading
+    // zero. A string comparison would leave this permanently drifted.
+    const mod = file.directory("/var/lib/limen", { owner: "065532:065532" })
+    const result = await mod.check(ssh, emptyEnv)
+    expect(result).toBe("ok")
+  })
+
   it("check returns needs-apply when a numeric owner does not match the remote uid", async () => {
     const ssh = createMockSsh({
       "[ -d '/var/lib/limen' ]": { code: 0 },
@@ -3193,6 +3207,30 @@ describe("file.properties", () => {
     const mod = file.properties("/var/app", { owner: "65532" })
     const result = await mod.check(ssh, emptyEnv)
     expect(result).toBe("needs-apply")
+  })
+
+  it("check returns ok for a leading-zero numeric owner and group", async () => {
+    const ssh = createMockSsh({
+      "stat -c '%a %U %G %u %g' '/var/app'": { stdout: "600 UNKNOWN UNKNOWN 65532 65532" },
+    })
+
+    const mod = file.properties("/var/app", { group: "065532", owner: "065532" })
+    const result = await mod.check(ssh, emptyEnv)
+    expect(result).toBe("ok")
+  })
+
+  it("apply issues no chown/chgrp for a leading-zero numeric declaration", async () => {
+    const ssh = createMockSsh({
+      "[ -L '/var/app' ]": { code: 1 },
+      "stat -c '%a %U %G %u %g' '/var/app'": { stdout: "600 UNKNOWN UNKNOWN 65532 65532" },
+    })
+
+    const mod = file.properties("/var/app", { group: "065532", owner: "065532" })
+    const result = await mod.apply(ssh, emptyEnv)
+
+    expect(result.status).toBe("ok")
+    expect(ssh.calls.every((call) => !call.includes("chown"))).toBe(true)
+    expect(ssh.calls.every((call) => !call.includes("chgrp"))).toBe(true)
   })
 
   it("apply returns ok and issues no chown/chgrp when numeric ownership already matches", async () => {
