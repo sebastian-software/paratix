@@ -26,8 +26,8 @@ const createMockSsh: typeof createBaseMockSsh = (responses, options) =>
     responseStubs: [
       ...(options?.responseStubs ?? []),
       {
-        command: /^stat -c '%a %U %G' '\/(?:etc|remote|var)\//v,
-        result: { stdout: "644 root root" },
+        command: /^stat -c '%a %U %G %u %g' '\/(?:etc|remote|var)\//v,
+        result: { stdout: "644 root root 0 0" },
       },
       { command: /^stat -c '%a' '\/(?:etc|remote|var)\//v, result: { stdout: "644" } },
       {
@@ -194,7 +194,7 @@ describe("file.directory", () => {
     const ssh = createMockSsh({
       "[ -d '/var/app' ]": { code: 0 },
       "[ -L '/var/app' ]": { code: 1 },
-      "stat -c '%a %U %G' '/var/app'": { stdout: "755 root root" },
+      "stat -c '%a %U %G %u %g' '/var/app'": { stdout: "755 root root 0 0" },
     })
 
     const mod = file.directory("/var/app", { mode: "0700" })
@@ -206,7 +206,7 @@ describe("file.directory", () => {
     const ssh = createMockSsh({
       "[ -d '/var/app' ]": { code: 0 },
       "[ -L '/var/app' ]": { code: 1 },
-      "stat -c '%a %U %G' '/var/app'": { stdout: "700 root root" },
+      "stat -c '%a %U %G %u %g' '/var/app'": { stdout: "700 root root 0 0" },
     })
 
     const mod = file.directory("/var/app", { owner: "www-data:www-data" })
@@ -219,7 +219,7 @@ describe("file.directory", () => {
       "[ -d '/var/app' ]": { code: 0 },
       "[ -L '/var' ]": { code: 1 },
       "[ -L '/var/app' ]": { code: 1 },
-      "stat -c '%a %U %G' '/var/app'": { stdout: "755 www-data www-data" },
+      "stat -c '%a %U %G %u %g' '/var/app'": { stdout: "755 www-data www-data 33 33" },
     })
 
     const mod = file.directory("/var/app", { mode: "0755", owner: "www-data:www-data" })
@@ -252,7 +252,7 @@ describe("file.directory", () => {
       "[ -d '/var/app' ]": { code: 0 },
       "[ -L '/var' ]": { code: 1 },
       "[ -L '/var/app' ]": { code: 1 },
-      "stat -c '%a %U %G' '/var/app'": { stdout: "700 www-data www-data" },
+      "stat -c '%a %U %G %u %g' '/var/app'": { stdout: "700 www-data www-data 33 33" },
     })
 
     const mod = file.directory("/var/app", { mode: "0755", owner: "www-data:www-data" })
@@ -269,7 +269,7 @@ describe("file.directory", () => {
       "[ -d '/var/app' ]": { code: 0 },
       "[ -L '/var' ]": { code: 1 },
       "[ -L '/var/app' ]": { code: 1 },
-      "stat -c '%a %U %G' '/var/app'": { stdout: "755 root root" },
+      "stat -c '%a %U %G %u %g' '/var/app'": { stdout: "755 root root 0 0" },
     })
 
     const mod = file.directory("/var/app", { mode: "0755", owner: "www-data:www-data" })
@@ -283,12 +283,120 @@ describe("file.directory", () => {
     )
   })
 
+  it("check returns ok when a numeric owner matches an uid without a passwd entry", async () => {
+    const ssh = createMockSsh({
+      "[ -d '/var/lib/limen' ]": { code: 0 },
+      "[ -L '/var/lib/limen' ]": { code: 1 },
+      // GNU coreutils reports UNKNOWN for %U/%G when the id has no passwd or
+      // group entry — distroless images use 65532 exactly this way.
+      "stat -c '%a %U %G %u %g' '/var/lib/limen'": { stdout: "700 UNKNOWN UNKNOWN 65532 65532" },
+    })
+
+    const mod = file.directory("/var/lib/limen", { mode: "0700", owner: "65532:65532" })
+    const result = await mod.check(ssh, emptyEnv)
+    expect(result).toBe("ok")
+  })
+
+  it("check returns ok when a numeric owner matches a named uid", async () => {
+    const ssh = createMockSsh({
+      "[ -d '/opt/rybbit' ]": { code: 0 },
+      "[ -L '/opt/rybbit' ]": { code: 1 },
+      "stat -c '%a %U %G %u %g' '/opt/rybbit'": { stdout: "644 redis paratix 999 1000" },
+    })
+
+    const mod = file.directory("/opt/rybbit", { owner: "999:1000" })
+    const result = await mod.check(ssh, emptyEnv)
+    expect(result).toBe("ok")
+  })
+
+  it("check matches a mixed owner spec by name and by id", async () => {
+    const ssh = createMockSsh({
+      "[ -d '/var/app' ]": { code: 0 },
+      "[ -L '/var/app' ]": { code: 1 },
+      "stat -c '%a %U %G %u %g' '/var/app'": { stdout: "755 root UNKNOWN 0 65532" },
+    })
+
+    const mod = file.directory("/var/app", { owner: "root:65532" })
+    const result = await mod.check(ssh, emptyEnv)
+    expect(result).toBe("ok")
+  })
+
+  it("check returns ok for a leading-zero numeric owner, which chown parses as base 10", async () => {
+    const ssh = createMockSsh({
+      "[ -d '/var/lib/limen' ]": { code: 0 },
+      "[ -L '/var/lib/limen' ]": { code: 1 },
+      "stat -c '%a %U %G %u %g' '/var/lib/limen'": { stdout: "700 UNKNOWN UNKNOWN 65532 65532" },
+    })
+
+    // `chown 065532` sets uid 65532, which stat reports without the leading
+    // zero. A string comparison would leave this permanently drifted.
+    const mod = file.directory("/var/lib/limen", { owner: "065532:065532" })
+    const result = await mod.check(ssh, emptyEnv)
+    expect(result).toBe("ok")
+  })
+
+  it("check returns needs-apply when a numeric owner does not match the remote uid", async () => {
+    const ssh = createMockSsh({
+      "[ -d '/var/lib/limen' ]": { code: 0 },
+      "[ -L '/var/lib/limen' ]": { code: 1 },
+      "stat -c '%a %U %G %u %g' '/var/lib/limen'": { stdout: "700 paratix paratix 1000 1000" },
+    })
+
+    const mod = file.directory("/var/lib/limen", { mode: "0700", owner: "65532:65532" })
+    const result = await mod.check(ssh, emptyEnv)
+    expect(result).toBe("needs-apply")
+  })
+
+  it("check returns needs-apply when the ownership probe fails", async () => {
+    const ssh = createMockSsh({
+      "[ -d '/var/app' ]": { code: 0 },
+      "[ -L '/var/app' ]": { code: 1 },
+      "stat -c '%a %U %G %u %g' '/var/app'": { code: 1, stdout: "" },
+    })
+
+    const mod = file.directory("/var/app", { owner: "65532:65532" })
+    const result = await mod.check(ssh, emptyEnv)
+    expect(result).toBe("needs-apply")
+  })
+
+  it("reads ownership through the numeric-aware stat format", async () => {
+    const ssh = createMockSsh({
+      "[ -d '/var/app' ]": { code: 0 },
+      "[ -L '/var/app' ]": { code: 1 },
+      "stat -c '%a %U %G %u %g' '/var/app'": { stdout: "755 root root 0 0" },
+    })
+
+    const mod = file.directory("/var/app", { owner: "root:root" })
+    await mod.check(ssh, emptyEnv)
+
+    // Pins the exact probe: an outdated mock would fall through to the
+    // non-zero-exit branch and silently report permanent drift.
+    expect(ssh.calls).toContain("stat -c '%a %U %G %u %g' '/var/app'")
+  })
+
+  it("apply skips chown when the declared numeric owner already matches", async () => {
+    const ssh = createMockSsh({
+      "[ -d '/var/lib/limen' ]": { code: 0 },
+      "[ -L '/var' ]": { code: 1 },
+      "[ -L '/var/lib' ]": { code: 1 },
+      "[ -L '/var/lib/limen' ]": { code: 1 },
+      "stat -c '%a %U %G %u %g' '/var/lib/limen'": { stdout: "700 UNKNOWN UNKNOWN 65532 65532" },
+    })
+
+    const mod = file.directory("/var/lib/limen", { mode: "0700", owner: "65532:65532" })
+    const result = await mod.apply(ssh, emptyEnv)
+
+    expect(result.status).toBe("ok")
+    expect(ssh.calls.every((call) => !call.includes("chown"))).toBe(true)
+    expect(ssh.calls.every((call) => !call.includes("chmod"))).toBe(true)
+  })
+
   it("rejects option-like owner components before directory chown", async () => {
     const ssh = createMockSsh({
       "[ -d '/var/app' ]": { code: 0 },
       "[ -L '/var' ]": { code: 1 },
       "[ -L '/var/app' ]": { code: 1 },
-      "stat -c '%a %U %G' '/var/app'": { stdout: "755 root root" },
+      "stat -c '%a %U %G %u %g' '/var/app'": { stdout: "755 root root 0 0" },
     })
     const mod = file.directory("/var/app", { owner: "--reference=/etc/shadow" })
 
@@ -379,7 +487,7 @@ describe("file.directory", () => {
     expect(result.status).toBe("failed")
     expect(String(result.error)).toContain("final validation failed")
     expect(ssh.calls).toContain(finalValidationCommand)
-    expect(ssh.calls).not.toContain("stat -c '%a %U %G' '/var/app'")
+    expect(ssh.calls).not.toContain("stat -c '%a %U %G %u %g' '/var/app'")
     expect(ssh.calls).not.toContain("chown -- 'www-data:www-data' '/var/app'")
   })
 
@@ -470,7 +578,7 @@ describe("file.directory", () => {
         "[ -d '/var/app' ]": { code: 0 },
         "[ -L '/var' ]": { code: 1 },
         "[ -L '/var/app' ]": { code: 1 },
-        "stat -c '%a %U %G' '/var/app'": { stdout: "700 root root" },
+        "stat -c '%a %U %G %u %g' '/var/app'": { stdout: "700 root root 0 0" },
       },
       {
         responseStubs: [
@@ -497,7 +605,7 @@ describe("file.directory", () => {
         "[ -d '/var/app' ]": { code: 0 },
         "[ -L '/var' ]": { code: 1 },
         "[ -L '/var/app' ]": { code: 1 },
-        "stat -c '%a %U %G' '/var/app'": { stdout: "755 root root" },
+        "stat -c '%a %U %G %u %g' '/var/app'": { stdout: "755 root root 0 0" },
       },
       {
         responseStubs: [
@@ -765,7 +873,7 @@ describe("file.chmod", () => {
   it("check returns ok when the mode already matches", async () => {
     const ssh = createMockSsh({
       "[ -e '/var/app/config.yml' ]": { code: 0 },
-      "stat -c '%a %U %G' '/var/app/config.yml'": { stdout: "644 root root" },
+      "stat -c '%a %U %G %u %g' '/var/app/config.yml'": { stdout: "644 root root 0 0" },
     })
 
     const mod = file.chmod("/var/app/config.yml", "0644")
@@ -786,7 +894,7 @@ describe("file.chmod", () => {
   it("check returns needs-apply when the mode differs", async () => {
     const ssh = createMockSsh({
       "[ -e '/var/app/config.yml' ]": { code: 0 },
-      "stat -c '%a %U %G' '/var/app/config.yml'": { stdout: "600 root root" },
+      "stat -c '%a %U %G %u %g' '/var/app/config.yml'": { stdout: "600 root root 0 0" },
     })
 
     const mod = file.chmod("/var/app/config.yml", "0644")
@@ -887,7 +995,7 @@ describe("file.chown", () => {
   it("check returns ok when the owner already matches", async () => {
     const ssh = createMockSsh({
       "[ -e '/var/app/config.yml' ]": { code: 0 },
-      "stat -c '%a %U %G' '/var/app/config.yml'": { stdout: "644 www-data www-data" },
+      "stat -c '%a %U %G %u %g' '/var/app/config.yml'": { stdout: "644 www-data www-data 33 33" },
     })
 
     const mod = file.chown("/var/app/config.yml", "www-data:www-data")
@@ -898,7 +1006,7 @@ describe("file.chown", () => {
   it("check returns ok when a group-only ownership spec already matches", async () => {
     const ssh = createMockSsh({
       "[ -e '/var/app/config.yml' ]": { code: 0 },
-      "stat -c '%a %U %G' '/var/app/config.yml'": { stdout: "644 root www-data" },
+      "stat -c '%a %U %G %u %g' '/var/app/config.yml'": { stdout: "644 root www-data 0 33" },
     })
 
     const mod = file.chown("/var/app/config.yml", ":www-data")
@@ -909,7 +1017,7 @@ describe("file.chown", () => {
   it("check returns needs-apply when a group-only ownership spec differs", async () => {
     const ssh = createMockSsh({
       "[ -e '/var/app/config.yml' ]": { code: 0 },
-      "stat -c '%a %U %G' '/var/app/config.yml'": { stdout: "644 root root" },
+      "stat -c '%a %U %G %u %g' '/var/app/config.yml'": { stdout: "644 root root 0 0" },
     })
 
     const mod = file.chown("/var/app/config.yml", ":www-data")
@@ -930,7 +1038,7 @@ describe("file.chown", () => {
   it("check returns needs-apply when the owner differs", async () => {
     const ssh = createMockSsh({
       "[ -e '/var/app/config.yml' ]": { code: 0 },
-      "stat -c '%a %U %G' '/var/app/config.yml'": { stdout: "644 root root" },
+      "stat -c '%a %U %G %u %g' '/var/app/config.yml'": { stdout: "644 root root 0 0" },
     })
 
     const mod = file.chown("/var/app/config.yml", "www-data:www-data")
@@ -1073,7 +1181,7 @@ describe("file.copy", () => {
         // sha256sum returns matching hash
         "sha256sum '/remote/file.txt'": { stdout: `${localHash}  /remote/file.txt` },
         // remote mode matches the documented default (0644)
-        "stat -c '%a %U %G' '/remote/file.txt'": { stdout: "644 root root" },
+        "stat -c '%a %U %G %u %g' '/remote/file.txt'": { stdout: "644 root root 0 0" },
       })
 
       const mod = file.copy("/remote/file.txt", localPath)
@@ -1168,7 +1276,7 @@ describe("file.copy", () => {
         "[ -e '/remote/file.txt' ]": { code: 0 },
         "[ -f '/remote/file.txt' ]": { code: 0 },
         "sha256sum '/remote/file.txt'": { stdout: `${localHash}  /remote/file.txt` },
-        "stat -c '%a %U %G' '/remote/file.txt'": { stdout: "644 www-data www-data" },
+        "stat -c '%a %U %G %u %g' '/remote/file.txt'": { stdout: "644 www-data www-data 33 33" },
       })
 
       const mod = file.copy("/remote/file.txt", localPath, { mode: "0600" })
@@ -1190,7 +1298,7 @@ describe("file.copy", () => {
         "[ -e '/remote/file.txt' ]": { code: 0 },
         "[ -f '/remote/file.txt' ]": { code: 0 },
         "sha256sum '/remote/file.txt'": { stdout: `${localHash}  /remote/file.txt` },
-        "stat -c '%a %U %G' '/remote/file.txt'": { stdout: "600 root root" },
+        "stat -c '%a %U %G %u %g' '/remote/file.txt'": { stdout: "600 root root 0 0" },
       })
 
       const mod = file.copy("/remote/file.txt", localPath, { owner: "www-data:www-data" })
@@ -1212,7 +1320,7 @@ describe("file.copy", () => {
         "[ -e '/remote/file.txt' ]": { code: 0 },
         "[ -f '/remote/file.txt' ]": { code: 0 },
         "sha256sum '/remote/file.txt'": { stdout: `${localHash}  /remote/file.txt` },
-        "stat -c '%a %U %G' '/remote/file.txt'": { stdout: "644 root www-data" },
+        "stat -c '%a %U %G %u %g' '/remote/file.txt'": { stdout: "644 root www-data 0 33" },
       })
 
       const mod = file.copy("/remote/file.txt", localPath, { owner: ":www-data" })
@@ -1422,7 +1530,7 @@ describe("file.copy", () => {
         "[ -f '/remote/file.txt' ]": { code: 0 },
         "sha256sum '/remote/file.txt'": { stdout: `${localHash}  /remote/file.txt` },
         // Server-side drift: remote was chmod'd to 0600 by an operator.
-        "stat -c '%a %U %G' '/remote/file.txt'": { stdout: "600 root root" },
+        "stat -c '%a %U %G %u %g' '/remote/file.txt'": { stdout: "600 root root 0 0" },
       })
 
       // No options.mode → file.copy defaults to 0644 on both apply and check.
@@ -1445,7 +1553,7 @@ describe("file.copy", () => {
         "[ -e '/remote/file.txt' ]": { code: 0 },
         "[ -f '/remote/file.txt' ]": { code: 0 },
         "sha256sum '/remote/file.txt'": { stdout: `${localHash}  /remote/file.txt` },
-        "stat -c '%a %U %G' '/remote/file.txt'": { stdout: "600 root root" },
+        "stat -c '%a %U %G %u %g' '/remote/file.txt'": { stdout: "600 root root 0 0" },
       })
 
       const mod = file.copy("/remote/file.txt", localPath, { mode: "0600" })
@@ -1468,7 +1576,7 @@ describe("file.copy", () => {
         "[ -f '/etc/nginx/nginx.conf' ]": { code: 0 },
         "sha256sum '/etc/nginx/nginx.conf'": { stdout: `${localHash}  /etc/nginx/nginx.conf` },
         // Operator manually ran `chmod 0600 nginx.conf`.
-        "stat -c '%a %U %G' '/etc/nginx/nginx.conf'": { stdout: "600 root root" },
+        "stat -c '%a %U %G %u %g' '/etc/nginx/nginx.conf'": { stdout: "600 root root 0 0" },
       })
 
       // Explicit mode 0644, no owner — previously the missing-owner path skipped
@@ -1493,7 +1601,7 @@ describe("file.copy", () => {
         "[ -f '/var/www/index.html' ]": { code: 0 },
         "sha256sum '/var/www/index.html'": { stdout: `${localHash}  /var/www/index.html` },
         // Drift: file is 0600 (e.g. previous uploadFile temp default leaked through).
-        "stat -c '%a %U %G' '/var/www/index.html'": { stdout: "600 www-data www-data" },
+        "stat -c '%a %U %G %u %g' '/var/www/index.html'": { stdout: "600 www-data www-data 33 33" },
       })
 
       // No options at all — default mode 0644 must still be enforced via check.
@@ -2165,7 +2273,7 @@ describe("file.template", () => {
         "[ -e '/remote/out.txt' ]": { code: 0 },
         "[ -f '/remote/out.txt' ]": { code: 0 },
         "sha256sum '/remote/out.txt'": { stdout: `${renderedHash}  /remote/out.txt` },
-        "stat -c '%a %U %G' '/remote/out.txt'": { stdout: "644 root root" },
+        "stat -c '%a %U %G %u %g' '/remote/out.txt'": { stdout: "644 root root 0 0" },
       })
 
       const mod = file.template("/remote/out.txt", templatePath, { mode: "0600" })
@@ -2187,7 +2295,7 @@ describe("file.template", () => {
         "[ -e '/remote/out.txt' ]": { code: 0 },
         "[ -f '/remote/out.txt' ]": { code: 0 },
         "sha256sum '/remote/out.txt'": { stdout: `${renderedHash}  /remote/out.txt` },
-        "stat -c '%a %U %G' '/remote/out.txt'": { stdout: "600 root root" },
+        "stat -c '%a %U %G %u %g' '/remote/out.txt'": { stdout: "600 root root 0 0" },
       })
 
       const mod = file.template("/remote/out.txt", templatePath, {
@@ -2415,7 +2523,7 @@ describe("file.assemble", () => {
         "[ -e '/remote/assembled.txt' ]": { code: 0 },
         "[ -f '/remote/assembled.txt' ]": { code: 0 },
         "sha256sum '/remote/assembled.txt'": { stdout: `${combinedHash}  /remote/assembled.txt` },
-        "stat -c '%a %U %G' '/remote/assembled.txt'": { stdout: "644 root root" },
+        "stat -c '%a %U %G %u %g' '/remote/assembled.txt'": { stdout: "644 root root 0 0" },
       })
 
       const mod = file.assemble("/remote/assembled.txt", [frag1, frag2])
@@ -2455,7 +2563,7 @@ describe("file.assemble", () => {
         "[ -e '/remote/assembled.txt' ]": { code: 0 },
         "[ -f '/remote/assembled.txt' ]": { code: 0 },
         "sha256sum '/remote/assembled.txt'": { stdout: `${combinedHash}  /remote/assembled.txt` },
-        "stat -c '%a %U %G' '/remote/assembled.txt'": { stdout: "600 root root" },
+        "stat -c '%a %U %G %u %g' '/remote/assembled.txt'": { stdout: "600 root root 0 0" },
       })
 
       const mod = file.assemble("/remote/assembled.txt", [frag1])
@@ -2607,7 +2715,7 @@ describe("file.assemble", () => {
         "[ -f '/remote/assembled.txt' ]": { code: 0 },
         "sha256sum '/remote/assembled.txt'": { stdout: `${combinedHash}  /remote/assembled.txt` },
         // Operator manually chmod'd 0644 even though the recipe pinned 0600.
-        "stat -c '%a %U %G' '/remote/assembled.txt'": { stdout: "644 root root" },
+        "stat -c '%a %U %G %u %g' '/remote/assembled.txt'": { stdout: "644 root root 0 0" },
       })
 
       const mod = file.assemble("/remote/assembled.txt", [frag1], { mode: "0600" })
@@ -2630,7 +2738,7 @@ describe("file.assemble", () => {
         "[ -f '/remote/assembled.txt' ]": { code: 0 },
         "sha256sum '/remote/assembled.txt'": { stdout: `${combinedHash}  /remote/assembled.txt` },
         // Recipe pins owner=www-data but the file is currently owned by root.
-        "stat -c '%a %U %G' '/remote/assembled.txt'": { stdout: "644 root root" },
+        "stat -c '%a %U %G %u %g' '/remote/assembled.txt'": { stdout: "644 root root 0 0" },
       })
 
       const mod = file.assemble("/remote/assembled.txt", [frag1], { owner: "www-data" })
@@ -2652,7 +2760,9 @@ describe("file.assemble", () => {
         "[ -e '/remote/assembled.txt' ]": { code: 0 },
         "[ -f '/remote/assembled.txt' ]": { code: 0 },
         "sha256sum '/remote/assembled.txt'": { stdout: `${combinedHash}  /remote/assembled.txt` },
-        "stat -c '%a %U %G' '/remote/assembled.txt'": { stdout: "600 www-data www-data" },
+        "stat -c '%a %U %G %u %g' '/remote/assembled.txt'": {
+          stdout: "600 www-data www-data 33 33",
+        },
       })
 
       const mod = file.assemble("/remote/assembled.txt", [frag1], {
@@ -3059,9 +3169,19 @@ describe("file.properties", () => {
     )
   })
 
+  it("rejects a two-part owner spec so the group option stays authoritative", () => {
+    expect(() => file.properties("/var/app", { owner: "65532:65532" })).toThrow(
+      'user name "65532:65532" is invalid'
+    )
+  })
+
+  it("accepts a numeric owner and group", () => {
+    expect(() => file.properties("/var/app", { group: "65532", owner: "65532" })).not.toThrow()
+  })
+
   it("check returns ok when all properties match", async () => {
     const ssh = createMockSsh({
-      "stat -c '%a %U %G' '/var/app'": { stdout: "644 www-data www-data" },
+      "stat -c '%a %U %G %u %g' '/var/app'": { stdout: "644 www-data www-data 33 33" },
     })
 
     const mod = file.properties("/var/app", { group: "www-data", mode: "0644", owner: "www-data" })
@@ -3069,9 +3189,69 @@ describe("file.properties", () => {
     expect(result).toBe("ok")
   })
 
+  it("check returns ok when a numeric owner and group match the remote ids", async () => {
+    const ssh = createMockSsh({
+      "stat -c '%a %U %G %u %g' '/var/app'": { stdout: "600 UNKNOWN UNKNOWN 65532 65532" },
+    })
+
+    const mod = file.properties("/var/app", { group: "65532", mode: "0600", owner: "65532" })
+    const result = await mod.check(ssh, emptyEnv)
+    expect(result).toBe("ok")
+  })
+
+  it("check returns needs-apply when a numeric owner does not match the remote uid", async () => {
+    const ssh = createMockSsh({
+      "stat -c '%a %U %G %u %g' '/var/app'": { stdout: "600 paratix paratix 1000 1000" },
+    })
+
+    const mod = file.properties("/var/app", { owner: "65532" })
+    const result = await mod.check(ssh, emptyEnv)
+    expect(result).toBe("needs-apply")
+  })
+
+  it("check returns ok for a leading-zero numeric owner and group", async () => {
+    const ssh = createMockSsh({
+      "stat -c '%a %U %G %u %g' '/var/app'": { stdout: "600 UNKNOWN UNKNOWN 65532 65532" },
+    })
+
+    const mod = file.properties("/var/app", { group: "065532", owner: "065532" })
+    const result = await mod.check(ssh, emptyEnv)
+    expect(result).toBe("ok")
+  })
+
+  it("apply issues no chown/chgrp for a leading-zero numeric declaration", async () => {
+    const ssh = createMockSsh({
+      "[ -L '/var/app' ]": { code: 1 },
+      "stat -c '%a %U %G %u %g' '/var/app'": { stdout: "600 UNKNOWN UNKNOWN 65532 65532" },
+    })
+
+    const mod = file.properties("/var/app", { group: "065532", owner: "065532" })
+    const result = await mod.apply(ssh, emptyEnv)
+
+    expect(result.status).toBe("ok")
+    expect(ssh.calls.every((call) => !call.includes("chown"))).toBe(true)
+    expect(ssh.calls.every((call) => !call.includes("chgrp"))).toBe(true)
+  })
+
+  it("apply returns ok and issues no chown/chgrp when numeric ownership already matches", async () => {
+    const ssh = createMockSsh({
+      "[ -L '/var/app' ]": { code: 1 },
+      "stat -c '%a %U %G %u %g' '/var/app'": { stdout: "600 UNKNOWN UNKNOWN 65532 65532" },
+    })
+
+    const mod = file.properties("/var/app", { group: "65532", mode: "0600", owner: "65532" })
+    const result = await mod.apply(ssh, emptyEnv)
+
+    expect(result.status).toBe("ok")
+    expect(ssh.calls).toContain("stat -c '%a %U %G %u %g' '/var/app'")
+    expect(ssh.calls.every((call) => !call.includes("chown"))).toBe(true)
+    expect(ssh.calls.every((call) => !call.includes("chgrp"))).toBe(true)
+    expect(ssh.calls.every((call) => !call.includes("chmod"))).toBe(true)
+  })
+
   it("check returns needs-apply when mode differs", async () => {
     const ssh = createMockSsh({
-      "stat -c '%a %U %G' '/var/app'": { stdout: "755 www-data www-data" },
+      "stat -c '%a %U %G %u %g' '/var/app'": { stdout: "755 www-data www-data 33 33" },
     })
 
     const mod = file.properties("/var/app", { mode: "0644" })
@@ -3081,7 +3261,7 @@ describe("file.properties", () => {
 
   it("check returns needs-apply when owner differs", async () => {
     const ssh = createMockSsh({
-      "stat -c '%a %U %G' '/var/app'": { stdout: "644 root www-data" },
+      "stat -c '%a %U %G %u %g' '/var/app'": { stdout: "644 root www-data 0 33" },
     })
 
     const mod = file.properties("/var/app", { owner: "www-data" })
@@ -3097,7 +3277,7 @@ describe("file.properties", () => {
 
   it("apply runs chmod and chown when mode and owner differ from current state", async () => {
     const ssh = createMockSsh({
-      "stat -c '%a %U %G' '/var/app'": { stdout: "755 root root" },
+      "stat -c '%a %U %G %u %g' '/var/app'": { stdout: "755 root root 0 0" },
     })
     const mod = file.properties("/var/app", { mode: "0644", owner: "www-data" })
     const result = await mod.apply(ssh, emptyEnv)
@@ -3109,7 +3289,7 @@ describe("file.properties", () => {
 
   it("apply returns ok and does not run chmod/chown/chgrp when nothing has drifted", async () => {
     const ssh = createMockSsh({
-      "stat -c '%a %U %G' '/var/app'": { stdout: "644 www-data www-data" },
+      "stat -c '%a %U %G %u %g' '/var/app'": { stdout: "644 www-data www-data 33 33" },
     })
     const mod = file.properties("/var/app", {
       group: "www-data",
@@ -3127,7 +3307,7 @@ describe("file.properties", () => {
 
   it("apply only runs chmod when only mode has drifted", async () => {
     const ssh = createMockSsh({
-      "stat -c '%a %U %G' '/var/app'": { stdout: "755 www-data www-data" },
+      "stat -c '%a %U %G %u %g' '/var/app'": { stdout: "755 www-data www-data 33 33" },
     })
     const mod = file.properties("/var/app", {
       group: "www-data",
@@ -3143,7 +3323,7 @@ describe("file.properties", () => {
 
   it("apply combines chown owner:group when both have drifted", async () => {
     const ssh = createMockSsh({
-      "stat -c '%a %U %G' '/var/app'": { stdout: "644 root root" },
+      "stat -c '%a %U %G %u %g' '/var/app'": { stdout: "644 root root 0 0" },
     })
     const mod = file.properties("/var/app", {
       group: "www-data",
@@ -3163,7 +3343,7 @@ describe("file.properties", () => {
 
   it("apply only invokes chgrp when group alone has drifted", async () => {
     const ssh = createMockSsh({
-      "stat -c '%a %U %G' '/var/app'": { stdout: "644 www-data root" },
+      "stat -c '%a %U %G %u %g' '/var/app'": { stdout: "644 www-data root 33 0" },
     })
     const mod = file.properties("/var/app", { group: "www-data" })
     const result = await mod.apply(ssh, emptyEnv)
@@ -3174,7 +3354,7 @@ describe("file.properties", () => {
 
   it("apply normalises mode comparisons: 0644 desired matches 644 from stat", async () => {
     const ssh = createMockSsh({
-      "stat -c '%a %U %G' '/var/app'": { stdout: "644 www-data www-data" },
+      "stat -c '%a %U %G %u %g' '/var/app'": { stdout: "644 www-data www-data 33 33" },
     })
     const mod = file.properties("/var/app", { mode: "0644" })
     const result = await mod.apply(ssh, emptyEnv)
@@ -3198,7 +3378,7 @@ describe("file.properties", () => {
     expect(ssh.calls).not.toContain("chmod -- '0644' '/var/app'")
     expect(ssh.calls).not.toContain("chown -- 'www-data:www-data' '/var/app'")
     expect(ssh.calls).not.toContain("chgrp -- 'www-data' '/var/app'")
-    expect(ssh.calls).not.toContain("stat -c '%a %U %G' '/var/app'")
+    expect(ssh.calls).not.toContain("stat -c '%a %U %G %u %g' '/var/app'")
   })
 
   it("regression R-0000133 — check returns needs-apply when the target is a symlink", async () => {
@@ -3212,7 +3392,7 @@ describe("file.properties", () => {
 
   it("check handles stat ownership output with repeated whitespace", async () => {
     const ssh = createMockSsh({
-      "stat -c '%a %U %G' '/var/app'": { stdout: "644   www-data\twww-data" },
+      "stat -c '%a %U %G %u %g' '/var/app'": { stdout: "644   www-data\twww-data 33 33" },
     })
     const mod = file.properties("/var/app", {
       group: "www-data",
@@ -3229,7 +3409,7 @@ describe("file.properties", () => {
     // runner's failure pipeline.
     const ssh = createMockSsh(
       {
-        "stat -c '%a %U %G' '/var/app'": { stdout: "755 www-data www-data" },
+        "stat -c '%a %U %G %u %g' '/var/app'": { stdout: "755 www-data www-data 33 33" },
       },
       {
         responseStubs: [
@@ -3253,7 +3433,7 @@ describe("file.properties", () => {
   it("R-0000268: returns failed when combined chown exits non-zero", async () => {
     const ssh = createMockSsh(
       {
-        "stat -c '%a %U %G' '/var/app'": { stdout: "644 root root" },
+        "stat -c '%a %U %G %u %g' '/var/app'": { stdout: "644 root root 0 0" },
       },
       {
         responseStubs: [
@@ -3274,7 +3454,7 @@ describe("file.properties", () => {
   it("R-0000268: returns failed when single chgrp exits non-zero", async () => {
     const ssh = createMockSsh(
       {
-        "stat -c '%a %U %G' '/var/app'": { stdout: "644 www-data root" },
+        "stat -c '%a %U %G %u %g' '/var/app'": { stdout: "644 www-data root 33 0" },
       },
       {
         responseStubs: [
@@ -3295,7 +3475,7 @@ describe("file.properties", () => {
   it("returns failed when the chmod target identity changes before mutation", async () => {
     const ssh = createMockSsh(
       {
-        "stat -c '%a %U %G' '/var/app'": { stdout: "755 www-data www-data" },
+        "stat -c '%a %U %G %u %g' '/var/app'": { stdout: "755 www-data www-data 33 33" },
       },
       {
         responseStubs: [
@@ -3318,7 +3498,7 @@ describe("file.properties", () => {
   it("returns failed when the chown target identity changes before mutation", async () => {
     const ssh = createMockSsh(
       {
-        "stat -c '%a %U %G' '/var/app'": { stdout: "644 root www-data" },
+        "stat -c '%a %U %G %u %g' '/var/app'": { stdout: "644 root www-data 0 33" },
       },
       {
         responseStubs: [
@@ -3341,7 +3521,7 @@ describe("file.properties", () => {
   it("returns failed when the chgrp target identity changes before mutation", async () => {
     const ssh = createMockSsh(
       {
-        "stat -c '%a %U %G' '/var/app'": { stdout: "644 www-data root" },
+        "stat -c '%a %U %G %u %g' '/var/app'": { stdout: "644 www-data root 33 0" },
       },
       {
         responseStubs: [

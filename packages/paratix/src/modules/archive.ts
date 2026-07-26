@@ -20,13 +20,15 @@ import {
   normalizeArchiveMemberPath,
 } from "./archiveMemberValidation.js"
 import { localSha256, sha256String } from "./fileHelpers.js"
-import { renderChownSymlinkCommand } from "./fileMetadataHelpers.js"
+import { ownershipComponentMatches, renderChownSymlinkCommand } from "./fileMetadataHelpers.js"
 
 const EXEC_OPTS = { ignoreExitCode: true, silent: true } as const
 const SILENT = { silent: true } as const
 const FLAGS_DIR = "/var/lib/paratix/flags"
 const ARCHIVE_MARKER_MODE = "0644"
 const ARCHIVE_OWNER_MEMBER_CONCURRENCY = 8
+/** Columns emitted by the member ownership probe: `%U %G %u %g`. */
+const ARCHIVE_STAT_OWNERSHIP_FIELDS = 4
 
 type StagingMergeParameters = {
   destination: string
@@ -740,12 +742,24 @@ async function applyExtract(
   }
 }
 
+/**
+ * Compare a declared `owner`/`owner:group` spec against `stat -c '%U %G %u %g'`
+ * output through the shared ownership comparison, so an extracted member is
+ * matched by name or by numeric id exactly like every other drift check.
+ *
+ * @param stdout - Raw stdout of the `stat -c '%U %G %u %g'` probe.
+ * @param owner - The declared `owner` or `owner:group` spec.
+ * @returns `true` when every declared component matches by name or by id.
+ */
 function ownerMatchesStat(stdout: string, owner: string): boolean {
-  const [actualUser = "", actualGroup = ""] = stdout.trim().split(/\s+/v, 2)
+  const [actualUser = "", actualGroup = "", actualUserId = "", actualGroupId = ""] = stdout
+    .trim()
+    .split(/\s+/v, ARCHIVE_STAT_OWNERSHIP_FIELDS)
   const [expectedUser = "", expectedGroup = ""] = owner.split(":", 2)
-  if (expectedUser !== "" && actualUser !== expectedUser) return false
-  if (expectedGroup !== "" && actualGroup !== expectedGroup) return false
-  return true
+  return (
+    ownershipComponentMatches(expectedUser, actualUser, actualUserId) &&
+    ownershipComponentMatches(expectedGroup, actualGroup, actualGroupId)
+  )
 }
 
 function isStringArray(value: unknown): value is string[] {
@@ -762,7 +776,7 @@ async function extractedMemberOwnerMatches(
     EXEC_OPTS
   )
   if (exists.code !== 0) return false
-  const stat = await conn.exec(`stat -c '%U %G' -- ${shellQuote(path)}`, EXEC_OPTS)
+  const stat = await conn.exec(`stat -c '%U %G %u %g' -- ${shellQuote(path)}`, EXEC_OPTS)
   if (stat.code !== 0) return false
   return ownerMatchesStat(stat.stdout, owner)
 }
