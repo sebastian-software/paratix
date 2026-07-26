@@ -542,6 +542,7 @@ function myCustomModule(configPath: string, content: string): Module {
 - Prefer `failedCommand("...", result)` when you used `ssh.exec(..., { ignoreExitCode: true })` and want stdout/stderr preserved for central runner output.
 - Return `NEEDS_APPLY` (the exported constant), never the string literal `"needs-apply"`.
 - `ModuleResult.status` must be one of: `"changed"`, `"failed"`, `"ok"`, `"skipped"`.
+- Optionally return `ModuleResult.detail` with a short single-line reason; the runner appends it to the step line. Use it to say what a `changed` step actually did, and leave it unset when the step did no work. See [Status Detail on Changed Steps](#status-detail-on-changed-steps).
 - Use typed `meta` entries in the return value, not loose objects.
 - For normal downstream environment propagation, use `meta.env(name, value)`.
 - `meta.env(...)` accepts strings, numbers, booleans, sync lazy functions, and async lazy functions.
@@ -782,6 +783,43 @@ async check(ssh) {
 }
 ```
 
+## Status Detail on Changed Steps
+
+A module may return a short `detail` next to its status. The runner appends it to
+the step line, both for top-level modules and for steps inside a recipe:
+
+```
+· · ↺  package.upgrade: 2026-03-01    changed  no packages upgraded  4.1s
+```
+
+The dated-flag modules use this to say **why** they ran. Their step name already
+carries the date, so the detail reports the outcome instead of repeating the key.
+This matters most for the upgrade modules: they report `changed` whenever their
+dated marker is absent, even when the package manager upgraded nothing.
+
+| Module            | Detail on `changed`                                                     |
+| ----------------- | ----------------------------------------------------------------------- |
+| `package.update`  | `marker was missing, package index refreshed`                           |
+| `package.upgrade` | `12 packages upgraded`, `1 package upgraded`, or `no packages upgraded` |
+| `apt.distUpgrade` | same forms as `package.upgrade`                                         |
+
+Rules:
+
+- The count is parsed from apt's upgrade summary. `package.upgrade` also serves
+  `dnf`, `yum` and `apk`, whose summaries differ; those report
+  `upgrade completed, package count unavailable`.
+- The same fallback applies when the summary line is missing from the output, or
+  when the captured output was truncated at `maxOutputBytes`. apt prints its
+  summary last, so a truncated capture loses exactly that line, and reporting no
+  count is preferred over reporting a wrong one.
+- A step that did no work carries no detail: the flag-already-exists path returns
+  a plain `ok`, and failures report through the normal error path.
+- Dry runs keep the generic `changed (dry-run)` suffix. The detail is produced by
+  `apply`, which does not run in dry-run mode.
+
+Custom modules may return `detail` the same way; see
+[Key rules for custom modules](#key-rules-for-custom-modules).
+
 ## Dry-Run Diff Output (`--diff`)
 
 Paratix runs a playbook in dry-run mode via `paratix apply <file> --dry-run`, which
@@ -885,7 +923,7 @@ The diff string is plain text — no ANSI codes. The output layer applies colors
 5. Use `{{KEY|shell}}` or `{{KEY|raw}}` placeholders in `.tmpl` files — strict mode is on by default and bare `{{KEY}}` will throw. Provide values via `env` in `server()`.
 6. Use `service.restart()` and `service.reload()` as `signals` in recipes, not directly in `run`.
 7. Use `signals.flush()` only as an explicit checkpoint when staged flows require an early signal flush.
-8. Always pass a date string to `package.upgrade()` and `package.update()` -- it is the idempotency key. Each distinct date keeps its own flag file, so several calls with different dates coexist; a date that was already applied stays applied and is not re-run.
+8. Always pass a date string to `package.upgrade()` and `package.update()` -- it is the idempotency key. Each distinct date keeps its own flag file, so several calls with different dates coexist; a date that was already applied stays applied and is not re-run. Read the step's [status detail](#status-detail-on-changed-steps) to tell a real upgrade from a step that only wrote its marker.
 9. Specify `ssh.ports` as an array -- the runner tries each port in order.
 10. Custom modules must implement both `check` and `apply`, both async.
 11. Use `shellQuote()` when interpolating dynamic values into shell commands.
