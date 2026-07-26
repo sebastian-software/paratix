@@ -9,6 +9,10 @@ import {
 } from "../types.js"
 import { hasFlag, setFlag } from "./moduleHelpers.js"
 import {
+  describeAptUpgradeOutcome,
+  UNKNOWN_UPGRADE_OUTCOME_DETAIL,
+} from "./packageUpgradeSummary.js"
+import {
   describePackages,
   getInstalledVersion,
   type NormalizedPackage,
@@ -24,6 +28,13 @@ import {
 export type { PackageSpec, UpgradeOptions } from "./packageVersion.js"
 
 const EXEC_OPTS = { ignoreExitCode: true, silent: true } as const
+
+/**
+ * Detail reported by `package.update` when it refreshed the package index.
+ * The step name already carries the date, so the detail states what the run
+ * did rather than repeating the idempotency key.
+ */
+const PACKAGE_INDEX_REFRESHED_DETAIL = "marker was missing, package index refreshed"
 
 function execOptions(options?: UpgradeOptions): ExecOptions {
   if (options?.timeout === undefined) return EXEC_OPTS
@@ -447,7 +458,9 @@ export const pkg = {
         const flagFailure = await setFlag(ssh, flagName)
         if (flagFailure) return flagFailure
 
-        return { status: "changed" }
+        // An index refresh has no countable outcome, so the detail states the
+        // reason the step ran at all instead of a package count.
+        return { detail: PACKAGE_INDEX_REFRESHED_DETAIL, status: "changed" }
       },
       async check(ssh: null | SshConnection): Promise<"needs-apply" | "ok"> {
         if (!ssh) return NEEDS_APPLY
@@ -496,12 +509,16 @@ export const pkg = {
         if (!pm) return missingPackageManager(`package.upgrade: ${date}`)
 
         const pipelineOptions = execOptions(options)
+        // The upgrade summary is printed by the last step of the pipeline, so
+        // its stdout is what the outcome detail is derived from.
+        let lastStdout = ""
         for (const command of UPGRADE_COMMANDS[pm]) {
           // eslint-disable-next-line no-await-in-loop -- upgrade steps must run sequentially
           const result = await ssh.exec(command, pipelineOptions)
           if (result.code !== 0) {
             return failedCommand(`[package.upgrade: ${date}] package upgrade failed`, result)
           }
+          lastStdout = result.stdout
         }
 
         // R-0000273: surface flag-persist failures (EROFS/EPERM/ENOSPC)
@@ -509,7 +526,13 @@ export const pkg = {
         const flagFailure = await setFlag(ssh, flagName)
         if (flagFailure) return flagFailure
 
-        return { status: "changed" }
+        // Only apt's summary shape is parsed; dnf, yum and apk report through
+        // formats this parser does not know and take the generic detail.
+        return {
+          detail:
+            pm === "apt" ? describeAptUpgradeOutcome(lastStdout) : UNKNOWN_UPGRADE_OUTCOME_DETAIL,
+          status: "changed",
+        }
       },
       async check(ssh: null | SshConnection): Promise<"needs-apply" | "ok"> {
         if (!ssh) return NEEDS_APPLY

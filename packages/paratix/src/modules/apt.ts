@@ -19,6 +19,7 @@ import {
 import { ensureAptKeyringDirectorySymlinkFree } from "./aptKeyStaging.js"
 import { hexHashesEqual, sha256String } from "./fileHelpers.js"
 import { applyWithFlagLock, hasFlag, setFlag, setVersionedFlag } from "./moduleHelpers.js"
+import { describeAptUpgradeOutcome } from "./packageUpgradeSummary.js"
 import { isSymlink } from "./remoteFileChecks.js"
 
 const NONINTERACTIVE = "DEBIAN_FRONTEND=noninteractive"
@@ -867,7 +868,7 @@ export const apt = {
             const flagFailure = await setFlag(ssh, flagName)
             if (flagFailure) return flagFailure
 
-            return { status: "changed" }
+            return { detail: describeAptUpgradeOutcome(upgrade.stdout), status: "changed" }
           },
           flagName,
         })

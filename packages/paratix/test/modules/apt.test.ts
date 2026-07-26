@@ -28,6 +28,11 @@ const createMockSsh: typeof createBaseMockSsh = (responses, options) =>
 const emptyEnv = {}
 const DIST_UPGRADE_FLAG = "apt-dist-upgrade-2024-01-15"
 
+/** Realistic tail of an apt dist-upgrade run, used to exercise the outcome detail. */
+const APT_UPGRADE_SUMMARY = "8 upgraded, 0 newly installed, 0 to remove and 0 not upgraded.\n"
+/** Detail reported when no trustworthy package count could be derived. */
+const UNKNOWN_UPGRADE_DETAIL = "upgrade completed, package count unavailable"
+
 // Existence probe for a flag file, as issued by `hasFlag`.
 const flagProbe = (flagName: string) => `[ -f /var/lib/paratix/flags/'${flagName}' ]`
 // Marker write for a flag file, as issued by `setFlag`.
@@ -723,7 +728,10 @@ describe("apt.distUpgrade", () => {
   it("apply returns changed and runs the three-step pipeline", async () => {
     const ssh = createMockSsh({
       ...distUpgradeApplyLockResponses(),
-      "DEBIAN_FRONTEND=noninteractive apt-get dist-upgrade -y": { code: 0 },
+      "DEBIAN_FRONTEND=noninteractive apt-get dist-upgrade -y": {
+        code: 0,
+        stdout: APT_UPGRADE_SUMMARY,
+      },
       "DEBIAN_FRONTEND=noninteractive apt-get update": { code: 0 },
       "DEBIAN_FRONTEND=noninteractive dpkg --configure -a": { code: 0 },
       "mkdir -p /var/lib/paratix/flags": { code: 0 },
@@ -731,7 +739,7 @@ describe("apt.distUpgrade", () => {
     })
     const mod = apt.distUpgrade("2024-01-15")
     const result = await mod.apply(ssh, emptyEnv)
-    expect(result).toStrictEqual({ status: "changed" })
+    expect(result).toStrictEqual({ detail: "8 packages upgraded", status: "changed" })
     expect(ssh.calls).toContain("DEBIAN_FRONTEND=noninteractive apt-get update")
     expect(ssh.calls).toContain("DEBIAN_FRONTEND=noninteractive dpkg --configure -a")
     expect(ssh.calls).toContain("DEBIAN_FRONTEND=noninteractive apt-get dist-upgrade -y")
@@ -793,7 +801,8 @@ describe("apt.distUpgrade", () => {
     })
     const mod = apt.distUpgrade("2024-01-15", { timeout: 1_200_000 })
     const result = await mod.apply(ssh, emptyEnv)
-    expect(result).toStrictEqual({ status: "changed" })
+    // No summary in the stubbed output, so the outcome stays unknown.
+    expect(result).toStrictEqual({ detail: UNKNOWN_UPGRADE_DETAIL, status: "changed" })
 
     for (const command of [
       "DEBIAN_FRONTEND=noninteractive apt-get update",
@@ -804,6 +813,27 @@ describe("apt.distUpgrade", () => {
       expect(call).toBeDefined()
       expect(call?.options?.timeout).toBe(1_200_000)
     }
+  })
+
+  // Mirrors the package.upgrade case: marker missing, so the step reports
+  // `changed`, but apt upgraded nothing.
+  it("apply distinguishes a dist-upgrade that changed no packages", async () => {
+    const ssh = createMockSsh({
+      ...distUpgradeApplyLockResponses(),
+      "DEBIAN_FRONTEND=noninteractive apt-get dist-upgrade -y": {
+        code: 0,
+        stdout: "0 upgraded, 0 newly installed, 0 to remove and 0 not upgraded.\n",
+      },
+      "DEBIAN_FRONTEND=noninteractive apt-get update": { code: 0 },
+      "DEBIAN_FRONTEND=noninteractive dpkg --configure -a": { code: 0 },
+      "mkdir -p /var/lib/paratix/flags": { code: 0 },
+      "touch /var/lib/paratix/flags/'apt-dist-upgrade-2024-01-15'": { code: 0 },
+    })
+    const mod = apt.distUpgrade("2024-01-15")
+    expect(await mod.apply(ssh, emptyEnv)).toStrictEqual({
+      detail: "no packages upgraded",
+      status: "changed",
+    })
   })
 
   it("apply with options.timeout=undefined does not set a timeout key", async () => {
@@ -873,9 +903,15 @@ describe("apt.distUpgrade", () => {
     const first = apt.distUpgrade("2026-03-01")
     const second = apt.distUpgrade("2026-06-01")
 
-    expect(await first.apply(ssh, emptyEnv)).toStrictEqual({ status: "changed" })
+    expect(await first.apply(ssh, emptyEnv)).toStrictEqual({
+      detail: UNKNOWN_UPGRADE_DETAIL,
+      status: "changed",
+    })
     responses[flagProbe("apt-dist-upgrade-2026-03-01")] = { code: 0 }
-    expect(await second.apply(ssh, emptyEnv)).toStrictEqual({ status: "changed" })
+    expect(await second.apply(ssh, emptyEnv)).toStrictEqual({
+      detail: UNKNOWN_UPGRADE_DETAIL,
+      status: "changed",
+    })
     responses[flagProbe("apt-dist-upgrade-2026-06-01")] = { code: 0 }
 
     // No command may remove a sibling call site's marker ...
