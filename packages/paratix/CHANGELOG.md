@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.17.0](https://github.com/sebastian-software/paratix/compare/paratix-v0.16.1...paratix-v0.17.0) (2026-07-26)
+
+
+### Features
+
+* **paratix:** report why dated flag modules changed ([#158](https://github.com/sebastian-software/paratix/issues/158)) ([36a8199](https://github.com/sebastian-software/paratix/commit/36a81992c144c1b08da984647de01e8451730b87))
+
+
+### Bug Fixes
+
+* **paratix:** stop dated flag markers from evicting each other ([#155](https://github.com/sebastian-software/paratix/issues/155)) ([c3fa0d4](https://github.com/sebastian-software/paratix/commit/c3fa0d45d55557202f99a7ddc7e8cb554b3e4396))
+
 ## [0.16.1](https://github.com/sebastian-software/paratix/compare/paratix-v0.16.0...paratix-v0.16.1) (2026-07-26)
 
 
