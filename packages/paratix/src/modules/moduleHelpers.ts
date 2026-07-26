@@ -35,6 +35,14 @@ export async function hasFlag(ssh: SshConnection, flagName: string): Promise<boo
  * Persist a versioned flag, deleting any older flag files that share the
  * given prefix.
  *
+ * Only call this with a prefix that carries the call site's identity, such as
+ * a hash of the unit name, package name or destination path. The deletion
+ * glob spans the whole flags directory, so a prefix without an identity
+ * component is host-global: two calls of the same module would share one
+ * namespace and evict each other's marker on every run, and neither could
+ * converge. Modules whose flag name is only a caller-supplied date have no
+ * such identity and use {@link setFlag} instead.
+ *
  * R-0000273: Apply-paths call this helper *after* the underlying convergence
  * already happened. A roh-throw on EROFS/EPERM/ENOSPC would mask the
  * successful state change behind an uncaught exception, so this helper now

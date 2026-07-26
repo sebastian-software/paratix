@@ -28,11 +28,18 @@ const createMockSsh: typeof createBaseMockSsh = (responses, options) =>
 const emptyEnv = {}
 const DIST_UPGRADE_FLAG = "apt-dist-upgrade-2024-01-15"
 
-function distUpgradeApplyLockResponses(): Record<string, { code?: number; stdout?: string }> {
-  const markerPath = `/var/lib/paratix/flags/'${DIST_UPGRADE_FLAG}.lock'/holder`
-  const lockPath = `/var/lib/paratix/flags/'${DIST_UPGRADE_FLAG}.lock'`
+// Existence probe for a flag file, as issued by `hasFlag`.
+const flagProbe = (flagName: string) => `[ -f /var/lib/paratix/flags/'${flagName}' ]`
+// Marker write for a flag file, as issued by `setFlag`.
+const touchFlag = (flagName: string) => `touch /var/lib/paratix/flags/'${flagName}'`
+
+function distUpgradeApplyLockResponses(
+  flagName: string = DIST_UPGRADE_FLAG
+): Record<string, { code?: number; stdout?: string }> {
+  const markerPath = `/var/lib/paratix/flags/'${flagName}.lock'/holder`
+  const lockPath = `/var/lib/paratix/flags/'${flagName}.lock'`
   // R-0000803: awk now receives the marker as a single shell-quoted token.
-  const awkMarkerPath = `'/var/lib/paratix/flags/${DIST_UPGRADE_FLAG}.lock/holder'`
+  const awkMarkerPath = `'/var/lib/paratix/flags/${flagName}.lock/holder'`
   // R-0000634: acquire reads the marker token back via `ssh.output`; release
   // is now a single shell statement that verifies ownership before removing
   // the marker and lock directory.
@@ -47,12 +54,12 @@ function distUpgradeApplyLockResponses(): Record<string, { code?: number; stdout
     `rm -f -- ${markerPath} && ` +
     `rmdir -- ${lockPath}`
   return {
-    [`[ -f /var/lib/paratix/flags/'${DIST_UPGRADE_FLAG}' ]`]: { code: 1 },
+    [`[ -f /var/lib/paratix/flags/'${flagName}' ]`]: { code: 1 },
     [`awk 'NR==1{print $1}' ${awkMarkerPath}`]: {
       code: 0,
       stdout: MOCK_FLAG_LOCK_HOLDER_TOKEN,
     },
-    [`mkdir /var/lib/paratix/flags/'${DIST_UPGRADE_FLAG}.lock'`]: { code: 0 },
+    [`mkdir /var/lib/paratix/flags/'${flagName}.lock'`]: { code: 0 },
     [`printf '%s@%s %s\\n' "$$" '' "$(date +%s)" > ${markerPath}`]: { code: 0 },
     hostname: { code: 0, stdout: "" },
     "mkdir -p /var/lib/paratix/flags": { code: 0 },
@@ -719,9 +726,8 @@ describe("apt.distUpgrade", () => {
       "DEBIAN_FRONTEND=noninteractive apt-get dist-upgrade -y": { code: 0 },
       "DEBIAN_FRONTEND=noninteractive apt-get update": { code: 0 },
       "DEBIAN_FRONTEND=noninteractive dpkg --configure -a": { code: 0 },
-      "find /var/lib/paratix/flags -maxdepth 1 -type f -name 'apt-dist-upgrade-*' ! -name '*.lock' -delete && touch /var/lib/paratix/flags/'apt-dist-upgrade-2024-01-15'":
-        { code: 0 },
       "mkdir -p /var/lib/paratix/flags": { code: 0 },
+      "touch /var/lib/paratix/flags/'apt-dist-upgrade-2024-01-15'": { code: 0 },
     })
     const mod = apt.distUpgrade("2024-01-15")
     const result = await mod.apply(ssh, emptyEnv)
@@ -742,9 +748,8 @@ describe("apt.distUpgrade", () => {
       "DEBIAN_FRONTEND=noninteractive apt-get dist-upgrade -y": { code: 0 },
       "DEBIAN_FRONTEND=noninteractive apt-get update": { code: 0 },
       "DEBIAN_FRONTEND=noninteractive dpkg --configure -a": { code: 0 },
-      "find /var/lib/paratix/flags -maxdepth 1 -type f -name 'apt-dist-upgrade-*' ! -name '*.lock' -delete && touch /var/lib/paratix/flags/'apt-dist-upgrade-2024-01-15'":
-        { code: 0 },
       "mkdir -p /var/lib/paratix/flags": { code: 0 },
+      "touch /var/lib/paratix/flags/'apt-dist-upgrade-2024-01-15'": { code: 0 },
     })
     const mod = apt.distUpgrade("2024-01-15")
     await mod.apply(ssh, emptyEnv)
@@ -766,9 +771,8 @@ describe("apt.distUpgrade", () => {
       "DEBIAN_FRONTEND=noninteractive apt-get dist-upgrade -y": { code: 0 },
       "DEBIAN_FRONTEND=noninteractive apt-get update": { code: 0 },
       "DEBIAN_FRONTEND=noninteractive dpkg --configure -a": { code: 0 },
-      "find /var/lib/paratix/flags -maxdepth 1 -type f -name 'apt-dist-upgrade-*' ! -name '*.lock' -delete && touch /var/lib/paratix/flags/'apt-dist-upgrade-2024-01-15'":
-        { code: 0 },
       "mkdir -p /var/lib/paratix/flags": { code: 0 },
+      "touch /var/lib/paratix/flags/'apt-dist-upgrade-2024-01-15'": { code: 0 },
     })
     const mod = apt.distUpgrade("2024-01-15")
     await mod.apply(ssh, emptyEnv)
@@ -784,9 +788,8 @@ describe("apt.distUpgrade", () => {
       "DEBIAN_FRONTEND=noninteractive apt-get dist-upgrade -y": { code: 0 },
       "DEBIAN_FRONTEND=noninteractive apt-get update": { code: 0 },
       "DEBIAN_FRONTEND=noninteractive dpkg --configure -a": { code: 0 },
-      "find /var/lib/paratix/flags -maxdepth 1 -type f -name 'apt-dist-upgrade-*' ! -name '*.lock' -delete && touch /var/lib/paratix/flags/'apt-dist-upgrade-2024-01-15'":
-        { code: 0 },
       "mkdir -p /var/lib/paratix/flags": { code: 0 },
+      "touch /var/lib/paratix/flags/'apt-dist-upgrade-2024-01-15'": { code: 0 },
     })
     const mod = apt.distUpgrade("2024-01-15", { timeout: 1_200_000 })
     const result = await mod.apply(ssh, emptyEnv)
@@ -809,9 +812,8 @@ describe("apt.distUpgrade", () => {
       "DEBIAN_FRONTEND=noninteractive apt-get dist-upgrade -y": { code: 0 },
       "DEBIAN_FRONTEND=noninteractive apt-get update": { code: 0 },
       "DEBIAN_FRONTEND=noninteractive dpkg --configure -a": { code: 0 },
-      "find /var/lib/paratix/flags -maxdepth 1 -type f -name 'apt-dist-upgrade-*' ! -name '*.lock' -delete && touch /var/lib/paratix/flags/'apt-dist-upgrade-2024-01-15'":
-        { code: 0 },
       "mkdir -p /var/lib/paratix/flags": { code: 0 },
+      "touch /var/lib/paratix/flags/'apt-dist-upgrade-2024-01-15'": { code: 0 },
     })
     const mod = apt.distUpgrade("2024-01-15", { timeout: undefined })
     await mod.apply(ssh, emptyEnv)
@@ -850,6 +852,39 @@ describe("apt.distUpgrade", () => {
     expect(result).toStrictEqual({ status: "ok" })
     expect(ssh.calls).not.toContain("DEBIAN_FRONTEND=noninteractive dpkg --configure -a")
     expect(ssh.calls).not.toContain(`mkdir /var/lib/paratix/flags/'${DIST_UPGRADE_FLAG}.lock'`)
+  })
+
+  // Regression: the marker used to be written with a call-site-independent
+  // prefix, so a second `apt.distUpgrade` with a different date evicted the
+  // first one's marker on every run and neither call could ever converge.
+  it("two calls with different dates converge instead of evicting each other", async () => {
+    // The mock resolves every command against this record on each call, so
+    // flipping an entry models the host state a `touch` leaves behind.
+    const responses: Record<string, { code?: number; stdout?: string }> = {
+      ...distUpgradeApplyLockResponses("apt-dist-upgrade-2026-03-01"),
+      ...distUpgradeApplyLockResponses("apt-dist-upgrade-2026-06-01"),
+      "DEBIAN_FRONTEND=noninteractive apt-get dist-upgrade -y": { code: 0 },
+      "DEBIAN_FRONTEND=noninteractive apt-get update": { code: 0 },
+      "DEBIAN_FRONTEND=noninteractive dpkg --configure -a": { code: 0 },
+      [touchFlag("apt-dist-upgrade-2026-03-01")]: { code: 0 },
+      [touchFlag("apt-dist-upgrade-2026-06-01")]: { code: 0 },
+    }
+    const ssh = createMockSsh(responses)
+    const first = apt.distUpgrade("2026-03-01")
+    const second = apt.distUpgrade("2026-06-01")
+
+    expect(await first.apply(ssh, emptyEnv)).toStrictEqual({ status: "changed" })
+    responses[flagProbe("apt-dist-upgrade-2026-03-01")] = { code: 0 }
+    expect(await second.apply(ssh, emptyEnv)).toStrictEqual({ status: "changed" })
+    responses[flagProbe("apt-dist-upgrade-2026-06-01")] = { code: 0 }
+
+    // No command may remove a sibling call site's marker ...
+    expect(ssh.calls.some((command) => command.includes("-name 'apt-dist-upgrade-*'"))).toBe(false)
+    // ... so both call sites are converged on the next run.
+    expect(await first.check(ssh, emptyEnv)).toBe("ok")
+    expect(await second.check(ssh, emptyEnv)).toBe("ok")
+    expect(await first.apply(ssh, emptyEnv)).toStrictEqual({ status: "ok" })
+    expect(await second.apply(ssh, emptyEnv)).toStrictEqual({ status: "ok" })
   })
 })
 

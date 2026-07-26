@@ -9,6 +9,11 @@ import { createMockSsh } from "../helpers/mockSsh.js"
 
 const emptyEnv = {}
 
+// Existence probe for a flag file, as issued by `hasFlag`.
+const flagProbe = (flagName: string) => `[ -f /var/lib/paratix/flags/'${flagName}' ]`
+// Marker write for a flag file, as issued by `setFlag`.
+const touchFlag = (flagName: string) => `touch /var/lib/paratix/flags/'${flagName}'`
+
 // ---------------------------------------------------------------------------
 // Helpers: mock responses for package manager detection
 // ---------------------------------------------------------------------------
@@ -1082,28 +1087,24 @@ describe("pkg.update", () => {
     const ssh = createMockSsh({
       ...APT_FOUND,
       "apt-get update": { code: 0 },
-      "find /var/lib/paratix/flags -maxdepth 1 -type f -name 'package-update-*' ! -name '*.lock' -delete && touch /var/lib/paratix/flags/'package-update-2024-01-15'":
-        { code: 0 },
       [FLAG]: { code: 1 },
       "mkdir -p /var/lib/paratix/flags": { code: 0 },
+      "touch /var/lib/paratix/flags/'package-update-2024-01-15'": { code: 0 },
     })
     const mod = pkg.update("2024-01-15")
     const result = await mod.apply(ssh, emptyEnv)
     expect(result).toStrictEqual({ status: "changed" })
     expect(ssh.calls).toContain("apt-get update")
-    expect(ssh.calls).toContain(
-      "find /var/lib/paratix/flags -maxdepth 1 -type f -name 'package-update-*' ! -name '*.lock' -delete && touch /var/lib/paratix/flags/'package-update-2024-01-15'"
-    )
+    expect(ssh.calls).toContain("touch /var/lib/paratix/flags/'package-update-2024-01-15'")
   })
 
   it("apply forwards options.timeout to the update command", async () => {
     const ssh = createMockSsh({
       ...APT_FOUND,
       "apt-get update": { code: 0 },
-      "find /var/lib/paratix/flags -maxdepth 1 -type f -name 'package-update-*' ! -name '*.lock' -delete && touch /var/lib/paratix/flags/'package-update-2024-01-15'":
-        { code: 0 },
       [FLAG]: { code: 1 },
       "mkdir -p /var/lib/paratix/flags": { code: 0 },
+      "touch /var/lib/paratix/flags/'package-update-2024-01-15'": { code: 0 },
     })
     const mod = pkg.update("2024-01-15", { timeout: 450_000 })
     await mod.apply(ssh, emptyEnv)
@@ -1143,6 +1144,39 @@ describe("pkg.update", () => {
   it("has correct name format: package.update: 2024-01-15", () => {
     const mod = pkg.update("2024-01-15")
     expect(mod.name).toBe("package.update: 2024-01-15")
+  })
+
+  // Regression: the marker used to be written with a call-site-independent
+  // prefix, so a second `package.update` with a different date evicted the
+  // first one's marker on every run and neither call could ever converge.
+  it("two calls with different dates converge instead of evicting each other", async () => {
+    // The mock resolves every command against this record on each call, so
+    // flipping an entry models the host state a `touch` leaves behind.
+    const responses: Record<string, Partial<ExecResult>> = {
+      ...APT_FOUND,
+      "apt-get update": { code: 0 },
+      [flagProbe("package-update-2026-03-23")]: { code: 1 },
+      [flagProbe("package-update-2026-03-26")]: { code: 1 },
+      "mkdir -p /var/lib/paratix/flags": { code: 0 },
+      [touchFlag("package-update-2026-03-23")]: { code: 0 },
+      [touchFlag("package-update-2026-03-26")]: { code: 0 },
+    }
+    const ssh = createMockSsh(responses)
+    const first = pkg.update("2026-03-23")
+    const second = pkg.update("2026-03-26")
+
+    expect(await first.apply(ssh, emptyEnv)).toStrictEqual({ status: "changed" })
+    responses[flagProbe("package-update-2026-03-23")] = { code: 0 }
+    expect(await second.apply(ssh, emptyEnv)).toStrictEqual({ status: "changed" })
+    responses[flagProbe("package-update-2026-03-26")] = { code: 0 }
+
+    // No command may remove a sibling call site's marker ...
+    expect(ssh.calls.some((command) => command.includes("-name 'package-update-*'"))).toBe(false)
+    // ... so both call sites are converged on the next run.
+    expect(await first.check(ssh, emptyEnv)).toBe("ok")
+    expect(await second.check(ssh, emptyEnv)).toBe("ok")
+    expect(await first.apply(ssh, emptyEnv)).toStrictEqual({ status: "ok" })
+    expect(await second.apply(ssh, emptyEnv)).toStrictEqual({ status: "ok" })
   })
 })
 
@@ -1184,10 +1218,9 @@ describe("pkg.upgrade", () => {
       "DEBIAN_FRONTEND=noninteractive apt-get update": { code: 0 },
       "DEBIAN_FRONTEND=noninteractive apt-get upgrade -y": { code: 0 },
       "DEBIAN_FRONTEND=noninteractive dpkg --configure -a": { code: 0 },
-      "find /var/lib/paratix/flags -maxdepth 1 -type f -name 'package-upgrade-*' ! -name '*.lock' -delete && touch /var/lib/paratix/flags/'package-upgrade-2024-01-15'":
-        { code: 0 },
       [FLAG]: { code: 1 },
       "mkdir -p /var/lib/paratix/flags": { code: 0 },
+      "touch /var/lib/paratix/flags/'package-upgrade-2024-01-15'": { code: 0 },
     })
     const mod = pkg.upgrade("2024-01-15")
     const result = await mod.apply(ssh, emptyEnv)
@@ -1198,9 +1231,7 @@ describe("pkg.upgrade", () => {
     expect(ssh.calls).not.toContain(
       "DEBIAN_FRONTEND=noninteractive dpkg --configure -a && DEBIAN_FRONTEND=noninteractive apt-get update && DEBIAN_FRONTEND=noninteractive apt-get upgrade -y"
     )
-    expect(ssh.calls).toContain(
-      "find /var/lib/paratix/flags -maxdepth 1 -type f -name 'package-upgrade-*' ! -name '*.lock' -delete && touch /var/lib/paratix/flags/'package-upgrade-2024-01-15'"
-    )
+    expect(ssh.calls).toContain("touch /var/lib/paratix/flags/'package-upgrade-2024-01-15'")
   })
 
   it("apply without options does not set a timeout key on exec options (apt)", async () => {
@@ -1209,10 +1240,9 @@ describe("pkg.upgrade", () => {
       "DEBIAN_FRONTEND=noninteractive apt-get update": { code: 0 },
       "DEBIAN_FRONTEND=noninteractive apt-get upgrade -y": { code: 0 },
       "DEBIAN_FRONTEND=noninteractive dpkg --configure -a": { code: 0 },
-      "find /var/lib/paratix/flags -maxdepth 1 -type f -name 'package-upgrade-*' ! -name '*.lock' -delete && touch /var/lib/paratix/flags/'package-upgrade-2024-01-15'":
-        { code: 0 },
       [FLAG]: { code: 1 },
       "mkdir -p /var/lib/paratix/flags": { code: 0 },
+      "touch /var/lib/paratix/flags/'package-upgrade-2024-01-15'": { code: 0 },
     })
     const mod = pkg.upgrade("2024-01-15")
     await mod.apply(ssh, emptyEnv)
@@ -1231,9 +1261,8 @@ describe("pkg.upgrade", () => {
       "DEBIAN_FRONTEND=noninteractive apt-get update": { code: 0 },
       "DEBIAN_FRONTEND=noninteractive apt-get upgrade -y": { code: 0 },
       "DEBIAN_FRONTEND=noninteractive dpkg --configure -a": { code: 0 },
-      "find /var/lib/paratix/flags -maxdepth 1 -type f -name 'package-upgrade-*' ! -name '*.lock' -delete && touch /var/lib/paratix/flags/'package-upgrade-2026-05-01'":
-        { code: 0 },
       "mkdir -p /var/lib/paratix/flags": { code: 0 },
+      "touch /var/lib/paratix/flags/'package-upgrade-2026-05-01'": { code: 0 },
     })
     const mod = pkg.upgrade("2026-05-01", { timeout: 900_000 })
     const result = await mod.apply(ssh, emptyEnv)
@@ -1257,10 +1286,9 @@ describe("pkg.upgrade", () => {
       "DEBIAN_FRONTEND=noninteractive apt-get update": { code: 0 },
       "DEBIAN_FRONTEND=noninteractive apt-get upgrade -y": { code: 0 },
       "DEBIAN_FRONTEND=noninteractive dpkg --configure -a": { code: 0 },
-      "find /var/lib/paratix/flags -maxdepth 1 -type f -name 'package-upgrade-*' ! -name '*.lock' -delete && touch /var/lib/paratix/flags/'package-upgrade-2024-01-15'":
-        { code: 0 },
       [FLAG]: { code: 1 },
       "mkdir -p /var/lib/paratix/flags": { code: 0 },
+      "touch /var/lib/paratix/flags/'package-upgrade-2024-01-15'": { code: 0 },
     })
     const mod = pkg.upgrade("2024-01-15", { timeout: undefined })
     await mod.apply(ssh, emptyEnv)
@@ -1311,6 +1339,36 @@ describe("pkg.upgrade", () => {
   it("has correct name format: package.upgrade: 2024-01-15", () => {
     const mod = pkg.upgrade("2024-01-15")
     expect(mod.name).toBe("package.upgrade: 2024-01-15")
+  })
+
+  // Regression: same shared-namespace defect as in `pkg.update`; it only
+  // stayed invisible here because playbooks usually hold a single call.
+  it("two calls with different dates converge instead of evicting each other", async () => {
+    const responses: Record<string, Partial<ExecResult>> = {
+      ...APT_FOUND,
+      "DEBIAN_FRONTEND=noninteractive apt-get update": { code: 0 },
+      "DEBIAN_FRONTEND=noninteractive apt-get upgrade -y": { code: 0 },
+      "DEBIAN_FRONTEND=noninteractive dpkg --configure -a": { code: 0 },
+      [flagProbe("package-upgrade-2026-03-01")]: { code: 1 },
+      [flagProbe("package-upgrade-2026-06-01")]: { code: 1 },
+      "mkdir -p /var/lib/paratix/flags": { code: 0 },
+      [touchFlag("package-upgrade-2026-03-01")]: { code: 0 },
+      [touchFlag("package-upgrade-2026-06-01")]: { code: 0 },
+    }
+    const ssh = createMockSsh(responses)
+    const first = pkg.upgrade("2026-03-01")
+    const second = pkg.upgrade("2026-06-01")
+
+    expect(await first.apply(ssh, emptyEnv)).toStrictEqual({ status: "changed" })
+    responses[flagProbe("package-upgrade-2026-03-01")] = { code: 0 }
+    expect(await second.apply(ssh, emptyEnv)).toStrictEqual({ status: "changed" })
+    responses[flagProbe("package-upgrade-2026-06-01")] = { code: 0 }
+
+    expect(ssh.calls.some((command) => command.includes("-name 'package-upgrade-*'"))).toBe(false)
+    expect(await first.check(ssh, emptyEnv)).toBe("ok")
+    expect(await second.check(ssh, emptyEnv)).toBe("ok")
+    expect(await first.apply(ssh, emptyEnv)).toStrictEqual({ status: "ok" })
+    expect(await second.apply(ssh, emptyEnv)).toStrictEqual({ status: "ok" })
   })
 })
 
@@ -1445,9 +1503,8 @@ describe("package manager detection", () => {
       ...DNF_FOUND,
       "[ -f /var/lib/paratix/flags/'package-update-2024-01-15' ]": { code: 1 },
       "dnf makecache": { code: 0 },
-      "find /var/lib/paratix/flags -maxdepth 1 -type f -name 'package-update-*' ! -name '*.lock' -delete && touch /var/lib/paratix/flags/'package-update-2024-01-15'":
-        { code: 0 },
       "mkdir -p /var/lib/paratix/flags": { code: 0 },
+      "touch /var/lib/paratix/flags/'package-update-2024-01-15'": { code: 0 },
     })
     const mod = pkg.update("2024-01-15")
     await mod.apply(ssh, emptyEnv)
@@ -1459,9 +1516,8 @@ describe("package manager detection", () => {
       ...APK_FOUND,
       "[ -f /var/lib/paratix/flags/'package-update-2024-01-15' ]": { code: 1 },
       "apk update": { code: 0 },
-      "find /var/lib/paratix/flags -maxdepth 1 -type f -name 'package-update-*' ! -name '*.lock' -delete && touch /var/lib/paratix/flags/'package-update-2024-01-15'":
-        { code: 0 },
       "mkdir -p /var/lib/paratix/flags": { code: 0 },
+      "touch /var/lib/paratix/flags/'package-update-2024-01-15'": { code: 0 },
     })
     const mod = pkg.update("2024-01-15")
     await mod.apply(ssh, emptyEnv)
@@ -1474,9 +1530,8 @@ describe("package manager detection", () => {
       "[ -f /var/lib/paratix/flags/'package-upgrade-2024-01-15' ]": { code: 1 },
       "apk update": { code: 0 },
       "apk upgrade": { code: 0 },
-      "find /var/lib/paratix/flags -maxdepth 1 -type f -name 'package-upgrade-*' ! -name '*.lock' -delete && touch /var/lib/paratix/flags/'package-upgrade-2024-01-15'":
-        { code: 0 },
       "mkdir -p /var/lib/paratix/flags": { code: 0 },
+      "touch /var/lib/paratix/flags/'package-upgrade-2024-01-15'": { code: 0 },
     })
     const mod = pkg.upgrade("2024-01-15")
     await mod.apply(ssh, emptyEnv)

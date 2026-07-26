@@ -7,7 +7,7 @@ import {
   NEEDS_APPLY,
   type SshConnection,
 } from "../types.js"
-import { hasFlag, setVersionedFlag } from "./moduleHelpers.js"
+import { hasFlag, setFlag } from "./moduleHelpers.js"
 import {
   describePackages,
   getInstalledVersion,
@@ -410,7 +410,16 @@ export const pkg = {
    * A flag file at `${FLAGS_DIRECTORY}/package-update-<date>` is created after
    * a successful run. On the next run the flag is detected and the module
    * reports `"ok"` without running the update again. Changing `date` to a new
-   * value invalidates all previous flags for this operation.
+   * value selects a new flag file, so the update runs once more.
+   *
+   * The marker is written with `setFlag`, not `setVersionedFlag`: the flag
+   * name carries no call-site identity, only the date. An evicting prefix
+   * would therefore be host-global, and two `package.update` calls with
+   * different dates would delete each other's marker on every run so that
+   * neither could ever converge. Two consequences are accepted deliberately:
+   * markers for retired dates are not pruned (one empty file per distinct
+   * date), and re-using an earlier date is skipped rather than re-run,
+   * because that marker still exists.
    *
    * @param date - A date string used as the idempotency key (e.g. `"2024-01-15"`).
    * @param options - Optional per-call overrides (e.g. SSH command `timeout`).
@@ -435,7 +444,7 @@ export const pkg = {
 
         // R-0000273: surface flag-persist failures (EROFS/EPERM/ENOSPC)
         // through the failedCommand path; the helper no longer throws.
-        const flagFailure = await setVersionedFlag(ssh, flagName, "package-update-")
+        const flagFailure = await setFlag(ssh, flagName)
         if (flagFailure) return flagFailure
 
         return { status: "changed" }
@@ -454,7 +463,13 @@ export const pkg = {
    * A flag file at `${FLAGS_DIRECTORY}/package-upgrade-<date>` is created after
    * a successful run. On the next run the flag is detected and the module
    * reports `"ok"` without running the upgrade again. Changing `date` to a new
-   * value invalidates all previous flags for this operation.
+   * value selects a new flag file, so the upgrade runs once more.
+   *
+   * The marker is written with `setFlag` for the same reason as in
+   * `pkg.update`: the flag name carries only the date, so an
+   * evicting prefix would be host-global and sibling calls could never
+   * converge. Retired markers are therefore not pruned, and re-using an
+   * earlier date is skipped rather than re-run.
    *
    * On apt systems this runs `dpkg --configure -a`, `apt-get update`, and
    * `apt-get upgrade -y` as three separate commands (each subject to its own
@@ -491,7 +506,7 @@ export const pkg = {
 
         // R-0000273: surface flag-persist failures (EROFS/EPERM/ENOSPC)
         // through the failedCommand path; the helper no longer throws.
-        const flagFailure = await setVersionedFlag(ssh, flagName, "package-upgrade-")
+        const flagFailure = await setFlag(ssh, flagName)
         if (flagFailure) return flagFailure
 
         return { status: "changed" }

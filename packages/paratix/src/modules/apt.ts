@@ -18,7 +18,7 @@ import {
 } from "./aptKeyHelpers.js"
 import { ensureAptKeyringDirectorySymlinkFree } from "./aptKeyStaging.js"
 import { hexHashesEqual, sha256String } from "./fileHelpers.js"
-import { applyWithFlagLock, hasFlag, setVersionedFlag } from "./moduleHelpers.js"
+import { applyWithFlagLock, hasFlag, setFlag, setVersionedFlag } from "./moduleHelpers.js"
 import { isSymlink } from "./remoteFileChecks.js"
 
 const NONINTERACTIVE = "DEBIAN_FRONTEND=noninteractive"
@@ -814,6 +814,12 @@ export const apt = {
    * The pipeline is split into three separate SSH commands so that each step
    * gets its own timeout window and produces a precise failure label.
    *
+   * The marker is written with `setFlag`: the flag name carries only the
+   * date and no call-site identity, so an evicting prefix would be
+   * host-global and two `apt.distUpgrade` calls with different dates would
+   * delete each other's marker on every run. Retired markers are therefore
+   * not pruned, and re-using an earlier date is skipped rather than re-run.
+   *
    * @param date - A date string used as the idempotency key (e.g. `"2024-01-15"`).
    * @param options - Optional per-call overrides (e.g. SSH command `timeout`).
    *   The same `timeout` is applied to every step of the dist-upgrade pipeline.
@@ -855,10 +861,10 @@ export const apt = {
             if (upgrade.code !== 0)
               return failedCommand("[apt.distUpgrade] apt-get dist-upgrade failed", upgrade)
 
-            // R-0000273: setVersionedFlag now returns a typed
+            // R-0000273: the flag helper returns a typed
             // `ModuleResult | null`; surface persist failures rather than
             // throwing after a successful dist-upgrade.
-            const flagFailure = await setVersionedFlag(ssh, flagName, "apt-dist-upgrade-")
+            const flagFailure = await setFlag(ssh, flagName)
             if (flagFailure) return flagFailure
 
             return { status: "changed" }
