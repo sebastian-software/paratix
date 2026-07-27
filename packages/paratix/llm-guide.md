@@ -824,6 +824,9 @@ Custom modules may return `detail` the same way; see
 
 Paratix runs a playbook in dry-run mode via `paratix apply <file> --dry-run`, which
 reports per-module `changed (dry-run)` or `ok` based on each module's `check()`.
+A recipe is always itemized in a dry run — at any nesting depth it prints its
+`[name]` header plus one line per child, and that itemization on its own says
+nothing about diffs.
 
 `--diff` enables a second, opt-in layer: modules that mark themselves as diff
 producers also render a unified-diff block under their status line so the user
