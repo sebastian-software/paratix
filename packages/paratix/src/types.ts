@@ -119,8 +119,24 @@ export type OrchestrationStep = {
  * @internal
  */
 export type ModuleApplyOptions = {
+  /**
+   * Whether the user passed `--diff`. Only meaningful on an `_applyDryRun`
+   * dispatch: a container module that itemizes its own children forwards the
+   * flag so a `_dryRunDiffProducer` child inside the container is dispatched
+   * exactly like the same child inside a recipe.
+   * @internal
+   */
+  diff?: boolean
   onChildStep?: (step: OrchestrationStep) => Promise<void>
   shutdownSignal?: () => null | ShutdownSignal
+  /**
+   * Whether verbose command diagnostics should be printed. Forwarded to
+   * container modules that render their children's failures themselves, so a
+   * failure inside the container reports the same detail level as one raised
+   * directly by the runner.
+   * @internal
+   */
+  verbose?: boolean
 }
 
 /**

@@ -1,5 +1,5 @@
 import type { RecipeModule } from "./recipe.js"
-import type { Environment, ModuleMetaEntry, ModuleStatus, SshConnection } from "./types.js"
+import type { Environment, Module, ModuleMetaEntry, ModuleStatus, SshConnection } from "./types.js"
 
 import { shouldExecuteApplyDuringDryRun } from "./dryRunDispatch.js"
 import { mergeEnvironmentFromMeta } from "./meta.js"
@@ -12,7 +12,14 @@ import {
 } from "./output.js"
 import { isRecipe } from "./recipeGuard.js"
 
-type StepResult = {
+/**
+ * Outcome of a single dry-run step: the environment the next sibling sees, the
+ * meta it produced, and the control-plane flags that end the enclosing loop.
+ *
+ * Exported because `conditionalModules.ts` folds the very same step result into
+ * its own accumulator — see {@link executeDryRunChildModule}.
+ */
+export type DryRunStepResult = {
   env: Environment
   meta?: ModuleMetaEntry[]
   shouldBreak: boolean
@@ -24,7 +31,7 @@ function interruptedDryRunResult(parameters: {
   aggregatedMeta: ModuleMetaEntry[]
   aggregatedStatus: "changed" | "ok"
   currentEnvironment: Environment
-}): StepResult {
+}): DryRunStepResult {
   return {
     env: parameters.currentEnvironment,
     meta: parameters.aggregatedMeta.length === 0 ? undefined : parameters.aggregatedMeta,
@@ -34,13 +41,13 @@ function interruptedDryRunResult(parameters: {
 }
 
 async function executeDryRunBlockingModule(parameters: {
-  childModule: RecipeModule["_modules"][number]
+  childModule: Module
   connection: null | SshConnection
   diff: boolean
   environment: Environment
   shutdownSignal: () => NodeJS.Signals | null
   verbose: boolean
-}): Promise<StepResult> {
+}): Promise<DryRunStepResult> {
   const { childModule, connection, diff, environment, verbose } = parameters
   if (parameters.shutdownSignal() != null) return { env: environment, shouldBreak: true }
   startModuleSpinner(childModule.name)
@@ -48,7 +55,13 @@ async function executeDryRunBlockingModule(parameters: {
     childModule._applyDryRun == null
       ? await childModule.apply(connection, environment)
       : await childModule._applyDryRun(connection, environment, {
+          // `diff` and `verbose` matter to container modules (a `when(...)`
+          // block) that itemize their own children: without them the container
+          // would render its subtree with `--diff` disabled and swallow the
+          // verbose command diagnostics of a failing grandchild.
+          diff,
           shutdownSignal: parameters.shutdownSignal,
+          verbose,
         })
   const nextEnvironment =
     result.meta == null ? environment : await mergeEnvironmentFromMeta(environment, result.meta)
@@ -85,7 +98,7 @@ async function executeDryRunBlockingModule(parameters: {
  * @returns `true` when the descent was interrupted rather than completed.
  */
 function wasDryRunDescentInterrupted(
-  result: StepResult,
+  result: DryRunStepResult,
   shutdownSignal: () => NodeJS.Signals | null
 ): boolean {
   return result.shouldBreak && shutdownSignal() != null
@@ -117,7 +130,7 @@ async function executeDryRunChildRecipe(parameters: {
   environment: Environment
   shutdownSignal: () => NodeJS.Signals | null
   verbose: boolean
-}): Promise<StepResult> {
+}): Promise<DryRunStepResult> {
   // Measure the recipe's own runtime here: each child result line consumes and
   // clears the shared start-time slot in output.ts, so the closing line has to
   // carry its own measurement rather than the last child's.
@@ -142,14 +155,40 @@ async function executeDryRunChildRecipe(parameters: {
   return result
 }
 
-async function executeDryRunChildModule(parameters: {
-  childModule: RecipeModule["_modules"][number]
+/**
+ * Run one child of a container during a dry run and print its result line.
+ *
+ * This is the single place that encodes the per-child dry-run decision:
+ *
+ * - a recipe child is descended into unconditionally, because itemization is a
+ *   property of *being a container*, not of the module kinds it happens to
+ *   hold;
+ * - every other child runs its `check()` and only dispatches `_applyDryRun`
+ *   (or `apply` as the fallback) when {@link shouldExecuteApplyDuringDryRun}
+ *   allows it — otherwise it renders as a passive `ok` / `changed (dry-run)`.
+ *
+ * Both dry-run containers consume this function: the recipe loop below and the
+ * `when(...)` loop in `conditionalModules.ts`. Keeping a private copy per
+ * container is exactly how the itemization gaps of issues #160 and #163 arose,
+ * so new container kinds must call this instead of re-deriving the decision.
+ *
+ * @param parameters - Step parameters.
+ * @param parameters.childModule - The child to check and conditionally dispatch.
+ * @param parameters.diff - Whether `--diff` was requested.
+ * @param parameters.environment - Environment visible to the child.
+ * @param parameters.shutdownSignal - Getter for the pending shutdown signal.
+ * @param parameters.ssh - SSH connection of the enclosing container.
+ * @param parameters.verbose - Whether verbose command diagnostics are printed.
+ * @returns The child's step result for the enclosing accumulator.
+ */
+export async function executeDryRunChildModule(parameters: {
+  childModule: Module
   diff: boolean
   environment: Environment
   shutdownSignal: () => NodeJS.Signals | null
   ssh: null | SshConnection
   verbose: boolean
-}): Promise<StepResult> {
+}): Promise<DryRunStepResult> {
   const { childModule, diff, environment, ssh, verbose } = parameters
   if (parameters.shutdownSignal() != null) return { env: environment, shouldBreak: true }
   const connection = childModule.local === true ? null : ssh
@@ -192,7 +231,7 @@ type DryRunRecipeAccumulator = {
 
 function applyDryRunChildResult(
   accumulator: DryRunRecipeAccumulator,
-  result: StepResult
+  result: DryRunStepResult
 ): DryRunRecipeAccumulator {
   return {
     aggregatedMeta:
@@ -211,7 +250,7 @@ async function runDryRunChildLoop(parameters: {
   shutdownSignal: () => NodeJS.Signals | null
   ssh: null | SshConnection
   verbose: boolean
-}): Promise<DryRunRecipeAccumulator | StepResult> {
+}): Promise<DryRunRecipeAccumulator | DryRunStepResult> {
   let accumulator = parameters.accumulator
   for (const childModule of parameters.recipeModule._modules) {
     if (parameters.shutdownSignal() != null) {
@@ -245,7 +284,7 @@ export async function dryRunRecipeModule(parameters: {
   recipeModule: RecipeModule
   shutdownSignal?: () => NodeJS.Signals | null
   ssh: null | SshConnection
-}): Promise<StepResult> {
+}): Promise<DryRunStepResult> {
   return withRecipeOutputScope(async () => {
     const { environment, recipeModule, ssh } = parameters
     printRecipeHeader(recipeModule.name)

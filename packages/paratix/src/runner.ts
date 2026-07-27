@@ -702,16 +702,23 @@ async function runRecipeModule(parameters: {
 async function executeModuleForApply(parameters: {
   connection: null | SshConnectionImpl
   currentEnvironment: Environment
+  diff: boolean
   dryRun: boolean
   rebootGrace: RebootGraceContext
   shutdownSignal: () => NodeJS.Signals | null
   ssh: SshConnectionImpl
   targetModule: Module
+  verbose: boolean
 }): Promise<ModuleResult> {
   const { connection, currentEnvironment, dryRun, rebootGrace, ssh, targetModule } = parameters
   if (dryRun && targetModule._applyDryRun != null) {
     return targetModule._applyDryRun(connection, currentEnvironment, {
+      // A container module (a top-level `when(...)` block) itemizes its own
+      // children, so it needs the same `--diff` and verbosity context the
+      // runner would apply to those children directly.
+      diff: parameters.diff,
       shutdownSignal: parameters.shutdownSignal,
+      verbose: parameters.verbose,
     })
   }
   if (targetModule._supportsChildStepHook === true) {
@@ -748,11 +755,13 @@ async function applyModule(parameters: {
   const result = await executeModuleForApply({
     connection,
     currentEnvironment,
+    diff,
     dryRun,
     rebootGrace,
     shutdownSignal: parameters.shutdownSignal,
     ssh,
     targetModule,
+    verbose,
   })
   const stepResult = await handleMetaAndBuildResult({
     dryRun,

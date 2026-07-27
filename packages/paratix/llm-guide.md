@@ -664,6 +664,9 @@ assert((env) => !!env["APP_SECRET"], "APP_SECRET must be set")
 ### `when(condition, ...modules)`
 
 Conditionally run modules. Skipped modules report `"skipped"`, not `"failed"`.
+A block whose condition holds is itemized like a recipe — header, one line per
+guarded module, closing line; a block whose condition is false reports a single
+`skipped` line. See [Dry-Run Diff Output](#dry-run-diff-output---diff).
 
 ```typescript
 when((env) => env["DEPLOY_ENV"] === "production", service.enabled("fail2ban"), ufw.enabled())
@@ -826,7 +829,11 @@ Paratix runs a playbook in dry-run mode via `paratix apply <file> --dry-run`, wh
 reports per-module `changed (dry-run)` or `ok` based on each module's `check()`.
 A recipe is always itemized in a dry run — at any nesting depth it prints its
 `[name]` header plus one line per child, and that itemization on its own says
-nothing about diffs.
+nothing about diffs. A `when(...)` block is itemized the same way: when its
+condition holds it prints its own `[name]` header, one line per guarded module
+and a closing line with the aggregated status, in a dry run as well as in an
+apply. When the condition is false the block reports a single `skipped` line
+without a header, and the run summary counts it under `skipped`.
 
 `--diff` enables a second, opt-in layer: modules that mark themselves as diff
 producers also render a unified-diff block under their status line so the user
