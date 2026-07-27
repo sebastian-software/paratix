@@ -10,6 +10,7 @@ import {
   startModuleSpinner,
   withRecipeOutputScope,
 } from "./output.js"
+import { isRecipe } from "./recipeGuard.js"
 
 type StepResult = {
   env: Environment
@@ -70,6 +71,77 @@ async function executeDryRunBlockingModule(parameters: {
   }
 }
 
+/**
+ * Decide whether a finished descent was cut short by a shutdown signal.
+ *
+ * `interruptedDryRunResult` and the shutdown guards in
+ * {@link executeDryRunChildModule} all leave the loop with `shouldBreak` set
+ * while a signal is pending, and none of them printed a result line for the
+ * work they abandoned. The enclosing recipe must stay silent for the same
+ * reason (see the invariant documented in `output.ts`).
+ *
+ * @param result - The step result returned by the descent.
+ * @param shutdownSignal - Getter for the pending shutdown signal.
+ * @returns `true` when the descent was interrupted rather than completed.
+ */
+function wasDryRunDescentInterrupted(
+  result: StepResult,
+  shutdownSignal: () => NodeJS.Signals | null
+): boolean {
+  return result.shouldBreak && shutdownSignal() != null
+}
+
+/**
+ * Render a nested recipe exactly like a top-level one.
+ *
+ * Itemization is a property of *being a recipe*, not of the module kinds a
+ * recipe happens to contain: the descent is unconditional, so a recipe of plain
+ * package/service steps prints its `[name]` header plus one line per child
+ * instead of collapsing into a single anonymous `changed (dry-run)` row. The
+ * per-module `shouldExecuteApplyDuringDryRun` gate still applies one level
+ * down, so `--diff` handling, blockers and meta producers are unchanged.
+ *
+ * @param parameters - Descent parameters.
+ * @param parameters.childRecipe - The nested recipe to itemize.
+ * @param parameters.connection - SSH connection, or `null` for local recipes.
+ * @param parameters.diff - Whether `--diff` was requested.
+ * @param parameters.environment - Environment visible to the nested recipe.
+ * @param parameters.shutdownSignal - Getter for the pending shutdown signal.
+ * @param parameters.verbose - Whether verbose command diagnostics are printed.
+ * @returns The nested recipe's aggregated step result.
+ */
+async function executeDryRunChildRecipe(parameters: {
+  childRecipe: RecipeModule
+  connection: null | SshConnection
+  diff: boolean
+  environment: Environment
+  shutdownSignal: () => NodeJS.Signals | null
+  verbose: boolean
+}): Promise<StepResult> {
+  // Measure the recipe's own runtime here: each child result line consumes and
+  // clears the shared start-time slot in output.ts, so the closing line has to
+  // carry its own measurement rather than the last child's.
+  const startedAt = Date.now()
+  const result = await dryRunRecipeModule({
+    environment: parameters.environment,
+    options: { diff: parameters.diff, verbose: parameters.verbose },
+    recipeModule: parameters.childRecipe,
+    shutdownSignal: parameters.shutdownSignal,
+    ssh: parameters.connection,
+  })
+  const { status } = result
+  // An interrupted descent carries no meaningful aggregate — `status` may even
+  // be undefined — and must not print a closing line at all.
+  if (status != null && !wasDryRunDescentInterrupted(result, parameters.shutdownSignal)) {
+    printModuleResult(parameters.childRecipe.name, status, "(dry-run)", undefined, startedAt)
+  }
+  // A failed child already emitted its own printCommandFailure inside the
+  // descent, so the aggregate is passed through untouched. dryRunRecipeModule
+  // returns the inner-merged environment and the aggregated meta, so the parent
+  // accumulator needs no extra mergeEnvironmentFromMeta on this path.
+  return result
+}
+
 async function executeDryRunChildModule(parameters: {
   childModule: RecipeModule["_modules"][number]
   diff: boolean
@@ -81,6 +153,18 @@ async function executeDryRunChildModule(parameters: {
   const { childModule, diff, environment, ssh, verbose } = parameters
   if (parameters.shutdownSignal() != null) return { env: environment, shouldBreak: true }
   const connection = childModule.local === true ? null : ssh
+  if (isRecipe(childModule)) {
+    // Deliberately no recipe-level check() here: the descent itemizes every
+    // child, and each child runs its own check().
+    return executeDryRunChildRecipe({
+      childRecipe: childModule,
+      connection,
+      diff,
+      environment,
+      shutdownSignal: parameters.shutdownSignal,
+      verbose,
+    })
+  }
   startModuleSpinner(childModule.name)
   const checkResult = await childModule.check(connection, environment)
   if (parameters.shutdownSignal() != null) return { env: environment, shouldBreak: true }

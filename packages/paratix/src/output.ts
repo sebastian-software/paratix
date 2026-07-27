@@ -239,6 +239,13 @@ export async function withRecipeOutputScope<T>(scopedOperation: () => Promise<T>
 // current callers (regular, recipe child, recipe parent, dry-run, signal)
 // honour this; interrupt paths simply leave the value to be overwritten by the
 // next startModuleSpinner and never print a result line themselves.
+//
+// The one documented exception is a composite line that closes a scope whose
+// children already printed: a recipe's own result line comes after every child
+// consumed and cleared the shared slot, so the recipe measures its own start
+// and passes it as `startedAt` to the print call. startModuleSpinner stays the
+// single writer of the shared slot; `startedAt` only overrides the value used
+// for that one line.
 function getActiveModuleElapsed(): string | undefined {
   if (liveOutputState.activeModuleStartedAt == null) return undefined
   return formatModuleElapsed(Date.now() - liveOutputState.activeModuleStartedAt)
@@ -451,6 +458,7 @@ function printRenderedModuleResult(parameters: {
   diff?: string
   extraGuideDepths?: number[]
   name: string
+  startedAt?: number
   status: DisplayStatus
 }): void {
   const extraGuideDepths = parameters.extraGuideDepths ?? []
@@ -469,7 +477,13 @@ function printRenderedModuleResult(parameters: {
   })
   // Consume the active module's start time exactly once for the main status
   // line so the static value never bleeds onto later recipe parent lines.
-  const elapsed = getActiveModuleElapsed()
+  // A caller that owns a scope (a recipe closing its itemized children) hands
+  // in its own `startedAt`, because its children already consumed the shared
+  // slot; the slot is still cleared so nothing bleeds onto the next line.
+  const elapsed =
+    parameters.startedAt == null
+      ? getActiveModuleElapsed()
+      : formatModuleElapsed(Date.now() - parameters.startedAt)
   liveOutputState.activeModuleStartedAt = null
   const line = renderModuleLine({
     detail: displayModule.detail,
@@ -506,16 +520,22 @@ function printRenderedModuleResult(parameters: {
  *   a non-empty diff (i.e. the user passed `--diff` and the module produced one).
  *   Every diff line is masked through `maskRegisteredSecrets` and
  *   `sanitizeTerminalText` before printing.
+ * @param startedAt - Optional `Date.now()` timestamp captured by the caller
+ *   before the module's own work began. Only composite callers need it: a
+ *   recipe's children each consume and clear the shared start-time slot, so the
+ *   line closing the recipe has to supply its own measurement. Leaf callers
+ *   omit it and keep using the slot recorded by `startModuleSpinner`.
  */
 // eslint-disable-next-line max-params -- positional API kept for source compatibility with downstream callers; diff is a leaf-level optional follow-up to detail
 export function printModuleResult(
   name: string,
   status: DisplayStatus,
   detail?: string,
-  diff?: string
+  diff?: string,
+  startedAt?: number
 ): void {
   clearPendingRecipeClosureGuides()
-  printRenderedModuleResult({ detail, diff, name, status })
+  printRenderedModuleResult({ detail, diff, name, startedAt, status })
 }
 
 // eslint-disable-next-line max-params -- mirrors printModuleResult; positional API kept for source compatibility
@@ -523,13 +543,15 @@ export function printRecipeModuleResult(
   name: string,
   status: DisplayStatus,
   detail?: string,
-  diff?: string
+  diff?: string,
+  startedAt?: number
 ): void {
   printRenderedModuleResult({
     detail,
     diff,
     extraGuideDepths: liveOutputState.pendingRecipeClosureGuideDepths,
     name,
+    startedAt,
     status,
   })
   clearPendingRecipeClosureGuides()

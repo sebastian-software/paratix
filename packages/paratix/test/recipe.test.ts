@@ -5,6 +5,8 @@ import type { Environment, Module } from "../src/types.js"
 import { assert, fail, firstRun, signals, when } from "../src/builtins.js"
 import { dryRunRecipeModule } from "../src/dryRunRecipe.js"
 import { resolveEnvironment } from "../src/environment.js"
+import { applyModuleFilter } from "../src/moduleFilter.js"
+import { resetLiveOutputForTests } from "../src/output.js"
 import { recipe } from "../src/recipe.js"
 import { setRunnerAbortSignal } from "../src/runnerAbortSignal.js"
 import { CommandError } from "../src/sshHelpers.js"
@@ -12,6 +14,29 @@ import { createMockSsh } from "./helpers/mockSsh.js"
 
 const emptyEnv: Environment = {}
 const noShutdownSignal = () => null
+
+function makeSpyModule(name: string): Module {
+  return {
+    apply: vi.fn().mockResolvedValue({ status: "changed" }),
+    check: vi.fn().mockResolvedValue("needs-apply"),
+    name,
+  }
+}
+
+// Force the non-animated output path so every result line lands on console.log
+// and can be asserted verbatim, including its elapsed suffix.
+async function withoutTty<T>(body: () => Promise<T>): Promise<T> {
+  const originalIsTTY = process.stdout.isTTY
+  Object.defineProperty(process.stdout, "isTTY", { configurable: true, value: false })
+  try {
+    return await body()
+  } finally {
+    Object.defineProperty(process.stdout, "isTTY", {
+      configurable: true,
+      value: originalIsTTY,
+    })
+  }
+}
 
 function makeModule(
   checkResult: "needs-apply" | "ok",
@@ -911,5 +936,288 @@ describe("recipe", () => {
     } finally {
       setRunnerAbortSignal(undefined)
     }
+  })
+})
+
+describe("nested recipe dry-run itemization", () => {
+  let consoleLogs: string[]
+  let consoleErrors: string[]
+
+  beforeEach(() => {
+    consoleLogs = []
+    consoleErrors = []
+    vi.spyOn(console, "log").mockImplementation((...args: unknown[]) => {
+      consoleLogs.push(args.map(String).join(" "))
+    })
+    vi.spyOn(console, "error").mockImplementation((...args: unknown[]) => {
+      consoleErrors.push(args.map(String).join(" "))
+    })
+  })
+
+  afterEach(() => {
+    resetLiveOutputForTests()
+    vi.restoreAllMocks()
+    vi.useRealTimers()
+  })
+
+  it("itemizes a nested recipe whose subtree carries no dry-run markers", async () => {
+    // The issue repro: without any of _applyDryRun / _dryRunBlocker /
+    // _dryRunMetaProducer in the subtree, the nested recipe used to collapse
+    // into a single anonymous "changed (dry-run)" line that named no step.
+    const firstStep = makeSpyModule("step-one")
+    const secondStep = makeSpyModule("step-two")
+    const nestedRecipe = recipe("nested-recipe", [firstStep, secondStep])
+    expect(nestedRecipe._applyDryRun).toBeUndefined()
+    expect(nestedRecipe._dryRunBlocker).toBeUndefined()
+    expect(nestedRecipe._dryRunMetaProducer).toBeUndefined()
+
+    const result = await dryRunRecipeModule({
+      environment: emptyEnv,
+      recipeModule: recipe("outer-recipe", [nestedRecipe]),
+      ssh: createMockSsh(),
+    })
+
+    const output = consoleLogs.join("\n")
+    expect(result.status).toBe("changed")
+    expect(output).toContain("\n  · [nested-recipe]")
+    expect(output).toContain("\n  · · ↺  step-one")
+    expect(output).toContain("\n  · · ↺  step-two")
+    expect(output).toContain("\n  · ↺  nested-recipe")
+  })
+
+  it("does not run the nested recipe's own check before descending", async () => {
+    const firstStep = makeSpyModule("step-one")
+    const secondStep = makeSpyModule("step-two")
+    const nestedRecipe = recipe("nested-recipe", [firstStep, secondStep])
+    const nestedRecipeCheck = vi.spyOn(nestedRecipe, "check")
+
+    await dryRunRecipeModule({
+      environment: emptyEnv,
+      recipeModule: recipe("outer-recipe", [nestedRecipe]),
+      ssh: createMockSsh(),
+    })
+
+    expect(nestedRecipeCheck).not.toHaveBeenCalled()
+    expect(firstStep.check).toHaveBeenCalledTimes(1)
+    expect(secondStep.check).toHaveBeenCalledTimes(1)
+  })
+
+  it.each([false, true])(
+    "dispatches no child apply while descending (diff: %s)",
+    async (diff: boolean) => {
+      const firstStep = makeSpyModule("step-one")
+      const secondStep = makeSpyModule("step-two")
+      // A marker-free subtree exposes no _applyDryRun at all, so the only way
+      // a step could run is through the plain apply contract.
+      expect(firstStep._applyDryRun).toBeUndefined()
+      expect(secondStep._applyDryRun).toBeUndefined()
+
+      await dryRunRecipeModule({
+        environment: emptyEnv,
+        options: { diff },
+        recipeModule: recipe("outer-recipe", [recipe("nested-recipe", [firstStep, secondStep])]),
+        ssh: createMockSsh(),
+      })
+
+      // Both steps were itemized — the recipe-level check() would have
+      // short-circuited on the first needs-apply and never reached step-two.
+      expect(firstStep.check).toHaveBeenCalledTimes(1)
+      expect(secondStep.check).toHaveBeenCalledTimes(1)
+      expect(firstStep.apply).not.toHaveBeenCalled()
+      expect(secondStep.apply).not.toHaveBeenCalled()
+    }
+  )
+
+  it("closes a descended recipe with its own aggregated status, detail and elapsed time", async () => {
+    vi.useFakeTimers()
+    const firstStep: Module = {
+      apply: vi.fn(),
+      check: vi.fn().mockImplementation(async () => {
+        await Promise.resolve()
+        vi.advanceTimersByTime(2000)
+        return "needs-apply" as const
+      }),
+      name: "step-one",
+    }
+    const secondStep: Module = {
+      apply: vi.fn(),
+      check: vi.fn().mockImplementation(async () => {
+        await Promise.resolve()
+        vi.advanceTimersByTime(3000)
+        return "needs-apply" as const
+      }),
+      name: "step-two",
+    }
+
+    await withoutTty(async () =>
+      dryRunRecipeModule({
+        environment: emptyEnv,
+        recipeModule: recipe("outer-recipe", [recipe("nested-recipe", [firstStep, secondStep])]),
+        ssh: createMockSsh(),
+      })
+    )
+
+    const closingLine = consoleLogs.findLast((line) => line.includes("nested-recipe"))
+    expect(closingLine).toContain("changed")
+    expect(closingLine).toContain("(dry-run)")
+    // 2s + 3s of child work, measured from before the descent rather than from
+    // the last child (which only took 3s).
+    expect(consoleLogs.find((line) => line.includes("step-two"))).toContain("3.0s")
+    expect(closingLine).toContain("5.0s")
+  })
+
+  it("reports a nested recipe's own elapsed time on the apply path", async () => {
+    vi.useFakeTimers()
+    const innerStep: Module = {
+      apply: vi.fn().mockImplementation(async () => {
+        await Promise.resolve()
+        vi.advanceTimersByTime(2000)
+        return { status: "changed" as const }
+      }),
+      check: vi.fn().mockImplementation(async () => {
+        await Promise.resolve()
+        vi.advanceTimersByTime(1000)
+        return "needs-apply" as const
+      }),
+      name: "inner-step",
+    }
+    const outerRecipe = recipe("outer-recipe", [recipe("nested-recipe", [innerStep])])
+    const applyOuterRecipe = outerRecipe.apply
+
+    await withoutTty(async () => applyOuterRecipe(null, emptyEnv))
+
+    // The recipe's check() runs every child check once (1s), then the descent
+    // repeats the check (1s) and applies (2s): 4s in total, while the child
+    // itself only accounts for 3s.
+    expect(consoleLogs.find((line) => line.includes("inner-step"))).toContain("3.0s")
+    expect(consoleLogs.findLast((line) => line.includes("nested-recipe"))).toContain("4.0s")
+  })
+
+  it("prints a failed closing line when a grandchild fails and stops the parent loop", async () => {
+    const laterSibling = makeSpyModule("later-sibling")
+
+    const result = await dryRunRecipeModule({
+      environment: emptyEnv,
+      recipeModule: recipe("outer-recipe", [
+        recipe("nested-recipe", [fail("stop here")]),
+        laterSibling,
+      ]),
+      ssh: createMockSsh(),
+    })
+
+    expect(result.status).toBe("failed")
+    expect(result.shouldBreak).toBe(true)
+    expect(consoleLogs.findLast((line) => line.includes("nested-recipe"))).toContain("failed")
+    // The failing grandchild already reported the error itself; the closing
+    // line must not repeat it.
+    expect(consoleErrors.filter((line) => line.includes("[fail] stop here"))).toHaveLength(1)
+    expect(laterSibling.check).not.toHaveBeenCalled()
+    expect(laterSibling.apply).not.toHaveBeenCalled()
+  })
+
+  it("propagates stopRun out of a descended recipe and ends the parent loop", async () => {
+    const laterSibling = makeSpyModule("later-sibling")
+    const firstRunEnvironment: Environment = { PARATIX_FIRST_RUN: "true" }
+
+    const result = await dryRunRecipeModule({
+      environment: firstRunEnvironment,
+      recipeModule: recipe("outer-recipe", [
+        recipe("nested-recipe", [firstRun.stop()]),
+        laterSibling,
+      ]),
+      ssh: createMockSsh(),
+    })
+
+    expect(result.stopRun).toBe(true)
+    expect(result.shouldBreak).toBe(true)
+    expect(laterSibling.check).not.toHaveBeenCalled()
+  })
+
+  it("prints no closing line for a recipe interrupted by a shutdown signal", async () => {
+    let receivedSignal: NodeJS.Signals | null = null
+    const firstStep: Module = {
+      apply: vi.fn(),
+      // eslint-disable-next-line @typescript-eslint/require-await -- Interface requires async
+      async check() {
+        receivedSignal = "SIGINT"
+        return "needs-apply"
+      },
+      name: "step-one",
+    }
+    const secondStep = makeSpyModule("step-two")
+
+    const result = await dryRunRecipeModule({
+      environment: emptyEnv,
+      recipeModule: recipe("outer-recipe", [recipe("nested-recipe", [firstStep, secondStep])]),
+      shutdownSignal: () => receivedSignal,
+      ssh: createMockSsh(),
+    })
+
+    expect(result.shouldBreak).toBe(true)
+    expect(result.status).toBeUndefined()
+    // Only the header was printed — an interrupted recipe never gets a result
+    // line, misleading or otherwise.
+    expect(consoleLogs.filter((line) => line.includes("nested-recipe"))).toStrictEqual([
+      expect.stringContaining("[nested-recipe]"),
+    ])
+    expect(secondStep.check).not.toHaveBeenCalled()
+  })
+
+  it("still executes a recipe nested in when() during a dry run", async () => {
+    // recipe()._applyDryRun looks unused after the descent change, but
+    // conditionalModules still dispatches it — without it, when(cond, recipe())
+    // would silently do nothing in a dry run and print nothing either.
+    const blocker: Module = {
+      _dryRunBlocker: true,
+      apply: vi.fn().mockResolvedValue({ status: "changed" }),
+      check: vi.fn().mockResolvedValue("needs-apply"),
+      name: "guarded-blocker",
+    }
+    const guardedRecipe = recipe("guarded-recipe", [blocker])
+    expect(guardedRecipe._applyDryRun).toStrictEqual(expect.any(Function))
+
+    await dryRunRecipeModule({
+      environment: emptyEnv,
+      recipeModule: recipe("outer-recipe", [when(() => true, guardedRecipe)]),
+      ssh: createMockSsh(),
+    })
+
+    expect(blocker.apply).toHaveBeenCalledTimes(1)
+  })
+
+  it("keeps rendering filtered-out children inside a descended recipe", async () => {
+    const selectedStep = makeSpyModule("selected-step")
+    const filteredStep = makeSpyModule("filtered-step")
+    const filteredChildren = applyModuleFilter(
+      [recipe("nested-recipe", [selectedStep, filteredStep])],
+      new Set(["selected-step"])
+    )
+
+    await dryRunRecipeModule({
+      environment: emptyEnv,
+      recipeModule: recipe("outer-recipe", filteredChildren),
+      ssh: createMockSsh(),
+    })
+
+    const output = consoleLogs.join("\n")
+    expect(output).toContain("[nested-recipe]")
+    expect(output).toContain("selected-step")
+    expect(output).toContain("filtered-step")
+    expect(output).toContain("filtered out")
+    expect(output).toContain("skipped")
+  })
+
+  it("descends into an empty nested recipe and aggregates it as ok", async () => {
+    const result = await dryRunRecipeModule({
+      environment: emptyEnv,
+      recipeModule: recipe("outer-recipe", [recipe("empty-recipe", [])]),
+      ssh: createMockSsh(),
+    })
+
+    expect(result.status).toBe("ok")
+    const emptyRecipeLines = consoleLogs.filter((line) => line.includes("empty-recipe"))
+    expect(emptyRecipeLines).toHaveLength(2)
+    expect(emptyRecipeLines[0]).toContain("[empty-recipe]")
+    expect(emptyRecipeLines[1]).toContain("ok")
   })
 })

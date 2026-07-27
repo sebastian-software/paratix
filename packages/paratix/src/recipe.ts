@@ -10,6 +10,7 @@ import {
   startModuleSpinner,
   withRecipeOutputScope,
 } from "./output.js"
+import { isRecipe } from "./recipeGuard.js"
 import { getRunnerAbortSignal } from "./runnerAbortSignal.js"
 import { runSignalModules, type SignalHooks } from "./signalOrchestration.js"
 import { CommandError } from "./sshHelpers.js"
@@ -77,28 +78,69 @@ type RecipeLoopStepResult =
 
 const INTERRUPTED_BEFORE_APPLY = Symbol("recipe-interrupted-before-apply")
 
-/**
- * Central type guard that narrows a {@link Module} to a {@link RecipeModule}
- * through the internal `kind` discriminator.
- *
- * This is the single source of truth for the recipe/leaf-module distinction;
- * the runner, the module filter and the dry-run paths all consume it instead of
- * repeating an unsafe structural cast on an ad-hoc marker.
- *
- * @param module - The module to inspect.
- * @returns `true` when `module` is a recipe exposing child `_modules`.
- */
-export function isRecipe(module: Module): module is RecipeModule {
-  return module.kind === "recipe"
-}
+// Re-exported so every existing consumer keeps importing the guard from
+// `recipe.js`; the implementation lives in `recipeGuard.ts` so `dryRunRecipe.ts`
+// can use it without an import cycle back into this module.
+export { isRecipe }
 
-function printRecipeChildResult(module: Module, result: ModuleResult): void {
+/**
+ * Print the result row of one recipe child plus, on failure, its command
+ * diagnostics.
+ *
+ * @param parameters - Reporting parameters.
+ * @param parameters.module - The child module that just finished.
+ * @param parameters.result - The result it reported.
+ * @param parameters.startedAt - `Date.now()` captured before the child started.
+ * @param parameters.verbose - Whether verbose command diagnostics are printed.
+ */
+function reportRecipeChildResult(parameters: {
+  module: Module
+  result: ModuleResult
+  startedAt: number
+  verbose: boolean
+}): void {
+  const { module, result, startedAt } = parameters
   if (isRecipe(module)) {
-    printRecipeModuleResult(module.name, result.status, result.detail)
-    return
+    // A nested recipe itemizes its own children, and every one of those child
+    // result lines consumes the shared start-time slot in output.ts. Pass the
+    // recipe's own start explicitly so its closing line reports how long the
+    // whole recipe took instead of losing the value to its last child.
+    printRecipeModuleResult(module.name, result.status, result.detail, undefined, startedAt)
+  } else {
+    printModuleResult(module.name, result.status, result.detail)
   }
 
-  printModuleResult(module.name, result.status, result.detail)
+  if (result.status === "failed" && result.error != null) {
+    printCommandFailure(result.error, parameters.verbose)
+  }
+}
+
+/**
+ * Turn a finished child result into the orchestration step the recipe loop and
+ * the runner consume.
+ *
+ * @param result - Status, meta and control-plane flags reported by the child.
+ * @param currentEnvironment - Environment the child was given.
+ * @returns The orchestration step carrying the merged environment.
+ */
+async function buildRecipeChildStep(
+  result: ModuleResult,
+  currentEnvironment: Environment
+): Promise<OrchestrationStep> {
+  // R-0000579: mirror `applySignalMeta` (signalOrchestration.ts) and skip the
+  // env merge when the child failed, so the failure does not leak partial meta
+  // back into the recipe environment.
+  const environment =
+    result.status === "failed"
+      ? currentEnvironment
+      : await mergeEnvironmentFromMeta(currentEnvironment, result.meta)
+  return {
+    _flushSignals: result._flushSignals,
+    _stopRun: result._stopRun,
+    env: environment,
+    meta: result.meta,
+    status: result.status,
+  }
 }
 
 function applyRecipeStepToState(
@@ -163,6 +205,9 @@ async function executeOneModule(parameters: {
   const { currentEnvironment, ssh, targetModule } = parameters
   const verbose = parameters.verbose ?? false
   const connection = targetModule.local === true ? null : ssh
+  // Capture the module's own start before check() so a nested recipe can report
+  // its total runtime; see reportRecipeChildResult.
+  const startedAt = Date.now()
   const checkResult = await checkRecipeChild(targetModule, connection, currentEnvironment)
 
   if (checkResult === "ok") {
@@ -189,25 +234,8 @@ async function executeOneModule(parameters: {
     targetModule,
     verbose,
   })
-  printRecipeChildResult(targetModule, result)
-  if (result.status === "failed" && result.error != null) {
-    printCommandFailure(result.error, verbose)
-  }
-
-  // R-0000579: mirror `applySignalMeta` (signalOrchestration.ts) and skip the
-  // env merge when the child failed, so the failure does not leak partial meta
-  // back into the recipe environment.
-  const environment =
-    result.status === "failed"
-      ? currentEnvironment
-      : await mergeEnvironmentFromMeta(currentEnvironment, result.meta)
-  return {
-    _flushSignals: result._flushSignals,
-    _stopRun: result._stopRun,
-    env: environment,
-    meta: result.meta,
-    status: result.status,
-  }
+  reportRecipeChildResult({ module: targetModule, result, startedAt, verbose })
+  return buildRecipeChildStep(result, currentEnvironment)
 }
 
 async function checkRecipeChild(
@@ -540,10 +568,38 @@ function shouldExecuteRecipeDryRun(module: Module): boolean {
   )
 }
 
+/**
+ * Decide whether the recipe has to expose a `_applyDryRun` hook at all.
+ *
+ * Do not delete this as dead code. Since a nested recipe is always itemized by
+ * `dryRunRecipe.executeDryRunChildModule`, neither the runner nor a parent
+ * recipe dispatches this hook any more — but `when(...)` still does:
+ * `conditionalModules.executeConditionalApply` runs `module._applyDryRun` for
+ * every guarded child, and `shouldExecuteConditionalApply` uses the very same
+ * markers to decide whether a guarded child runs during a dry run at all.
+ * Without the hook, `when(cond, [recipe(...)])` would silently stop executing
+ * in dry-run mode and produce no output whatsoever, because conditional modules
+ * have no output layer of their own.
+ *
+ * @param modules - The recipe's child modules.
+ * @returns `true` when at least one child needs dry-run execution.
+ */
 function recipeNeedsDryRunApply(modules: Module[]): boolean {
   return modules.some((module) => shouldExecuteRecipeDryRun(module))
 }
 
+/**
+ * Build the recipe's `_applyDryRun` hook.
+ *
+ * See {@link recipeNeedsDryRunApply}: `when(...)` is the only remaining
+ * consumer of this hook, so it must stay even though the dry-run recipe path
+ * no longer calls it.
+ *
+ * @param name - Display name of the recipe.
+ * @param modules - The recipe's child modules.
+ * @param needsDryRunApply - Whether any child requires dry-run execution.
+ * @returns The dry-run apply hook, or `undefined` when no child needs one.
+ */
 function createRecipeDryRunApply(
   name: string,
   modules: Module[],
