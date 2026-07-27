@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it, vi } from "vitest"
+import { afterEach, beforeEach, describe, expect, it, type MockInstance, vi } from "vitest"
 
 import {
   createCommandGuard,
@@ -6,6 +6,7 @@ import {
   createPackageGuard,
 } from "../src/conditionalGuards.js"
 import { createNullPrototypeEnvironment } from "../src/environment.js"
+import { resetLiveOutputForTests } from "../src/output.js"
 import { createMockSsh } from "./helpers/mockSsh.js"
 
 vi.mock("../src/modules/package.js", () => ({
@@ -27,6 +28,21 @@ const TEST_FLAGS = [
 ] as const
 
 describe("createFilesystemGuard", () => {
+  // A guard whose condition holds opens its own output scope and prints a
+  // `[name]` header, so keep the suite's stdout quiet.
+  let consoleLogSpy: MockInstance<typeof console.log>
+
+  beforeEach(() => {
+    consoleLogSpy = vi.spyOn(console, "log").mockImplementation(() => {
+      /* noop */
+    })
+  })
+
+  afterEach(() => {
+    consoleLogSpy.mockRestore()
+    resetLiveOutputForTests()
+  })
+
   it("derives the module name from the test flag and inversion", () => {
     for (const { flag, type } of TEST_FLAGS) {
       expect(
@@ -89,6 +105,21 @@ describe("createFilesystemGuard", () => {
 })
 
 describe("createCommandGuard", () => {
+  // A guard whose condition holds opens its own output scope and prints a
+  // `[name]` header, so keep the suite's stdout quiet.
+  let consoleLogSpy: MockInstance<typeof console.log>
+
+  beforeEach(() => {
+    consoleLogSpy = vi.spyOn(console, "log").mockImplementation(() => {
+      /* noop */
+    })
+  })
+
+  afterEach(() => {
+    consoleLogSpy.mockRestore()
+    resetLiveOutputForTests()
+  })
+
   it("names the guard after the command and inversion", () => {
     expect(createCommandGuard("git", false, []).name).toBe("when.commandExists: git")
     expect(createCommandGuard("git", true, []).name).toBe("when.commandMissing: git")
@@ -115,9 +146,21 @@ describe("createCommandGuard", () => {
 })
 
 describe("createPackageGuard", () => {
+  // A guard whose condition holds opens its own output scope and prints a
+  // `[name]` header, so keep the suite's stdout quiet.
+  let consoleLogSpy: MockInstance<typeof console.log>
+
   beforeEach(() => {
+    consoleLogSpy = vi.spyOn(console, "log").mockImplementation(() => {
+      /* noop */
+    })
     detectPackageManager.mockReset()
     isPackageInstalled.mockReset()
+  })
+
+  afterEach(() => {
+    consoleLogSpy.mockRestore()
+    resetLiveOutputForTests()
   })
 
   it("names the guard after the package and inversion", () => {

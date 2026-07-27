@@ -1,4 +1,4 @@
-import { describe, expect, it, vi } from "vitest"
+import { afterEach, beforeEach, describe, expect, it, type MockInstance, vi } from "vitest"
 
 import type { Environment, Module } from "../src/types.js"
 
@@ -14,6 +14,7 @@ import {
 } from "../src/builtins.js"
 import { resolveEnvironment } from "../src/environment.js"
 import { mergeEnvironmentFromMeta, meta } from "../src/meta.js"
+import { resetLiveOutputForTests } from "../src/output.js"
 import { createMockSsh } from "./helpers/mockSsh.js"
 
 const emptyEnv: Environment = {}
@@ -472,11 +473,29 @@ describe("signals.flush", () => {
 })
 
 describe("when", () => {
-  it("check returns ok when condition is false (modules are skipped)", async () => {
+  // A when(...) block itemizes its children, so every apply/dry-run in this
+  // block prints a header and one result line per child.
+  let consoleLogSpy: MockInstance<typeof console.log>
+
+  beforeEach(() => {
+    consoleLogSpy = vi.spyOn(console, "log").mockImplementation(() => {
+      /* noop */
+    })
+  })
+
+  afterEach(() => {
+    consoleLogSpy.mockRestore()
+    resetLiveOutputForTests()
+  })
+
+  it("check returns needs-apply when condition is false so apply can render the skip", async () => {
     const innerModule = makeNeedsApplyModule()
     const mod = when(() => false, innerModule)
     const result = await mod.check(null, emptyEnv)
-    expect(result).toBe("ok")
+    // A false guard reports needs-apply on purpose: only apply() renders the
+    // block's single `skipped` line, and only then does the run summary count
+    // it as a skip instead of silently reporting it as already ok.
+    expect(result).toBe("needs-apply")
   })
 
   it("check returns ok when condition is true and all inner modules are ok", async () => {
@@ -580,13 +599,19 @@ describe("when", () => {
 
     await mod._applyDryRun?.(mockSsh, emptyEnv)
 
-    expect(localModule.check).toHaveBeenCalledWith(null, expect.any(Object))
-    expect(localModule._applyDryRun).toHaveBeenCalledWith(null, expect.any(Object), {
+    expect(localModule.check).toHaveBeenCalledWith(null, expect.anything())
+    // `diff` and `verbose` travel with the dispatch so a guarded child renders
+    // exactly like the same child inside a recipe.
+    expect(localModule._applyDryRun).toHaveBeenCalledWith(null, expect.anything(), {
+      diff: false,
       shutdownSignal: expect.any(Function),
+      verbose: false,
     })
-    expect(remoteModule.check).toHaveBeenCalledWith(mockSsh, expect.any(Object))
-    expect(remoteModule._applyDryRun).toHaveBeenCalledWith(mockSsh, expect.any(Object), {
+    expect(remoteModule.check).toHaveBeenCalledWith(mockSsh, expect.anything())
+    expect(remoteModule._applyDryRun).toHaveBeenCalledWith(mockSsh, expect.anything(), {
+      diff: false,
       shutdownSignal: expect.any(Function),
+      verbose: false,
     })
   })
 
@@ -789,7 +814,9 @@ describe("when", () => {
     const mod = when.packageAbsent("ufw", innerModule)
     const result = await mod.check(ssh, emptyEnv)
 
-    expect(result).toBe("ok")
+    // needs-apply reaches apply(), which renders the block as `skipped`; the
+    // guarded children are still never checked.
+    expect(result).toBe("needs-apply")
     expect(innerCheck).not.toHaveBeenCalled()
   })
 
@@ -825,8 +852,11 @@ describe("when", () => {
       "test -f '/etc/app.conf'": { code: 0 },
     })
     const mod = when.fileMissing("/etc/app.conf", makeNeedsApplyModule())
-    const result = await mod.check(ssh, emptyEnv)
-    expect(result).toBe("ok")
+    // The guard is false, so check reports needs-apply and apply renders the
+    // block's single `skipped` line.
+    await expect(mod.check(ssh, emptyEnv)).resolves.toBe("needs-apply")
+    const result = await mod.apply(ssh, emptyEnv)
+    expect(result.status).toBe("skipped")
   })
 
   it("pathExists checks for directories only", async () => {

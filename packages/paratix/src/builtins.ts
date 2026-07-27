@@ -321,10 +321,11 @@ export const signals = {
  * when(env => env["DEPLOY_ENV"] === "production", service.enabled("fail2ban"))
  */
 function baseWhen(condition: (environment: Environment) => boolean, ...modules: Module[]): Module {
+  const moduleCount = modules.length
   return createConditionalModule({
     condition: (_ssh, environment) => condition(environment),
     modules,
-    name: `when: conditional (${modules.length} modules)`,
+    name: `when: conditional (${moduleCount} ${moduleCount === 1 ? "module" : "modules"})`,
   })
 }
 

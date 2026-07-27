@@ -1,5 +1,4 @@
 /* eslint-disable max-lines -- recipe orchestration intentionally stays co-located */
-import { dryRunRecipeModule } from "./dryRunRecipe.js"
 import { createNullPrototypeEnvironment } from "./environment.js"
 import { isEnvironmentMetaEntry, mergeEnvironmentFromMeta } from "./meta.js"
 import {
@@ -560,86 +559,6 @@ function shouldRunRecipeSignalsAtEnd(state: RecipeState, signals?: Module[]): si
   return state.signalsPending && state.status === "changed" && signals != null
 }
 
-function shouldExecuteRecipeDryRun(module: Module): boolean {
-  return (
-    module._applyDryRun != null ||
-    module._dryRunBlocker === true ||
-    module._dryRunMetaProducer === true
-  )
-}
-
-/**
- * Decide whether the recipe has to expose a `_applyDryRun` hook at all.
- *
- * Do not delete this as dead code. Since a nested recipe is always itemized by
- * `dryRunRecipe.executeDryRunChildModule`, neither the runner nor a parent
- * recipe dispatches this hook any more — but `when(...)` still does:
- * `conditionalModules.executeConditionalApply` runs `module._applyDryRun` for
- * every guarded child, and `shouldExecuteConditionalApply` uses the very same
- * markers to decide whether a guarded child runs during a dry run at all.
- * Without the hook, `when(cond, [recipe(...)])` would silently stop executing
- * in dry-run mode and produce no output whatsoever, because conditional modules
- * have no output layer of their own.
- *
- * @param modules - The recipe's child modules.
- * @returns `true` when at least one child needs dry-run execution.
- */
-function recipeNeedsDryRunApply(modules: Module[]): boolean {
-  return modules.some((module) => shouldExecuteRecipeDryRun(module))
-}
-
-/**
- * Build the recipe's `_applyDryRun` hook.
- *
- * See {@link recipeNeedsDryRunApply}: `when(...)` is the only remaining
- * consumer of this hook, so it must stay even though the dry-run recipe path
- * no longer calls it.
- *
- * @param name - Display name of the recipe.
- * @param modules - The recipe's child modules.
- * @param needsDryRunApply - Whether any child requires dry-run execution.
- * @returns The dry-run apply hook, or `undefined` when no child needs one.
- */
-function createRecipeDryRunApply(
-  name: string,
-  modules: Module[],
-  needsDryRunApply: boolean
-): Module["_applyDryRun"] | undefined {
-  if (!needsDryRunApply) return undefined
-  return async (
-    ssh: null | SshConnection,
-    environment: Environment,
-    parameters?: {
-      shutdownSignal?: () => null | ShutdownSignal
-    }
-  ): Promise<ModuleResult> => {
-    const result = await dryRunRecipeModule({
-      environment,
-      recipeModule: {
-        _modules: modules,
-        async apply() {
-          await Promise.resolve()
-          return { status: "ok" }
-        },
-        async check() {
-          await Promise.resolve()
-          return "ok"
-        },
-        kind: "recipe",
-        name,
-      },
-      shutdownSignal: parameters?.shutdownSignal,
-      ssh,
-    })
-
-    return {
-      _stopRun: result.stopRun,
-      meta: result.meta,
-      status: result.status ?? "ok",
-    }
-  }
-}
-
 /**
  * Group a list of modules into a named, self-contained recipe.
  *
@@ -671,17 +590,14 @@ export function recipe(
   modules: Module[],
   options?: { signals?: Module[] }
 ): RecipeModule {
-  const needsDryRunApply = recipeNeedsDryRunApply(modules)
-  const applyDryRun = createRecipeDryRunApply(name, modules, needsDryRunApply)
-
+  // No `_applyDryRun` and no aggregated `_dryRunBlocker`/`_dryRunMetaProducer`
+  // markers: a recipe is reachable through `isRecipe`, and both dry-run
+  // containers (`dryRunRecipe.executeDryRunChildModule` and the `when(...)`
+  // loop that shares it) descend into a recipe unconditionally. Neither the
+  // hook nor the aggregated markers were ever consulted for a recipe, so
+  // keeping them would only pretend that a marker-free recipe is treated
+  // differently from one holding a blocker.
   return {
-    ...(modules.some((module) => module._dryRunBlocker === true)
-      ? { _dryRunBlocker: true as const }
-      : {}),
-    ...(modules.some((module) => module._dryRunMetaProducer === true)
-      ? { _dryRunMetaProducer: true as const }
-      : {}),
-    ...(applyDryRun == null ? {} : { _applyDryRun: applyDryRun }),
     _modules: modules,
     _signals: options?.signals,
     _supportsChildStepHook: true,

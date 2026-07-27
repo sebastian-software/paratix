@@ -568,14 +568,19 @@ describe("recipe", () => {
     expect(result).toBe("ok")
   })
 
-  it("aggregates dry-run blocker markers from nested recipe children", () => {
+  it("exposes no dry-run hook and aggregates no dry-run markers", () => {
+    // Every dry-run container descends into a recipe through `isRecipe`, so
+    // neither the hook nor the aggregated markers were ever consulted for a
+    // recipe. Keeping them would only pretend that a marker-free recipe is
+    // treated differently from one holding a blocker.
     const nestedRecipe = recipe("nested-recipe", [assert(() => false, "must pass")])
     const outerRecipe = recipe("outer-recipe", [nestedRecipe])
 
-    expect(nestedRecipe._dryRunBlocker).toBe(true)
-    expect(nestedRecipe._applyDryRun).toStrictEqual(expect.any(Function))
-    expect(outerRecipe._dryRunBlocker).toBe(true)
-    expect(outerRecipe._applyDryRun).toStrictEqual(expect.any(Function))
+    expect(nestedRecipe._dryRunBlocker).toBeUndefined()
+    expect(nestedRecipe._dryRunMetaProducer).toBeUndefined()
+    expect(nestedRecipe._applyDryRun).toBeUndefined()
+    expect(outerRecipe._dryRunBlocker).toBeUndefined()
+    expect(outerRecipe._applyDryRun).toBeUndefined()
   })
 
   it("treats nested fail() as a blocker in recipe dry-run mode", async () => {
@@ -1164,9 +1169,9 @@ describe("nested recipe dry-run itemization", () => {
   })
 
   it("still executes a recipe nested in when() during a dry run", async () => {
-    // recipe()._applyDryRun looks unused after the descent change, but
-    // conditionalModules still dispatches it — without it, when(cond, recipe())
-    // would silently do nothing in a dry run and print nothing either.
+    // The when(...) block descends into a recipe child through the same shared
+    // dispatch the recipe loop uses, so a guarded recipe runs without needing a
+    // `_applyDryRun` hook of its own.
     const blocker: Module = {
       _dryRunBlocker: true,
       apply: vi.fn().mockResolvedValue({ status: "changed" }),
@@ -1174,7 +1179,7 @@ describe("nested recipe dry-run itemization", () => {
       name: "guarded-blocker",
     }
     const guardedRecipe = recipe("guarded-recipe", [blocker])
-    expect(guardedRecipe._applyDryRun).toStrictEqual(expect.any(Function))
+    expect(guardedRecipe._applyDryRun).toBeUndefined()
 
     await dryRunRecipeModule({
       environment: emptyEnv,

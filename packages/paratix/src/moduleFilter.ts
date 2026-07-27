@@ -111,8 +111,8 @@ export function createSkipModule(name: string): Module {
  *   so its whole subtree runs.
  * - Not selected but a recipe with a matching descendant → rebuild the recipe
  *   from filtered children so the run descends into it. The original signals
- *   are preserved; the dry-run markers are re-derived by {@link recipe} from
- *   the filtered children.
+ *   are preserved; the rebuilt recipe is descended into like any other, so the
+ *   skip modules among its filtered children render their own rows.
  * - Otherwise → replace the node with a skip module.
  *
  * @param module - The node to transform.
