@@ -4,16 +4,16 @@ import {
   ArrowDown,
   ArrowRight,
   Check,
-  CheckCircle2,
+  CircleCheckBig,
   Clipboard,
-  Code2,
+  CodeXml,
   Eye,
   KeyRound,
-  Layers3,
+  Layers,
   RefreshCw,
   ServerCog,
   ShieldCheck,
-  TerminalSquare,
+  SquareTerminal,
   X,
 } from "lucide-react"
 import { useRef, useState } from "react"
@@ -134,7 +134,7 @@ const pains = [
 
 const features = [
   {
-    icon: Code2,
+    icon: CodeXml,
     text: "Imports, conditions, composition, types, and the editor tooling you already use.",
     title: "Real TypeScript",
   },
@@ -154,7 +154,7 @@ const features = [
     title: "SSH-aware execution",
   },
   {
-    icon: Layers3,
+    icon: Layers,
     text: "Group work and defer reloads until a surrounding scope actually changed.",
     title: "Recipes and signals",
   },
@@ -279,7 +279,7 @@ export default function Home(): ReactElement {
             </ol>
             <div aria-label="Example Paratix dry-run output" className="terminal">
               <div className="terminal-bar">
-                <TerminalSquare aria-hidden="true" />
+                <SquareTerminal aria-hidden="true" />
                 <span>paratix apply · dry run</span>
                 <span className="terminal-ok">0 errors</span>
               </div>
@@ -362,10 +362,10 @@ export default function Home(): ReactElement {
                 <tr>
                   <th scope="row">State awareness</th>
                   <td className="chosen">
-                    <CheckCircle2 /> Built in
+                    <CircleCheckBig /> Built in
                   </td>
                   <td>
-                    <CheckCircle2 /> Built in
+                    <CircleCheckBig /> Built in
                   </td>
                   <td>
                     <X /> You build it
@@ -400,26 +400,26 @@ export default function Home(): ReactElement {
           </div>
           <ul>
             <li>
-              <CheckCircle2 /> Open TypeScript playbooks stay in your repository.
+              <CircleCheckBig /> Open TypeScript playbooks stay in your repository.
             </li>
             <li>
-              <CheckCircle2 /> Dry-runs expose intended work before mutation.
+              <CircleCheckBig /> Dry-runs expose intended work before mutation.
             </li>
             <li>
-              <CheckCircle2 /> Explicit host-key and first-run workflows support careful
+              <CircleCheckBig /> Explicit host-key and first-run workflows support careful
               bootstrapping.
             </li>
             <li>
-              <CheckCircle2 /> MIT licensing is prepared for the public release.
+              <CircleCheckBig /> MIT licensing is prepared for the public release.
             </li>
             <li>
-              <CheckCircle2 /> GitHub and npm publication are planned, but not public yet.
+              <CircleCheckBig /> GitHub and npm publication are planned, but not public yet.
             </li>
             <li>
-              <CheckCircle2 /> Package changelogs record releases and security hardening work.
+              <CircleCheckBig /> Package changelogs record releases and security hardening work.
             </li>
             <li>
-              <CheckCircle2 /> Scoped secrets are redacted from command output and errors.
+              <CircleCheckBig /> Scoped secrets are redacted from command output and errors.
             </li>
           </ul>
         </section>
