@@ -2,7 +2,7 @@ import { describe, expect, it, vi } from "vitest"
 
 import { sha256String } from "../../src/modules/fileHelpers.js"
 import { quadlet } from "../../src/modules/quadlet.js"
-import { createMockSsh } from "../helpers/mockSsh.js"
+import { createQuadletMockSsh } from "../helpers/mockQuadletSsh.js"
 
 const emptyEnv = {}
 
@@ -71,7 +71,7 @@ function createQuadletModule() {
 }
 
 function createSuccessfulApplySsh() {
-  return createMockSsh(
+  return createQuadletMockSsh(
     {
       "mkdir -p '/etc/containers/systemd'": { code: 0 },
       "mkdir -p /var/lib/paratix/flags": { code: 0 },
@@ -101,7 +101,7 @@ function createSuccessfulApplySsh() {
 }
 
 function overrideExecForCommand(
-  ssh: ReturnType<typeof createMockSsh>,
+  ssh: ReturnType<typeof createQuadletMockSsh>,
   command: string,
   stdouts: string[]
 ): void {
@@ -121,7 +121,7 @@ function overrideExecForCommand(
 
 describe("quadlet.container", () => {
   it("check returns ok when the remote quadlet matches", async () => {
-    const ssh = createMockSsh({
+    const ssh = createQuadletMockSsh({
       [`[ -e '${quadletFilePath}' ]`]: { code: 0 },
       // R-0000762: pin the symlink probe to "not a symlink".
       [`[ -L '${quadletFilePath}' ]`]: { code: 1 },
@@ -136,7 +136,7 @@ describe("quadlet.container", () => {
   })
 
   it("check returns needs-apply when the quadlet is missing", async () => {
-    const ssh = createMockSsh({
+    const ssh = createQuadletMockSsh({
       [`[ -e '${quadletFilePath}' ]`]: { code: 1 },
       // R-0000762: the symlink probe runs before the existence probe.
       [`[ -L '${quadletFilePath}' ]`]: { code: 1 },
@@ -148,7 +148,7 @@ describe("quadlet.container", () => {
   })
 
   it("check returns needs-apply when the quadlet content differs", async () => {
-    const ssh = createMockSsh({
+    const ssh = createQuadletMockSsh({
       [`[ -e '${quadletFilePath}' ]`]: { code: 0 },
       // R-0000762: check refuses symlinks up front; pin to non-symlink so
       // the content-drift assertion still exercises the real codepath.
@@ -162,7 +162,7 @@ describe("quadlet.container", () => {
   })
 
   it("check returns needs-apply when content matches but mode drifts to 0600", async () => {
-    const ssh = createMockSsh({
+    const ssh = createQuadletMockSsh({
       [`[ -e '${quadletFilePath}' ]`]: { code: 0 },
       // R-0000762: pin the symlink probe to "not a symlink" so the mode
       // drift branch is the assertion under test.
@@ -177,7 +177,7 @@ describe("quadlet.container", () => {
   })
 
   it("check returns needs-apply when stat for the quadlet file mode fails", async () => {
-    const ssh = createMockSsh({
+    const ssh = createQuadletMockSsh({
       [`[ -e '${quadletFilePath}' ]`]: { code: 0 },
       // R-0000762: pin the symlink probe to "not a symlink".
       [`[ -L '${quadletFilePath}' ]`]: { code: 1 },
@@ -191,7 +191,7 @@ describe("quadlet.container", () => {
   })
 
   it("check returns needs-apply when daemon-reload marker is missing", async () => {
-    const ssh = createMockSsh({
+    const ssh = createQuadletMockSsh({
       [`[ -e '${quadletFilePath}' ]`]: { code: 0 },
       // R-0000762: pin the symlink probe to "not a symlink".
       [`[ -L '${quadletFilePath}' ]`]: { code: 1 },
@@ -206,7 +206,7 @@ describe("quadlet.container", () => {
   })
 
   it("R-0000762: check returns needs-apply when the quadlet file is a symlink", async () => {
-    const ssh = createMockSsh({
+    const ssh = createQuadletMockSsh({
       [`[ -L '${quadletFilePath}' ]`]: { code: 0 },
     })
 
@@ -217,7 +217,7 @@ describe("quadlet.container", () => {
 
   it("apply creates the quadlet directory, writes the file, and reloads systemd", async () => {
     const flagCommand = buildReloadFlagPersistCommand("traefik", expectedQuadletContent())
-    const ssh = createMockSsh({
+    const ssh = createQuadletMockSsh({
       [`[ -e '${quadletFilePath}' ]`]: { code: 1 },
       [`[ -L '${quadletFilePath}' ]`]: { code: 1 },
       [flagCommand]: { code: 0 },
@@ -239,7 +239,7 @@ describe("quadlet.container", () => {
   })
 
   it("apply rejects an unstubbed apply exec", async () => {
-    const ssh = createMockSsh({
+    const ssh = createQuadletMockSsh({
       [`[ -e '${quadletFilePath}' ]`]: { code: 1 },
       [`[ -L '${quadletFilePath}' ]`]: { code: 1 },
       "mkdir -p '/etc/containers/systemd'": { code: 0 },
@@ -252,7 +252,7 @@ describe("quadlet.container", () => {
   })
 
   it("apply returns failed when creating the quadlet directory fails", async () => {
-    const ssh = createMockSsh({
+    const ssh = createQuadletMockSsh({
       "mkdir -p '/etc/containers/systemd'": { code: 1, stderr: "mkdir failed" },
     })
 
@@ -265,7 +265,7 @@ describe("quadlet.container", () => {
   })
 
   it("apply returns failed when systemctl daemon-reload exits with non-zero code", async () => {
-    const ssh = createMockSsh({
+    const ssh = createQuadletMockSsh({
       [`[ -e '${quadletFilePath}' ]`]: { code: 1 },
       [`[ -L '${quadletFilePath}' ]`]: { code: 1 },
       [`rm -f '${quadletFilePath}'`]: { code: 0 },
@@ -282,7 +282,7 @@ describe("quadlet.container", () => {
 
   it("apply returns failed without rollback when persisting the reload flag fails", async () => {
     const flagCommand = buildReloadFlagPersistCommand("traefik", expectedQuadletContent())
-    const ssh = createMockSsh({
+    const ssh = createQuadletMockSsh({
       [`[ -e '${quadletFilePath}' ]`]: { code: 1 },
       [`[ -L '${quadletFilePath}' ]`]: { code: 1 },
       [flagCommand]: { code: 1, stderr: "read-only file system" },
@@ -318,7 +318,7 @@ describe("quadlet.container", () => {
 
   it("R-0000182: restores snapshot and returns failed when writeFile throws", async () => {
     const previousContent = "[Container]\nImage=docker.io/library/traefik:v3.2\n"
-    const ssh = createMockSsh({
+    const ssh = createQuadletMockSsh({
       [`[ -e '${quadletFilePath}' ]`]: { code: 0 },
       [`[ -L '${quadletFilePath}' ]`]: { code: 1 },
       [`cat '${quadletFilePath}'`]: { stdout: previousContent },
@@ -347,7 +347,7 @@ describe("quadlet.container", () => {
 
   it("reports write and rollback failures when writeFile and restore both fail", async () => {
     const previousContent = "[Container]\nImage=docker.io/library/traefik:v3.2\n"
-    const ssh = createMockSsh({
+    const ssh = createQuadletMockSsh({
       [`[ -e '${quadletFilePath}' ]`]: { code: 0 },
       [`[ -L '${quadletFilePath}' ]`]: { code: 1 },
       [`cat '${quadletFilePath}'`]: { stdout: previousContent },
@@ -369,7 +369,7 @@ describe("quadlet.container", () => {
 
   it("restores an existing quadlet when systemctl daemon-reload fails", async () => {
     const previousContent = "[Container]\nImage=docker.io/library/traefik:v3.2\n"
-    const ssh = createMockSsh({
+    const ssh = createQuadletMockSsh({
       [`[ -e '${quadletFilePath}' ]`]: { code: 0 },
       [`[ -L '${quadletFilePath}' ]`]: { code: 1 },
       [`cat '${quadletFilePath}'`]: { stdout: previousContent },
@@ -394,7 +394,7 @@ describe("quadlet.container", () => {
 
   it("reports daemon-reload and rollback failures when both fail", async () => {
     const previousContent = "[Container]\nImage=docker.io/library/traefik:v3.2\n"
-    const ssh = createMockSsh({
+    const ssh = createQuadletMockSsh({
       [`[ -e '${quadletFilePath}' ]`]: { code: 0 },
       [`[ -L '${quadletFilePath}' ]`]: { code: 1 },
       [`cat '${quadletFilePath}'`]: { stdout: previousContent },
@@ -416,7 +416,7 @@ describe("quadlet.container", () => {
   })
 
   it("R-0000603: refuses to apply when the quadlet path is a symlink", async () => {
-    const ssh = createMockSsh({
+    const ssh = createQuadletMockSsh({
       [`[ -L '${quadletFilePath}' ]`]: { code: 0 },
       "mkdir -p '/etc/containers/systemd'": { code: 0 },
     })
@@ -468,7 +468,7 @@ describe("quadlet.container", () => {
     ].join("\n")
 
     const filePath = "/etc/containers/systemd/pocket-id.container"
-    const ssh = createMockSsh({
+    const ssh = createQuadletMockSsh({
       [`[ -e '${filePath}' ]`]: { code: 0 },
       // R-0000762: pin the symlink probe to "not a symlink".
       [`[ -L '${filePath}' ]`]: { code: 1 },
@@ -849,7 +849,7 @@ describe("quadlet.updateImage", () => {
   })
 
   it("pulls the image and restarts the service when a newer image was downloaded", async () => {
-    const ssh = createMockSsh({
+    const ssh = createQuadletMockSsh({
       "podman image inspect --format '{{.Id}}\\n{{range .RepoDigests}}{{.}}\\n{{end}}' -- 'docker.io/library/traefik:v3.3'":
         {
           code: 0,
@@ -884,7 +884,7 @@ describe("quadlet.updateImage", () => {
     // R-0000183: pre-pull and post-pull inspects must return identical IDs
     // for the "no change" branch.
     const inspectStdout = "sha256:stable-local-id\ndocker.io/library/traefik@sha256:stable-digest\n"
-    const ssh = createMockSsh({
+    const ssh = createQuadletMockSsh({
       "podman image inspect --format '{{.Id}}\\n{{range .RepoDigests}}{{.}}\\n{{end}}' -- 'docker.io/library/traefik:v3.3'":
         { code: 0, stdout: inspectStdout },
       "podman pull -- 'docker.io/library/traefik:v3.3'": {
@@ -914,7 +914,7 @@ describe("quadlet.updateImage", () => {
       "sha256:old-local-id\ndocker.io/library/traefik@sha256:old-digest\n",
       "sha256:new-local-id\ndocker.io/library/traefik@sha256:new-digest\n",
     ]
-    const ssh = createMockSsh({
+    const ssh = createQuadletMockSsh({
       "podman pull -- 'docker.io/library/traefik:v3.3'": {
         code: 0,
         stdout: "Lade BLOB sha256:abc\nManifest wird gespeichert\n",
@@ -937,7 +937,7 @@ describe("quadlet.updateImage", () => {
   it("passes authFile to podman pull for private registries", async () => {
     const authFilePullCommand =
       "podman pull --authfile '/run/containers/auth.json' -- 'ghcr.io/acme/private-app:latest'"
-    const ssh = createMockSsh({
+    const ssh = createQuadletMockSsh({
       [authFilePullCommand]: {
         code: 0,
         stdout: "Downloaded newer image for ghcr.io/acme/private-app:latest",
@@ -996,7 +996,7 @@ describe("quadlet.updateImage", () => {
   })
 
   it("restarts the overridden service name when provided", async () => {
-    const ssh = createMockSsh({
+    const ssh = createQuadletMockSsh({
       "podman image inspect --format '{{.Id}}\\n{{range .RepoDigests}}{{.}}\\n{{end}}' -- 'ghcr.io/acme/private-app:latest'":
         {
           code: 0,
@@ -1026,7 +1026,7 @@ describe("quadlet.updateImage", () => {
   })
 
   it("returns failed when image inspection fails after a changed pull", async () => {
-    const ssh = createMockSsh({
+    const ssh = createQuadletMockSsh({
       "podman image inspect --format '{{.Id}}\\n{{range .RepoDigests}}{{.}}\\n{{end}}' -- 'docker.io/library/traefik:v3.3'":
         {
           code: 125,
@@ -1050,7 +1050,7 @@ describe("quadlet.updateImage", () => {
   })
 
   it("returns failed when image inspection returns no ID", async () => {
-    const ssh = createMockSsh({
+    const ssh = createQuadletMockSsh({
       "podman image inspect --format '{{.Id}}\\n{{range .RepoDigests}}{{.}}\\n{{end}}' -- 'docker.io/library/traefik:v3.3'":
         {
           code: 0,
@@ -1073,7 +1073,7 @@ describe("quadlet.updateImage", () => {
   })
 
   it("falls back to the local image ID when no repo digest is available", async () => {
-    const ssh = createMockSsh({
+    const ssh = createQuadletMockSsh({
       "podman image inspect --format '{{.Id}}\\n{{range .RepoDigests}}{{.}}\\n{{end}}' -- 'docker.io/library/traefik:v3.3'":
         {
           code: 0,
@@ -1100,7 +1100,7 @@ describe("quadlet.updateImage", () => {
   })
 
   it("returns failed when podman pull exits non-zero", async () => {
-    const ssh = createMockSsh({
+    const ssh = createQuadletMockSsh({
       "podman image inspect --format '{{.Id}}\\n{{range .RepoDigests}}{{.}}\\n{{end}}' -- 'docker.io/library/traefik:v3.3'":
         { code: 1, stderr: "no such image" },
       "podman pull -- 'docker.io/library/traefik:v3.3'": {
@@ -1120,7 +1120,7 @@ describe("quadlet.updateImage", () => {
   })
 
   it("returns failed when restarting the service fails after a changed pull", async () => {
-    const ssh = createMockSsh({
+    const ssh = createQuadletMockSsh({
       "podman image inspect --format '{{.Id}}\\n{{range .RepoDigests}}{{.}}\\n{{end}}' -- 'docker.io/library/traefik:v3.3'":
         {
           code: 0,
@@ -1161,7 +1161,7 @@ function buildNetworkReloadFlagCheck(name: string, content: string): string {
 }
 
 function createNetworkApplySsh(options: { networkExists?: boolean } = {}) {
-  return createMockSsh(
+  return createQuadletMockSsh(
     {
       "mkdir -p '/etc/containers/systemd'": { code: 0 },
       "mkdir -p /var/lib/paratix/flags": { code: 0 },
@@ -1310,7 +1310,7 @@ describe("quadlet.network", () => {
       "NetworkName=app",
     ].join("\n")
     const filePath = networkFilePath("app")
-    const ssh = createMockSsh(
+    const ssh = createQuadletMockSsh(
       {
         [`[ -e '${filePath}' ]`]: { code: 0 },
         [`[ -L '${filePath}' ]`]: { code: 1 },
@@ -1356,7 +1356,7 @@ describe("quadlet.network", () => {
       "NetworkName=app",
     ].join("\n")
     const filePath = networkFilePath("app")
-    const ssh = createMockSsh({
+    const ssh = createQuadletMockSsh({
       [`[ -e '${filePath}' ]`]: { code: 0 },
       [`[ -L '${filePath}' ]`]: { code: 1 },
       [`cat '${filePath}'`]: { code: 0, stdout: content },
@@ -1378,7 +1378,7 @@ describe("quadlet.network", () => {
       "NetworkName=app",
     ].join("\n")
     const filePath = networkFilePath("app")
-    const ssh = createMockSsh({
+    const ssh = createQuadletMockSsh({
       [`[ -e '${filePath}' ]`]: { code: 0 },
       [`[ -L '${filePath}' ]`]: { code: 1 },
       [`cat '${filePath}'`]: { code: 0, stdout: content },
@@ -1393,7 +1393,7 @@ describe("quadlet.network", () => {
 
   it("check returns needs-apply when the unit file is missing", async () => {
     const filePath = networkFilePath("app")
-    const ssh = createMockSsh({
+    const ssh = createQuadletMockSsh({
       [`[ -e '${filePath}' ]`]: { code: 1 },
       [`[ -L '${filePath}' ]`]: { code: 1 },
     })
@@ -1405,7 +1405,7 @@ describe("quadlet.network", () => {
 
   it("check returns needs-apply when the on-disk unit content differs", async () => {
     const filePath = networkFilePath("app")
-    const ssh = createMockSsh({
+    const ssh = createQuadletMockSsh({
       [`[ -e '${filePath}' ]`]: { code: 0 },
       [`[ -L '${filePath}' ]`]: { code: 1 },
       [`cat '${filePath}'`]: { code: 0, stdout: "[Network]\nNetworkName=stale\n" },
@@ -1430,7 +1430,7 @@ describe("quadlet.network", () => {
 
   it("_applyDryRun returns a diff when the on-disk unit differs", async () => {
     const filePath = networkFilePath("app")
-    const ssh = createMockSsh({
+    const ssh = createQuadletMockSsh({
       [`[ -e '${filePath}' ]`]: { code: 0 },
       [`cat '${filePath}'`]: { code: 0, stdout: "[Network]\nNetworkName=old\n" },
       "podman network exists -- 'app'": { code: 1 },
@@ -1446,7 +1446,7 @@ describe("quadlet.network", () => {
 
   it("_applyDryRun surfaces the advisory detail when the live network exists", async () => {
     const filePath = networkFilePath("app")
-    const ssh = createMockSsh({
+    const ssh = createQuadletMockSsh({
       [`[ -e '${filePath}' ]`]: { code: 0 },
       [`cat '${filePath}'`]: { code: 0, stdout: "[Network]\nNetworkName=old\n" },
       "podman network exists -- 'app'": { code: 0 },

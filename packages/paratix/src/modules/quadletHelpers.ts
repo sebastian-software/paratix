@@ -74,6 +74,13 @@ export type QuadletContainerOptions = {
 
 export type QuadletImageUpdateOptions = {
   authFile?: string
+  /**
+   * Container name managed by the unit. Defaults to Quadlet's own
+   * `systemd-<name>` convention. Set it to the same value as
+   * {@link QuadletContainerOptions.containerName} when that option is used, so
+   * the conflict guard inspects the container the unit actually manages.
+   */
+  containerName?: string
   image: string
   name: string
   serviceName?: string
