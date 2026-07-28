@@ -173,7 +173,11 @@ describe("dist CLI", () => {
   it("exposes the published declaration entry point to TypeScript consumers", () => {
     const tempDirectory = mkdtempSync(join(tmpdir(), "create-paratix-types-consumer-"))
     const nodeModulesDirectory = join(tempDirectory, "node_modules")
-    const tscPath = require.resolve("typescript/bin/tsc")
+    // `typescript` is aliased to @typescript/typescript6, whose binary is
+    // `tsc6`. This consumer check keeps using the 6.x compiler, as it did
+    // before the alias; its tsconfig below has no `baseUrl`, so TypeScript 7
+    // would work here too, but switching it would change what the test proves.
+    const tscPath = require.resolve("typescript/bin/tsc6")
 
     try {
       mkdirSync(nodeModulesDirectory)
