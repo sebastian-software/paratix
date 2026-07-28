@@ -194,12 +194,16 @@ describe("writeProjectFiles", () => {
     expect(parsed).toMatchObject({
       devDependencies: {
         "@types/node": expect.stringMatching(/^\^/v),
+        // The scaffold runs TypeScript 7 for tsc next to the 6.x compatibility
+        // package that typescript-eslint needs, so both entries are npm
+        // aliases rather than plain ranges.
+        "@typescript/native": expect.stringMatching(/^npm:typescript@\^/v),
         eslint: expect.stringMatching(/^\^/v),
         "eslint-config-setup": expect.stringMatching(/^\^/v),
         jiti: expect.stringMatching(/^\^/v),
         prettier: expect.stringMatching(/^\^/v),
         tsx: expect.stringMatching(/^\^/v),
-        typescript: expect.stringMatching(/^\^/v),
+        typescript: expect.stringMatching(/^npm:@typescript\/typescript6@\^/v),
       },
       scripts: {
         apply: "paratix apply server.ts",
@@ -209,6 +213,7 @@ describe("writeProjectFiles", () => {
         "format:check": "prettier --check .",
         "format:fix": "prettier --write .",
         lint: "eslint .",
+        typecheck: "tsc --noEmit",
       },
     })
   })
