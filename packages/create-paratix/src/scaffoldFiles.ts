@@ -149,13 +149,19 @@ export function writeScaffoldFiles(
       paratix: deriveParatixDependencyRange(),
     },
     devDependencies: {
-      "@types/node": "^24.5.2",
-      eslint: "^10.0.3",
-      "eslint-config-setup": "^0.3.3",
-      jiti: "^2.6.1",
-      prettier: "^3.6.2",
-      tsx: "^4.20.6",
-      typescript: "^5.9.2",
+      "@types/node": "^24.13.3",
+      // TypeScript 7 is a native port that ships no compiler API before 7.1,
+      // while typescript-eslint reads that API through eslint-config-setup.
+      // Aliasing "typescript" onto the 6.x compatibility package keeps that
+      // working and leaves the "tsc" binary to the 7.x entry below, so the two
+      // never collide.
+      "@typescript/native": "npm:typescript@^7.0.2",
+      eslint: "^10.8.0",
+      "eslint-config-setup": "^0.5.2",
+      jiti: "^2.7.0",
+      prettier: "^3.9.6",
+      tsx: "^4.23.1",
+      typescript: "npm:@typescript/typescript6@^6.0.2",
     },
     engines: {
       node: ">=24.0.0",
@@ -170,6 +176,7 @@ export function writeScaffoldFiles(
       "format:check": "prettier --check .",
       "format:fix": "prettier --write .",
       lint: "eslint .",
+      typecheck: "tsc --noEmit",
     },
     type: "module",
   }
