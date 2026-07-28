@@ -814,9 +814,7 @@ des gesamten Laufs ausgewertet:
 ```typescript
 export default server({
   // ...
-  run: [
-    /* ... */
-  ],
+  run: [/* ... */],
   signals: [service.restart("nginx")],
 })
 ```

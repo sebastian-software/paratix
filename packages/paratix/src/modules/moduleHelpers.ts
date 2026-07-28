@@ -123,8 +123,7 @@ export async function applyWithFlagLock(
  * so the failure path stays symmetric with every other module helper.
  */
 export type MutexLockResult<TValue> =
-  | { failure: ModuleResult; kind: "failed" }
-  | { kind: "ok"; value: TValue }
+  { failure: ModuleResult; kind: "failed" } | { kind: "ok"; value: TValue }
 
 /**
  * Run a critical section while holding a named mutex lock on the remote host.
@@ -262,8 +261,7 @@ async function runMutexSection<TValue>(
 }
 
 type SectionCaptureOutcome<TValue> =
-  | { error: unknown; kind: "threw" }
-  | { kind: "captured"; result: MutexLockResult<TValue> }
+  { error: unknown; kind: "threw" } | { kind: "captured"; result: MutexLockResult<TValue> }
 
 async function runSectionCapturingErrors<TValue>(parameters: {
   failureMessage: string

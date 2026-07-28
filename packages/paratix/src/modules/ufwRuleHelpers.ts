@@ -283,9 +283,7 @@ export async function readUfwShowAdded(ssh: SshConnection): Promise<null | strin
  *     error message is preserved in `detail`.
  */
 export type UfwShowAddedReadResult =
-  | { detail: string; kind: "unreadable" }
-  | { kind: "missing" }
-  | { kind: "ok"; output: string }
+  { detail: string; kind: "unreadable" } | { kind: "missing" } | { kind: "ok"; output: string }
 
 // R-0000821: mirror the `isUfwInstalled` probe used by
 // `readUfwStatusDetailed` (R-0000551). A failure of the probe itself is

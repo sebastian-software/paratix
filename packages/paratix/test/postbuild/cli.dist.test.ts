@@ -151,8 +151,7 @@ describe("dist CLI", () => {
     }
 
     const packOutput = JSON.parse(packResult.stdout) as
-      | { filename: string }
-      | Array<{ filename: string }>
+      { filename: string } | Array<{ filename: string }>
     const packEntries = Array.isArray(packOutput) ? packOutput : [packOutput]
     if (packEntries.length !== 1) {
       throw new Error(`Expected pnpm pack to produce one tarball, got ${packEntries.length}`)

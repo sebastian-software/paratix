@@ -143,9 +143,7 @@ export async function restoreUnitFileSnapshot(
  *   triggered the rollback in the first place.
  */
 export type RestoreUnitFileIfCurrentMatchesResult =
-  | { kind: "failed"; reason: string }
-  | { kind: "restored" }
-  | { kind: "skipped" }
+  { kind: "failed"; reason: string } | { kind: "restored" } | { kind: "skipped" }
 
 /**
  * Restore the unit file only when the current on-disk content still matches

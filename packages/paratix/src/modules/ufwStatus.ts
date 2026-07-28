@@ -131,9 +131,7 @@ export function statusReportsActive(status: string): boolean {
  *     preserved in `detail` for surfacing to the operator.
  */
 export type UfwStatusReadResult =
-  | { detail: string; kind: "unreadable" }
-  | { kind: "missing" }
-  | { kind: "ok"; status: string }
+  { detail: string; kind: "unreadable" } | { kind: "missing" } | { kind: "ok"; status: string }
 
 // R-0000551: probe `ufw` separately from `ufw status` so the two failure modes
 // can be distinguished. `ssh.test` returns a plain boolean; checking

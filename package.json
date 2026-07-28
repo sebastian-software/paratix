@@ -41,7 +41,7 @@
     "eslint-config-setup": "^0.5.2",
     "jiti": "^2.7.0",
     "oxlint": "^1.76.0",
-    "prettier": "^3.8.3",
+    "prettier": "^3.9.6",
     "typescript": "^6.0.3"
   }
 }

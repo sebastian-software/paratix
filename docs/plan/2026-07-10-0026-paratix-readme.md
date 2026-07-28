@@ -31,13 +31,13 @@ Create a user-facing README.md for the `paratix` npm package, written in English
 
 ### Review Findings
 
-| ID    | Severity | Description                                                 | Status                                                       |
+| ID | Severity | Description | Status |
 | ----- | -------- | ----------------------------------------------------------- | ------------------------------------------------------------ | ------ |
-| R-001 | Wichtig  | SshConnection table missing 5 advanced methods              | Fixed — added note referencing type definitions              |
-| R-002 | Hinweis  | CLI --reconnect-timeout default (300s CLI vs 120s internal) | No action — README documents CLI context correctly           |
-| R-003 | Hinweis  | recipe missing from built-in helpers table                  | Not implemented — recipe has dedicated Core Concepts section |
-| R-004 | Hinweis  | Verified: all 22 module namespaces correct                  | N/A — validation pass                                        |
-| R-005 | Wichtig  | Custom module check() missing explicit return type          | Fixed — added `Promise<"needs-apply"                         | "ok">` |
+| R-001 | Wichtig | SshConnection table missing 5 advanced methods | Fixed — added note referencing type definitions |
+| R-002 | Hinweis | CLI --reconnect-timeout default (300s CLI vs 120s internal) | No action — README documents CLI context correctly |
+| R-003 | Hinweis | recipe missing from built-in helpers table | Not implemented — recipe has dedicated Core Concepts section |
+| R-004 | Hinweis | Verified: all 22 module namespaces correct | N/A — validation pass |
+| R-005 | Wichtig | Custom module check() missing explicit return type | Fixed — added `Promise<"needs-apply"                         | "ok">` |
 
 ## Validation
 

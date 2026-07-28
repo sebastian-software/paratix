@@ -35,9 +35,7 @@ export async function isSymlink(ssh: SshConnection, remotePath: string): Promise
  * the offending path that turned out to be a symlink.
  */
 export type AncestorSymlinkProbe =
-  | { kind: "ancestor"; path: string }
-  | { kind: "leaf"; path: string }
-  | null
+  { kind: "ancestor"; path: string } | { kind: "leaf"; path: string } | null
 
 /**
  * R-0000637: walk every existing ancestor of `remotePath` looking for a

@@ -38,8 +38,7 @@ const SS_HARD_ERROR_PATTERNS: RegExp[] = [
 ]
 
 export type LiveSshdPortProbe =
-  | { kind: "hard-error"; stderr: string; stdout: string }
-  | { kind: "match"; matches: boolean }
+  { kind: "hard-error"; stderr: string; stdout: string } | { kind: "match"; matches: boolean }
 
 export const LIVE_PORT_PROBE_MATCH_KIND = "match" as const
 export const LIVE_PORT_PROBE_HARD_ERROR_KIND = "hard-error" as const

@@ -12,6 +12,4 @@ export type NormalizedSwapFileOptions = {
 }
 
 export type SwapFilePathClassification =
-  | { reason: string; state: "unsafe" }
-  | { state: "managed-swap-file" }
-  | { state: "missing" }
+  { reason: string; state: "unsafe" } | { state: "managed-swap-file" } | { state: "missing" }

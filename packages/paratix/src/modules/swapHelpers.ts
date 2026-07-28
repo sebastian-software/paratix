@@ -96,8 +96,7 @@ async function disableAndRemoveSwapForReplacement(
 }
 
 type ManagedReplacementOutcome =
-  | { backupPath: string; kind: "changed" }
-  | ({ kind: "result" } & ModuleResult)
+  { backupPath: string; kind: "changed" } | ({ kind: "result" } & ModuleResult)
 
 async function replaceManagedSwapFile(
   ssh: SshConnection,
@@ -145,9 +144,7 @@ async function replaceManagedSwapFile(
 }
 
 type RecreateOutcome =
-  | "ok"
-  | { backupPath: null | string; kind: "changed" }
-  | ({ kind: "result" } & ModuleResult)
+  "ok" | { backupPath: null | string; kind: "changed" } | ({ kind: "result" } & ModuleResult)
 
 async function recreateSwapFile(
   ssh: SshConnection,

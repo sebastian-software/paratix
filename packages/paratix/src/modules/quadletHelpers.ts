@@ -4,13 +4,7 @@ type QuadletAutoUpdate = "local" | "registry"
 type QuadletHealthOnFailure = "kill" | "none" | "restart" | "stop"
 type QuadletPullPolicy = "always" | "missing" | "never" | "newer"
 type QuadletRestartPolicy =
-  | "always"
-  | "no"
-  | "on-abnormal"
-  | "on-abort"
-  | "on-failure"
-  | "on-success"
-  | "on-watchdog"
+  "always" | "no" | "on-abnormal" | "on-abort" | "on-failure" | "on-success" | "on-watchdog"
 
 export type QuadletContainerOptions = {
   addCapability?: string[]

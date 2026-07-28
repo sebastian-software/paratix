@@ -85,8 +85,7 @@ export function flagLockName(flagName: string): string {
  * can surface a `failedCommand(...)` ModuleResult with masked stdout/stderr.
  */
 type WriteHolderMarkerResult =
-  | { failure: ModuleResult; kind: "failed" }
-  | { holderToken: string; kind: "ok" }
+  { failure: ModuleResult; kind: "failed" } | { holderToken: string; kind: "ok" }
 
 /**
  * Write the holder marker into the freshly acquired lock directory and read

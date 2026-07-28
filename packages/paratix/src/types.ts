@@ -43,10 +43,7 @@ export type SystemRebootMetaEntry = {
 
 /** Any meta entry that modules may emit. */
 export type ModuleMetaEntry =
-  | EnvironmentMetaEntry
-  | SshdPortMetaEntry
-  | SystemHostMetaEntry
-  | SystemRebootMetaEntry
+  EnvironmentMetaEntry | SshdPortMetaEntry | SystemHostMetaEntry | SystemRebootMetaEntry
 
 /** Check result indicating the module's desired state is not yet present. */
 export const NEEDS_APPLY = "needs-apply" as const
