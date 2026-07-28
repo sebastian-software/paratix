@@ -69,7 +69,11 @@ export default defineConfig([
   {
     clean: false,
     define: sharedDefine,
-    dts: true,
+    // tsup hardcodes baseUrl for its dts pass (rollup.js: baseUrl ||
+    // "."), which TypeScript 6 reports as a deprecation. The dts pass runs
+    // on the aliased @typescript/typescript6, so the suppression lives here
+    // rather than in the shared tsconfig, which tsc 7 reads.
+    dts: { compilerOptions: { ignoreDeprecations: "6.0" } },
     entry: {
       index: "src/index.ts",
       "modules/index": "src/modules/index.ts",

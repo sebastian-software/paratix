@@ -36,8 +36,13 @@ const paratixModulesPath = resolve(
   fileURLToPath(new URL("../../paratix/src/modules/index.ts", import.meta.url))
 )
 const paratixCliPath = resolve(fileURLToPath(new URL("../../paratix/src/cli.ts", import.meta.url)))
+// The workspace aliases `typescript` to @typescript/typescript6, which ships
+// its binary as `tsc6` so it does not collide with the TypeScript 7 `tsc`.
+// This check deliberately stays on the 6.x compiler: a scaffolded project
+// pins typescript ^5.9, and the typecheck config below relies on `baseUrl`,
+// which TypeScript 7 no longer supports.
 const tscBinaryPath = resolve(
-  fileURLToPath(new URL("../../../node_modules/typescript/bin/tsc", import.meta.url))
+  fileURLToPath(new URL("../../../node_modules/typescript/bin/tsc6", import.meta.url))
 )
 const eslintBinaryPath = resolve(
   fileURLToPath(new URL("../../../node_modules/eslint/bin/eslint.js", import.meta.url))
