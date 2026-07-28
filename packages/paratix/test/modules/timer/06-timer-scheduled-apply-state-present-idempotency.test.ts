@@ -49,6 +49,9 @@ const baseOptions = {
 const expectedServiceContent =
   "[Unit]\nDescription=Paratix scheduled task: backup\n\n[Service]\nType=oneshot\nExecStart=/usr/local/bin/backup\n"
 
+const expectedServiceContentWithOnFailure =
+  "[Unit]\nDescription=Paratix scheduled task: backup\nOnFailure=notify@%n.service\n\n[Service]\nType=oneshot\nExecStart=/usr/local/bin/backup\n"
+
 const expectedTimerContent =
   "[Unit]\nDescription=Paratix scheduled task: backup (timer)\n\n[Timer]\nOnCalendar=*-*-* 03:00:00\nPersistent=true\nUnit=backup.service\n\n[Install]\nWantedBy=timers.target\n"
 
@@ -83,6 +86,53 @@ describe("timer.scheduled — apply (state: present, idempotency)", () => {
       "systemctl is-enabled --quiet -- 'backup.timer'": { code: 0 },
     })
     const mod = timer.scheduled("backup", baseOptions)
+    const result = await mod.apply(ssh, emptyEnv)
+    expect(result.status).toBe("ok")
+    expect(ssh.calls).not.toContain("systemctl daemon-reload")
+    expect(ssh.calls).not.toContain("systemctl restart -- 'backup.timer'")
+    expect(ssh.calls).not.toContain("systemctl enable --now -- 'backup.timer'")
+  })
+
+  it("rewrites only the service unit when onFailure is added to a deployed timer", async () => {
+    const ssh = createTimerApplyMockSsh({
+      [`[ -e '${SERVICE_PATH}' ]`]: { code: 0 },
+      [`[ ! -L '${SERVICE_PATH}' ] && [ -f '${SERVICE_PATH}' ]`]: { code: 0 },
+      [`[ ! -L '${TIMER_PATH}' ] && [ -f '${TIMER_PATH}' ]`]: { code: 0 },
+      [`cat '${SERVICE_PATH}'`]: { code: 0, stdout: expectedServiceContent },
+      [`cat '${TIMER_PATH}'`]: { code: 0, stdout: expectedTimerContent },
+      [`stat -c '%a' '${SERVICE_PATH}'`]: { code: 0, stdout: "644\n" },
+      [`stat -c '%a' '${TIMER_PATH}'`]: { code: 0, stdout: "644\n" },
+      "systemctl daemon-reload": { code: 0 },
+      "systemctl enable --now -- 'backup.timer'": { code: 0 },
+    })
+    const mod = timer.scheduled("backup", { ...baseOptions, onFailure: "notify@%n.service" })
+    const result = await mod.apply(ssh, emptyEnv)
+    expect(result.status).toBe("changed")
+    // Only the service unit changes; the schedule is untouched, so the timer
+    // must not be restarted -- a restart would abort an in-flight oneshot job.
+    expect(ssh.writeFileCalls).toStrictEqual([
+      {
+        content: expectedServiceContentWithOnFailure,
+        options: { mode: "0644" },
+        remotePath: SERVICE_PATH,
+      },
+    ])
+    expect(ssh.calls).toContain("systemctl daemon-reload")
+    expect(ssh.calls).not.toContain("systemctl restart -- 'backup.timer'")
+  })
+
+  it("returns ok on re-apply once the onFailure service unit is already on disk", async () => {
+    const ssh = createMockSsh({
+      [`[ ! -L '${SERVICE_PATH}' ] && [ -f '${SERVICE_PATH}' ]`]: { code: 0 },
+      [`[ ! -L '${TIMER_PATH}' ] && [ -f '${TIMER_PATH}' ]`]: { code: 0 },
+      [`cat '${SERVICE_PATH}'`]: { code: 0, stdout: expectedServiceContentWithOnFailure },
+      [`cat '${TIMER_PATH}'`]: { code: 0, stdout: expectedTimerContent },
+      [`stat -c '%a' '${SERVICE_PATH}'`]: { code: 0, stdout: "644\n" },
+      [`stat -c '%a' '${TIMER_PATH}'`]: { code: 0, stdout: "644\n" },
+      "systemctl is-active --quiet -- 'backup.timer'": { code: 0 },
+      "systemctl is-enabled --quiet -- 'backup.timer'": { code: 0 },
+    })
+    const mod = timer.scheduled("backup", { ...baseOptions, onFailure: "notify@%n.service" })
     const result = await mod.apply(ssh, emptyEnv)
     expect(result.status).toBe("ok")
     expect(ssh.calls).not.toContain("systemctl daemon-reload")

@@ -23,6 +23,24 @@ const EXEC_VALUE_PATTERN = /^\/[^\n\r#]*$/v
 // bidirectional Unicode codepoints -- must go through quoting and escaping.
 // eslint-disable-next-line regexp/prefer-w -- explicit ASCII intent, do not collapse to \w
 const ENVIRONMENT_VALUE_SAFE_UNQUOTED = /^[A-Za-z0-9_\-.\/]+$/v
+// Allowed characters in an `OnFailure=` unit reference: systemd unit names use
+// ASCII letters and digits plus `:`, `_`, `.`, `@` and `-`, and `\` for escaped
+// names such as `dev-disk-by\x2duuid-….device`.
+//
+// `%` is deliberately inside the safe set so unit specifiers survive unescaped
+// and `OnFailure=notify@%n.service` resolves to the failing unit's name. This is
+// the opposite of the quadlet handling, where R-0000590 escapes `%` to `%%`
+// precisely to suppress specifier expansion -- there the value is arbitrary user
+// data, here it is a unit reference whose specifier is the entire point of the
+// option. The divergence is intentional; do not align the two.
+//
+// Whitespace stays out of the set. systemd would accept a space-separated unit
+// list in a single value, but splitting it here would make per-entry validation
+// meaningless; several handlers are expressed as an array instead. `#` is
+// excluded for the same reason as in `EXEC_VALUE_PATTERN` (R-0000493): systemd
+// treats it as a comment marker and would truncate the directive.
+// eslint-disable-next-line regexp/prefer-w -- explicit ASCII intent, do not collapse to \w
+const ON_FAILURE_VALUE_PATTERN = /^[A-Za-z0-9_\-.:@%\\]+$/v
 
 /** Options for `timer.scheduled`. */
 export type TimerScheduledOptions = {
@@ -38,6 +56,14 @@ export type TimerScheduledOptions = {
   group?: string
   /** Calendar specification(s) written as one or more `OnCalendar=` lines. */
   onCalendar: string | string[]
+  /**
+   * Optional unit reference(s) written as one or more `OnFailure=` lines in the
+   * `[Unit]` section of the generated `.service`. systemd activates them when
+   * the scheduled job fails, which is the supported way to attach a
+   * notification unit. Specifiers are passed through unescaped, so
+   * `"notify@%n.service"` resolves to the failing unit's name.
+   */
+  onFailure?: string | string[]
   /** Whether `Persistent=true` is written into the `[Timer]` section. Defaults to `true`. */
   persistent?: boolean
   /** Optional `RandomizedDelaySec=` for the `[Timer]` section. */
@@ -87,6 +113,21 @@ function normalizeOnCalendar(onCalendar: string | string[]): string[] {
   return entries
 }
 
+function normalizeOnFailure(onFailure: string | string[]): string[] {
+  const entries = Array.isArray(onFailure) ? onFailure : [onFailure]
+  if (entries.length === 0) {
+    throw new Error("timer.scheduled: onFailure must contain at least one entry")
+  }
+  for (const entry of entries) {
+    assertNoNewline("onFailure entry", entry)
+    if (entry.trim().length === 0) {
+      throw new Error("timer.scheduled: onFailure entries must not be empty")
+    }
+    assertOnFailureValue(entry)
+  }
+  return entries
+}
+
 function quoteEnvironmentValue(value: string): string {
   // Only ASCII alphanumerics plus `_`, `.`, `/`, `-` are emitted unquoted.
   // Everything else -- whitespace, quotes, backslashes, shell metacharacters
@@ -129,7 +170,16 @@ function assertExecValue(value: string): void {
 
 function renderServiceUnit(name: string, options: TimerScheduledOptions): string {
   const description = options.description ?? `Paratix scheduled task: ${name}`
-  const lines: string[] = ["[Unit]", `Description=${description}`, "", "[Service]", "Type=oneshot"]
+  // `OnFailure=` is a `[Unit]` directive, so it has to be emitted while the
+  // `[Unit]` block is still open. Appending it further down would place it in
+  // `[Service]`, where systemd rejects it.
+  const lines: string[] = ["[Unit]", `Description=${description}`]
+  if (options.onFailure != null) {
+    for (const entry of normalizeOnFailure(options.onFailure)) {
+      lines.push(`OnFailure=${entry}`)
+    }
+  }
+  lines.push("", "[Service]", "Type=oneshot")
 
   if (options.user != null) lines.push(`User=${options.user}`)
   if (options.group != null) lines.push(`Group=${options.group}`)
@@ -143,6 +193,17 @@ function renderServiceUnit(name: string, options: TimerScheduledOptions): string
   }
   lines.push(`ExecStart=${options.exec}`)
   return `${lines.join("\n")}\n`
+}
+
+// R-0000493 analogue for `OnFailure=`: a systemd comment marker must not be
+// able to truncate the rendered directive, and whitespace or a line break must
+// not smuggle extra directives past the renderer.
+function assertOnFailureValue(value: string): void {
+  if (!ON_FAILURE_VALUE_PATTERN.test(value)) {
+    throw new Error(
+      `timer.scheduled: onFailure entry must match ${String(ON_FAILURE_VALUE_PATTERN)}, got: ${JSON.stringify(value)}`
+    )
+  }
 }
 
 function renderTimerUnit(name: string, options: TimerScheduledOptions): string {
@@ -184,6 +245,9 @@ function validateServiceDirectiveValues(options: TimerScheduledOptions): void {
   if (options.workingDirectory != null) {
     assertAbsolutePath("workingDirectory", options.workingDirectory)
   }
+  // Also validates onFailure entries for newlines, empty values and the
+  // unit-reference pattern.
+  if (options.onFailure != null) normalizeOnFailure(options.onFailure)
 }
 
 export function validatePresentOptions(options: TimerScheduledOptions): void {

@@ -141,6 +141,57 @@ describe("timer.scheduled — unit content", () => {
     expect(writes[TIMER_PATH]).not.toContain("Persistent=")
   })
 
+  it("renders OnFailure inside the [Unit] section of the service", async () => {
+    const ssh = createPresentApplyFromMissingUnitsMockSsh()
+    const writes: Record<string, string> = {}
+    // eslint-disable-next-line @typescript-eslint/require-await -- Mock implementation
+    ssh.writeFile = async (path: string, content: string) => {
+      writes[path] = content
+    }
+    const mod = timer.scheduled("backup", {
+      exec: "/usr/local/bin/backup",
+      onCalendar: "daily",
+      onFailure: "notify@%n.service",
+    })
+    await mod.apply(ssh, emptyEnv)
+    // The `%n` specifier must survive unescaped, otherwise systemd cannot
+    // resolve the failing unit's name.
+    expect(writes[SERVICE_PATH]).toBe(
+      "[Unit]\nDescription=Paratix scheduled task: backup\nOnFailure=notify@%n.service\n\n[Service]\nType=oneshot\nExecStart=/usr/local/bin/backup\n"
+    )
+  })
+
+  it("renders multiple OnFailure lines when an array is supplied", async () => {
+    const ssh = createPresentApplyFromMissingUnitsMockSsh()
+    const writes: Record<string, string> = {}
+    // eslint-disable-next-line @typescript-eslint/require-await -- Mock implementation
+    ssh.writeFile = async (path: string, content: string) => {
+      writes[path] = content
+    }
+    const mod = timer.scheduled("backup", {
+      exec: "/usr/local/bin/backup",
+      onCalendar: "daily",
+      onFailure: ["notify@%n.service", "status-mail.service"],
+    })
+    await mod.apply(ssh, emptyEnv)
+    const unitSection = writes[SERVICE_PATH].split("\n\n")[0]
+    expect(unitSection).toContain("OnFailure=notify@%n.service")
+    expect(unitSection).toContain("OnFailure=status-mail.service")
+  })
+
+  it("omits OnFailure entirely when the option is absent", async () => {
+    const ssh = createPresentApplyFromMissingUnitsMockSsh()
+    const writes: Record<string, string> = {}
+    // eslint-disable-next-line @typescript-eslint/require-await -- Mock implementation
+    ssh.writeFile = async (path: string, content: string) => {
+      writes[path] = content
+    }
+    const mod = timer.scheduled("backup", baseOptions)
+    await mod.apply(ssh, emptyEnv)
+    expect(writes[SERVICE_PATH]).not.toContain("OnFailure=")
+    expect(writes[SERVICE_PATH]).toBe(expectedServiceContent)
+  })
+
   it("includes RandomizedDelaySec and AccuracySec when supplied", async () => {
     const ssh = createPresentApplyFromMissingUnitsMockSsh()
     const writes: Record<string, string> = {}
