@@ -92,4 +92,52 @@ Each dated call must have its own file. A call whose marker is missing after a s
 
 **Verify:** Apply the playbook twice without changing it. The second run must report `ok` for every dated module.
 
+## A Quadlet container cannot be replaced
+
+**Symptom:** A `quadlet.updateImage` step fails with `systemctl restart failed (exit code 1)`. The
+attached journal excerpt names the real cause, for example `container <id> has dependent containers
+which must be removed before it` or `container already exists`.
+
+**Likely cause:** A container of that name already exists on the host and was not created by this
+Quadlet unit — typically a leftover from a Compose-based deployment during a migration, or a
+manually started container. Podman refuses to replace it while other containers depend on it. The
+blocking condition is host state, not configuration, so re-running the playbook reproduces it
+exactly.
+
+**Diagnose:** Inspect what currently holds the name and who owns it:
+
+```bash
+sudo podman ps -a --filter name=<container> --format '{{.Names}} {{.Status}} {{.Labels}}'
+```
+
+Read the unit's own journal for the failed attempt:
+
+```bash
+sudo journalctl -xeu <unit>
+```
+
+**Fix:** Remove the foreign container together with whatever depends on it, then let the unit
+recreate it. Confirm what would be removed before running this — it deletes running containers:
+
+```bash
+sudo podman rm --depend <container>
+```
+
+Then clear the failed unit state and start it again:
+
+```bash
+sudo systemctl reset-failed <unit>
+```
+
+**Verify:** Apply the playbook again. The step must report `changed` once and `ok` afterwards. Check
+that every container of the stack sits on the same network:
+
+```bash
+sudo podman inspect --format '{{.Name}} {{range $net, $conf := .NetworkSettings.Networks}}{{$net}} {{end}}' <container>
+```
+
+A stack whose containers span two networks is the split state described in issue #149: since a
+failed signal now stops the remaining signals of its list, a partial rollout no longer produces it,
+but a host that was left in that state by an older version still needs the manual repair above.
+
 [Back to the user guide](./README.md)

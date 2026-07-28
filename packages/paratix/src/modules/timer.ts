@@ -9,6 +9,7 @@ import {
   type SshConnection,
 } from "../types.js"
 import { buildUnifiedDiff } from "./diffHelpers.js"
+import { restartSystemdUnit } from "./systemctlRestart.js"
 import { readFileSnapshot, restoreUnitFileSnapshots } from "./timerFileSnapshots.js"
 import {
   assertTimerName,
@@ -467,14 +468,11 @@ async function restartTimerIfNeeded(
       return failedCommand(`[timer.scheduled: ${name}] systemctl daemon-reload failed`, reload)
     }
   }
-  const restart = await ssh.exec(`${SYSTEMCTL} restart -- ${shellQuote(paths.timerUnit)}`, {
-    ignoreExitCode: true,
-    silent: true,
+  return restartSystemdUnit({
+    failureMessage: `[timer.scheduled: ${name}] systemctl restart failed`,
+    ssh,
+    unit: paths.timerUnit,
   })
-  if (restart.code !== 0) {
-    return failedCommand(`[timer.scheduled: ${name}] systemctl restart failed`, restart)
-  }
-  return null
 }
 
 // R-0000773: probe whether a freshly-synced timer is already fully

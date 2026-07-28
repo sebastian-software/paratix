@@ -105,11 +105,28 @@ async function runOneSignal(parameters: {
   }
 }
 
+/**
+ * Run a signal list, stopping at the first failed signal.
+ *
+ * A failed signal aborts the remaining signals of *this* list, the same way a
+ * failed child aborts the remaining steps of a recipe. Continuing here used to
+ * turn a single failed step into an inconsistent host: when one container of a
+ * Quadlet stack could not be replaced, its siblings were still recreated, which
+ * left the stack split across the old and the new state and did not heal on a
+ * re-run.
+ *
+ * The abort is scoped to this list. Whether the enclosing recipe or run also
+ * stops is decided by their existing post-list handling, so a separate signal
+ * list is not suppressed from here.
+ *
+ * @param parameters - The signal list plus its environment, connection, hooks
+ *   and shutdown probe.
+ * @returns `"failed"` when any signal failed, otherwise `"changed"`.
+ */
 export async function runSignalModules(parameters: SignalRunParameters): Promise<SignalRunStatus> {
   const getShutdownSignal = parameters.shutdownSignal ?? (() => null)
   const verbose = parameters.verbose ?? false
   let currentEnvironment = parameters.environment
-  let status: SignalRunStatus = "changed"
 
   for (const signal of parameters.signals) {
     if (getShutdownSignal() != null) break
@@ -126,9 +143,9 @@ export async function runSignalModules(parameters: SignalRunParameters): Promise
         verbose,
       })
       currentEnvironment = signalStep.nextEnvironment
-      if (signalStep.status === "failed") status = "failed"
+      if (signalStep.status === "failed") return "failed"
     } catch (error) {
-      status = handleSignalFailure({
+      return handleSignalFailure({
         error,
         hooks: parameters.hooks,
         signalName: signal.name,
@@ -137,5 +154,5 @@ export async function runSignalModules(parameters: SignalRunParameters): Promise
     }
   }
 
-  return status
+  return "changed"
 }
