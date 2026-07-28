@@ -33,9 +33,9 @@ import {
   validateQuadletImageValue,
   validateQuadletName,
 } from "./quadletValidationHelpers.js"
+import { restartSystemdUnit } from "./systemctlRestart.js"
 
 const QUADLET_RELOAD_HASH_LENGTH = 16
-const SYSTEMCTL = "systemctl"
 
 function buildQuadletReloadFlag(
   kind: string,
@@ -107,19 +107,17 @@ async function restartQuadletService(parameters: {
   serviceName: string
   ssh: SshConnection
 }): Promise<ModuleResult> {
-  const restartResult = await parameters.ssh.exec(
-    `${SYSTEMCTL} restart -- ${shellQuote(parameters.serviceName)}`,
-    {
-      ignoreExitCode: true,
-      silent: true,
+  const failure = await restartSystemdUnit({
+    failureMessage: `[quadlet.updateImage: ${parameters.name}] systemctl restart failed`,
+    ssh: parameters.ssh,
+    unit: parameters.serviceName,
+  })
+  return (
+    failure ?? {
+      detail: formatQuadletImageIdentifierDetail(parameters.imageId),
+      status: "changed",
     }
   )
-  return restartResult.code === 0
-    ? { detail: formatQuadletImageIdentifierDetail(parameters.imageId), status: "changed" }
-    : failedCommand(
-        `[quadlet.updateImage: ${parameters.name}] systemctl restart failed`,
-        restartResult
-      )
 }
 
 async function inspectQuadletImageIdBeforePull(

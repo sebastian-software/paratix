@@ -1005,6 +1005,11 @@ und Recipes werden nicht mehr ausgefuehrt. Es gibt kein `continueOnError` —
 ein Fehler ist ein unerwarteter Zustand, bei dem Weiterausfuehrung riskant
 waere, da nachfolgende Module auf dem Ergebnis aufbauen koennten.
 
+Das gilt auch fuer Signals: Ein fehlgeschlagenes Signal bricht die restlichen
+Signals derselben Liste ab. Weiterlaufen wuerde neuen Zustand auf einer bereits
+gescheiterten Voraussetzung aufbauen — genau so wurde ein Container-Stack ueber
+zwei Netzwerke hinweg gesplittet (ADR-0006).
+
 ### SSH-Library
 
 Paratix nutzt `ssh2` (npm) fuer die SSH-Verbindung. Die Library bietet volle

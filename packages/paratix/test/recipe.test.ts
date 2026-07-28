@@ -461,7 +461,7 @@ describe("recipe", () => {
     expect(result.status).toBe("failed")
   })
 
-  it("keeps the recipe status failed when a later signal succeeds", async () => {
+  it("does not run later signals after a failed signal", async () => {
     const firstSignal: Module = {
       // eslint-disable-next-line @typescript-eslint/require-await -- Interface requires async
       async apply() {
@@ -474,14 +474,8 @@ describe("recipe", () => {
       name: "first-signal",
     }
     const secondSignal: Module = {
-      // eslint-disable-next-line @typescript-eslint/require-await -- Interface requires async
-      async apply() {
-        return { status: "changed" }
-      },
-      // eslint-disable-next-line @typescript-eslint/require-await -- Interface requires async
-      async check() {
-        return "needs-apply"
-      },
+      apply: vi.fn().mockResolvedValue({ status: "changed" }),
+      check: vi.fn().mockResolvedValue("needs-apply"),
       name: "second-signal",
     }
 
@@ -491,6 +485,9 @@ describe("recipe", () => {
     const result = await r.apply(null, emptyEnv)
 
     expect(result.status).toBe("failed")
+    // A failed signal must not leave the remaining siblings to recreate state on
+    // top of it — that is what split a Quadlet stack across two networks.
+    expect(secondSignal.apply).not.toHaveBeenCalled()
   })
 
   it("sets the recipe status to failed when a signal throws", async () => {

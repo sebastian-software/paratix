@@ -2,6 +2,7 @@ import { environmentToMetaEntries } from "../meta.js"
 import { failed, failedCommand } from "../moduleFailure.js"
 import { shellQuote } from "../ssh.js"
 import { type Module, type ModuleResult, NEEDS_APPLY, type SshConnection } from "../types.js"
+import { restartSystemdUnit } from "./systemctlRestart.js"
 
 const SYSTEMCTL = "systemctl"
 // R-0000538: keep the unit-name whitelist in sync with `validateQuadletName`
@@ -243,13 +244,12 @@ export const service = {
     return {
       async apply(ssh: null | SshConnection): Promise<ModuleResult> {
         if (!ssh) return failed(`[service.restart: ${name}] SSH connection is required`)
-        const result = await ssh.exec(`${SYSTEMCTL} restart -- ${shellQuote(unitName)}`, {
-          ignoreExitCode: true,
-          silent: true,
+        const failure = await restartSystemdUnit({
+          failureMessage: `[service.restart: ${name}] systemctl restart failed`,
+          ssh,
+          unit: unitName,
         })
-        return result.code === 0
-          ? { status: "changed" }
-          : failedCommand(`[service.restart: ${name}] systemctl restart failed`, result)
+        return failure ?? { status: "changed" }
       },
       // eslint-disable-next-line @typescript-eslint/require-await -- Interface requires async
       async check(): Promise<"needs-apply" | "ok"> {

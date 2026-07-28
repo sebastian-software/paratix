@@ -2,7 +2,12 @@ import { describe, expect, it, vi } from "vitest"
 
 import type { ExecResult, ModuleResult } from "../src/types.js"
 
-import { failed, failedCommand, withRollbackFailure } from "../src/moduleFailure.js"
+import {
+  failed,
+  failedCommand,
+  failedCommandWithDiagnostic,
+  withRollbackFailure,
+} from "../src/moduleFailure.js"
 import { CommandError } from "../src/sshHelpers.js"
 
 function execResult(overrides: Partial<ExecResult>): ExecResult {
@@ -33,9 +38,52 @@ describe("failedCommand", () => {
     expect(result.error?.message).toBe("apt-get failed (exit code 100)\nE: broken")
   })
 
-  it("skips leading blank lines when picking the detail line", () => {
+  it("skips leading blank lines when picking the detail lines", () => {
     const result = failedCommand("cmd failed", execResult({ stderr: "\n   \nreal error\nsecond" }))
-    expect(result.error?.message).toBe("cmd failed (exit code 1)\nreal error")
+    expect(result.error?.message).toBe("cmd failed (exit code 1)\nreal error\nsecond")
+  })
+
+  it("carries systemd's actionable hint line instead of dropping it", () => {
+    const result = failedCommand(
+      "[service.restart: nginx] systemctl restart failed",
+      execResult({
+        stderr: [
+          "Job for nginx.service failed because the control process exited with error code.",
+          'See "systemctl status nginx.service" and "journalctl -xeu nginx.service" for details.',
+        ].join("\n"),
+      })
+    )
+    expect(result.error?.message).toContain("journalctl -xeu nginx.service")
+  })
+
+  it("caps the detail at three lines and marks the truncation", () => {
+    const result = failedCommand(
+      "cmd failed",
+      execResult({ stderr: "one\ntwo\nthree\nfour\nfive" })
+    )
+    expect(result.error?.message).toBe(
+      "cmd failed (exit code 1)\none\ntwo\nthree\n… (output truncated)"
+    )
+  })
+
+  it("truncates a single oversized line rather than dropping it", () => {
+    const oversized = "x".repeat(900)
+    const result = failedCommand("cmd failed", execResult({ stderr: oversized }))
+    const message = asCommandError(result.error).message
+    expect(message).toContain("… (output truncated)")
+    expect(message.length).toBeLessThan(oversized.length)
+    expect(message).toContain("x".repeat(600))
+  })
+
+  it("stops before a line that would exceed the byte budget", () => {
+    const result = failedCommand("cmd failed", execResult({ stderr: `first\n${"y".repeat(700)}` }))
+    expect(result.error?.message).toBe("cmd failed (exit code 1)\nfirst\n… (output truncated)")
+  })
+
+  it("keeps the full untruncated streams on the error", () => {
+    const result = failedCommand("cmd failed", execResult({ stderr: "one\ntwo\nthree\nfour" }))
+    const error = asCommandError(result.error)
+    expect(error.fullStderr).toBe("one\ntwo\nthree\nfour")
   })
 
   it("falls back to stdout when stderr is empty", () => {
@@ -64,6 +112,58 @@ describe("failedCommand", () => {
   it("does not mask when the secrets list is empty", () => {
     const result = failedCommand("cmd failed", execResult({ stderr: "plain" }), [])
     expect(result.error?.message).toBe("cmd failed (exit code 1)\nplain")
+  })
+})
+
+describe("failedCommandWithDiagnostic", () => {
+  it("appends the diagnostic after the command output lines", () => {
+    const result = failedCommandWithDiagnostic({
+      diagnostic: "unit web — journal since 2026-07-28 10:12:03:\ncontainer already exists",
+      message: "[quadlet.updateImage: web] systemctl restart failed",
+      result: execResult({ stderr: "Job for web.service failed" }),
+    })
+    expect(result.error?.message).toBe(
+      [
+        "[quadlet.updateImage: web] systemctl restart failed (exit code 1)",
+        "Job for web.service failed",
+        "unit web — journal since 2026-07-28 10:12:03:",
+        "container already exists",
+      ].join("\n")
+    )
+  })
+
+  it("renders the diagnostic even when both output streams are blank", () => {
+    const result = failedCommandWithDiagnostic({
+      diagnostic: "unit web — inspect with: journalctl -xeu web",
+      message: "restart failed",
+      result: execResult({ stderr: "", stdout: "" }),
+    })
+    expect(result.error?.message).toBe(
+      "restart failed (exit code 1)\nunit web — inspect with: journalctl -xeu web"
+    )
+  })
+
+  it("masks secrets in the diagnostic block too", () => {
+    const result = failedCommandWithDiagnostic({
+      diagnostic: "journal: connecting with password=s3cr3t",
+      message: "restart failed",
+      result: execResult({ stderr: "" }),
+      secrets: ["s3cr3t"],
+    })
+    const error = asCommandError(result.error)
+    expect(error.message).not.toContain("s3cr3t")
+    expect(error.message).toContain("[REDACTED]")
+  })
+
+  it("matches failedCommand when no diagnostic is supplied", () => {
+    const withoutDiagnostic = failedCommandWithDiagnostic({
+      diagnostic: null,
+      message: "cmd failed",
+      result: execResult({ stderr: "detail" }),
+    })
+    expect(withoutDiagnostic.error?.message).toBe(
+      failedCommand("cmd failed", execResult({ stderr: "detail" })).error?.message
+    )
   })
 })
 

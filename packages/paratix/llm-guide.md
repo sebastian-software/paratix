@@ -559,7 +559,9 @@ function myCustomModule(configPath: string, content: string): Module {
 ### Key rules for custom modules
 
 - Always check `if (!ssh) return NEEDS_APPLY` in check and return `failed("...")` with a useful message in apply.
-- Prefer `failedCommand("...", result)` when you used `ssh.exec(..., { ignoreExitCode: true })` and want stdout/stderr preserved for central runner output.
+- Prefer `failedCommand("...", result)` when you used `ssh.exec(..., { ignoreExitCode: true })` and want stdout/stderr preserved for central runner output. It carries the first few non-empty output lines (bounded by a line and byte budget) so multi-line diagnostics such as systemd's `See "journalctl -xeu <unit>"` hint are not dropped; the full streams stay on `CommandError.fullStderr`/`fullStdout` for `--verbose`.
+- Use `failedCommandWithDiagnostic({ ... })` when the failing command's own output does not name the cause and a follow-up probe supplied it. Keep such probes best-effort: any problem in the probe must yield no diagnostic rather than a worse failure.
+- To restart a systemd unit, use `restartSystemdUnit({ ... })` from `modules/systemctlRestart.js` instead of calling `systemctl restart` directly. It returns `null` on success and, on failure, attaches the unit name plus a bounded journal excerpt scoped to that attempt.
 - Return `NEEDS_APPLY` (the exported constant), never the string literal `"needs-apply"`.
 - `ModuleResult.status` must be one of: `"changed"`, `"failed"`, `"ok"`, `"skipped"`.
 - Optionally return `ModuleResult.detail` with a short single-line reason; the runner appends it to the step line. Use it to say what a `changed` step actually did, and leave it unset when the step did no work. See [Status Detail on Changed Steps](#status-detail-on-changed-steps).
@@ -663,6 +665,10 @@ export const nginxRecipe = recipe(
 - Modules run in order; execution stops on first `"failed"` status.
 - `meta.env(...)` values propagate from one module to all subsequent ones within the recipe and resolve lazily when later modules or templates consume them.
 - If any module reports `"changed"`, the `signals` array fires after all modules complete.
+- Signals follow the same failure rule as modules: a failed signal stops the remaining signals of
+  that list, and the recipe or run status becomes `"failed"`. There is no `continueOnError`. Put
+  restarts that must all be attempted independently into separate signal lists. See
+  [ADR-0006](../../docs/adr/0006-signal-lists-stop-at-the-first-failed-signal.md).
 - `signals.flush()` can be used inside the same scope to execute currently pending signals early.
 - Recipes can be nested: include a recipe in another recipe's module list.
 

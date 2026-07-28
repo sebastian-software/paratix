@@ -1381,7 +1381,7 @@ describe("runSignals stats tracking", () => {
     expect(successSignal.apply).toHaveBeenCalledOnce()
   })
 
-  it("does not propagate env meta from a failed signal to following signals", async () => {
+  it("stops at a failed signal and does not publish its env meta", async () => {
     const { runSignalModules } = await import("../src/signalOrchestration.js")
 
     const signalSteps: Array<{ env: Record<string, unknown>; status: string }> = []
@@ -1394,13 +1394,8 @@ describe("runSignals stats tracking", () => {
       name: "failing-signal",
     }
 
-    let followingSignalLeakedValue: unknown = "NOT_SET"
     const followingSignal: Module = {
-      apply: vi.fn().mockImplementation(async (_ssh, environment) => {
-        await Promise.resolve()
-        followingSignalLeakedValue = environment.LEAKED
-        return { status: "changed" } satisfies ModuleResult
-      }),
+      apply: vi.fn().mockResolvedValue({ status: "changed" } satisfies ModuleResult),
       check: vi.fn().mockResolvedValue("needs-apply"),
       name: "following-signal",
     }
@@ -1417,11 +1412,64 @@ describe("runSignals stats tracking", () => {
 
     expect(status).toBe("failed")
     expect(failingSignal.apply).toHaveBeenCalledOnce()
-    expect(followingSignal.apply).toHaveBeenCalledOnce()
-    expect(followingSignalLeakedValue).toBeUndefined()
-    expect(signalSteps).toHaveLength(2)
+    expect(followingSignal.apply).not.toHaveBeenCalled()
+    expect(signalSteps).toHaveLength(1)
     expect(signalSteps[0]?.status).toBe("failed")
     expect(signalSteps[0]?.env.LEAKED).toBeUndefined()
+  })
+
+  it("stops at a throwing signal instead of running the remaining ones", async () => {
+    const { runSignalModules } = await import("../src/signalOrchestration.js")
+
+    const throwingSignal: Module = {
+      apply: vi.fn().mockRejectedValue(new Error("signal exploded")),
+      check: vi.fn().mockResolvedValue("needs-apply"),
+      name: "throwing-signal",
+    }
+    const followingSignal: Module = {
+      apply: vi.fn().mockResolvedValue({ status: "changed" } satisfies ModuleResult),
+      check: vi.fn().mockResolvedValue("needs-apply"),
+      name: "following-signal",
+    }
+
+    const status = await runSignalModules({
+      environment: {},
+      signals: [throwingSignal, followingSignal],
+      ssh: null,
+    })
+
+    expect(status).toBe("failed")
+    expect(followingSignal.apply).not.toHaveBeenCalled()
+  })
+
+  it("scopes the abort to the failing list, so a separate list still runs", async () => {
+    const { runSignalModules } = await import("../src/signalOrchestration.js")
+
+    const failingSignal: Module = {
+      apply: vi.fn().mockResolvedValue({ status: "failed" } satisfies ModuleResult),
+      check: vi.fn().mockResolvedValue("needs-apply"),
+      name: "failing-signal",
+    }
+    const laterListSignal: Module = {
+      apply: vi.fn().mockResolvedValue({ status: "changed" } satisfies ModuleResult),
+      check: vi.fn().mockResolvedValue("needs-apply"),
+      name: "later-list-signal",
+    }
+
+    const firstStatus = await runSignalModules({
+      environment: {},
+      signals: [failingSignal],
+      ssh: null,
+    })
+    const secondStatus = await runSignalModules({
+      environment: {},
+      signals: [laterListSignal],
+      ssh: null,
+    })
+
+    expect(firstStatus).toBe("failed")
+    expect(secondStatus).toBe("changed")
+    expect(laterListSignal.apply).toHaveBeenCalledOnce()
   })
 })
 
