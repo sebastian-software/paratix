@@ -34,7 +34,7 @@ type ConditionalApplyState = {
 type ConditionalRunContext = {
   diff: boolean
   dryRun: boolean
-  onChildStep?: ModuleApplyOptions["onChildStep"]
+  onChildStep?: NonNullable<ModuleApplyOptions["onChildStep"]>
   preserveControlPlaneMeta: boolean
   shutdownSignal: () => NodeJS.Signals | null
   ssh: null | SshConnection
@@ -112,7 +112,7 @@ async function mergeConditionalApplyState(
 
 async function notifyConditionalChildStep(parameters: {
   environment: Environment
-  onChildStep?: ModuleApplyOptions["onChildStep"]
+  onChildStep?: NonNullable<ModuleApplyOptions["onChildStep"]>
   result: ModuleResult
 }): Promise<void> {
   if (parameters.onChildStep == null) return
@@ -126,7 +126,7 @@ async function notifyConditionalChildStep(parameters: {
 }
 
 async function processConditionalApplyResult(parameters: {
-  onChildStep?: ModuleApplyOptions["onChildStep"]
+  onChildStep?: NonNullable<ModuleApplyOptions["onChildStep"]>
   preserveControlPlaneMeta: boolean
   result: ModuleResult
   state: ConditionalApplyState
@@ -170,8 +170,8 @@ export async function applyConditionalModules(parameters: {
   environment: Environment
   modules: Module[]
   name: string
-  onChildStep?: ModuleApplyOptions["onChildStep"]
-  shutdownSignal?: ModuleApplyOptions["shutdownSignal"]
+  onChildStep?: NonNullable<ModuleApplyOptions["onChildStep"]>
+  shutdownSignal?: NonNullable<ModuleApplyOptions["shutdownSignal"]>
   ssh: null | SshConnection
   verbose?: boolean
 }): Promise<ModuleResult> {
@@ -186,8 +186,8 @@ async function runConditionalModuleLoop(parameters: {
   dryRun?: boolean
   environment: Environment
   modules: Module[]
-  onChildStep?: ModuleApplyOptions["onChildStep"]
-  shutdownSignal?: ModuleApplyOptions["shutdownSignal"]
+  onChildStep?: NonNullable<ModuleApplyOptions["onChildStep"]>
+  shutdownSignal?: NonNullable<ModuleApplyOptions["shutdownSignal"]>
   ssh: null | SshConnection
   verbose?: boolean
 }): Promise<ModuleResult> {

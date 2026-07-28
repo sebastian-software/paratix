@@ -311,7 +311,6 @@ describe("withRegisteredSecrets", () => {
     // failing the second call.
     // R-0000583: secrets must be at least 8 characters or the sink silently
     // drops them and Map.set is never called, breaking this spy setup.
-    // eslint-disable-next-line @typescript-eslint/unbound-method -- bound to Map instance via call() below
     const originalSet = Map.prototype.set
     const setSpy = vi
       .spyOn(Map.prototype, "set")
