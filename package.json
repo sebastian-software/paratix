@@ -36,12 +36,13 @@
   "devDependencies": {
     "@cspell/dict-de-de": "^4.1.2",
     "@types/node": "24.13.3",
+    "@typescript/native": "npm:typescript@^7.0.2",
     "concurrently": "^10.0.4",
     "eslint": "^10.8.0",
     "eslint-config-setup": "^0.5.2",
     "jiti": "^2.7.0",
     "oxlint": "^1.76.0",
     "prettier": "^3.9.6",
-    "typescript": "^6.0.3"
+    "typescript": "npm:@typescript/typescript6@^6.0.2"
   }
 }
