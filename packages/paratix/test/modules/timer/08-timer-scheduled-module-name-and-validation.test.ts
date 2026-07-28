@@ -125,6 +125,77 @@ describe("timer.scheduled — module name and validation", () => {
     ).toThrow(/must not contain newlines/v)
   })
 
+  it("throws when onFailure is an empty array", () => {
+    expect(() =>
+      timer.scheduled("backup", {
+        exec: "/usr/local/bin/backup",
+        onCalendar: "daily",
+        onFailure: [],
+      })
+    ).toThrow(/at least one entry/v)
+  })
+
+  it("throws when an onFailure entry is blank", () => {
+    expect(() =>
+      timer.scheduled("backup", {
+        exec: "/usr/local/bin/backup",
+        onCalendar: "daily",
+        onFailure: "   ",
+      })
+    ).toThrow(/must not be empty/v)
+  })
+
+  it("throws when an onFailure entry contains a newline", () => {
+    expect(() =>
+      timer.scheduled("backup", {
+        exec: "/usr/local/bin/backup",
+        onCalendar: "daily",
+        onFailure: ["notify.service\nExecStart=/bin/sh"],
+      })
+    ).toThrow(/must not contain newlines/v)
+  })
+
+  it("throws when an onFailure entry contains a comment marker", () => {
+    expect(() =>
+      timer.scheduled("backup", {
+        exec: "/usr/local/bin/backup",
+        onCalendar: "daily",
+        onFailure: "notify.service#comment",
+      })
+    ).toThrow(/onFailure entry must match/v)
+  })
+
+  it("throws when an onFailure entry contains whitespace", () => {
+    expect(() =>
+      timer.scheduled("backup", {
+        exec: "/usr/local/bin/backup",
+        onCalendar: "daily",
+        onFailure: "a.service b.service",
+      })
+    ).toThrow(/onFailure entry must match/v)
+  })
+
+  it("accepts an onFailure entry with a specifier", () => {
+    expect(() =>
+      timer.scheduled("backup", {
+        exec: "/usr/local/bin/backup",
+        onCalendar: "daily",
+        onFailure: "notify@%n.service",
+      })
+    ).not.toThrow()
+  })
+
+  it("does not validate onFailure when state is absent", () => {
+    expect(() =>
+      timer.scheduled("backup", {
+        exec: "/usr/local/bin/backup",
+        onCalendar: "daily",
+        onFailure: "not a unit#name",
+        state: "absent",
+      })
+    ).not.toThrow()
+  })
+
   it("throws when description contains a newline", () => {
     expect(() =>
       timer.scheduled("backup", {

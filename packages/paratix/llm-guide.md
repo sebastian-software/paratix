@@ -457,10 +457,10 @@ rsync SSH process and does not depend on a local `known_hosts` entry.
 
 ### `timer`
 
-| Method            | Signature                                                                                                                                                                                                                                                                                                                             | Idempotent |
-| ----------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------- |
-| `timer.scheduled` | `(name: string, options: { accuracySec?: number \| string; description?: string; environment?: Record<string, string>; exec: string; group?: string; onCalendar: string \| string[]; persistent?: boolean; randomizedDelaySec?: number \| string; state?: "absent" \| "present"; user?: string; workingDirectory?: string }): Module` | Yes        |
-| `timer.absent`    | `(name: string): Module`                                                                                                                                                                                                                                                                                                              | Yes        |
+| Method            | Signature                                                                                                                                                                                                                                                                                                                                                             | Idempotent |
+| ----------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------- |
+| `timer.scheduled` | `(name: string, options: { accuracySec?: number \| string; description?: string; environment?: Record<string, string>; exec: string; group?: string; onCalendar: string \| string[]; onFailure?: string \| string[]; persistent?: boolean; randomizedDelaySec?: number \| string; state?: "absent" \| "present"; user?: string; workingDirectory?: string }): Module` | Yes        |
+| `timer.absent`    | `(name: string): Module`                                                                                                                                                                                                                                                                                                                                              | Yes        |
 
 `timer.absent(name)` is the dedicated uninstall variant: it disables and stops
 the timer, removes both unit files, and reloads systemd, without requiring
@@ -488,6 +488,26 @@ timer.scheduled("cleanup", {
 
 timer.absent("legacy-task")
 ```
+
+Use `onFailure` to attach a notification unit, so an unattended job that starts
+failing does not stay silent until someone reads journald. Each entry becomes
+one `OnFailure=` line in the `[Unit]` section of the generated `.service`, and
+systemd specifiers are passed through unescaped, so `%n` resolves to the failing
+unit's name:
+
+```typescript
+timer.scheduled("restic-backup", {
+  exec: "/usr/local/bin/restic-backup",
+  onCalendar: "*-*-* 02:30:00",
+  onFailure: "notify@%n.service",
+})
+```
+
+The referenced handler unit is yours to provide, for example as a
+`notify@.service` template via `systemd.unit`. Entries are restricted to
+systemd unit-name characters plus `%`; a value containing whitespace, `#` or a
+line break is rejected. For anything the option cannot express, write the unit
+yourself with `systemd.unit`.
 
 ### `ufw`
 
