@@ -72,8 +72,7 @@ type ExecuteModulesParameters = {
 }
 
 type RecipeLoopStepResult =
-  | { kind: "break"; state: RecipeState }
-  | { kind: "continue"; state: RecipeState }
+  { kind: "break"; state: RecipeState } | { kind: "continue"; state: RecipeState }
 
 const INTERRUPTED_BEFORE_APPLY = Symbol("recipe-interrupted-before-apply")
 

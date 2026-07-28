@@ -49,8 +49,7 @@ const SSHD_CONFIG_FILE_MUTEX = "etc-ssh-sshd-config-mutex"
 type SshdSocketUnit = "ssh.socket" | "sshd.socket"
 
 type SshSocketState =
-  | { active: boolean; enabled: boolean; exists: true; unit: SshdSocketUnit }
-  | { exists: false }
+  { active: boolean; enabled: boolean; exists: true; unit: SshdSocketUnit } | { exists: false }
 
 // Resolution order mirrors `resolveSshServiceUnit`: probe the unit name
 // commonly used by the matching service unit first, then fall back. Keep
@@ -1218,9 +1217,7 @@ async function restartSshdIfNotAlreadyOnOriginalPort(
 // `probe-failed` carries the probe error message so the caller can surface
 // a single, structured warning instead of silently re-issuing a restart.
 type ProbeAlreadyOnOriginalPortResult =
-  | { kind: "matches" }
-  | { kind: "mismatches" }
-  | { kind: "probe-failed"; message: string }
+  { kind: "matches" } | { kind: "mismatches" } | { kind: "probe-failed"; message: string }
 
 async function probeAlreadyOnOriginalPort(
   ssh: SshConnection,

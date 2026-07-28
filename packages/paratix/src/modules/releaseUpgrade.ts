@@ -67,8 +67,7 @@ type ReleaseUpgradeOptions = {
 }
 
 type DebianCurrentCodenameResult =
-  | { codename: string; status: "ok" }
-  | { failure: ModuleResult; status: "failed" }
+  { codename: string; status: "ok" } | { failure: ModuleResult; status: "failed" }
 
 /**
  * Detect the Linux distribution of the remote host by reading

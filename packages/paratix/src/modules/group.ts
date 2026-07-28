@@ -64,9 +64,7 @@ async function handleFailedGroupadd(input: {
 }
 
 type GroupLookupResult =
-  | { failure: ModuleResult; kind: "error" }
-  | { gid: string; kind: "found" }
-  | { kind: "missing" }
+  { failure: ModuleResult; kind: "error" } | { gid: string; kind: "found" } | { kind: "missing" }
 
 function failCheckWithLookupError(
   name: string,

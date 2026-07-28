@@ -1083,12 +1083,10 @@ type RouteMutationSnapshot = {
 }
 
 type LiveRouteSnapshotOutcome =
-  | { failure: ModuleResult; snapshot: null }
-  | { failure: null; snapshot: LiveRouteSnapshot }
+  { failure: ModuleResult; snapshot: null } | { failure: null; snapshot: LiveRouteSnapshot }
 
 type RouteMutationSnapshotOutcome =
-  | { failure: ModuleResult; snapshot: null }
-  | { failure: null; snapshot: RouteMutationSnapshot }
+  { failure: ModuleResult; snapshot: null } | { failure: null; snapshot: RouteMutationSnapshot }
 
 function routeIpFamily(parameters: { destination: string; gateway: string }): string {
   const familySource =
@@ -1292,8 +1290,7 @@ async function ensureRouteDropinDirectory(
 
 /** Result of an apply step that may or may not have mutated host state. */
 type RouteApplyOutcome =
-  | { changed: boolean; failure: null }
-  | { changed: false; failure: ModuleResult }
+  { changed: boolean; failure: null } | { changed: false; failure: ModuleResult }
 
 type LiveRouteDeleteOutcome =
   | { changed: false; failure: ModuleResult; snapshot: null }
@@ -1601,8 +1598,7 @@ async function createHostsFileWithSymlinkGuard(
  * decide between create and overwrite.
  */
 type ComputedHostsContent =
-  | { changed: false }
-  | { changed: true; existed: boolean; newContent: string }
+  { changed: false } | { changed: true; existed: boolean; newContent: string }
 
 /**
  * Compute the prospective `/etc/hosts` content for a `state: "present"`

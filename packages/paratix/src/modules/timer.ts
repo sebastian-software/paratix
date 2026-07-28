@@ -619,8 +619,7 @@ async function restoreTimerActivationForAbsent(
 //     the diagnostic verbatim without an activation rollback that could
 //     itself fail and obscure the real cause.
 type DisableAbsentFailure =
-  | { kind: "disable"; result: ModuleResult }
-  | { kind: "probe"; result: ModuleResult }
+  { kind: "disable"; result: ModuleResult } | { kind: "probe"; result: ModuleResult }
 
 async function disableTimerForAbsent(
   ssh: SshConnection,

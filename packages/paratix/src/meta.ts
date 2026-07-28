@@ -211,6 +211,12 @@ export function assertValidModuleMetaEntry(entry: unknown): asserts entry is Mod
     }
     case SYSTEM_HOST_KIND: {
       assertValidSystemHostMetaEntry(entry)
+      // The next case body is also just a return, which makes oxlint read this
+      // one as redundant; ESLint own no-useless-return does not flag it.
+      // Dropping it would turn an explicit exit into an implicit switch
+      // fallthrough, and perfectionist/sort-switch-case rules out reordering
+      // the cases to avoid that shape.
+      // oxlint-disable-next-line no-useless-return
       return
     }
     case SYSTEM_REBOOT_KIND: {

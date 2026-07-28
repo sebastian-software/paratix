@@ -32,6 +32,11 @@ const eslintConfig: Linter.Config[] = [
       // false-positives are expected here.
       "@typescript-eslint/no-unsafe-argument": "off",
       "@typescript-eslint/no-unsafe-type-assertion": "off",
+      // Same origin: assertions reference methods of those mock objects
+      // detached from their receiver (`expect(mock.method).toHaveBeenCalled()`).
+      // The rule guards against losing `this`, which a mock that never uses
+      // `this` cannot lose.
+      "@typescript-eslint/unbound-method": "off",
       "node/no-unsupported-features/node-builtins": "off",
       "security/detect-non-literal-fs-filename": "off",
     },

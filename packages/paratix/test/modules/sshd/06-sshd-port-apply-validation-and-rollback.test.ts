@@ -246,8 +246,7 @@ function isSetupNoiseCommand(command: string): boolean {
 // existing tests can describe their domain-call sequence without counting the
 // new mutex acquire/release commands.
 type ScriptedExecStep =
-  | { code: number; stderr?: string; stdout?: string }
-  | { kind: "reject"; reason: Error }
+  { code: number; stderr?: string; stdout?: string } | { kind: "reject"; reason: Error }
 
 type ScriptedExecHarness = {
   assertConsumed: () => void

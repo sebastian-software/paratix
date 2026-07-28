@@ -293,7 +293,6 @@ async function runInstallAndVerify(parameters: {
  * pkg.update("2024-01-15")
  * pkg.upgrade("2024-01-15")
  */
-// eslint-disable-next-line unicorn/prevent-abbreviations -- `package` is a JS reserved word; re-exported as `package` in index.ts
 export const pkg = {
   /**
    * Ensure the given packages are not installed.

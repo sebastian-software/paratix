@@ -299,8 +299,7 @@ function stringifyCause(cause: unknown, secretList: string[]): string {
 function stringifyObjectCause(cause: object, secretList: string[]): string {
   try {
     const serialized = JSON.stringify(normalizeObjectCause(cause, secretList, new WeakSet())) as
-      | string
-      | undefined
+      string | undefined
     return serialized ?? Object.prototype.toString.call(cause)
   } catch {
     return Object.prototype.toString.call(cause)

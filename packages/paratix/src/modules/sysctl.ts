@@ -340,9 +340,7 @@ type AbsentStateInput = {
  * before the rm when the snapshot is uncertain.
  */
 type PersistenceFileSnapshot =
-  | { content: string; kind: "captured" }
-  | { kind: "failed"; reason: string }
-  | { kind: "missing" }
+  { content: string; kind: "captured" } | { kind: "failed"; reason: string } | { kind: "missing" }
 
 /**
  * Capture the current content of the sysctl persistence file so the absent

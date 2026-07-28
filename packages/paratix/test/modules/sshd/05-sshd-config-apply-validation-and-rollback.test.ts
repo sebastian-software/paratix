@@ -131,8 +131,7 @@ function isMutexBookkeepingCommand05(command: string): boolean {
 }
 
 type ScriptedExecStep05 =
-  | { code: number; stderr?: string; stdout?: string }
-  | { kind: "reject"; reason: Error }
+  { code: number; stderr?: string; stdout?: string } | { kind: "reject"; reason: Error }
 
 type ScriptedExecHarness05 = {
   assertConsumed: () => void

@@ -354,9 +354,7 @@ async function passwdAttributesMatch(
 const TOOLCHAIN_ERROR = "toolchain-error" as const
 
 type ShadowHashCompareResult =
-  | { failure: ModuleResult; kind: typeof TOOLCHAIN_ERROR }
-  | { kind: "match" }
-  | { kind: "mismatch" }
+  { failure: ModuleResult; kind: typeof TOOLCHAIN_ERROR } | { kind: "match" } | { kind: "mismatch" }
 
 async function shadowHashMatches(
   ssh: SshConnection,
@@ -428,9 +426,7 @@ type UserMutationContext = {
 }
 
 type UserExistenceProbe =
-  | { kind: "exists" }
-  | { kind: "failure"; result: ModuleResult }
-  | { kind: "missing" }
+  { kind: "exists" } | { kind: "failure"; result: ModuleResult } | { kind: "missing" }
 
 async function probeUserExists(
   ssh: SshConnection,
@@ -450,9 +446,7 @@ async function probeUserExists(
 }
 
 type UserMutationOutcome =
-  | { kind: "changed" }
-  | { kind: "failed"; result: ModuleResult }
-  | { kind: "noop" }
+  { kind: "changed" } | { kind: "failed"; result: ModuleResult } | { kind: "noop" }
 
 /**
  * Run `useradd` or `usermod` to bring the user account into the desired state.
@@ -492,9 +486,7 @@ async function applyUserMutation(context: UserMutationContext): Promise<UserMuta
 // the regular match/mismatch verdict so check phase can surface a structured
 // failure instead of falsely returning `needs-apply`.
 type AttributesMatchOutcome =
-  | { failure: ModuleResult; kind: typeof TOOLCHAIN_ERROR }
-  | { kind: "match" }
-  | { kind: "mismatch" }
+  { failure: ModuleResult; kind: typeof TOOLCHAIN_ERROR } | { kind: "match" } | { kind: "mismatch" }
 
 async function attributesMatch(
   ssh: SshConnection,
@@ -685,9 +677,7 @@ async function ensureHomeMode(
 }
 
 type PresentMutationStep =
-  | { failure: ModuleResult; kind: "failed" }
-  | { kind: "changed" }
-  | { kind: "noop" }
+  { failure: ModuleResult; kind: "failed" } | { kind: "changed" } | { kind: "noop" }
 
 async function runUserMutationStep(
   ssh: SshConnection,
