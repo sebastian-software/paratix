@@ -94,9 +94,14 @@ Each dated call must have its own file. A call whose marker is missing after a s
 
 ## A Quadlet container cannot be replaced
 
-**Symptom:** A `quadlet.updateImage` step fails with `systemctl restart failed (exit code 1)`. The
-attached journal excerpt names the real cause, for example `container <id> has dependent containers
-which must be removed before it` or `container already exists`.
+**Symptom:** A `quadlet.container` or `quadlet.updateImage` step fails with
+`container '<name>' already exists and is not owned by unit '<unit>'`, naming the marker that proved
+foreign ownership — a Compose project label or a `PODMAN_SYSTEMD_UNIT` of another unit.
+
+Where that ownership marker is absent, the step instead fails later with
+`systemctl restart failed (exit code 1)`, and the attached journal excerpt names the real cause, for
+example `container <id> has dependent containers which must be removed before it` or
+`container already exists`.
 
 **Likely cause:** A container of that name already exists on the host and was not created by this
 Quadlet unit — typically a leftover from a Compose-based deployment during a migration, or a
@@ -139,5 +144,11 @@ sudo podman inspect --format '{{.Name}} {{range $net, $conf := .NetworkSettings.
 A stack whose containers span two networks is the split state described in issue #149: since a
 failed signal now stops the remaining signals of its list, a partial rollout no longer produces it,
 but a host that was left in that state by an older version still needs the manual repair above.
+
+**Detecting it before it bites:** a plain `--dry-run` now reports the same conflict from
+`quadlet.container`, so a migration can be checked against the host before anything is applied.
+The check only fires when the leftover container carries a Compose project label or another unit's
+`PODMAN_SYSTEMD_UNIT`; a container started by hand with no such metadata is not detected and still
+surfaces through the journal excerpt above.
 
 [Back to the user guide](./README.md)

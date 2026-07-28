@@ -1,9 +1,20 @@
-import { failed, failedCommand } from "../moduleFailure.js"
+import { failed } from "../moduleFailure.js"
 import { shellQuote } from "../ssh.js"
-import { type Module, type ModuleResult, NEEDS_APPLY, type SshConnection } from "../types.js"
+import {
+  type Environment,
+  type Module,
+  type ModuleApplyOptions,
+  type ModuleResult,
+  NEEDS_APPLY,
+  type SshConnection,
+} from "../types.js"
 import { buildUnifiedDiff } from "./diffHelpers.js"
 import { sha256String } from "./fileHelpers.js"
 import { hasFlag, setVersionedFlag } from "./moduleHelpers.js"
+import {
+  guardQuadletContainerConflict,
+  resolveQuadletContainerName,
+} from "./quadletConflictGuard.js"
 import { applyQuadletFile, checkQuadletFile } from "./quadletFileHelpers.js"
 import {
   buildQuadletContainerLines,
@@ -15,14 +26,10 @@ import {
   getQuadletContainerServiceName,
   type QuadletContainerOptions,
   type QuadletImageUpdateOptions,
-  quadletPullOutputIndicatesChange,
   renderQuadletSection,
 } from "./quadletHelpers.js"
-import {
-  buildQuadletImageInspectCommand,
-  formatQuadletImageIdentifierDetail,
-  readQuadletImageIdentifierFromInspectOutput,
-} from "./quadletImageInspectHelpers.js"
+import { buildQuadletImageInspectCommand } from "./quadletImageInspectHelpers.js"
+import { applyQuadletImageUpdate } from "./quadletImageUpdateFlow.js"
 import {
   generateNetworkQuadlet,
   getQuadletNetworkFilePath,
@@ -33,7 +40,6 @@ import {
   validateQuadletImageValue,
   validateQuadletName,
 } from "./quadletValidationHelpers.js"
-import { restartSystemdUnit } from "./systemctlRestart.js"
 
 const QUADLET_RELOAD_HASH_LENGTH = 16
 
@@ -61,119 +67,6 @@ function generateContainerQuadlet(options: QuadletContainerOptions): string {
     buildQuadletInstallSection(options),
   ]
   return sections.join("\n").trimEnd()
-}
-
-type QuadletImageUpdateParameters = {
-  image: string
-  inspectCommand: string
-  name: string
-  pullCommand: string
-  serviceName: string
-  ssh: SshConnection
-}
-
-async function inspectQuadletImageId(parameters: {
-  image: string
-  inspectCommand: string
-  name: string
-  ssh: SshConnection
-}): Promise<ModuleResult | string> {
-  const inspectResult = await parameters.ssh.exec(parameters.inspectCommand, {
-    ignoreExitCode: true,
-    silent: true,
-  })
-  if (inspectResult.code !== 0) {
-    return failedCommand(
-      `[quadlet.updateImage: ${parameters.name}] podman image inspect failed`,
-      inspectResult
-    )
-  }
-
-  const imageId = readQuadletImageIdentifierFromInspectOutput(
-    parameters.image,
-    inspectResult.stdout
-  )
-  if (imageId == null) {
-    return failed(
-      `[quadlet.updateImage: ${parameters.name}] podman image inspect returned no digest or image ID`
-    )
-  }
-  return imageId
-}
-
-async function restartQuadletService(parameters: {
-  imageId: string
-  name: string
-  serviceName: string
-  ssh: SshConnection
-}): Promise<ModuleResult> {
-  const failure = await restartSystemdUnit({
-    failureMessage: `[quadlet.updateImage: ${parameters.name}] systemctl restart failed`,
-    ssh: parameters.ssh,
-    unit: parameters.serviceName,
-  })
-  return (
-    failure ?? {
-      detail: formatQuadletImageIdentifierDetail(parameters.imageId),
-      status: "changed",
-    }
-  )
-}
-
-async function inspectQuadletImageIdBeforePull(
-  parameters: QuadletImageUpdateParameters
-): Promise<null | string> {
-  // Pre-pull lookup: if the image is not present locally, the inspect call
-  // exits non-zero. Treat that as "no previous ID" and rely on the post-pull
-  // inspect to materialise an ID. Uses the same identifier selection as
-  // {@link inspectQuadletImageId} (digest preferred, image ID fallback) so a
-  // direct comparison against the post-pull result is meaningful.
-  const result = await parameters.ssh.exec(parameters.inspectCommand, {
-    ignoreExitCode: true,
-    silent: true,
-  })
-  if (result.code !== 0) return null
-  return readQuadletImageIdentifierFromInspectOutput(parameters.image, result.stdout)
-}
-
-async function applyQuadletImageUpdate(
-  parameters: QuadletImageUpdateParameters
-): Promise<ModuleResult> {
-  // R-0000183: capture the local image ID before pulling so we can detect a
-  // changed image regardless of podman's locale-dependent stdout strings.
-  const previousImageId = await inspectQuadletImageIdBeforePull(parameters)
-
-  const pullResult = await parameters.ssh.exec(parameters.pullCommand, {
-    ignoreExitCode: true,
-    silent: true,
-  })
-  if (pullResult.code !== 0) {
-    return failedCommand(`[quadlet.updateImage: ${parameters.name}] podman pull failed`, pullResult)
-  }
-
-  const imageId = await inspectQuadletImageId(parameters)
-  if (typeof imageId !== "string") return imageId
-
-  // Either: the image was missing entirely before (previousImageId === null)
-  // — pull always changes the local state — or the post-pull ID differs from
-  // the pre-pull ID. Falling back to the legacy output heuristic on a tie
-  // catches the (rare) case where the inspect output cannot be compared but
-  // the pull output indicates a transfer happened.
-  const idChanged =
-    previousImageId == null ||
-    previousImageId !== imageId ||
-    // R-0000569: stderr is now kept separate from stdout, so feed both
-    // streams to the change heuristic. podman emits progress lines on
-    // either channel depending on terminal detection.
-    quadletPullOutputIndicatesChange(pullResult.stdout, pullResult.stderr)
-  if (!idChanged) return { status: "ok" }
-
-  return restartQuadletService({
-    imageId,
-    name: parameters.name,
-    serviceName: parameters.serviceName,
-    ssh: parameters.ssh,
-  })
 }
 
 /**
@@ -259,12 +152,31 @@ export const quadlet = {
     const filePath = getQuadletContainerFilePath(options.name)
     const content = generateContainerQuadlet(options)
     const reloadFlag = buildQuadletReloadFlag("container", options.name, content)
+    const containerName = resolveQuadletContainerName(options)
+    const guardParameters = {
+      containerName,
+      moduleLabel: `quadlet.container: ${options.name}`,
+      unit: options.name,
+    }
 
     return {
-      async _applyDryRun(ssh: null | SshConnection): Promise<ModuleResult> {
+      async _applyDryRun(
+        ssh: null | SshConnection,
+        _environment: Environment,
+        applyOptions?: ModuleApplyOptions
+      ): Promise<ModuleResult> {
         if (!ssh) return { status: "changed" }
-        const diff = await buildQuadletDryRunDiff(ssh, filePath, content)
-        if (diff != null) return { diff, status: "changed" }
+        // `_dryRunBlocker` makes this hook run in every dry run, so the guard
+        // reports a blocking conflict even without `--diff`.
+        const conflict = await guardQuadletContainerConflict(ssh, guardParameters)
+        if (conflict) return conflict
+        // Diff production stays behind `--diff`, exactly as before the guard
+        // existed: the marker above would otherwise add the diff round-trips
+        // to every dry run.
+        if (applyOptions?.diff === true) {
+          const diff = await buildQuadletDryRunDiff(ssh, filePath, content)
+          if (diff != null) return { diff, status: "changed" }
+        }
         // R-0001023: the unit file content already converges, but `apply`
         // also persists a versioned reload flag that drives the next
         // `systemctl daemon-reload`. When that flag is missing the operator
@@ -276,9 +188,18 @@ export const quadlet = {
         if (flagPresent) return { status: "changed" }
         return { _dryRunDetail: "(dry-run, daemon-reload pending)", status: "changed" }
       },
+      // Run `_applyDryRun` in every dry run, not only under `--diff`: the guard
+      // is a run blocker, and a conflict that only surfaces with `--diff` would
+      // let a plain dry run look clean.
+      _dryRunBlocker: true,
       _dryRunDiffProducer: true,
       async apply(ssh: null | SshConnection): Promise<ModuleResult> {
         if (!ssh) return failed(`[quadlet.container: ${options.name}] SSH connection is required`)
+        // Detect a foreign container before writing the unit, so a migration
+        // learns about the blocker at definition time rather than at the first
+        // activation through `service.enabled`.
+        const conflict = await guardQuadletContainerConflict(ssh, guardParameters)
+        if (conflict) return conflict
         const result = await applyQuadletFile({ content, filePath, name: options.name, ssh })
         if (result.status !== "changed") return result
         // R-0000273: surface flag-persist failures (EROFS/EPERM/ENOSPC)
@@ -400,11 +321,13 @@ export const quadlet = {
     const pullCommand = buildQuadletImagePullCommand(options)
     const inspectCommand = buildQuadletImageInspectCommand(options.image)
     const serviceName = getQuadletContainerServiceName(options)
+    const containerName = resolveQuadletContainerName(options)
 
     return {
       async apply(ssh: null | SshConnection): Promise<ModuleResult> {
         if (!ssh) return failed(`[quadlet.updateImage: ${options.name}] SSH connection is required`)
         return applyQuadletImageUpdate({
+          containerName,
           image: options.image,
           inspectCommand,
           name: options.name,

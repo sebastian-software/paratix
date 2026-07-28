@@ -6,6 +6,7 @@ import { net } from "../../src/modules/net.js"
 import { quadlet } from "../../src/modules/quadlet.js"
 import { swap } from "../../src/modules/swap.js"
 import { timer } from "../../src/modules/timer.js"
+import { createQuadletMockSsh } from "../helpers/mockQuadletSsh.js"
 import { createMockSsh } from "../helpers/mockSsh.js"
 
 const emptyEnv = {}
@@ -235,7 +236,7 @@ describe("quadlet.container — dry-run diff", () => {
   })
 
   it("renders a unified diff when the unit file already exists with different content", async () => {
-    const ssh = createMockSsh({
+    const ssh = createQuadletMockSsh({
       [`[ -e '${FILE_PATH}' ]`]: { code: 0 },
       [`cat '${FILE_PATH}'`]: {
         code: 0,
@@ -243,18 +244,18 @@ describe("quadlet.container — dry-run diff", () => {
       },
     })
     const mod = quadlet.container({ image: "docker.io/library/traefik:v3", name: "traefik" })
-    const result = await mod._applyDryRun!(ssh, emptyEnv)
+    const result = await mod._applyDryRun!(ssh, emptyEnv, { diff: true })
     expect(result.status).toBe("changed")
     expect(result.diff).toContain("-Image=docker.io/library/traefik:v2")
     expect(result.diff).toContain("+Image=docker.io/library/traefik:v3")
   })
 
   it("marks the file as new when it does not exist on the remote host", async () => {
-    const ssh = createMockSsh({
+    const ssh = createQuadletMockSsh({
       [`[ -e '${FILE_PATH}' ]`]: { code: 1 },
     })
     const mod = quadlet.container({ image: "docker.io/library/traefik:v3", name: "traefik" })
-    const result = await mod._applyDryRun!(ssh, emptyEnv)
+    const result = await mod._applyDryRun!(ssh, emptyEnv, { diff: true })
     expect(result.diff).toContain("(new file)")
     expect(result.diff).toContain("+Image=docker.io/library/traefik:v3")
   })
@@ -281,7 +282,7 @@ describe("quadlet.container — dry-run diff", () => {
       "[Install]",
       "WantedBy=multi-user.target",
     ].join("\n")
-    const ssh = createMockSsh(
+    const ssh = createQuadletMockSsh(
       {
         // File exists and content already converges.
         [`[ -e '${FILE_PATH}' ]`]: { code: 0 },
@@ -321,7 +322,7 @@ describe("quadlet.container — dry-run diff", () => {
       "[Install]",
       "WantedBy=multi-user.target",
     ].join("\n")
-    const ssh = createMockSsh(
+    const ssh = createQuadletMockSsh(
       {
         [`[ -e '${FILE_PATH}' ]`]: { code: 0 },
         [`cat '${FILE_PATH}'`]: { code: 0, stdout: desired },

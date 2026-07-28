@@ -421,6 +421,28 @@ Bei einem tatsaechlich aktualisierten Image erscheint hinter `changed` zudem
 bevorzugt der neue Registry-Digest in Klammern, mit lokaler Image-ID als
 Fallback wenn kein `RepoDigest` vorhanden ist.
 
+**Conflict Guard:** Beide Module pruefen vor der eigentlichen Arbeit, ob ein
+Container mit dem verwalteten Namen bereits existiert und _nicht_ zu dieser Unit
+gehoert. Podman kann einen fremden Container nicht ersetzen; ohne diese Pruefung
+scheiterte der Rollout erst spaeter mit `systemctl restart failed (exit code 1)`
+oder blieb bei unveraendertem Image sogar unbemerkt.
+
+Der verwaltete Containername ist `containerName ?? systemd-<name>` — dieselbe
+Konvention, die Quadlet selbst verwendet. Wird `containerName` bei
+`quadlet.container(...)` gesetzt, gehoert derselbe Wert auch in
+`quadlet.updateImage(...)`.
+
+Gemeldet wird ein Konflikt nur bei **positiver** Evidenz: ein Compose-Projekt-Label
+(`com.docker.compose.project` oder `io.podman.compose.project`, also der typische
+Rest einer Compose-zu-Quadlet-Migration) oder ein `PODMAN_SYSTEMD_UNIT`, das eine
+andere Unit nennt. Fehlt jede Kennzeichnung, laeuft der Apply unveraendert weiter —
+ein Fehlalarm waere teurer als eine Erkennungsluecke. Der eigene Container der Unit
+gilt nie als Konflikt: `PODMAN_SYSTEMD_UNIT` enthaelt den vollen Unit-Namen (`%n`),
+beide Seiten werden vor dem Vergleich normalisiert.
+
+`quadlet.container` traegt `_dryRunBlocker: true`, der Konflikt erscheint also
+bereits in einem normalen `--dry-run` ohne `--diff`.
+
 ---
 
 ## compose — Container-Compose-Verwaltung (Docker & Podman)
