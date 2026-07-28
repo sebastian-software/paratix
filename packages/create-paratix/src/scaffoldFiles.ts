@@ -3,14 +3,16 @@ import { dirname, join } from "node:path"
 
 import { formatCliValue } from "./cliFormat.js"
 import { deriveParatixDependencyRange } from "./dependencyRange.js"
+import { createServerTemplate } from "./serverTemplate.js"
 import {
   AUTO_UPGRADES_20_TEMPLATE,
   createAdminNopasswdSudoersContent,
-  createServerTemplate,
+  CSPELL_TEMPLATE,
   ENV_EXAMPLE_TEMPLATE,
   ESLINT_CONFIG_TEMPLATE,
   GITIGNORE_TEMPLATE,
   type InitialUserConfig,
+  PNPM_WORKSPACE_TEMPLATE,
   PRETTIER_IGNORE_TEMPLATE,
   PRETTIER_RC_TEMPLATE,
   TSCONFIG_TEMPLATE,
@@ -103,6 +105,8 @@ function writeSharedScaffoldFiles(projectDirectory: string): void {
   writeManagedScaffoldFile(projectDirectory, ".prettierignore", PRETTIER_IGNORE_TEMPLATE)
   writeManagedScaffoldFile(projectDirectory, "eslint.config.ts", ESLINT_CONFIG_TEMPLATE)
   writeManagedScaffoldFile(projectDirectory, ".env.example", ENV_EXAMPLE_TEMPLATE)
+  writeManagedScaffoldFile(projectDirectory, "pnpm-workspace.yaml", PNPM_WORKSPACE_TEMPLATE)
+  writeManagedScaffoldFile(projectDirectory, "cspell.json", CSPELL_TEMPLATE)
 }
 
 function writeScaffoldSupportFiles(projectDirectory: string, initialUser: InitialUserConfig): void {

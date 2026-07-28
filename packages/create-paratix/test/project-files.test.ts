@@ -14,10 +14,10 @@ import { fileURLToPath, pathToFileURL } from "node:url"
 import { afterEach, beforeEach, describe, expect, it } from "vitest"
 
 import { deriveParatixDependencyRange, writeProjectFiles } from "../src/index.js"
+import { createServerTemplate } from "../src/serverTemplate.js"
 import {
   AUTO_UPGRADES_20_TEMPLATE,
   createAdminNopasswdSudoersContent,
-  createServerTemplate,
   UNATTENDED_UPGRADES_50_TEMPLATE,
 } from "../src/templates.js"
 import {
@@ -389,7 +389,11 @@ describe("writeProjectFiles", () => {
     const content = readFileSync(join(TEST_DIR, "eslint.config.ts"), "utf8")
 
     expect(content).toContain('import { getEslintConfig } from "eslint-config-setup"')
-    expect(content).toContain("export default await getEslintConfig({ node: true })")
+    expect(content).toContain("...(await getEslintConfig({ node: true }))")
+    // JSON files are excluded because the shared config registers JavaScript
+    // rules that ESLint refuses to run against the json/json language, which
+    // aborts the run instead of reporting findings.
+    expect(content).toContain('"**/*.json"')
   })
 
   it("generated eslint config loads through the scaffolded lint toolchain", () => {
@@ -429,7 +433,7 @@ describe("writeProjectFiles", () => {
     const content = readFileSync(join(TEST_DIR, "server.ts"), "utf8")
 
     expect(content).toContain("package as packages")
-    expect(content).toContain("net, package as packages")
+    expect(content).toContain("  package as packages,")
     expect(content).not.toContain("import { apt")
   })
 
@@ -438,15 +442,18 @@ describe("writeProjectFiles", () => {
 
     const content = readFileSync(join(TEST_DIR, "server.ts"), "utf8")
 
-    expect(content).toContain('const adminUser = "paratix";')
-    expect(content).toContain(
-      'const adminPublicKey = "ssh-ed25519 REPLACE_ME_WITH_YOUR_PUBLIC_KEY";'
-    )
-    expect(content).toContain("const FIRST_RUN = isFirstRun();")
+    expect(content).toContain('const adminUser = "paratix"')
+    // Without a key neither the constant nor the ssh import is emitted; both
+    // would sit unused and fail the lint config the scaffold ships.
+    expect(content).not.toContain("const adminPublicKey")
+    expect(content).not.toContain("  ssh,")
+    expect(content).toContain("const FIRST_RUN = isFirstRun()")
     expect(content).toContain('host: "1.2.3.4"')
     expect(content).toContain("user: adminUser")
-    expect(content).toContain("// Add a valid OpenSSH public key before enabling this line:")
-    expect(content).toContain("// ssh.authorizedKeys(adminUser, adminPublicKey),")
+    expect(content).toContain("// To let the admin user log in, add ssh to the paratix/modules")
+    expect(content).toContain(
+      '// ssh.authorizedKeys(adminUser, "ssh-ed25519 AAAA... you@example.com"),'
+    )
     expect(content).not.toContain("      ssh.authorizedKeys(adminUser, adminPublicKey),")
     expect(content).toContain('PasswordAuthentication: "no"')
     expect(content).toContain('PermitRootLogin: "no"')
@@ -462,7 +469,8 @@ describe("writeProjectFiles", () => {
 
     const content = readFileSync(join(TEST_DIR, "server.ts"), "utf8")
 
-    expect(content).toContain(`const adminPublicKey = ${JSON.stringify(TEST_ADMIN_PUBLIC_KEY)};`)
+    expect(content).toContain("const adminPublicKey =")
+    expect(content).toContain(JSON.stringify(TEST_ADMIN_PUBLIC_KEY))
     expect(content).toContain("      ssh.authorizedKeys(adminUser, adminPublicKey),")
     expect(content).not.toContain("// ssh.authorizedKeys(adminUser, adminPublicKey),")
   })
@@ -475,7 +483,7 @@ describe("writeProjectFiles", () => {
 
     const content = readFileSync(join(TEST_DIR, "server.ts"), "utf8")
 
-    expect(content).toContain('const adminUser = "deploy";')
+    expect(content).toContain('const adminUser = "deploy"')
     expect(content).toContain('host: "deploy.example.com"')
     expect(content).toContain("user: adminUser")
     expect(content).toContain('recipe("admin-access"')
@@ -490,8 +498,8 @@ describe("writeProjectFiles", () => {
 
     const content = readFileSync(join(TEST_DIR, "server.ts"), "utf8")
 
-    expect(content).toContain('const adminUser = "deploy";')
-    expect(content).not.toContain('const adminUser = " deploy ";')
+    expect(content).toContain('const adminUser = "deploy"')
+    expect(content).not.toContain('const adminUser = " deploy "')
   })
 
   it("rejects an invalid programmatic admin username before creating files", () => {
@@ -523,8 +531,8 @@ describe("writeProjectFiles", () => {
       initialUser: { kind: "admin", user: initialAdminUser },
     })
 
-    expect(content).toContain(`const adminUser = ${JSON.stringify(initialAdminUser)};`)
-    expect(content).not.toContain(`const adminUser = "${initialAdminUser}";`)
+    expect(content).toContain(`const adminUser = ${JSON.stringify(initialAdminUser)}`)
+    expect(content).not.toContain(`const adminUser = "${initialAdminUser}"`)
   })
 
   it("generated server.ts safely serializes quote characters in the host", () => {
@@ -573,7 +581,8 @@ describe("writeProjectFiles", () => {
 
     const content = readFileSync(join(TEST_DIR, "server.ts"), "utf8")
 
-    expect(content).toContain(`const adminPublicKey = ${JSON.stringify(TEST_ADMIN_PUBLIC_KEY)};`)
+    expect(content).toContain("const adminPublicKey =")
+    expect(content).toContain(JSON.stringify(TEST_ADMIN_PUBLIC_KEY))
     expect(content).not.toContain("REPLACE_ME_WITH_YOUR_PUBLIC_KEY")
   })
 
@@ -584,7 +593,8 @@ describe("writeProjectFiles", () => {
 
     const content = readFileSync(join(TEST_DIR, "server.ts"), "utf8")
 
-    expect(content).toContain(`const adminPublicKey = ${JSON.stringify(TEST_ADMIN_PUBLIC_KEY)};`)
+    expect(content).toContain("const adminPublicKey =")
+    expect(content).toContain(JSON.stringify(TEST_ADMIN_PUBLIC_KEY))
   })
 
   it("generated server.ts keeps first-run host-key checking fail-closed", () => {
@@ -592,7 +602,7 @@ describe("writeProjectFiles", () => {
 
     const content = readFileSync(join(TEST_DIR, "server.ts"), "utf8")
 
-    expect(content).toContain('const strictHostKeyChecking = "yes";')
+    expect(content).toContain('const strictHostKeyChecking = "yes"')
     expect(content).toContain('pass "paratix apply ... --first-run" for the bootstrap run')
     expect(content).toContain("pin expectedHostFingerprint/PublicKey or pre-populate known_hosts")
     expect(content).not.toContain('"accept-new"')
@@ -614,7 +624,7 @@ describe("writeProjectFiles", () => {
 
     const content = readFileSync(join(TEST_DIR, "server.ts"), "utf8")
 
-    expect(content).toContain('const strictHostKeyChecking = "yes";')
+    expect(content).toContain('const strictHostKeyChecking = "yes"')
     expect(content).toContain(`expectedHostFingerprint: ${JSON.stringify(TEST_HOST_FINGERPRINT)}`)
     expect(content).not.toContain(
       'expectedHostFingerprint: "SHA256:REPLACE_ME_WITH_YOUR_HOST_FINGERPRINT"'
@@ -675,14 +685,14 @@ describe("writeProjectFiles", () => {
 
     const content = readFileSync(join(TEST_DIR, "server.ts"), "utf8")
 
-    expect(content).toContain("const FIRST_RUN = isFirstRun();")
-    expect(content).toContain("const sshPorts = FIRST_RUN ? [22] : [2222];")
+    expect(content).toContain("const FIRST_RUN = isFirstRun()")
+    expect(content).toContain("const sshPorts = FIRST_RUN ? [22] : [2222]")
     expect(content).toContain(
-      "const firewallTcpPorts = FIRST_RUN ? [22, 2222, 80, 443] : [2222, 80, 443];"
+      "const firewallTcpPorts = FIRST_RUN ? [22, 2222, 80, 443] : [2222, 80, 443]"
     )
     expect(content).toContain("ports: sshPorts")
     expect(content).toContain('ufw.rule("allow", firewallTcpPorts)')
-    expect(content).toContain('(env) => env["FIRST_RUN"] !== true')
+    expect(content).toContain("(env) => env.FIRST_RUN !== true")
     expect(content).toContain("ufw --force delete allow 22 || true")
     expect(content).toContain("ufw --force delete allow 22/tcp || true")
     expect(content).toContain(
@@ -781,14 +791,14 @@ describe("writeProjectFiles", () => {
 
     const content = readFileSync(join(TEST_DIR, "server.ts"), "utf8")
     const firstRunPortsIndex = content.indexOf(
-      "const firewallTcpPorts = FIRST_RUN ? [22, 2222, 80, 443] : [2222, 80, 443];"
+      "const firewallTcpPorts = FIRST_RUN ? [22, 2222, 80, 443] : [2222, 80, 443]"
     )
     const removeBootstrapRuleIndex = content.indexOf('name: "remove bootstrap ssh firewall rule"')
 
     expect(firstRunPortsIndex).toBeGreaterThanOrEqual(0)
     expect(removeBootstrapRuleIndex).toBeGreaterThanOrEqual(0)
     expect(firstRunPortsIndex).toBeLessThan(removeBootstrapRuleIndex)
-    expect(content).toContain('when(\n        (env) => env["FIRST_RUN"] !== true,')
+    expect(content).toContain("when(\n        (env) => env.FIRST_RUN !== true,")
   })
 
   it("generated server.ts opens firewall port 2222 before applying sshd.port(2222)", () => {
@@ -814,12 +824,12 @@ describe("writeProjectFiles", () => {
 
     expect(content).toContain('host: "203.0.113.10"')
     expect(content).toContain('user: FIRST_RUN ? "root" : adminUser')
-    expect(content).toContain('const adminUser = "paratix";')
-    expect(content).toContain("const FIRST_RUN = isFirstRun();")
+    expect(content).toContain('const adminUser = "paratix"')
+    expect(content).toContain("const FIRST_RUN = isFirstRun()")
     expect(content).toContain("Transitional bootstrap mode:")
     expect(content).toContain('PasswordAuthentication: "no"')
     expect(content).toContain('PermitRootLogin: FIRST_RUN ? "prohibit-password" : "no"')
-    expect(content).toContain('const strictHostKeyChecking = "yes";')
+    expect(content).toContain('const strictHostKeyChecking = "yes"')
     expect(content).not.toContain('"accept-new"')
     expect(content).toContain(
       'expectedHostFingerprint: "SHA256:REPLACE_ME_WITH_YOUR_HOST_FINGERPRINT"'
@@ -946,7 +956,7 @@ describe("writeProjectFiles", () => {
 
     const content = readFileSync(join(TEST_DIR, "server.ts"), "utf8")
 
-    expect(content).toContain('const serverName = "my-server";')
+    expect(content).toContain('const serverName = "my-server"')
     expect(content).toContain("name: serverName")
     expect(content).toContain("env: {")
     expect(content).toContain("FIRST_RUN,")
@@ -1004,7 +1014,7 @@ describe("writeProjectFiles", () => {
     expect(kernelHardeningIndex).toBeLessThan(automaticUpgradesIndex)
     expect(automaticUpgradesIndex).toBeLessThan(firstRunStopIndex)
     expect(content).toContain(
-      'import { firstRun, isFirstRun, recipe, server, when } from "paratix";'
+      'import { firstRun, isFirstRun, recipe, server, when } from "paratix"'
     )
     expect(content).toContain("// Add application and user-facing services below this line.")
   })

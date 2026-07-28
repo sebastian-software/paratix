@@ -341,7 +341,7 @@ describe("dist CLI", () => {
       expect(serverTemplate).toContain(TEST_ADMIN_PUBLIC_KEY)
       expect(serverTemplate).toContain('const adminUser = "deploy"')
       expect(serverTemplate).toContain("import { firstRun, isFirstRun, recipe, server, when }")
-      expect(serverTemplate).toContain("const FIRST_RUN = isFirstRun();")
+      expect(serverTemplate).toContain("const FIRST_RUN = isFirstRun()")
 
       linkGeneratedProjectParatixRuntime(projectDirectory)
       writeFileSync(join(projectDirectory, "server.first-run.ts"), serverTemplate)
