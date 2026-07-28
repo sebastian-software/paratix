@@ -1,6 +1,6 @@
 # Umfassendes Dependency-Update der Renovate Pending Approvals
 
-**Planungsstatus:** Nicht umgesetzt
+**Planungsstatus:** Umgesetzt
 **Quelle:** /effective-flow plan
 **Empfohlener Workflow:** Refactoring (`/effective-flow refactor`)
 
@@ -469,3 +469,40 @@ offenen Punkte mehr und ist damit implementierbar.
 ## Offene Punkte
 
 - Keine offenen Punkte.
+
+## Nachtrag zur Umsetzung
+
+Umgesetzt in fünf Pull Requests: #168 (pnpm), #169 (Laufzeit- und Test-Patches),
+#170 (Lint und Format), #171 (Website), #172 (TypeScript 7).
+
+Fünf Annahmen dieses Plans haben sich dabei als falsch erwiesen. Sie stehen hier,
+damit spätere Leser ihnen nicht aufsitzen.
+
+- **`ignoreDeprecations: "6.0"` war nicht überflüssig.** Die Verifikation in der
+  Planungsphase rief `tsc` gegen die Paket-Configs auf und verfehlte damit den
+  dts-Pfad, den der ursprüngliche Commit im Namen trug. `tsup` setzt dort hart
+  `baseUrl`. Die Unterdrückung liegt jetzt in den beiden tsup-Configs.
+- **TypeScript 7 lehnt `ignoreDeprecations` nicht ab.** 7.0.2 akzeptiert die
+  Option klaglos. Die gegenteilige Behauptung unter „Belegte Breaking Changes"
+  trifft auf den Sprachdienst zu, nicht auf den CLI-Compiler.
+- **Die React-Router-Future-Flags gehören nicht nach v8.** Der Upgrade-Guide
+  beschreibt die Vorbereitung, während man noch auf v7 ist. Auf v8 lehnt der
+  Build alle fünf ab, weil die Verhalten dort Standard sind. Die korrekte
+  Konfiguration ist kein `future`-Block. Die Entscheidung aus dem Plan-Review,
+  alle fünf zu setzen, war damit gegenstandslos.
+- **Der Prettier-Reformat traf TypeScript, nicht Markdown.** Erwartet wurden 133
+  Markdown-Dateien wegen des micromark-Wechsels. Tatsächlich waren es 25 Dateien,
+  davon 23 TypeScript, weil 3.9 mehrzeilige Union-Typaliase zusammenzieht.
+- **Die Teilungsregel für Batch C griff ins Leere.** Sie unterstellte, der
+  Befundberg komme aus `eslint-config-setup` 0.5. Gemessen kamen 27 von 28
+  Befunden aus der transitiven Plugin-Auffrischung, vor allem typescript-eslint
+  8.59.1 auf 8.65.0.
+
+Nicht im Plan vermerkt war außerdem, dass `pnpm update` in pnpm 11 die Range in
+der `package.json` auf die neu aufgelöste Version anhebt. Die Batches B und C
+haben deshalb mehr Manifest-Zeilen verändert, als ihre Beschreibungen
+ankündigten.
+
+Das Alias auf `typescript` ist ein bewusster Zwischenzustand. Sobald
+typescript-eslint und tsup die TypeScript-7.1-API unterstützen, fallen beide
+Einträge wieder zu einer einzelnen `typescript`-Abhängigkeit zusammen.
