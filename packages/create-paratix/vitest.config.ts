@@ -5,7 +5,10 @@ export default defineConfig({
     PACKAGE_DISPLAY_VERSION: JSON.stringify("0.0.0-test"),
   },
   test: {
-    exclude: ["test/postbuild/**/*.test.ts"],
+    // Both suites need their own entry point: postbuild runs against the
+    // packed artefact, integration installs from the registry. Neither belongs
+    // in the default run, which must stay fast and work offline.
+    exclude: ["test/postbuild/**/*.test.ts", "test/integration/**/*.test.ts"],
     include: ["test/**/*.test.ts"],
   },
 })
