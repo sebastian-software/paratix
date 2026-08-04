@@ -3,6 +3,11 @@ import { describe, expect, it, vi } from "vitest"
 import type { ExecResult } from "../../src/types.js"
 
 import { archive } from "../../src/modules/archive.js"
+import {
+  buildMemberTypeProbeScript,
+  buildOwnershipProbeScript,
+  buildSymlinkProbeScript,
+} from "../../src/modules/archiveProbe.js"
 import { createMockSsh as createBaseMockSsh } from "../helpers/mockSsh.js"
 
 const emptyEnv = {}
@@ -11,8 +16,6 @@ const src = "/tmp/app.tar.gz"
 const destination = "/opt/app"
 const alternateDestination = "/opt/app-alt"
 const safeTarListing = "-rw-r--r-- root/root 0 1970-01-01 00:00 app/file"
-const archiveOwnerMemberConcurrencyLimit = 8
-const archiveSymlinkCheckConcurrencyLimit = 8
 
 // Stable hash of `${src}\n${destination}` for marker file naming.
 const srcHash = "2889be4b654d6b7f7922971e7fb3fdf1c5ebd92b9c52462be2683a735c7562ef"
@@ -20,22 +23,30 @@ const marker = `/var/lib/paratix/flags/archive-${srcHash}.sha256`
 const membersMarker = `${marker}.members`
 const archiveSha = "abc123def456"
 const extractedFileMember = { kind: "file", path: `${destination}/app/file` } as const
-const extractedFileTypeProbe = `[ -f '${destination}/app/file' ] && [ ! -L '${destination}/app/file' ]`
+const symlinkProbeCommand = buildSymlinkProbeScript()
+const extractedFileTypeProbe = buildMemberTypeProbeScript()
+const batchedChownCommand = "xargs -0 chown -h -- 'www-data:www-data'"
+const memberTypeMatchResponse = { code: 0, stdout: "" }
+const memberTypeDriftResponse = { code: 0, stdout: `${destination}/app/file\u0000` }
 
-const archiveSymlinkCheckPaths = [
-  "/opt",
-  destination,
-  alternateDestination,
-  `${destination}/app`,
-  `${destination}/app/file`,
-  ...Array.from({ length: 24 }, (_value, index) => `${destination}/app/file-${String(index)}`),
-]
-const archiveCleanupPaths = [
-  "/tmp/paratix-upload.AbCdEfGh",
-  "/tmp/paratix-upload.FAIL1234",
-  "/tmp/paratix-upload.FIRST111",
-  "/tmp/paratix-upload.SECOND22",
-]
+function ownershipProbeCommand(owner: string): string {
+  const [user = "", group = ""] = owner.split(":", 2)
+  return buildOwnershipProbeScript(user, group)
+}
+
+/**
+ * Ownership-probe stub. The remote script only pre-filters, so reporting a path
+ * is always valid: `ownerMatchesStat` re-decides in TypeScript. Tests therefore
+ * report unconditionally and let the production rule produce the verdict.
+ *
+ * @param path - The reported path.
+ * @param stat - The `%U %G %u %g` output to transport.
+ * @returns A probe response reporting that path.
+ */
+function ownershipReport(path: string, stat: string): { code: number; stdout: string } {
+  const fields = stat.trim().split(/\s+/v)
+  return { code: 0, stdout: [path, ...fields].map((field) => `${field}\u0000`).join("") }
+}
 
 // R-0000162: archive.extract now extracts into a paratix-controlled staging
 // directory under the destination via `mktemp -d`, then atomically moves the
@@ -77,14 +88,26 @@ function findGuardedArchiveMkdirCall(calls: string[], path: string): string | un
   )
 }
 
+const archiveCleanupPaths = [
+  "/tmp/paratix-upload.AbCdEfGh",
+  "/tmp/paratix-upload.FAIL1234",
+  "/tmp/paratix-upload.FIRST111",
+  "/tmp/paratix-upload.SECOND22",
+]
+
+function tarListingForMemberPaths(memberPaths: string[]): string {
+  return memberPaths
+    .map((memberPath) => `-rw-r--r-- root/root 0 1970-01-01 00:00 ${memberPath}`)
+    .join("\n")
+}
+
 const archiveApplyResponseStubs: NonNullable<
   Parameters<typeof createBaseMockSsh>[1]
 >["responseStubs"] = [
   { command: archiveMembersMarkerPattern, result: { code: 1, stderr: "cat: No such file" } },
-  ...archiveSymlinkCheckPaths.map((path) => ({
-    command: `test ! -L '${path}'`,
-    result: { code: 0 },
-  })),
+  { command: symlinkProbeCommand, result: { code: 0, stdout: "" } },
+  { command: extractedFileTypeProbe, result: { code: 0, stdout: "" } },
+  { command: batchedChownCommand, result: { code: 0 } },
   {
     command: `[ -d '${destination}' ] && [ ! -L '${destination}' ]`,
     result: { code: 0 },
@@ -117,6 +140,49 @@ const archiveApplyResponseStubs: NonNullable<
   })),
 ]
 
+/**
+ * Report a symlink violation only for the sweep whose payload actually carries
+ * the path. Every sweep issues the identical batched command, so the
+ * transported stdin is the only thing that tells them apart — the exact-match
+ * mock cannot.
+ *
+ * @param mockSsh - The mock connection to patch.
+ * @param memberPath - The member path whose recheck should report a symlink.
+ * @returns A handle exposing how many member-carrying sweeps ran.
+ */
+function stubSymlinkRecheck(mockSsh: MockSsh, memberPath: string): { sweeps: () => number } {
+  const originalExec = mockSsh.exec.bind(mockSsh)
+  let sweeps = 0
+  vi.spyOn(mockSsh, "exec").mockImplementation(async (command, options) => {
+    if (command !== symlinkProbeCommand) return originalExec(command, options)
+    mockSsh.calls.push(command)
+    const carriesMember = (options?.input ?? "").includes(`${memberPath}\u0000`)
+    if (!carriesMember) return { code: 0, stderr: "", stdout: "" }
+    sweeps += 1
+    // Only the recheck reports, so a failure can only originate from the sweep
+    // that runs after extraction.
+    return { code: 0, stderr: "", stdout: sweeps >= 2 ? `${memberPath}\u0000` : "" }
+  })
+  return { sweeps: () => sweeps }
+}
+
+/**
+ * Report a symlink violation only for the sweep whose payload carries the path.
+ *
+ * @param mockSsh - The mock connection to patch.
+ * @param path - The path to report as a symlink.
+ */
+function stubSymlinkViolationFor(mockSsh: MockSsh, path: string): void {
+  const originalExec = mockSsh.exec.bind(mockSsh)
+  vi.spyOn(mockSsh, "exec").mockImplementation(async (command, options) => {
+    if (command !== symlinkProbeCommand) return originalExec(command, options)
+    mockSsh.calls.push(command)
+    const payload = options?.input ?? ""
+    const reported = payload.includes(`${path}\u0000`) ? `${path}\u0000` : ""
+    return { code: 0, stderr: "", stdout: reported }
+  })
+}
+
 const createMockSsh: typeof createBaseMockSsh = (responses, options) =>
   createBaseMockSsh(responses, {
     ...options,
@@ -127,96 +193,8 @@ const createMockSsh: typeof createBaseMockSsh = (responses, options) =>
   })
 
 type MockSsh = ReturnType<typeof createMockSsh>
-type ExecTracker = { exec: MockSsh["exec"]; maxActive: () => number }
-
-function tarListingForMemberPaths(memberPaths: string[]): string {
-  return memberPaths
-    .map((memberPath) => `-rw-r--r-- root/root 0 1970-01-01 00:00 ${memberPath}`)
-    .join("\n")
-}
-
 function validMembersMarkerResponse(member = extractedFileMember): ExecResult {
   return { code: 0, stderr: "", stdout: JSON.stringify([member]) }
-}
-
-async function waitForTrackedExecTick(): Promise<void> {
-  await new Promise<void>((resolve) => {
-    setTimeout(resolve, 1)
-  })
-}
-
-function createTrackedExec(
-  mockSsh: MockSsh,
-  originalExec: MockSsh["exec"],
-  parameters: {
-    isTrackedCommand: (command: string) => boolean
-    resultForCommand: (command: string) => ExecResult
-  }
-): ExecTracker {
-  let active = 0
-  let maxActive = 0
-
-  return {
-    async exec(command, options) {
-      if (!parameters.isTrackedCommand(command)) return originalExec(command, options)
-      mockSsh.calls.push(command)
-      mockSsh.execCalls.push({ command, options })
-      active += 1
-      maxActive = Math.max(maxActive, active)
-      await waitForTrackedExecTick()
-      active -= 1
-      return parameters.resultForCommand(command)
-    },
-    maxActive: () => maxActive,
-  }
-}
-
-function createOwnerCheckExecTracker(mockSsh: MockSsh, originalExec: MockSsh["exec"]): ExecTracker {
-  return createTrackedExec(mockSsh, originalExec, {
-    isTrackedCommand: (command) =>
-      command.startsWith(`[ -e '${destination}/app/file-`) ||
-      command.startsWith(`stat -c '%U %G %u %g' -- '${destination}/app/file-`),
-    resultForCommand: (command) =>
-      command.startsWith("stat ")
-        ? { code: 0, stderr: "", stdout: "www-data www-data 33 33\n" }
-        : { code: 0, stderr: "", stdout: "" },
-  })
-}
-
-function createOwnerChownExecTracker(mockSsh: MockSsh, originalExec: MockSsh["exec"]): ExecTracker {
-  return createTrackedExec(mockSsh, originalExec, {
-    isTrackedCommand: (command) => command.startsWith("chown -h -- 'www-data:www-data' "),
-    resultForCommand: () => ({ code: 0, stderr: "", stdout: "" }),
-  })
-}
-
-function createSymlinkCheckExecTracker(
-  mockSsh: MockSsh,
-  originalExec: MockSsh["exec"]
-): ExecTracker {
-  return createTrackedExec(mockSsh, originalExec, {
-    isTrackedCommand: (command) => command.startsWith("test ! -L "),
-    resultForCommand: () => ({ code: 0, stderr: "", stdout: "" }),
-  })
-}
-
-function createSecondMatchingExecFailure(
-  mockSsh: MockSsh,
-  originalExec: MockSsh["exec"],
-  commandToFail: string
-): MockSsh["exec"] {
-  let matchingCalls = 0
-  return async (command, options) => {
-    if (command !== commandToFail) return originalExec(command, options)
-    matchingCalls += 1
-    mockSsh.calls.push(command)
-    mockSsh.execCalls.push({ command, options })
-    return {
-      code: matchingCalls === 2 ? 1 : 0,
-      stderr: "",
-      stdout: "",
-    }
-  }
 }
 
 function expectNoTarExtractCalls(mockSsh: MockSsh): void {
@@ -334,7 +312,7 @@ describe("archive.extract — check", () => {
       [`cat '${membersMarker}'`]: validMembersMarkerResponse(),
       [`test -d '${destination}'`]: { code: 0 },
       [`test -f '${marker}'`]: { code: 0 },
-      [extractedFileTypeProbe]: { code: 0 },
+      [extractedFileTypeProbe]: memberTypeMatchResponse,
     })
     vi.spyOn(mockSsh, "sha256").mockResolvedValue(archiveSha)
     const mod = archive.extract(src, destination)
@@ -347,7 +325,7 @@ describe("archive.extract — check", () => {
       [`cat '${membersMarker}'`]: validMembersMarkerResponse(),
       [`test -d '${destination}'`]: { code: 0 },
       [`test -f '${marker}'`]: { code: 0 },
-      [extractedFileTypeProbe]: { code: 1 },
+      [extractedFileTypeProbe]: memberTypeDriftResponse,
     })
     const mod = archive.extract(src, destination)
     const result = await mod.check(mockSsh, emptyEnv)
@@ -357,13 +335,13 @@ describe("archive.extract — check", () => {
 
   it("returns needs-apply when an extracted directory was replaced by a symlink", async () => {
     const mockSsh = createMockSsh({
-      [`[ -d '${destination}/app' ] && [ ! -L '${destination}/app' ]`]: { code: 1 },
       [`cat '${membersMarker}'`]: {
         code: 0,
         stdout: JSON.stringify([{ kind: "directory", path: `${destination}/app` }]),
       },
       [`test -d '${destination}'`]: { code: 0 },
       [`test -f '${marker}'`]: { code: 0 },
+      [extractedFileTypeProbe]: { code: 0, stdout: `${destination}/app\u0000` },
     })
     const mod = archive.extract(src, destination)
     const result = await mod.check(mockSsh, emptyEnv)
@@ -418,20 +396,19 @@ describe("archive.extract — check", () => {
   it("returns ok when marker matches and extracted owner matches", async () => {
     const ownerPathsMarker = `${marker}.owner-paths`
     const mockSsh = createMockSsh({
-      [`[ -e '${destination}/app/file' ] || [ -L '${destination}/app/file' ]`]: { code: 0 },
       [`cat '${marker}'`]: { code: 0, stdout: archiveSha },
       [`cat '${membersMarker}'`]: validMembersMarkerResponse(),
       [`cat '${ownerPathsMarker}'`]: {
         code: 0,
         stdout: JSON.stringify([`${destination}/app/file`]),
       },
-      [`stat -c '%U %G %u %g' -- '${destination}/app/file'`]: {
-        code: 0,
-        stdout: "www-data www-data 33 33\n",
-      },
       [`test -d '${destination}'`]: { code: 0 },
       [`test -f '${marker}'`]: { code: 0 },
-      [extractedFileTypeProbe]: { code: 0 },
+      [extractedFileTypeProbe]: memberTypeMatchResponse,
+      [ownershipProbeCommand("www-data:www-data")]: ownershipReport(
+        `${destination}/app/file`,
+        "www-data www-data 33 33"
+      ),
     })
     vi.spyOn(mockSsh, "sha256").mockResolvedValue(archiveSha)
     const mod = archive.extract(src, destination, { owner: "www-data:www-data" })
@@ -442,31 +419,34 @@ describe("archive.extract — check", () => {
   it("returns needs-apply when extracted owner has drifted", async () => {
     const ownerPathsMarker = `${marker}.owner-paths`
     const mockSsh = createMockSsh({
-      [`[ -e '${destination}/app/file' ] || [ -L '${destination}/app/file' ]`]: { code: 0 },
       [`cat '${membersMarker}'`]: validMembersMarkerResponse(),
       [`cat '${ownerPathsMarker}'`]: {
         code: 0,
         stdout: JSON.stringify([`${destination}/app/file`]),
       },
-      [`stat -c '%U %G %u %g' -- '${destination}/app/file'`]: {
-        code: 0,
-        stdout: "root root 0 0\n",
-      },
       [`test -d '${destination}'`]: { code: 0 },
       [`test -f '${marker}'`]: { code: 0 },
-      [extractedFileTypeProbe]: { code: 0 },
+      [extractedFileTypeProbe]: memberTypeMatchResponse,
+      [ownershipProbeCommand("www-data:www-data")]: ownershipReport(
+        `${destination}/app/file`,
+        "root root 0 0"
+      ),
     })
     const mod = archive.extract(src, destination, { owner: "www-data:www-data" })
     const result = await mod.check(mockSsh, emptyEnv)
     expect(result).toBe("needs-apply")
     expect(mockSsh.calls).toContain(`cat '${ownerPathsMarker}'`)
-    expect(mockSsh.calls).toContain(`stat -c '%U %G %u %g' -- '${destination}/app/file'`)
+    expect(mockSsh.calls).toContain(ownershipProbeCommand("www-data:www-data"))
     expect(mockSsh.calls).not.toContain(`cat '${marker}'`)
   })
 
-  it("limits concurrent owner checks across extracted archive members", async () => {
-    const memberPaths = Array.from({ length: 24 }, (_value, index) => `app/file-${String(index)}`)
+  it("issues one ownership probe no matter how many members are recorded", async () => {
+    // Issue #180: this used to assert that at most eight owner checks ran
+    // concurrently. There is no concurrency left to bound — the whole set now
+    // travels in a single probe, which is the stronger property.
+    const memberPaths = Array.from({ length: 500 }, (_value, index) => `app/file-${String(index)}`)
     const ownerPathsMarker = `${marker}.owner-paths`
+    const ownerProbe = ownershipProbeCommand("www-data:www-data")
     const mockSsh = createMockSsh({
       [`cat '${marker}'`]: { code: 0, stdout: archiveSha },
       [`cat '${membersMarker}'`]: {
@@ -479,31 +459,17 @@ describe("archive.extract — check", () => {
         code: 0,
         stdout: JSON.stringify(memberPaths.map((path) => `${destination}/${path}`)),
       },
-      ...Object.fromEntries(
-        memberPaths.map((path) => [
-          `[ -f '${destination}/${path}' ] && [ ! -L '${destination}/${path}' ]`,
-          { code: 0 },
-        ])
-      ),
       [`test -d '${destination}'`]: { code: 0 },
       [`test -f '${marker}'`]: { code: 0 },
+      [ownerProbe]: { code: 0, stdout: "" },
     })
-    const originalExec = mockSsh.exec.bind(mockSsh)
-    const ownerExecTracker = createOwnerCheckExecTracker(mockSsh, originalExec)
-
-    vi.spyOn(mockSsh, "exec").mockImplementation(ownerExecTracker.exec)
     vi.spyOn(mockSsh, "sha256").mockResolvedValue(archiveSha)
 
     const mod = archive.extract(src, destination, { owner: "www-data:www-data" })
     const result = await mod.check(mockSsh, emptyEnv)
 
     expect(result).toBe("ok")
-    expect(
-      mockSsh.calls.filter((command) =>
-        command.startsWith(`stat -c '%U %G %u %g' -- '${destination}/app/file-`)
-      )
-    ).toHaveLength(memberPaths.length)
-    expect(ownerExecTracker.maxActive()).toBeLessThanOrEqual(archiveOwnerMemberConcurrencyLimit)
+    expect(mockSsh.calls.filter((command) => command === ownerProbe)).toHaveLength(1)
   })
 
   it("returns needs-apply when marker does not match remote archive sha256", async () => {
@@ -512,7 +478,7 @@ describe("archive.extract — check", () => {
       [`cat '${membersMarker}'`]: validMembersMarkerResponse(),
       [`test -d '${destination}'`]: { code: 0 },
       [`test -f '${marker}'`]: { code: 0 },
-      [extractedFileTypeProbe]: { code: 0 },
+      [extractedFileTypeProbe]: memberTypeMatchResponse,
     })
     const sha256Spy = vi.spyOn(mockSsh, "sha256").mockResolvedValue("new-hash")
     const mod = archive.extract(src, destination)
@@ -547,7 +513,7 @@ describe("archive.extract — check", () => {
       [`cat '${membersMarker}'`]: validMembersMarkerResponse(),
       [`test -d '${destination}'`]: { code: 0 },
       [`test -f '${marker}'`]: { code: 0 },
-      [extractedFileTypeProbe]: { code: 0 },
+      [extractedFileTypeProbe]: memberTypeMatchResponse,
     })
     const mod = archive.extract(src, destination)
     const result = await mod.check(mockSsh, emptyEnv)
@@ -564,7 +530,7 @@ describe("archive.extract — check", () => {
       [`cat '${membersMarker}'`]: validMembersMarkerResponse(),
       [`test -d '${destination}'`]: { code: 0 },
       [`test -f '${marker}'`]: { code: 0 },
-      [extractedFileTypeProbe]: { code: 0 },
+      [extractedFileTypeProbe]: memberTypeMatchResponse,
     })
     const mod = archive.extract(src, destination)
     const result = await mod.check(mockSsh, emptyEnv)
@@ -580,27 +546,26 @@ describe("archive.extract — check", () => {
     // and reports drift when the on-disk owner does not match.
     const ownerPathsMarker = `${marker}.owner-paths`
     const mockSsh = createMockSsh({
-      [`[ -e '${destination}/app/file' ] || [ -L '${destination}/app/file' ]`]: { code: 0 },
       [`cat '${membersMarker}'`]: validMembersMarkerResponse(),
       [`cat '${ownerPathsMarker}'`]: {
         code: 1,
         stderr: `cat: '${ownerPathsMarker}': Permission denied`,
       },
-      [`stat -c '%U %G %u %g' -- '${destination}/app/file'`]: {
-        code: 0,
-        stdout: "root root 0 0\n",
-      },
       [`tar -tvzf '${src}'`]: { code: 0, stdout: safeTarListing },
       [`test -d '${destination}'`]: { code: 0 },
       [`test -f '${marker}'`]: { code: 0 },
-      [extractedFileTypeProbe]: { code: 0 },
+      [extractedFileTypeProbe]: memberTypeMatchResponse,
+      [ownershipProbeCommand("www-data:www-data")]: ownershipReport(
+        `${destination}/app/file`,
+        "root root 0 0"
+      ),
     })
     const mod = archive.extract(src, destination, { owner: "www-data:www-data" })
     const result = await mod.check(mockSsh, emptyEnv)
     expect(result).toBe("needs-apply")
     expect(mockSsh.calls).toContain(`cat '${ownerPathsMarker}'`)
     expect(mockSsh.calls).toContain(`tar -tvzf '${src}'`)
-    expect(mockSsh.calls).toContain(`stat -c '%U %G %u %g' -- '${destination}/app/file'`)
+    expect(mockSsh.calls).toContain(ownershipProbeCommand("www-data:www-data"))
   })
 
   it("computes local sha256 when upload is true without uploading", async () => {
@@ -641,7 +606,6 @@ describe("archive.extract — check", () => {
     const ownerPathsMarker = `${localMarker}.owner-paths`
 
     const mockSsh = createMockSsh({
-      [`[ -e '${destination}/app/file' ] || [ -L '${destination}/app/file' ]`]: { code: 0 },
       [`[ -f '${destination}/app/file' ] && [ ! -L '${destination}/app/file' ]`]: { code: 0 },
       [`cat '${localMarker}.members'`]: {
         code: 0,
@@ -652,12 +616,12 @@ describe("archive.extract — check", () => {
         code: 0,
         stdout: JSON.stringify([`${destination}/app/file`]),
       },
-      [`stat -c '%U %G %u %g' -- '${destination}/app/file'`]: {
-        code: 0,
-        stdout: "www-data www-data 33 33\n",
-      },
       [`test -d '${destination}'`]: { code: 0 },
       [`test -f '${localMarker}'`]: { code: 0 },
+      [ownershipProbeCommand("www-data:www-data")]: ownershipReport(
+        `${destination}/app/file`,
+        "www-data www-data 33 33"
+      ),
     })
 
     const fileHelpers = await import("../../src/modules/fileHelpers.js")
@@ -682,19 +646,18 @@ describe("archive.extract — check", () => {
     const ownerPathsMarker = `${localMarker}.owner-paths`
 
     const mockSsh = createMockSsh({
-      [`[ -e '${destination}/app/file' ] || [ -L '${destination}/app/file' ]`]: { code: 0 },
       [`cat '${localMarker}.members'`]: validMembersMarkerResponse(),
       [`cat '${ownerPathsMarker}'`]: {
         code: 0,
         stdout: JSON.stringify([`${destination}/app/file`]),
       },
-      [`stat -c '%U %G %u %g' -- '${destination}/app/file'`]: {
-        code: 0,
-        stdout: "root root 0 0\n",
-      },
       [`test -d '${destination}'`]: { code: 0 },
       [`test -f '${localMarker}'`]: { code: 0 },
-      [extractedFileTypeProbe]: { code: 0 },
+      [extractedFileTypeProbe]: memberTypeMatchResponse,
+      [ownershipProbeCommand("www-data:www-data")]: ownershipReport(
+        `${destination}/app/file`,
+        "root root 0 0"
+      ),
     })
     vi.spyOn(mockSsh, "uploadFile").mockResolvedValue()
 
@@ -705,7 +668,7 @@ describe("archive.extract — check", () => {
     const result = await mod.check(mockSsh, emptyEnv)
     expect(result).toBe("needs-apply")
     expect(mockSsh.calls).toContain(`cat '${ownerPathsMarker}'`)
-    expect(mockSsh.calls).toContain(`stat -c '%U %G %u %g' -- '${destination}/app/file'`)
+    expect(mockSsh.calls).toContain(ownershipProbeCommand("www-data:www-data"))
     expect(mockSsh.calls).not.toContain(`cat '${localMarker}'`)
     expect(mockSsh.uploadFile).not.toHaveBeenCalled()
   })
@@ -856,11 +819,11 @@ describe("archive.extract — apply", () => {
 
   it("limits chown to extracted members when owner is specified", async () => {
     const mockSsh = createMockSsh({
-      [`chown -h -- 'www-data:www-data' '${destination}/app/file'`]: { code: 0 },
       [`tar --no-same-owner --no-overwrite-dir -xzf '${src}' -C '${archiveStageDirectory}'`]: {
         code: 0,
       },
       [`tar -tvzf '${src}'`]: { code: 0, stdout: safeTarListing },
+      [batchedChownCommand]: { code: 0 },
     })
     vi.spyOn(mockSsh, "sha256").mockResolvedValue(archiveSha)
     vi.spyOn(mockSsh, "writeFile").mockResolvedValue()
@@ -869,22 +832,18 @@ describe("archive.extract — apply", () => {
     const result = await mod.apply(mockSsh, emptyEnv)
 
     expect(result.status).toBe("changed")
-    expect(mockSsh.calls).toContain(`chown -h -- 'www-data:www-data' '${destination}/app/file'`)
+    expect(mockSsh.calls).toContain(batchedChownCommand)
     expect(mockSsh.calls).not.toContain(`chown -R 'www-data:www-data' '${destination}'`)
   })
 
-  it("limits concurrent owner chown commands across extracted archive members", async () => {
-    const memberPaths = Array.from({ length: 24 }, (_value, index) => `app/file-${String(index)}`)
+  it("issues one chown no matter how many members are extracted", async () => {
+    const memberPaths = Array.from({ length: 500 }, (_value, index) => `app/file-${String(index)}`)
     const mockSsh = createMockSsh({
       [`tar --no-same-owner --no-overwrite-dir -xzf '${src}' -C '${archiveStageDirectory}'`]: {
         code: 0,
       },
       [`tar -tvzf '${src}'`]: { code: 0, stdout: tarListingForMemberPaths(memberPaths) },
     })
-    const originalExec = mockSsh.exec.bind(mockSsh)
-    const chownExecTracker = createOwnerChownExecTracker(mockSsh, originalExec)
-
-    vi.spyOn(mockSsh, "exec").mockImplementation(chownExecTracker.exec)
     vi.spyOn(mockSsh, "sha256").mockResolvedValue(archiveSha)
     vi.spyOn(mockSsh, "writeFile").mockResolvedValue()
 
@@ -892,35 +851,37 @@ describe("archive.extract — apply", () => {
     const result = await mod.apply(mockSsh, emptyEnv)
 
     expect(result.status).toBe("changed")
-    expect(
-      mockSsh.calls.filter((command) => command.startsWith("chown -h -- 'www-data:www-data' "))
-    ).toHaveLength(memberPaths.length)
-    expect(chownExecTracker.maxActive()).toBeLessThanOrEqual(archiveOwnerMemberConcurrencyLimit)
+    expect(mockSsh.calls.filter((command) => command === batchedChownCommand)).toHaveLength(1)
   })
 
-  it("limits concurrent symlink checks across archive destination paths", async () => {
-    const memberPaths = Array.from({ length: 24 }, (_value, index) => `app/file-${String(index)}`)
-    const mockSsh = createMockSsh({
-      [`tar --no-same-owner --no-overwrite-dir -xzf '${src}' -C '${archiveStageDirectory}'`]: {
-        code: 0,
-      },
-      [`tar -tvzf '${src}'`]: { code: 0, stdout: tarListingForMemberPaths(memberPaths) },
-    })
-    const originalExec = mockSsh.exec.bind(mockSsh)
-    const symlinkExecTracker = createSymlinkCheckExecTracker(mockSsh, originalExec)
+  it("keeps the symlink probe count constant as the member count grows", async () => {
+    // The bound is deliberately a fixed number rather than a ratio: a
+    // regression back to per-path probing would push this far past it, which is
+    // what makes the assertion worth having.
+    const runWith = async (memberCount: number): Promise<number> => {
+      const memberPaths = Array.from(
+        { length: memberCount },
+        (_value, index) => `app/file-${String(index)}`
+      )
+      const mockSsh = createMockSsh({
+        [`tar --no-same-owner --no-overwrite-dir -xzf '${src}' -C '${archiveStageDirectory}'`]: {
+          code: 0,
+        },
+        [`tar -tvzf '${src}'`]: { code: 0, stdout: tarListingForMemberPaths(memberPaths) },
+      })
+      vi.spyOn(mockSsh, "sha256").mockResolvedValue(archiveSha)
+      vi.spyOn(mockSsh, "writeFile").mockResolvedValue()
 
-    vi.spyOn(mockSsh, "exec").mockImplementation(symlinkExecTracker.exec)
-    vi.spyOn(mockSsh, "sha256").mockResolvedValue(archiveSha)
-    vi.spyOn(mockSsh, "writeFile").mockResolvedValue()
+      const result = await archive.extract(src, destination).apply(mockSsh, emptyEnv)
+      expect(result.status).toBe("changed")
+      return mockSsh.calls.filter((command) => command === symlinkProbeCommand).length
+    }
 
-    const mod = archive.extract(src, destination)
-    const result = await mod.apply(mockSsh, emptyEnv)
+    const few = await runWith(5)
+    const many = await runWith(500)
 
-    expect(result.status).toBe("changed")
-    expect(
-      mockSsh.calls.filter((command) => command.startsWith("test ! -L ")).length
-    ).toBeGreaterThan(memberPaths.length)
-    expect(symlinkExecTracker.maxActive()).toBeLessThanOrEqual(archiveSymlinkCheckConcurrencyLimit)
+    expect(many).toBe(few)
+    expect(many).toBeLessThanOrEqual(4)
   })
 
   it("R-0000267: returns failed when chown of an extracted member fails", async () => {
@@ -928,14 +889,14 @@ describe("archive.extract — apply", () => {
     // failedCommand result instead of leaking past Promise.all in the
     // concurrency-limited mapper as an uncaught CommandError.
     const mockSsh = createMockSsh({
-      [`chown -h -- 'www-data:www-data' '${destination}/app/file'`]: {
-        code: 1,
-        stderr: "chown: changing ownership of '/opt/app/app/file': Operation not permitted",
-      },
       [`tar --no-same-owner --no-overwrite-dir -xzf '${src}' -C '${archiveStageDirectory}'`]: {
         code: 0,
       },
       [`tar -tvzf '${src}'`]: { code: 0, stdout: safeTarListing },
+      [batchedChownCommand]: {
+        code: 1,
+        stderr: "chown: changing ownership of '/opt/app/app/file': Operation not permitted",
+      },
     })
     vi.spyOn(mockSsh, "sha256").mockResolvedValue(archiveSha)
     vi.spyOn(mockSsh, "writeFile").mockResolvedValue()
@@ -966,7 +927,7 @@ describe("archive.extract — apply", () => {
     await expect(mod.apply(mockSsh, emptyEnv)).rejects.toThrow(
       'chown owner component must not start with "-": "-R"'
     )
-    expect(mockSsh.calls).not.toContain(`chown -h -- '-R' '${destination}/app/file'`)
+    expect(mockSsh.calls).not.toContain("xargs -0 chown -h -- '-R'")
   })
 
   // R-0000700 / R-0000706: invalid destinations now fail fast at module
@@ -1000,7 +961,7 @@ describe("archive.extract — apply", () => {
   it.each([
     ["newline", "/opt/app\n/etc"],
     ["carriage return", "/opt/app\r/etc"],
-    ["NUL", "/opt/app /etc"],
+    ["NUL", "/opt/app\u0000/etc"],
     ["tab", "/opt/app\t/etc"],
   ])("rejects destinations containing %s control characters", (_label, destinationWithControl) => {
     expect(() => archive.extract(src, destinationWithControl)).toThrow(
@@ -1040,12 +1001,12 @@ describe("archive.extract — apply", () => {
     const ownerPathsMarker = `${localMarker}.owner-paths`
 
     const mockSsh = createMockSsh({
-      [`chown -h -- 'www-data:www-data' '${destination}/app/file'`]: { code: 0 },
       [`tar --no-same-owner --no-overwrite-dir -xzf '${remoteTmp}' -C '${archiveStageDirectory}'`]:
         {
           code: 0,
         },
       [`tar -tvzf '${remoteTmp}'`]: { code: 0, stdout: safeTarListing },
+      [batchedChownCommand]: { code: 0 },
       "mktemp /tmp/paratix-upload.XXXXXXXX": { code: 0, stdout: remoteTmp },
     })
     vi.spyOn(mockSsh, "sha256").mockResolvedValue(archiveSha)
@@ -1372,11 +1333,11 @@ describe("archive.extract — apply", () => {
 
   it("returns failed when writing the owner paths marker fails", async () => {
     const mockSsh = createMockSsh({
-      [`chown -h -- 'www-data:www-data' '${destination}/app/file'`]: { code: 0 },
       [`tar --no-same-owner --no-overwrite-dir -xzf '${src}' -C '${archiveStageDirectory}'`]: {
         code: 0,
       },
       [`tar -tvzf '${src}'`]: { code: 0, stdout: safeTarListing },
+      [batchedChownCommand]: { code: 0 },
     })
     vi.spyOn(mockSsh, "sha256").mockResolvedValue(archiveSha)
     vi.spyOn(mockSsh, "writeFile")
@@ -1479,7 +1440,7 @@ describe("archive.extract — apply", () => {
 
   it("rejects extraction when an existing destination ancestor is a symlink", async () => {
     const mockSsh = createMockSsh({
-      [`test ! -L '${destination}'`]: { code: 1 },
+      [symlinkProbeCommand]: { code: 0, stdout: `${destination}\u0000` },
     })
 
     const mod = archive.extract(src, destination)
@@ -1496,9 +1457,8 @@ describe("archive.extract — apply", () => {
 
   it("rejects extraction before creating the destination when a parent directory is a symlink", async () => {
     const symlinkedDestinationAncestor = "/opt"
-    const mockSsh = createMockSsh({
-      [`test ! -L '${symlinkedDestinationAncestor}'`]: { code: 1 },
-    })
+    const mockSsh = createMockSsh({})
+    stubSymlinkViolationFor(mockSsh, symlinkedDestinationAncestor)
 
     const mod = archive.extract(src, destination)
     const result = await mod.apply(mockSsh, emptyEnv)
@@ -1516,8 +1476,8 @@ describe("archive.extract — apply", () => {
     const symlinkedMemberAncestor = `${destination}/app`
     const mockSsh = createMockSsh({
       [`tar -tvzf '${src}'`]: { code: 0, stdout: safeTarListing },
-      [`test ! -L '${symlinkedMemberAncestor}'`]: { code: 1 },
     })
+    stubSymlinkViolationFor(mockSsh, symlinkedMemberAncestor)
 
     const mod = archive.extract(src, destination)
     const result = await mod.apply(mockSsh, emptyEnv)
@@ -1939,25 +1899,26 @@ describe("archive.extract — apply", () => {
   })
 
   it("rechecks member destination symlinks immediately before staging merge", async () => {
+    // R-0000751: the sweep before extraction and the one immediately before the
+    // merge are separate on purpose, so a symlink planted in between is still
+    // caught. Batching made both sweeps issue the identical command, so the
+    // transported payload is what tells them apart — and the second sweep
+    // carrying the member path is the recheck this asserts.
+    const memberPath = `${destination}/app/file`
     const mockSsh = createMockSsh({
       [`tar --no-same-owner --no-overwrite-dir -xzf '${src}' -C '${archiveStageDirectory}'`]: {
         code: 0,
       },
       [`tar -tvzf '${src}'`]: { code: 0, stdout: safeTarListing },
     })
-    const originalExec = mockSsh.exec.bind(mockSsh)
-    vi.spyOn(mockSsh, "exec").mockImplementation(
-      createSecondMatchingExecFailure(mockSsh, originalExec, `test ! -L '${destination}/app/file'`)
-    )
+    const recheck = stubSymlinkRecheck(mockSsh, memberPath)
 
     const mod = archive.extract(src, destination)
     const result = await mod.apply(mockSsh, emptyEnv)
 
     expect(result.status).toBe("failed")
-    expect(String(result.error)).toContain(`${destination}/app/file`)
-    expect(
-      mockSsh.calls.filter((command) => command === `test ! -L '${destination}/app/file'`)
-    ).toHaveLength(2)
+    expect(String(result.error)).toContain(memberPath)
+    expect(recheck.sweeps()).toBe(2)
     expect(mockSsh.calls.some((c) => archiveStageMovePattern.test(c))).toBe(false)
     expect(mockSsh.calls.some((c) => archiveStageCleanupPattern.test(c))).toBe(true)
   })
@@ -2070,11 +2031,11 @@ describe("archive.extract — apply", () => {
   it("R-0000166: persists extracted owner paths for non-upload archives with owner", async () => {
     const ownerPathsMarker = `${marker}.owner-paths`
     const mockSsh = createMockSsh({
-      [`chown -h -- 'www-data:www-data' '${destination}/app/file'`]: { code: 0 },
       [`tar --no-same-owner --no-overwrite-dir -xzf '${src}' -C '${archiveStageDirectory}'`]: {
         code: 0,
       },
       [`tar -tvzf '${src}'`]: { code: 0, stdout: safeTarListing },
+      [batchedChownCommand]: { code: 0 },
     })
     vi.spyOn(mockSsh, "sha256").mockResolvedValue(archiveSha)
     vi.spyOn(mockSsh, "writeFile").mockResolvedValue()
@@ -2103,7 +2064,6 @@ describe("archive.extract — apply", () => {
     // marker the check resolves the original member and reports `ok`.
     const driftedTarListing = "-rw-r--r-- root/root 0 1970-01-01 00:00 app/replacement"
     const mockSsh = createMockSsh({
-      [`[ -e '${destination}/app/file' ] || [ -L '${destination}/app/file' ]`]: { code: 0 },
       [`[ -f '${destination}/app/file' ] && [ ! -L '${destination}/app/file' ]`]: { code: 0 },
       [`cat '${marker}'`]: { code: 0, stdout: archiveSha },
       [`cat '${membersMarker}'`]: {
@@ -2114,13 +2074,13 @@ describe("archive.extract — apply", () => {
         code: 0,
         stdout: JSON.stringify([`${destination}/app/file`]),
       },
-      [`stat -c '%U %G %u %g' -- '${destination}/app/file'`]: {
-        code: 0,
-        stdout: "www-data www-data 33 33\n",
-      },
       [`tar -tvzf '${src}'`]: { code: 0, stdout: driftedTarListing },
       [`test -d '${destination}'`]: { code: 0 },
       [`test -f '${marker}'`]: { code: 0 },
+      [ownershipProbeCommand("www-data:www-data")]: ownershipReport(
+        `${destination}/app/file`,
+        "www-data www-data 33 33"
+      ),
     })
     vi.spyOn(mockSsh, "sha256").mockResolvedValue(archiveSha)
 
@@ -2136,7 +2096,6 @@ describe("archive.extract — apply", () => {
   it("R-0000166: falls back to the live archive listing when the owner-paths marker is missing (legacy host)", async () => {
     const ownerPathsMarker = `${marker}.owner-paths`
     const mockSsh = createMockSsh({
-      [`[ -e '${destination}/app/file' ] || [ -L '${destination}/app/file' ]`]: { code: 0 },
       [`[ -f '${destination}/app/file' ] && [ ! -L '${destination}/app/file' ]`]: { code: 0 },
       [`cat '${marker}'`]: { code: 0, stdout: archiveSha },
       [`cat '${membersMarker}'`]: {
@@ -2147,13 +2106,13 @@ describe("archive.extract — apply", () => {
         code: 1,
         stderr: "cat: No such file or directory",
       },
-      [`stat -c '%U %G %u %g' -- '${destination}/app/file'`]: {
-        code: 0,
-        stdout: "www-data www-data 33 33\n",
-      },
       [`tar -tvzf '${src}'`]: { code: 0, stdout: safeTarListing },
       [`test -d '${destination}'`]: { code: 0 },
       [`test -f '${marker}'`]: { code: 0 },
+      [ownershipProbeCommand("www-data:www-data")]: ownershipReport(
+        `${destination}/app/file`,
+        "www-data www-data 33 33"
+      ),
     })
     vi.spyOn(mockSsh, "sha256").mockResolvedValue(archiveSha)
 
@@ -2167,7 +2126,6 @@ describe("archive.extract — apply", () => {
   it("returns ok when a numeric owner matches the extracted member ids", async () => {
     const ownerPathsMarker = `${marker}.owner-paths`
     const mockSsh = createMockSsh({
-      [`[ -e '${destination}/app/file' ] || [ -L '${destination}/app/file' ]`]: { code: 0 },
       [`[ -f '${destination}/app/file' ] && [ ! -L '${destination}/app/file' ]`]: { code: 0 },
       [`cat '${marker}'`]: { code: 0, stdout: archiveSha },
       [`cat '${membersMarker}'`]: {
@@ -2178,14 +2136,14 @@ describe("archive.extract — apply", () => {
         code: 0,
         stdout: JSON.stringify([`${destination}/app/file`]),
       },
-      // No passwd or group entry for 65532, so GNU coreutils answers UNKNOWN
-      // for the name columns; only the numeric columns can match.
-      [`stat -c '%U %G %u %g' -- '${destination}/app/file'`]: {
-        code: 0,
-        stdout: "UNKNOWN UNKNOWN 65532 65532\n",
-      },
       [`test -d '${destination}'`]: { code: 0 },
       [`test -f '${marker}'`]: { code: 0 },
+      // No passwd or group entry for 65532, so GNU coreutils answers UNKNOWN
+      // for the name columns; only the numeric columns can match.
+      [ownershipProbeCommand("65532:65532")]: ownershipReport(
+        `${destination}/app/file`,
+        "UNKNOWN UNKNOWN 65532 65532"
+      ),
     })
     vi.spyOn(mockSsh, "sha256").mockResolvedValue(archiveSha)
 
@@ -2193,13 +2151,12 @@ describe("archive.extract — apply", () => {
     const result = await mod.check(mockSsh, emptyEnv)
 
     expect(result).toBe("ok")
-    expect(mockSsh.calls).toContain(`stat -c '%U %G %u %g' -- '${destination}/app/file'`)
+    expect(mockSsh.calls).toContain(ownershipProbeCommand("65532:65532"))
   })
 
   it("returns ok for a leading-zero numeric owner on extracted members", async () => {
     const ownerPathsMarker = `${marker}.owner-paths`
     const mockSsh = createMockSsh({
-      [`[ -e '${destination}/app/file' ] || [ -L '${destination}/app/file' ]`]: { code: 0 },
       [`[ -f '${destination}/app/file' ] && [ ! -L '${destination}/app/file' ]`]: { code: 0 },
       [`cat '${marker}'`]: { code: 0, stdout: archiveSha },
       [`cat '${membersMarker}'`]: {
@@ -2210,12 +2167,12 @@ describe("archive.extract — apply", () => {
         code: 0,
         stdout: JSON.stringify([`${destination}/app/file`]),
       },
-      [`stat -c '%U %G %u %g' -- '${destination}/app/file'`]: {
-        code: 0,
-        stdout: "UNKNOWN UNKNOWN 65532 65532\n",
-      },
       [`test -d '${destination}'`]: { code: 0 },
       [`test -f '${marker}'`]: { code: 0 },
+      [ownershipProbeCommand("065532:065532")]: ownershipReport(
+        `${destination}/app/file`,
+        "UNKNOWN UNKNOWN 65532 65532"
+      ),
     })
     vi.spyOn(mockSsh, "sha256").mockResolvedValue(archiveSha)
 
@@ -2228,7 +2185,6 @@ describe("archive.extract — apply", () => {
   it("returns needs-apply when a numeric owner does not match the extracted member ids", async () => {
     const ownerPathsMarker = `${marker}.owner-paths`
     const mockSsh = createMockSsh({
-      [`[ -e '${destination}/app/file' ] || [ -L '${destination}/app/file' ]`]: { code: 0 },
       [`[ -f '${destination}/app/file' ] && [ ! -L '${destination}/app/file' ]`]: { code: 0 },
       [`cat '${marker}'`]: { code: 0, stdout: archiveSha },
       [`cat '${membersMarker}'`]: {
@@ -2239,12 +2195,12 @@ describe("archive.extract — apply", () => {
         code: 0,
         stdout: JSON.stringify([`${destination}/app/file`]),
       },
-      [`stat -c '%U %G %u %g' -- '${destination}/app/file'`]: {
-        code: 0,
-        stdout: "root root 0 0\n",
-      },
       [`test -d '${destination}'`]: { code: 0 },
       [`test -f '${marker}'`]: { code: 0 },
+      [ownershipProbeCommand("65532:65532")]: ownershipReport(
+        `${destination}/app/file`,
+        "root root 0 0"
+      ),
     })
     vi.spyOn(mockSsh, "sha256").mockResolvedValue(archiveSha)
 

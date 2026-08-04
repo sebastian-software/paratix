@@ -58,6 +58,24 @@ export function renderChownSymlinkCommand(ownerSpec: string, remotePath: string)
 }
 
 /**
+ * Batched `chown -h` reading its target paths NUL-delimited from stdin.
+ *
+ * Issue #180: `archive.extract` used to run one `chown` exec per extracted
+ * member. `chown -h` never follows a symlink, so applying it to many paths in
+ * one invocation carries the same guarantee as applying it one at a time, and
+ * `xargs -0` keeps paths containing whitespace or newlines intact. Failures are
+ * reported by `chown` itself on stderr, naming every path it could not change
+ * rather than only the first.
+ *
+ * @param ownerSpec - The chown owner spec, e.g. `"user:group"`.
+ * @returns A shell command that chowns every path supplied on stdin.
+ */
+export function renderBatchedChownSymlinkCommand(ownerSpec: string): string {
+  assertValidChownOwnershipSpec(ownerSpec)
+  return `xargs -0 chown -h -- ${shellQuote(ownerSpec)}`
+}
+
+/**
  * R-0000750: shell-guarded chown that refuses to operate when `remotePath`
  * has become a symlink between the caller's pre-check and the actual chown.
  *

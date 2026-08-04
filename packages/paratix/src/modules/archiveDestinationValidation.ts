@@ -5,37 +5,9 @@ import type { ModuleResult, SshConnection } from "../types.js"
 import { failed, failedCommand } from "../moduleFailure.js"
 import { shellQuote } from "../ssh.js"
 import { type ArchiveMember, normalizeArchiveMemberPath } from "./archiveMemberValidation.js"
+import { buildSymlinkProbeScript, runBatchedProbe } from "./archiveProbe.js"
 
 const EXEC_OPTS = { ignoreExitCode: true, silent: true } as const
-const SYMLINK_CHECK_CONCURRENCY = 8
-
-async function mapWithConcurrencyLimit<TItem, TResult>(
-  items: TItem[],
-  limit: number,
-  mapper: (item: TItem, index: number) => Promise<TResult>
-): Promise<TResult[]> {
-  if (items.length === 0) return []
-
-  const results: TResult[] = []
-  let nextIndex = 0
-
-  async function worker(): Promise<void> {
-    for (;;) {
-      const index = nextIndex
-      nextIndex += 1
-      if (index >= items.length) return
-      // eslint-disable-next-line no-await-in-loop -- each worker intentionally runs one bounded queue slot at a time
-      results[index] = await mapper(items[index], index)
-    }
-  }
-
-  await Promise.all(
-    Array.from({ length: Math.min(limit, items.length) }, async () => {
-      await worker()
-    })
-  )
-  return results
-}
 
 // R-0000672: control characters (\x00-\x1F) in extract destinations are
 // rejected before any further validation. `moveExtractedContentsIntoDestination`
@@ -75,10 +47,8 @@ function pathWithAncestors(path: string): string[] {
   return paths.reverse()
 }
 
-async function pathIsSymlink(conn: SshConnection, path: string): Promise<boolean> {
-  const result = await conn.exec(`test ! -L ${shellQuote(path)}`, EXEC_OPTS)
-  return result.code !== 0
-}
+// Issue #180: `pathIsSymlink` used to be one exec per path. The probe is now
+// batched through `archiveProbe.ts`; see `validateNoSymlinkPaths`.
 
 export function destinationPathWithAncestors(destination: string): string[] {
   return pathWithAncestors(destination)
@@ -155,15 +125,22 @@ export async function validateNoSymlinkPaths(
   parameters: { paths: string[]; source: string }
 ): Promise<ModuleResult | null> {
   const paths = [...new Set(parameters.paths)]
-  const symlinkChecks = await mapWithConcurrencyLimit(
-    paths,
-    SYMLINK_CHECK_CONCURRENCY,
-    async (path) => ({ path, symlink: await pathIsSymlink(conn, path) })
-  )
-  const unsafe = symlinkChecks.find((check) => check.symlink)
-  if (unsafe === undefined) return null
+  const outcome = await runBatchedProbe(conn, {
+    entries: paths,
+    script: buildSymlinkProbeScript(),
+  })
+  // A probe that could not run is not a clean result. Reporting it as a failure
+  // keeps the guard fail-closed; treating the empty output of a crashed script
+  // as "no symlinks" would silently disable it.
+  if (outcome.kind === "failed") {
+    return failed(
+      `[archive.extract] refusing to extract ${parameters.source}: symlink probe failed: ${outcome.detail}`
+    )
+  }
+  if (outcome.fields.length === 0) return null
+  const [unsafe] = outcome.fields
   return failed(
-    `[archive.extract] refusing to extract ${parameters.source}: destination path ${JSON.stringify(unsafe.path)} is a symlink`
+    `[archive.extract] refusing to extract ${parameters.source}: destination path ${JSON.stringify(unsafe)} is a symlink`
   )
 }
 
