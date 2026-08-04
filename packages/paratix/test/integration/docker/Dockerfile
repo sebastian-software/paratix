@@ -3,7 +3,7 @@ FROM debian:bookworm-slim
 ARG CLIENT_PUBLIC_KEY
 
 RUN apt-get update \
-  && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends curl openssh-server python3 sudo \
+  && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends curl openssh-server python3 sudo unzip zip \
   && rm -rf /var/lib/apt/lists/*
 
 RUN useradd --create-home --shell /bin/bash paratix \

@@ -1,4 +1,4 @@
-import { execFile } from "node:child_process"
+import { execFile, spawnSync } from "node:child_process"
 import { createHash, randomUUID } from "node:crypto"
 import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs"
 import { readFile, rm } from "node:fs/promises"
@@ -9,7 +9,7 @@ import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from
 
 import type { Environment, Module, SshConfig, SshConnection } from "../../src/types.js"
 
-import { command, download, file, shellQuote } from "../../src/index.js"
+import { archive, command, download, file, shellQuote } from "../../src/index.js"
 import { clearHostKeyCache, HostKeyVerificationError } from "../../src/knownHosts.js"
 import { runPlaybook } from "../../src/runner.js"
 import { server } from "../../src/server.js"
@@ -513,13 +513,29 @@ describe("CLI command helper", () => {
   })
 })
 
-// The GitHub Actions runners that execute `agent:check:integration` do not
-// currently provide a working Docker runtime, so the harness cannot launch
-// the sshd container that backs every test in this block. Re-enable the
-// block by removing the `.skip` once the CI environment exposes Docker
-// again (or once an alternative runtime such as Podman is wired up).
-// oxlint-disable-next-line vitest/no-disabled-tests -- block is intentionally skipped until CI provides Docker; see AGENTS.md
-describe.skip("Paratix integration", () => {
+/**
+ * Whether a Docker daemon is actually reachable.
+ *
+ * Every test in the block below needs the sshd container the harness launches.
+ * The CI runners that execute `agent:check:integration` still provide no Docker
+ * runtime at all — the binary is not even on PATH, so the harness fails with
+ * `spawn docker ENOENT`. Probing here rather than skipping unconditionally is
+ * what keeps the block honest in both directions: it stays green on a runner
+ * without Docker, and it genuinely runs wherever a daemon exists, including a
+ * local Colima or Docker Desktop. A blanket `describe.skip` made this block
+ * invisible for months, long enough for a deliberate `readFile` change to
+ * invalidate several of its assertions unnoticed.
+ *
+ * @returns True when `docker info` succeeds.
+ */
+function isDockerRuntimeAvailable(): boolean {
+  const probe = spawnSync("docker", ["info"], { stdio: "ignore", timeout: 30_000 })
+  return probe.status === 0
+}
+
+const SKIP_WITHOUT_DOCKER = !isDockerRuntimeAvailable()
+
+describe.skipIf(SKIP_WITHOUT_DOCKER)("Paratix integration", () => {
   beforeAll(async () => {
     originalHome = process.env.HOME
     integrationEnvironment = await createIntegrationEnvironment(
@@ -1056,6 +1072,79 @@ describe.skip("Paratix integration", () => {
           removeRemoteDirectoryStep(ssh, remoteBase, "remove remote dist CLI apply test directory"),
           disconnectSshStep(ssh),
           removeCreatedLocalDirectoryStep(() => localDirectory),
+        ],
+        primaryError
+      )
+    }
+  })
+
+  it("extracts a many-member archive against the stock MaxSessions ceiling", async () => {
+    // Issue #178. Two defects hid behind each other here, and neither was
+    // reachable by a unit test: the staging merge refused every extracted path
+    // because its newline guard matched unconditionally, and the per-member
+    // probes opened more concurrent session channels than OpenSSH's default
+    // MaxSessions (pinned to 10 in the image's sshd_config) allows. A member
+    // count well above the channel cap is the point of the fixture — a handful
+    // of files would exhaust nothing and merge trivially.
+    const ssh = await connectSsh([getEnvironment().primaryPort], {}, "root")
+    const remoteBase = `/root/integration-${randomUUID()}`
+    const sourceTree = `${remoteBase}/tree`
+    const archivePath = `${remoteBase}/bundle.zip`
+    const destination = `${remoteBase}/destination`
+    const memberCount = 64
+
+    let primaryError: unknown
+    try {
+      await ssh.exec(
+        `mkdir -p ${shellQuote(sourceTree)}/nested ${shellQuote(destination)}/nested`,
+        { silent: true }
+      )
+      // `seq`-driven so the fixture stays a single round trip rather than 64.
+      await ssh.exec(
+        `for i in $(seq 1 ${String(memberCount)}); do printf 'member-%s\\n' "$i" > ${shellQuote(sourceTree)}/nested/file-$i.txt; done`,
+        { silent: true }
+      )
+      // A pre-existing destination subdirectory with the same name as an
+      // archive member forces the R-0000221 merge path rather than a plain copy.
+      await ssh.exec(`printf '%s\\n' preexisting > ${shellQuote(destination)}/nested/keep.txt`, {
+        silent: true,
+      })
+      await ssh.exec(`cd ${shellQuote(sourceTree)} && zip -q -r ${shellQuote(archivePath)} .`, {
+        silent: true,
+      })
+
+      const extractModule = archive.extract(archivePath, destination)
+
+      await expect(extractModule.apply(ssh, emptyEnv)).resolves.toMatchObject({
+        status: "changed",
+      })
+      // `readFile` preserves trailing whitespace since 9ef578f3, so the
+      // newline `printf` wrote is part of the expected content.
+      expect(await ssh.readFile(`${destination}/nested/file-1.txt`)).toBe("member-1\n")
+      expect(await ssh.readFile(`${destination}/nested/file-${String(memberCount)}.txt`)).toBe(
+        `member-${String(memberCount)}\n`
+      )
+      // The merge must not have replaced the existing destination subdirectory.
+      expect(await ssh.readFile(`${destination}/nested/keep.txt`)).toBe("preexisting\n")
+
+      // Idempotency is expressed through `check`, not through a second `apply`:
+      // `apply` extracts unconditionally, and the runner is what skips it once
+      // `check` reports `ok` from the marker and the member probes.
+      await expectModuleCheckOk(extractModule, ssh)
+      // No staging directory may survive a successful merge.
+      const leftoverStaging = await ssh.exec(
+        `find ${shellQuote(destination)} -maxdepth 1 -name '.paratix-stage.*' -print`,
+        { ignoreExitCode: true, silent: true }
+      )
+      expect(leftoverStaging.stdout.trim()).toBe("")
+    } catch (error) {
+      primaryError = error
+      throw error
+    } finally {
+      await runCleanupSteps(
+        [
+          removeRemoteDirectoryStep(ssh, remoteBase, "remove remote archive test directory"),
+          disconnectSshStep(ssh),
         ],
         primaryError
       )

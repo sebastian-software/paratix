@@ -208,6 +208,65 @@ async function allocateExtractStagingDirectory(
 }
 
 /**
+ * Build the `sh -c` snippet that merges one batch of staging entries into the
+ * destination.
+ *
+ * The script reads `destination`, `expected_destination` and `guard_paths` from
+ * `$1`–`$3` and the staging entries from the remaining positional arguments, so
+ * it is free of interpolated paths and can be executed verbatim against a real
+ * `/bin/sh` in a test. Issue #178 showed why that matters: a guard that reads
+ * correctly can still be inert at run time, and only executing it proves
+ * otherwise.
+ *
+ * @returns The merge script as a single shell command string.
+ */
+export function buildStagingMergeScript(): string {
+  // R-0000801: the staging merge inspects unsafe attacker-controlled paths
+  // emitted by the archive. We assemble the shell snippet as String.raw
+  // segments so the embedded quoting is readable, and we reject any
+  // extracted path that contains a literal newline before `cp` ever
+  // touches it. Newlines in extracted filenames are extremely unusual and
+  // would otherwise corrupt the `printf | while read` loop that processes
+  // `guard_paths`.
+  // R-0000801 addendum: capture the newline via a sacrificial `x` that is
+  // stripped afterwards. A bare `$(printf '\n')` is useless as a guard —
+  // command substitution strips *all* trailing newlines, so it expands to the
+  // empty string, the pattern degrades from `*"\n"*` to `*""*` (i.e. `*`) and
+  // the guard refuses every path. Appending `x` gives the substitution a
+  // non-newline byte to keep, and `${nl%x}` removes it again.
+  return [
+    // Not `String.raw`: that suppresses escape processing but not `${…}`
+    // interpolation, so a raw literal would evaluate `nl % x` in JavaScript.
+    // `$\{` is the same escape the `target_path` line below uses to emit a
+    // literal shell parameter expansion from a template literal.
+    `nl=$(printf '\\nx'); nl=$\{nl%x}; `,
+    String.raw`destination=$1; expected_destination=$2; guard_paths=$3; shift 3; `,
+    String.raw`for source_path do `,
+    String.raw`case "$source_path" in *"$nl"*) `,
+    String.raw`echo "[archive.extract] refusing staging merge: extracted path contains a newline" >&2; `,
+    String.raw`exit 64;; esac; `,
+    String.raw`resolved_destination=$(readlink -f -- "$destination") || { `,
+    String.raw`echo "[archive.extract] failed to resolve destination path $destination before staging merge" >&2; `,
+    String.raw`exit 64; }; `,
+    String.raw`if [ "$resolved_destination" != "$expected_destination" ]; then `,
+    String.raw`echo "[archive.extract] refusing staging merge: destination path $destination resolves to $resolved_destination" >&2; `,
+    String.raw`exit 64; fi; `,
+    String.raw`printf "%s\n" "$guard_paths" | while IFS= read -r guarded_path; do `,
+    String.raw`[ -z "$guarded_path" ] && continue; `,
+    String.raw`if [ -L "$guarded_path" ]; then `,
+    String.raw`echo "[archive.extract] refusing staging merge: destination path $guarded_path is a symlink" >&2; `,
+    String.raw`exit 64; fi; `,
+    String.raw`done || exit $?; `,
+    `target_path="$destination/$\{source_path##*/}"; `,
+    String.raw`if [ -L "$target_path" ]; then `,
+    String.raw`echo "[archive.extract] refusing staging merge: destination path $target_path is a symlink" >&2; `,
+    String.raw`exit 64; fi; `,
+    String.raw`cp -aT --no-dereference --remove-destination "$source_path" "$target_path" || exit $?; `,
+    String.raw`done`,
+  ].join("")
+}
+
+/**
  * Move the extracted archive contents from the paratix-controlled staging
  * directory into the destination using per-entry `cp -aT` so existing
  * destination directories are merged conflict-free. R-0000221: per-entry
@@ -231,38 +290,7 @@ async function moveExtractedContentsIntoDestination(
 ): Promise<ModuleResult | null> {
   const { destination, staging } = parameters
   const guardPaths = [...new Set(parameters.guardPaths)].join("\n")
-  // R-0000801: the staging merge inspects unsafe attacker-controlled paths
-  // emitted by the archive. We assemble the shell snippet as String.raw
-  // segments so the embedded quoting is readable, and we reject any
-  // extracted path that contains a literal newline before `cp` ever
-  // touches it. Newlines in extracted filenames are extremely unusual and
-  // would otherwise corrupt the `printf | while read` loop that processes
-  // `guard_paths`.
-  const mergeScript = [
-    String.raw`destination=$1; expected_destination=$2; guard_paths=$3; shift 3; `,
-    String.raw`for source_path do `,
-    String.raw`case "$source_path" in *"$(printf '\n')"*) `,
-    String.raw`echo "[archive.extract] refusing staging merge: extracted path contains a newline" >&2; `,
-    String.raw`exit 64;; esac; `,
-    String.raw`resolved_destination=$(readlink -f -- "$destination") || { `,
-    String.raw`echo "[archive.extract] failed to resolve destination path $destination before staging merge" >&2; `,
-    String.raw`exit 64; }; `,
-    String.raw`if [ "$resolved_destination" != "$expected_destination" ]; then `,
-    String.raw`echo "[archive.extract] refusing staging merge: destination path $destination resolves to $resolved_destination" >&2; `,
-    String.raw`exit 64; fi; `,
-    String.raw`printf "%s\n" "$guard_paths" | while IFS= read -r guarded_path; do `,
-    String.raw`[ -z "$guarded_path" ] && continue; `,
-    String.raw`if [ -L "$guarded_path" ]; then `,
-    String.raw`echo "[archive.extract] refusing staging merge: destination path $guarded_path is a symlink" >&2; `,
-    String.raw`exit 64; fi; `,
-    String.raw`done || exit $?; `,
-    `target_path="$destination/$\{source_path##*/}"; `,
-    String.raw`if [ -L "$target_path" ]; then `,
-    String.raw`echo "[archive.extract] refusing staging merge: destination path $target_path is a symlink" >&2; `,
-    String.raw`exit 64; fi; `,
-    String.raw`cp -aT --no-dereference --remove-destination "$source_path" "$target_path" || exit $?; `,
-    String.raw`done`,
-  ].join("")
+  const mergeScript = buildStagingMergeScript()
   // R-0000751: defense-in-depth — `[ -L "$target_path" ]` runs immediately
   // before the `cp -aT` so a symlink planted between the first probe and
   // the copy cannot smuggle the merge through to an attacker-controlled
