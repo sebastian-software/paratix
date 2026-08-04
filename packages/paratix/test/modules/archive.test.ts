@@ -961,7 +961,7 @@ describe("archive.extract — apply", () => {
   it.each([
     ["newline", "/opt/app\n/etc"],
     ["carriage return", "/opt/app\r/etc"],
-    ["NUL", "/opt/app /etc"],
+    ["NUL", "/opt/app\u0000/etc"],
     ["tab", "/opt/app\t/etc"],
   ])("rejects destinations containing %s control characters", (_label, destinationWithControl) => {
     expect(() => archive.extract(src, destinationWithControl)).toThrow(

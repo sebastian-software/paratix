@@ -1,6 +1,7 @@
 import type { SshConnection } from "../types.js"
 
 import { shellQuote } from "../ssh.js"
+import { CAPTURE_TRUNCATION_MARKER, DEFAULT_MAX_OUTPUT_BYTES } from "../sshHelpers.js"
 
 /**
  * Batched remote probes for `archive.extract`.
@@ -33,7 +34,7 @@ const XARGS_PREFIX = "xargs -0 sh -c '"
  * @param entries - The entries to transport.
  * @returns Each entry followed by a NUL byte.
  */
-function encodeNulPayload(entries: string[]): string {
+export function encodeNulPayload(entries: string[]): string {
   return entries.map((entry) => `${entry}\0`).join("")
 }
 
@@ -83,6 +84,19 @@ export async function runBatchedProbe(
     const detail =
       result.stderr.trim() || result.stdout.trim() || `exit code ${String(result.code)}`
     return { detail, kind: "failed" }
+  }
+  // R-0000668, as `readFile` and `sha256` apply it in `ssh.ts`: the captured
+  // output silently carries the truncation marker once it hits the byte cap.
+  // Parsing a cut-off list here would make the result depend on where the cut
+  // landed — the symlink and member-type probes stay fail-closed by the shape
+  // of their output, but the ownership probe drops a trailing partial record
+  // and can report a match it never verified. Rejecting truncation gives the
+  // whole transport one rule instead of three accidental ones.
+  if (result.stdout.endsWith(CAPTURE_TRUNCATION_MARKER)) {
+    return {
+      detail: `probe output exceeded the captured-output cap of ${String(DEFAULT_MAX_OUTPUT_BYTES)} bytes; refusing to evaluate a truncated result`,
+      kind: "failed",
+    }
   }
   return { fields: decodeNulFields(result.stdout), kind: "ok" }
 }
