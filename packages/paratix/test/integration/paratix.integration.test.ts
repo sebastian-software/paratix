@@ -9,7 +9,7 @@ import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from
 
 import type { Environment, Module, SshConfig, SshConnection } from "../../src/types.js"
 
-import { command, download, file, shellQuote } from "../../src/index.js"
+import { archive, command, download, file, shellQuote } from "../../src/index.js"
 import { clearHostKeyCache, HostKeyVerificationError } from "../../src/knownHosts.js"
 import { runPlaybook } from "../../src/runner.js"
 import { server } from "../../src/server.js"
@@ -1056,6 +1056,75 @@ describe.skip("Paratix integration", () => {
           removeRemoteDirectoryStep(ssh, remoteBase, "remove remote dist CLI apply test directory"),
           disconnectSshStep(ssh),
           removeCreatedLocalDirectoryStep(() => localDirectory),
+        ],
+        primaryError
+      )
+    }
+  })
+
+  it("extracts a many-member archive against the stock MaxSessions ceiling", async () => {
+    // Issue #178. Two defects hid behind each other here, and neither was
+    // reachable by a unit test: the staging merge refused every extracted path
+    // because its newline guard matched unconditionally, and the per-member
+    // probes opened more concurrent session channels than OpenSSH's default
+    // MaxSessions (pinned to 10 in the image's sshd_config) allows. A member
+    // count well above the channel cap is the point of the fixture — a handful
+    // of files would exhaust nothing and merge trivially.
+    const ssh = await connectSsh([getEnvironment().primaryPort], {}, "root")
+    const remoteBase = `/root/integration-${randomUUID()}`
+    const sourceTree = `${remoteBase}/tree`
+    const archivePath = `${remoteBase}/bundle.zip`
+    const destination = `${remoteBase}/destination`
+    const memberCount = 64
+
+    let primaryError: unknown
+    try {
+      await ssh.exec(
+        `mkdir -p ${shellQuote(sourceTree)}/nested ${shellQuote(destination)}/nested`,
+        { silent: true }
+      )
+      // `seq`-driven so the fixture stays a single round trip rather than 64.
+      await ssh.exec(
+        `for i in $(seq 1 ${String(memberCount)}); do printf 'member-%s\\n' "$i" > ${shellQuote(sourceTree)}/nested/file-$i.txt; done`,
+        { silent: true }
+      )
+      // A pre-existing destination subdirectory with the same name as an
+      // archive member forces the R-0000221 merge path rather than a plain copy.
+      await ssh.exec(`printf '%s\\n' preexisting > ${shellQuote(destination)}/nested/keep.txt`, {
+        silent: true,
+      })
+      await ssh.exec(`cd ${shellQuote(sourceTree)} && zip -q -r ${shellQuote(archivePath)} .`, {
+        silent: true,
+      })
+
+      const extractModule = archive.extract(archivePath, destination)
+
+      await expect(extractModule.apply(ssh, emptyEnv)).resolves.toMatchObject({
+        status: "changed",
+      })
+      expect(await ssh.readFile(`${destination}/nested/file-1.txt`)).toBe("member-1")
+      expect(await ssh.readFile(`${destination}/nested/file-${String(memberCount)}.txt`)).toBe(
+        `member-${String(memberCount)}`
+      )
+      // The merge must not have replaced the existing destination subdirectory.
+      expect(await ssh.readFile(`${destination}/nested/keep.txt`)).toBe("preexisting")
+
+      // Idempotency: a second apply recognizes the marker and changes nothing.
+      await expect(extractModule.apply(ssh, emptyEnv)).resolves.toMatchObject({ status: "ok" })
+      // No staging directory may survive a successful merge.
+      const leftoverStaging = await ssh.exec(
+        `find ${shellQuote(destination)} -maxdepth 1 -name '.paratix-stage.*' -print`,
+        { ignoreExitCode: true, silent: true }
+      )
+      expect(leftoverStaging.stdout.trim()).toBe("")
+    } catch (error) {
+      primaryError = error
+      throw error
+    } finally {
+      await runCleanupSteps(
+        [
+          removeRemoteDirectoryStep(ssh, remoteBase, "remove remote archive test directory"),
+          disconnectSshStep(ssh),
         ],
         primaryError
       )

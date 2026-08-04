@@ -13,5 +13,10 @@ PermitRootLogin prohibit-password
 AllowUsers paratix root
 PermitUserEnvironment no
 PidFile /run/sshd.pid
+# Pinned to the OpenSSH default rather than left implicit: issue #178 was a
+# per-connection session-channel exhaustion that only reproduces against this
+# ceiling. Stating it keeps the assumption under test visible, and stops a
+# future base-image change from silently raising it and hiding a regression.
+MaxSessions 10
 Subsystem sftp internal-sftp
 LogLevel VERBOSE

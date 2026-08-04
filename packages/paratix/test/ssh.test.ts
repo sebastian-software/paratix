@@ -4822,6 +4822,165 @@ describe("SshConnectionImpl", () => {
 })
 
 // ---------------------------------------------------------------------------
+// Session channel cap (issue #178)
+// ---------------------------------------------------------------------------
+
+/**
+ * The documented per-connection channel cap from `ssh.ts`. Deliberately
+ * duplicated rather than exported: the value is part of the contract described
+ * in `docs/user-guide/troubleshooting.md`, so changing it should break a test
+ * and force the documentation to be revisited.
+ */
+const EXPECTED_SESSION_CHANNEL_CAP = 4
+
+/** Flush every pending microtask and immediate callback. */
+async function flushPending(): Promise<void> {
+  await new Promise<void>((resolve) => {
+    setImmediate(resolve)
+  })
+}
+
+function makeReadySsh(client: Client): SshConnectionImpl {
+  const ssh = makeConnectedSsh(client, { user: "deploy" })
+  ;(ssh as unknown as Record<string, unknown>).cachedSudoPassword = null
+  ;(ssh as unknown as Record<string, unknown>).sudoReady = true
+  return ssh
+}
+
+describe("SshConnectionImpl session channel cap", () => {
+  it("never holds more concurrent session channels open than the cap", async () => {
+    // Issue #178: `exec` opens one ssh2 session channel each, and OpenSSH caps
+    // them per connection via MaxSessions (default 10). Module fan-outs used to
+    // issue 8 at once and exhausted the ceiling on archives with many members.
+    let concurrent = 0
+    let peak = 0
+    const execSpy = vi.fn().mockImplementation((_command: string, callback: ExecCallback) => {
+      concurrent += 1
+      peak = Math.max(peak, concurrent)
+      const stream = makeStream()
+      callback(undefined, stream)
+      setImmediate(() => {
+        concurrent -= 1
+        stream.emit("close", 0)
+      })
+    })
+    const ssh = makeReadySsh(makeClientWithExecSpy(execSpy))
+
+    const requestCount = 12
+    const results = await Promise.all(
+      Array.from({ length: requestCount }, async (_value, index) =>
+        ssh.exec(`echo ${String(index)}`, { silent: true })
+      )
+    )
+
+    expect(results).toHaveLength(requestCount)
+    expect(execSpy).toHaveBeenCalledTimes(requestCount)
+    expect(peak).toBe(EXPECTED_SESSION_CHANNEL_CAP)
+  })
+
+  it("runs callers queued behind the cap against the reconnected client", async () => {
+    // The wait can outlive a reconnect, so a queued caller must resolve the
+    // client after acquiring its slot. Capturing it beforehand would hand the
+    // waiter the client `reconnect()` already replaced.
+    const heldStreams: StreamWithStderr[] = []
+    const firstExec = vi.fn().mockImplementation((_command: string, callback: ExecCallback) => {
+      const stream = makeStream()
+      heldStreams.push(stream)
+      callback(undefined, stream)
+    })
+    const secondExec = vi.fn().mockImplementation((_command: string, callback: ExecCallback) => {
+      const stream = makeStream()
+      callback(undefined, stream)
+      setImmediate(() => {
+        stream.emit("close", 0)
+      })
+    })
+
+    const ssh = makeReadySsh(makeClientWithExecSpy(firstExec))
+    const requestCount = EXPECTED_SESSION_CHANNEL_CAP * 2
+    const pending = Array.from({ length: requestCount }, async (_value, index) =>
+      ssh.exec(`echo ${String(index)}`, { silent: true })
+    )
+
+    await flushPending()
+    // Exactly the cap is in flight; the rest are queued on the semaphore.
+    expect(firstExec).toHaveBeenCalledTimes(EXPECTED_SESSION_CHANNEL_CAP)
+
+    // Reconnect underneath the queued callers, then let the in-flight ones finish.
+    ;(ssh as unknown as Record<string, unknown>).client = makeClientWithExecSpy(secondExec)
+    for (const stream of heldStreams) stream.emit("close", 0)
+
+    await expect(Promise.all(pending)).resolves.toHaveLength(requestCount)
+    expect(secondExec).toHaveBeenCalledTimes(EXPECTED_SESSION_CHANNEL_CAP)
+  })
+
+  it("releases the slot when a command fails so later callers still run", async () => {
+    const failOnce = (_command: string, callback: ExecCallback): void => {
+      callback(new Error("boom"), makeStream())
+    }
+    const succeed = (_command: string, callback: ExecCallback): void => {
+      const stream = makeStream()
+      callback(undefined, stream)
+      setImmediate(() => {
+        stream.emit("close", 0)
+      })
+    }
+    // The first `cap` calls fail, the rest succeed. Queued as one-shot
+    // implementations rather than a branch inside the spy, so the test stays
+    // free of conditionals.
+    const execSpy = vi.fn().mockImplementation(succeed)
+    for (const _slot of Array.from({ length: EXPECTED_SESSION_CHANNEL_CAP })) {
+      execSpy.mockImplementationOnce(failOnce)
+    }
+    const ssh = makeReadySsh(makeClientWithExecSpy(execSpy))
+
+    const settled = await Promise.allSettled(
+      Array.from({ length: EXPECTED_SESSION_CHANNEL_CAP * 2 }, async (_value, index) =>
+        ssh.exec(`echo ${String(index)}`, { silent: true })
+      )
+    )
+
+    // A leaked slot would leave the trailing calls pending forever, so the mere
+    // fact that all of them settled is the assertion that matters here.
+    expect(settled.filter((entry) => entry.status === "rejected")).toHaveLength(
+      EXPECTED_SESSION_CHANNEL_CAP
+    )
+    expect(settled.filter((entry) => entry.status === "fulfilled")).toHaveLength(
+      EXPECTED_SESSION_CHANNEL_CAP
+    )
+  })
+
+  it("names MaxSessions when the server refuses a session channel, with the command masked", async () => {
+    const execSpy = vi.fn().mockImplementation((_command: string, callback: ExecCallback) => {
+      callback(new Error("(SSH) Channel open failure: open failed"), makeStream())
+    })
+    const ssh = makeReadySsh(makeClientWithExecSpy(execSpy))
+
+    const error = await expectRejectedError(
+      ssh.exec("echo hunter2-token", { secrets: ["hunter2-token"], silent: true })
+    )
+
+    expect(error.message).toContain("Channel open failure")
+    expect(error.message).toContain("MaxSessions")
+    expect(error.message).toContain(String(EXPECTED_SESSION_CHANNEL_CAP))
+    // R-0000667: the added diagnosis must not widen what a failure discloses.
+    expect(error.message).not.toContain("hunter2-token")
+  })
+
+  it("leaves an unrelated exec error untouched", async () => {
+    const execSpy = vi.fn().mockImplementation((_command: string, callback: ExecCallback) => {
+      callback(new Error("some other transport problem"), makeStream())
+    })
+    const ssh = makeReadySsh(makeClientWithExecSpy(execSpy))
+
+    const error = await expectRejectedError(ssh.exec("echo hi", { silent: true }))
+
+    expect(error.message).toBe("some other transport problem")
+    expect(error.message).not.toContain("MaxSessions")
+  })
+})
+
+// ---------------------------------------------------------------------------
 // validateMktempPath
 // ---------------------------------------------------------------------------
 

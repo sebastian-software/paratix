@@ -35,6 +35,7 @@ import {
   DEFAULT_MAX_OUTPUT_BYTES,
   maskPreparedSecrets,
   maskSecrets,
+  type PreparedSecrets,
   prepareSecrets,
   type SecretSource,
   shellQuote,
@@ -44,6 +45,33 @@ import {
 import { promptTerminal } from "./terminal.js"
 
 export { shellQuote, validateMktempPath, validateMode }
+
+/**
+ * Explain an ssh2 channel-open failure instead of passing it through raw.
+ *
+ * Issue #178: `(SSH) Channel open failure: open failed` is what the client
+ * reports when the server refuses a new session channel, and it is routinely
+ * misread as a network or upload problem. Naming `MaxSessions` and the cap
+ * paratix itself applies turns it into an actionable message. Every
+ * interpolated command goes through the prepared-secret sink (R-0000667), so
+ * the added diagnosis cannot widen what a failure discloses.
+ *
+ * @param error - The error ssh2 handed to the `client.exec` callback.
+ * @param command - The command whose channel could not be opened.
+ * @param secrets - The prepared secret sink used for masking.
+ * @returns An annotated error, or the original when it is an unrelated failure.
+ */
+function describeChannelOpenFailure(
+  error: Error,
+  command: string,
+  secrets: PreparedSecrets
+): Error {
+  if (!CHANNEL_OPEN_FAILURE_PATTERN.test(error.message)) return error
+  return new Error(
+    `${error.message} — the SSH server refused a new session channel. paratix opens at most ${String(MAX_CONCURRENT_SESSION_CHANNELS)} concurrent channels per connection; a server whose MaxSessions is below that (OpenSSH default: 10) refuses them. Command: ${maskPreparedSecrets(command, secrets)}`,
+    { cause: error }
+  )
+}
 
 async function statLocalFile(path: string): Promise<Stats> {
   // eslint-disable-next-line security/detect-non-literal-fs-filename -- localPath is an explicit caller-provided upload source that must be stat'ed before transfer
@@ -199,6 +227,18 @@ const EMPTY_FILE_SHA256 = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca4959
 // R-0000209: how long to wait for `client.end()` to complete before
 // forcibly destroying the underlying socket.
 const DISCONNECT_DESTROY_FALLBACK_MS = 5000
+// Issue #178: every `exec` opens its own ssh2 session channel, and OpenSSH
+// caps them per connection via `MaxSessions` (default 10). Module-level
+// fan-outs used to issue 8 at once, one channel below that ceiling, which
+// surfaced as an opaque `Channel open failure` on archives with many members.
+// Bounding the channels here rather than at each call site keeps one authority
+// for the limit: `archive.ts`, the `known_hosts` filter in `modules/ssh.ts` and
+// the compose image probes all share it, as does any future fan-out. 4 leaves
+// room for a concurrent SFTP channel plus headroom under the stock default.
+const MAX_CONCURRENT_SESSION_CHANNELS = 4
+// ssh2 reports a refused channel as `(SSH) Channel open failure: open failed`,
+// which reads like a transport fault rather than a reached ceiling.
+const CHANNEL_OPEN_FAILURE_PATTERN = /channel open failure/iv
 const JITTER_BASE = 0.75
 const JITTER_RANGE = 0.5
 const RECONNECT_BASE_DELAY = 1000
@@ -305,6 +345,11 @@ async function sleepWithAbort(delay: number, abortSignal?: AbortSignal): Promise
 }
 
 export class SshConnectionImpl implements SshConnection {
+  /**
+   * Session channels currently opened (or reserved) on this connection.
+   * Bounded by {@link MAX_CONCURRENT_SESSION_CHANNELS}; see issue #178.
+   */
+  private activeSessionChannels = 0
   private agentSocket: null | string = null
   private authMethod: AuthMethod = null
   /**
@@ -365,6 +410,12 @@ export class SshConnectionImpl implements SshConnection {
   private pinnedHostKey: Buffer | null = null
   private promptAbortSignal: AbortSignal | undefined
   private readonly runtime: SshRuntimeState
+  /**
+   * FIFO queue of callers waiting for a session-channel slot. Each entry is the
+   * `resolve` of that caller's wait promise; `releaseSessionChannel` hands the
+   * slot over by calling it.
+   */
+  private readonly sessionChannelWaiters: Array<() => void> = []
   /**
    * Cached error from a previous sudo probe failure. Once a probe has failed
    * (sudo not installed, wrong password, etc.) we re-throw this error on
@@ -805,6 +856,40 @@ export class SshConnectionImpl implements SshConnection {
     } finally {
       if (!finalized) await this.cleanupWriteFileTemporaryPath(remoteTemporary)
     }
+  }
+
+  /**
+   * Claim one of the connection's session-channel slots.
+   *
+   * Returns `null` when a slot was free and is now claimed, so an uncontended
+   * caller reaches `client.exec` in the same tick it always did. Awaiting even
+   * a resolved promise would insert an extra microtask and shift the observable
+   * timing of every command on the connection. Under contention it returns a
+   * promise that settles in FIFO order once a slot is handed over.
+   *
+   * Callers must resolve their ssh2 client **after** this returns or its
+   * promise settles, never before: `reconnect()` replaces the client and
+   * `disconnect()` nulls it, so a reference captured before the wait can be
+   * dead by the time the slot frees up. Waiting here is deliberately invisible
+   * to a reconnect — queued callers run against whatever client is current
+   * rather than being rejected.
+   *
+   * @returns `null` when the slot was claimed immediately, otherwise a promise
+   *   that resolves once this caller owns a slot.
+   */
+  private acquireSessionChannel(): null | Promise<void> {
+    if (
+      this.activeSessionChannels < MAX_CONCURRENT_SESSION_CHANNELS &&
+      this.sessionChannelWaiters.length === 0
+    ) {
+      this.activeSessionChannels += 1
+      return null
+    }
+    // The slot is handed over by releaseSessionChannel, which keeps the counter
+    // raised across the transfer — so nothing is incremented here.
+    return new Promise<void>((resolve) => {
+      this.sessionChannelWaiters.push(resolve)
+    })
   }
 
   private async agentSocketExists(agent: string): Promise<boolean> {
@@ -1680,62 +1765,20 @@ ${this.buildDirSymlinkCheckScript(directory)}mktemp -p ${shellQuote(directory)} 
   }
 
   private async execPrepared(command: string, options: ExecOptions = {}): Promise<ExecResult> {
-    const client = this.ensureClient()
-    const environmentPrefix = this.buildEnvPrefix(options.env)
-    const sudo = this.sudoCommand(command, environmentPrefix, options.input != null)
-    const secrets = prepareSecrets(this.buildSecrets(options.secrets))
+    // Issue #178: claim the channel slot first, then resolve the client. The
+    // wait can outlive a reconnect, and a client captured beforehand would be
+    // the dead one. `ensureSudoReady()` already ran in the public `exec`, so no
+    // slot is held while another exec is awaited — that would deadlock.
+    const channelWait = this.acquireSessionChannel()
+    if (channelWait !== null) await channelWait
     try {
-      return await new Promise((resolve, reject) => {
-        const { isSettled, wrappedReject, wrappedResolve } =
-          this.createSettledCallbacks<ExecResult>(resolve, reject)
-        const timeout = options.timeout ?? COMMAND_TIMEOUT
-        let activeStream: ClientChannel | null = null
-        const timer = setTimeout(() => {
-          activeStream?.close()
-          wrappedReject(
-            new Error(
-              `Command timed out after ${timeout}ms: ${maskPreparedSecrets(command, secrets)}`
-            )
-          )
-        }, timeout)
-        try {
-          client.exec(sudo.command, (error: Error | undefined, stream: ClientChannel) => {
-            if (error) {
-              clearTimeout(timer)
-              wrappedReject(error)
-              return
-            }
-            // If the timer already fired (or the promise was otherwise settled) before
-            // ssh2 invoked this callback, we must not attach listeners that can never
-            // resolve the already-rejected promise. Close the stream immediately so
-            // ssh2 releases the channel and discards any buffered data.
-            if (isSettled()) {
-              stream.close()
-              return
-            }
-            activeStream = stream
-            collectStreamOutput({
-              command,
-              options,
-              reject: wrappedReject,
-              resolve: wrappedResolve,
-              secrets,
-              stream,
-              timer,
-            })
-            this.writeStreamInput(stream, sudo.needsPassword, options.input)
-          })
-        } catch (error) {
-          clearTimeout(timer)
-          closeClientChannel(activeStream)
-          wrappedReject(toError(error))
-        }
-      })
-    } catch (error) {
-      if (sudo.mode === "noninteractive" && this.isNoninteractiveSudoAuthError(error)) {
-        this.invalidateSudoReadiness()
-      }
-      throw error
+      const client = this.ensureClient()
+      const environmentPrefix = this.buildEnvPrefix(options.env)
+      const sudo = this.sudoCommand(command, environmentPrefix, options.input != null)
+      const secrets = prepareSecrets(this.buildSecrets(options.secrets))
+      return await this.runPreparedExec({ client, command, options, secrets, sudo })
+    } finally {
+      this.releaseSessionChannel()
     }
   }
 
@@ -1759,58 +1802,16 @@ ${this.buildDirSymlinkCheckScript(directory)}mktemp -p ${shellQuote(directory)} 
    * @returns The exit code and captured stdout.
    */
   private async execRaw(command: string): Promise<{ exitCode: number; stdout: string }> {
-    const client = this.ensureClient()
-    // R-0000667: snapshot the secret sink once (as execPrepared does) so both
-    // the timeout message and the collectStreamOutput masking pipeline redact
-    // the same registered-secret material.
-    const secrets = prepareSecrets(this.buildSecrets())
-    const result = await new Promise<ExecResult>((resolve, reject) => {
-      const { isSettled, wrappedReject, wrappedResolve } = this.createSettledCallbacks<ExecResult>(
-        resolve,
-        reject
-      )
-      let activeStream: ClientChannel | null = null
-      const timer = setTimeout(() => {
-        activeStream?.close()
-        wrappedReject(
-          new Error(
-            `Command timed out after ${COMMAND_TIMEOUT}ms: ${maskPreparedSecrets(command, secrets)}`
-          )
-        )
-      }, COMMAND_TIMEOUT)
-      try {
-        client.exec(command, (error: Error | undefined, stream: ClientChannel) => {
-          if (error) {
-            clearTimeout(timer)
-            wrappedReject(error)
-            return
-          }
-          // If the timer already fired (or the promise was otherwise settled)
-          // before ssh2 invoked this callback, we must not attach listeners that
-          // can never resolve the already-rejected promise. Close the stream
-          // immediately so ssh2 releases the channel and discards buffered data.
-          if (isSettled()) {
-            stream.close()
-            return
-          }
-          activeStream = stream
-          collectStreamOutput({
-            command,
-            options: { ignoreExitCode: true, silent: true },
-            reject: wrappedReject,
-            resolve: wrappedResolve,
-            secrets,
-            stream,
-            timer,
-          })
-        })
-      } catch (error) {
-        clearTimeout(timer)
-        closeClientChannel(activeStream)
-        wrappedReject(toError(error))
-      }
-    })
-    return { exitCode: result.code, stdout: result.stdout }
+    // Issue #178: the raw path opens a session channel exactly like the sudo
+    // path, so it shares the same cap. Client resolution happens after the
+    // claim for the reconnect reason documented on acquireSessionChannel.
+    const channelWait = this.acquireSessionChannel()
+    if (channelWait !== null) await channelWait
+    try {
+      return await this.runRawExec(command)
+    } finally {
+      this.releaseSessionChannel()
+    }
   }
 
   private async execWithoutSudo(command: string): Promise<void> {
@@ -2155,6 +2156,23 @@ trap - EXIT
   }
 
   /**
+   * Return a session-channel slot, handing it directly to the next waiter.
+   *
+   * The counter is deliberately not decremented when a waiter exists: resolving
+   * its promise only schedules a microtask, and a caller arriving in between
+   * would otherwise see a free slot, claim it, and push the connection one
+   * channel over the cap.
+   */
+  private releaseSessionChannel(): void {
+    const next = this.sessionChannelWaiters.shift()
+    if (next !== undefined) {
+      next()
+      return
+    }
+    this.activeSessionChannels -= 1
+  }
+
+  /**
    * Tear down the SSH transport without touching the cached sudo password.
    *
    * R-0000209: `client.end()` initiates a graceful disconnect, which can
@@ -2239,6 +2257,144 @@ trap - EXIT
       // AbortController.abort never throws on modern runtimes; defense in
       // depth only.
     }
+  }
+
+  /**
+   * Run one prepared command on an already-claimed session channel.
+   *
+   * Split out of {@link execPrepared} so the channel-slot acquisition and its
+   * guaranteed release stay readable around the callback wiring.
+   *
+   * @param parameters - Prepared execution inputs.
+   * @param parameters.client - The ssh2 client resolved after the slot claim.
+   * @param parameters.command - The original (unwrapped) command, for messages.
+   * @param parameters.options - The caller's exec options.
+   * @param parameters.secrets - The prepared secret sink used for masking.
+   * @param parameters.sudo - The resolved sudo wrapping for this command.
+   * @returns The captured execution result.
+   */
+  private async runPreparedExec(parameters: {
+    client: Client
+    command: string
+    options: ExecOptions
+    secrets: PreparedSecrets
+    sudo: SudoCommandResult
+  }): Promise<ExecResult> {
+    const { client, command, options, secrets, sudo } = parameters
+    try {
+      return await new Promise((resolve, reject) => {
+        const { isSettled, wrappedReject, wrappedResolve } =
+          this.createSettledCallbacks<ExecResult>(resolve, reject)
+        const timeout = options.timeout ?? COMMAND_TIMEOUT
+        let activeStream: ClientChannel | null = null
+        const timer = setTimeout(() => {
+          activeStream?.close()
+          wrappedReject(
+            new Error(
+              `Command timed out after ${timeout}ms: ${maskPreparedSecrets(command, secrets)}`
+            )
+          )
+        }, timeout)
+        try {
+          client.exec(sudo.command, (error: Error | undefined, stream: ClientChannel) => {
+            if (error) {
+              clearTimeout(timer)
+              wrappedReject(describeChannelOpenFailure(error, command, secrets))
+              return
+            }
+            // If the timer already fired (or the promise was otherwise settled) before
+            // ssh2 invoked this callback, we must not attach listeners that can never
+            // resolve the already-rejected promise. Close the stream immediately so
+            // ssh2 releases the channel and discards any buffered data.
+            if (isSettled()) {
+              stream.close()
+              return
+            }
+            activeStream = stream
+            collectStreamOutput({
+              command,
+              options,
+              reject: wrappedReject,
+              resolve: wrappedResolve,
+              secrets,
+              stream,
+              timer,
+            })
+            this.writeStreamInput(stream, sudo.needsPassword, options.input)
+          })
+        } catch (error) {
+          clearTimeout(timer)
+          closeClientChannel(activeStream)
+          wrappedReject(toError(error))
+        }
+      })
+    } catch (error) {
+      if (sudo.mode === "noninteractive" && this.isNoninteractiveSudoAuthError(error)) {
+        this.invalidateSudoReadiness()
+      }
+      throw error
+    }
+  }
+
+  /**
+   * Run one unwrapped command on an already-claimed session channel.
+   *
+   * @param command - The raw shell command to run.
+   * @returns The exit code and captured stdout.
+   */
+  private async runRawExec(command: string): Promise<{ exitCode: number; stdout: string }> {
+    const client = this.ensureClient()
+    // R-0000667: snapshot the secret sink once (as execPrepared does) so both
+    // the timeout message and the collectStreamOutput masking pipeline redact
+    // the same registered-secret material.
+    const secrets = prepareSecrets(this.buildSecrets())
+    const result = await new Promise<ExecResult>((resolve, reject) => {
+      const { isSettled, wrappedReject, wrappedResolve } = this.createSettledCallbacks<ExecResult>(
+        resolve,
+        reject
+      )
+      let activeStream: ClientChannel | null = null
+      const timer = setTimeout(() => {
+        activeStream?.close()
+        wrappedReject(
+          new Error(
+            `Command timed out after ${COMMAND_TIMEOUT}ms: ${maskPreparedSecrets(command, secrets)}`
+          )
+        )
+      }, COMMAND_TIMEOUT)
+      try {
+        client.exec(command, (error: Error | undefined, stream: ClientChannel) => {
+          if (error) {
+            clearTimeout(timer)
+            wrappedReject(describeChannelOpenFailure(error, command, secrets))
+            return
+          }
+          // If the timer already fired (or the promise was otherwise settled)
+          // before ssh2 invoked this callback, we must not attach listeners that
+          // can never resolve the already-rejected promise. Close the stream
+          // immediately so ssh2 releases the channel and discards buffered data.
+          if (isSettled()) {
+            stream.close()
+            return
+          }
+          activeStream = stream
+          collectStreamOutput({
+            command,
+            options: { ignoreExitCode: true, silent: true },
+            reject: wrappedReject,
+            resolve: wrappedResolve,
+            secrets,
+            stream,
+            timer,
+          })
+        })
+      } catch (error) {
+        clearTimeout(timer)
+        closeClientChannel(activeStream)
+        wrappedReject(toError(error))
+      }
+    })
+    return { exitCode: result.code, stdout: result.stdout }
   }
 
   /**

@@ -68,6 +68,18 @@ The Paratix CLI also suggests a global installation, but a project-local depende
 
 **Verify:** Connect with SSH directly, then rerun Paratix and confirm that it reconnects within the configured window.
 
+## A step fails with `Channel open failure`
+
+**Symptom:** A step fails with `(SSH) Channel open failure: open failed`, often on `archive.extract` against an archive with many members. The message mentions `MaxSessions`. The failure is not cumulative — it reproduces on a rerun in which every preceding step reports `ok` — and it looks like a transport or upload problem rather than a limit being reached.
+
+**Likely cause:** The SSH server refused a new session channel. Every remote command runs on its own channel, and OpenSSH caps concurrent channels per connection through `MaxSessions` (default 10). Paratix opens at most 4 concurrent channels per connection, which stays under that default and leaves room for a parallel SFTP transfer. A host whose `sshd_config` lowers `MaxSessions` below that can still refuse them.
+
+**Diagnose:** Read the effective ceiling on the target host with `sshd -T | grep -i maxsessions`. A value below 5 leaves no room for the concurrent channels plus an SFTP transfer.
+
+**Fix:** Raise `MaxSessions` on the target back to the default of 10 (or higher) and reload the SSH daemon. Paratix does not exceed 4 concurrent channels per connection, so no playbook change is needed.
+
+**Verify:** Rerun the failing step and confirm it completes. If the same error persists at the default `MaxSessions`, something else on the host is consuming session channels on the same connection.
+
 ## A package step reports `changed` on every run
 
 **Symptom:** `package.update`, `package.upgrade` or `apt.distUpgrade` reports `changed` on every apply, even when the playbook and its date arguments have not changed.
