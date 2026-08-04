@@ -23,6 +23,7 @@ import {
   buildMemberTypeProbeScript,
   buildOwnershipProbeScript,
   encodeMemberTypeEntry,
+  encodeNulPayload,
   OWNERSHIP_PROBE_FIELD_COUNT,
   runBatchedProbe,
 } from "./archiveProbe.js"
@@ -445,7 +446,7 @@ async function applyExtractedMemberOwner(
   // than the previous first-failure-only message rather than narrower.
   const result = await conn.exec(renderBatchedChownSymlinkCommand(owner), {
     ...EXEC_OPTS,
-    input: paths.map((path) => `${path}\0`).join(""),
+    input: encodeNulPayload(paths),
   })
   if (result.code !== 0) {
     return failedCommand(
