@@ -95,6 +95,123 @@ describe("renderTemplate", () => {
     await expect(renderTemplate("{{A|}}", env)).rejects.toThrow('Unknown template modifier ""')
   })
 
+  describe("b64decode modifier", () => {
+    const pem =
+      "-----BEGIN PRIVATE KEY-----\nMIIBVgIBADANBg\nkqhkiG9w0B\n-----END PRIVATE KEY-----\n"
+    const encodedPem = Buffer.from(pem, "utf8").toString("base64")
+
+    it("restores a multi-line secret stored as single-line base64", async () => {
+      const env: Environment = { DEPLOY_KEY: encodedPem }
+      const view = await renderTemplate("{{DEPLOY_KEY|b64decode}}", env)
+      expect(view).toBe(pem)
+    })
+
+    it("decodes an empty value to an empty string", async () => {
+      const env: Environment = { EMPTY: "" }
+      const view = await renderTemplate("[{{EMPTY|b64decode}}]", env)
+      expect(view).toBe("[]")
+    })
+
+    it("tolerates surrounding and embedded whitespace", async () => {
+      const wrapped = `\n  ${encodedPem.slice(0, 20)}\n${encodedPem.slice(20)}  \n`
+      const env: Environment = { DEPLOY_KEY: wrapped }
+      const view = await renderTemplate("{{DEPLOY_KEY|b64decode}}", env)
+      expect(view).toBe(pem)
+    })
+
+    it("accepts a value whose padding was trimmed away", async () => {
+      // "YWJjZGU=" with its padding trimmed off.
+      const env: Environment = { A: "YWJjZGU" }
+      const view = await renderTemplate("{{A|b64decode}}", env)
+      expect(view).toBe("abcde")
+    })
+
+    it("rejects the base64url alphabet instead of normalizing it", async () => {
+      const env: Environment = { A: "a-b_c" }
+      await expect(renderTemplate("{{A|b64decode}}", env)).rejects.toThrow(
+        'Template modifier "b64decode" on placeholder "{{A}}" received a value that is not standard base64'
+      )
+    })
+
+    it("rejects a value of invalid base64 length", async () => {
+      // Five characters leave a remainder of one: six bits, too few for a byte.
+      const env: Environment = { A: "QUJDR" }
+      await expect(renderTemplate("{{A|b64decode}}", env)).rejects.toThrow(/invalid base64 length/v)
+    })
+
+    // "QR==" carries trailing bits that no byte can hold; Buffer.from() drops them
+    // and would silently decode it to the same "A" as the canonical "QQ==".
+    it("rejects a non-canonical final group", async () => {
+      const env: Environment = { A: "QR==" }
+      await expect(renderTemplate("{{A|b64decode}}", env)).rejects.toThrow(
+        /is not canonical base64/v
+      )
+    })
+
+    it("rejects base64 whose bytes are not valid UTF-8", async () => {
+      const env: Environment = { A: Buffer.from([0xff, 0xfe, 0xfd]).toString("base64") }
+      await expect(renderTemplate("{{A|b64decode}}", env)).rejects.toThrow(
+        /decoded to bytes that are not valid UTF-8/v
+      )
+    })
+
+    // The decoded payload is a secret: an error message that echoed the input or
+    // the decoded bytes would leak it into every log that captures the failure.
+    it("never exposes the value or the decoded bytes in an error message", async () => {
+      const secret = "SUPER-SECRET-KEY-MATERIAL"
+      const env: Environment = { A: `${Buffer.from(secret, "utf8").toString("base64")}!!` }
+      const message = String(
+        await renderTemplate("{{A|b64decode}}", env).catch((error: unknown) => error)
+      )
+      expect(message).toContain("b64decode")
+      expect(message).toContain("{{A}}")
+      expect(message).not.toContain(secret)
+      expect(message).not.toContain("SUPER")
+      expect(message).not.toContain(Buffer.from(secret, "utf8").toString("base64"))
+    })
+
+    it("satisfies strict mode on its own, without an escaping modifier", async () => {
+      const env: Environment = { A: Buffer.from("plain", "utf8").toString("base64") }
+      const view = await renderTemplate("{{A|b64decode}}", env, { strict: true })
+      expect(view).toBe("plain")
+    })
+  })
+
+  describe("modifier chains", () => {
+    it("applies a chain left to right", async () => {
+      const env: Environment = { A: Buffer.from("it's here", "utf8").toString("base64") }
+      const view = await renderTemplate("run {{A|b64decode|shell}}", env)
+      expect(view).toBe("run 'it'\\''s here'")
+    })
+
+    it("fails on a reversed chain instead of emitting garbage", async () => {
+      const env: Environment = { A: Buffer.from("plain", "utf8").toString("base64") }
+      await expect(renderTemplate("{{A|shell|b64decode}}", env)).rejects.toThrow(
+        /is not standard base64/v
+      )
+    })
+
+    it("treats raw inside a chain as an identity step", async () => {
+      const env: Environment = { A: Buffer.from("hello", "utf8").toString("base64") }
+      const view = await renderTemplate("{{A|raw|b64decode|raw}}", env)
+      expect(view).toBe("hello")
+    })
+
+    it("rejects an unknown modifier anywhere in the chain", async () => {
+      const env: Environment = { A: "x" }
+      await expect(renderTemplate("{{A|raw|nope|shell}}", env)).rejects.toThrow(
+        'Unknown template modifier "nope"'
+      )
+    })
+
+    it("stops the chain at the first failing modifier", async () => {
+      const env: Environment = { A: "!!!" }
+      await expect(renderTemplate("{{A|b64decode|shell}}", env)).rejects.toThrow(
+        /is not standard base64/v
+      )
+    })
+  })
+
   it("leaves value unchanged when no modifier is used", async () => {
     const env: Environment = { VAL: "raw" }
     const view = await renderTemplate("{{VAL}}", env, { strict: false })

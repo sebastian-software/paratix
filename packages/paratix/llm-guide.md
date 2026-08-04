@@ -622,9 +622,13 @@ Files deployed via `file.template(remotePath, localTemplatePath)` can contain `{
 - Values propagated through `meta.env(...)` are normalized to async resolution before downstream modules or templates consume them.
 - Escaping: `\{{` produces a literal `{{` in the output.
 - Unknown keys throw an error at runtime.
-- **Modifiers:** `{{KEY|shell}}` applies `shellQuote()` to the value. This is the only built-in modifier.
-- **Strict mode (default: on).** Every placeholder must have an explicit modifier (`|shell` or `|raw`). Bare `{{KEY}}` placeholders throw at render time. Pass `strict: false` in the options to disable this check.
-- **Security: No default escaping.** Values are inserted verbatim. If the template produces a shell script or shell config, **always** use `{{KEY|shell}}` for every variable — omitting `|shell` can lead to shell injection.
+- **Modifiers:** the built-in modifiers are `shell` (applies `shellQuote()` to the value), `raw` (explicit verbatim insertion) and `b64decode` (see below).
+- **Modifier chains.** Modifiers can be chained and are applied left to right: `{{KEY|b64decode|shell}}` decodes first and quotes the result. The order is yours to get right — `{{KEY|shell|b64decode}}` tries to decode the quoted string and fails.
+- **`b64decode`.** Decodes a base64-encoded value into the text it represents. Use it for multi-line secrets — PEM/OpenSSH private keys, certificates — that are stored base64-encoded on a single line because the secret manager mangles embedded newlines. Whitespace is stripped and missing padding is normalized; a foreign alphabet (including base64url), a non-canonical final group, or bytes that are not valid UTF-8 throw instead of writing corrupted output. Error messages never contain the value or the decoded bytes.
+- **`b64decode` is for file targets.** It fits SSH keys, certificates and kubeconfigs rendered with `file.template`. It does **not** make a multi-line value usable inside a systemd `EnvironmentFile` — those have their own quoting rules, and a decoded PEM still breaks the parser.
+- **Strict mode (default: on).** Every placeholder must have at least one explicit modifier. Bare `{{KEY}}` placeholders throw at render time. Pass `strict: false` in the options to disable this check.
+- **Security: No default escaping.** Values are inserted verbatim. If the template produces a shell script or shell config, **always** use `{{KEY|shell}}` for every variable — omitting `|shell` can lead to shell injection. `b64decode` is a transform, not an escape: a chain without `shell` inserts the decoded value verbatim.
+- **Secrets in dry runs.** `file.template` renders its `--dry-run` diff from the final content, unmasked. A decoded private key is therefore visible in that diff.
 
 Example template file (`nginx.conf.tmpl`):
 
@@ -988,7 +992,7 @@ The diff string is plain text — no ANSI codes. The output layer applies colors
 2. Import modules from `"paratix/modules"`, not from `"paratix"`.
 3. `package` must be aliased on import: `import { package as pkg } from "paratix/modules"` -- `package` is a reserved word in JavaScript.
 4. For idempotency with `command.shell()`, always provide a `check` command.
-5. Use `{{KEY|shell}}` or `{{KEY|raw}}` placeholders in `.tmpl` files — strict mode is on by default and bare `{{KEY}}` will throw. Provide values via `env` in `server()`.
+5. Use `{{KEY|shell}}`, `{{KEY|raw}}` or a chain such as `{{KEY|b64decode|shell}}` in `.tmpl` files — strict mode is on by default and bare `{{KEY}}` will throw. Provide values via `env` in `server()`.
 6. Use `service.restart()` and `service.reload()` as `signals` in recipes, not directly in `run`.
 7. Use `signals.flush()` only as an explicit checkpoint when staged flows require an early signal flush.
 8. Always pass a date string to `package.upgrade()` and `package.update()` -- it is the idempotency key. Each distinct date keeps its own flag file, so several calls with different dates coexist; a date that was already applied stays applied and is not re-run. Read the step's [status detail](#status-detail-on-changed-steps) to tell a real upgrade from a step that only wrote its marker.

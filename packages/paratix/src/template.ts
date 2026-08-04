@@ -9,8 +9,82 @@ export type RenderOptions = {
   strict?: boolean
 }
 
+/** Standard base64 alphabet with padding only at the very end. */
+const BASE64_PATTERN = /^[A-Za-z0-9+\/]*={0,2}$/v
+
+/** Base64 encodes three bytes per four characters, so input length is a multiple of four. */
+const BASE64_GROUP_LENGTH = 4
+
+/** Rejects any byte sequence that is not well-formed UTF-8. */
+const utf8Decoder = new TextDecoder("utf-8", { fatal: true })
+
+/**
+ * Strip whitespace from a base64 value and restore canonical padding.
+ *
+ * @param value - The raw resolved value, possibly wrapped across lines or trimmed of padding.
+ * @param location - Message prefix naming the modifier and placeholder.
+ * @returns The compacted, padded base64 string, ready to decode.
+ * @throws {Error} When the value uses a foreign alphabet or has an impossible length.
+ */
+function normalizeBase64(value: string, location: string): string {
+  const compact = value.replaceAll(/\s+/gv, "")
+  if (!BASE64_PATTERN.test(compact)) {
+    throw new Error(`${location} received a value that is not standard base64`)
+  }
+
+  const stripped = compact.replace(/={1,2}$/v, "")
+  // A remainder of one leaves six bits, too few to form a byte.
+  if (stripped.length % BASE64_GROUP_LENGTH === 1) {
+    throw new Error(`${location} received a value of invalid base64 length`)
+  }
+
+  const groups = Math.ceil(stripped.length / BASE64_GROUP_LENGTH)
+  return stripped.padEnd(groups * BASE64_GROUP_LENGTH, "=")
+}
+
+/**
+ * Decode a base64-encoded value into the text it represents.
+ *
+ * Secrets that span multiple lines — PEM and OpenSSH private keys, certificates —
+ * are commonly stored base64-encoded on a single line because secret managers
+ * mangle embedded newlines. This modifier turns such a value back into the bytes
+ * the target file expects.
+ *
+ * The decoder is deliberately strict: whitespace is stripped and missing padding
+ * is normalized, but a foreign alphabet (including base64url), a non-canonical
+ * final group, or bytes that are not valid UTF-8 throw instead of producing
+ * silently corrupted output.
+ *
+ * **Security:** no error message may contain the value or the decoded bytes — the
+ * input is a secret and error messages end up in logs.
+ *
+ * @param value - The stringified resolved value, expected to be standard base64.
+ * @param varName - Placeholder name, used only to make the error message locatable.
+ * @returns The decoded UTF-8 text.
+ * @throws {Error} When the value is not standard base64 or does not decode to UTF-8.
+ */
+function decodeBase64(value: string, varName: string): string {
+  const location = `Template modifier "b64decode" on placeholder "{{${varName}}}"`
+  const padded = normalizeBase64(value, location)
+  if (padded === "") return ""
+
+  const bytes = Buffer.from(padded, "base64")
+  // Buffer.from() ignores trailing bits that no byte can carry, so "QR==" and
+  // "QQ==" both decode to "A". Re-encoding is what tells them apart.
+  if (bytes.toString("base64") !== padded) {
+    throw new Error(`${location} received a value that is not canonical base64`)
+  }
+
+  try {
+    return utf8Decoder.decode(bytes)
+  } catch {
+    throw new Error(`${location} decoded to bytes that are not valid UTF-8`)
+  }
+}
+
 /** Registry of supported template modifiers. */
-const modifiers: Partial<Record<string, (value: string) => string>> = {
+const modifiers: Partial<Record<string, (value: string, varName: string) => string>> = {
+  b64decode: decodeBase64,
   raw: (value: string) => value,
   shell: shellQuote,
 }
@@ -21,16 +95,21 @@ const MALFORMED_PLACEHOLDER_SNIPPET_LIMIT = 40
 type Token =
   | { kind: "escaped" }
   | { kind: "literal"; text: string }
-  | { kind: "placeholder"; modifier: string | undefined; varName: string }
+  | { kind: "placeholder"; modifiers: string[]; varName: string }
 
 /**
  * Pattern that matches a single placeholder anchored at a specific position.
  *
  * Anchored variant of the legacy template pattern; the sticky `y` flag lets the
  * tokenizer attempt the match at the current cursor position only.
+ *
+ * The modifier group accepts either a chain of named modifiers (`|a|b|c`) or the
+ * single legacy trailing pipe (`{{KEY|}}`), which is parsed and then rejected as
+ * an unknown modifier. An empty segment *inside* a chain (`{{KEY||raw}}`) matches
+ * neither alternative and therefore stays malformed syntax, as before chaining.
  */
 // eslint-disable-next-line security/detect-unsafe-regex -- modifier group is consumed via match.groups
-const placeholderPattern = /\{\{(?<varName>\w+(?:\.\w+)*)(?:\|(?<modifier>\w*))?\}\}/vy
+const placeholderPattern = /\{\{(?<varName>\w+(?:\.\w+)*)(?<modifiers>\||(?:\|\w+)*)\}\}/vy
 
 /**
  * Single-pass tokenizer that walks a template string and emits an ordered
@@ -76,9 +155,11 @@ class TemplateTokenizer {
       return false
     }
     this.flushLiteral()
+    const rawModifiers = match.groups?.modifiers ?? ""
     this.tokens.push({
       kind: "placeholder",
-      modifier: match.groups?.modifier,
+      // "" -> no modifier, "|" -> the legacy empty one, "|a|b" -> a chain.
+      modifiers: rawModifiers === "" ? [] : rawModifiers.slice(1).split("|"),
       varName: match.groups?.varName ?? "",
     })
     this.cursor += match[0].length
@@ -120,17 +201,21 @@ function tokenizeTemplate(template: string, strict: boolean): Token[] {
 }
 
 /**
- * Apply a template modifier to a resolved value.
+ * Apply a placeholder's modifier chain to a resolved value, left to right.
  *
  * @param value - The stringified resolved value.
- * @param modifier - The modifier name extracted from the placeholder, or `undefined` if none.
- * @returns The value after applying the modifier transformation.
+ * @param names - The modifier names extracted from the placeholder, in source order.
+ * @param varName - Placeholder name, passed to modifiers for locatable error messages.
+ * @returns The value after applying every modifier in order.
  */
-function applyModifier(value: string, modifier: string | undefined): string {
-  if (modifier === undefined) return value
-  const transform = modifiers[modifier]
-  if (!transform) throw new Error(`Unknown template modifier "${modifier}"`)
-  return transform(value)
+function applyModifiers(value: string, names: string[], varName: string): string {
+  let current = value
+  for (const name of names) {
+    const transform = modifiers[name]
+    if (!transform) throw new Error(`Unknown template modifier "${name}"`)
+    current = transform(current, varName)
+  }
+  return current
 }
 
 /**
@@ -140,7 +225,7 @@ function applyModifier(value: string, modifier: string | undefined): string {
  */
 function enforceStrictModifiers(tokens: Token[]): void {
   for (const token of tokens) {
-    if (token.kind === "placeholder" && token.modifier === undefined) {
+    if (token.kind === "placeholder" && token.modifiers.length === 0) {
       throw new Error(
         `Strict mode: placeholder "{{${token.varName}}}" requires an explicit modifier (e.g. |shell or |raw)`
       )
@@ -160,10 +245,16 @@ function enforceStrictModifiers(tokens: Token[]): void {
  * Supported modifiers:
  * - `shell` — wraps the resolved value with {@link shellQuote} for safe shell interpolation.
  * - `raw` — passes the value through unchanged (explicit verbatim insertion).
+ * - `b64decode` — decodes a base64-encoded value into the text it represents, for
+ *   multi-line secrets (private keys, certificates) stored on a single line.
+ *
+ * Modifiers can be chained and are applied left to right:
+ * `\{\{KEY|b64decode|shell\}\}` decodes first and quotes the result. `b64decode` is a
+ * transform, not an escape — a chain without `shell` inserts the decoded value verbatim.
  *
  * When `options.strict` is `true` (the default), every placeholder **must** specify
- * a modifier; bare `\{\{KEY\}\}` placeholders will throw an error. Pass `strict: false`
- * to disable this check.
+ * at least one modifier; bare `\{\{KEY\}\}` placeholders will throw an error. Pass
+ * `strict: false` to disable this check.
  *
  * The renderer tokenizes the template once into escaped/placeholder/literal segments
  * and concatenates the resolved segments without performing a second `replaceAll`
@@ -210,7 +301,7 @@ export async function renderTemplate(
       output += "{{"
     } else {
       const resolved = String(resolvedValues[placeholderIndex])
-      output += applyModifier(resolved, token.modifier)
+      output += applyModifiers(resolved, token.modifiers, token.varName)
       placeholderIndex += 1
     }
   }
