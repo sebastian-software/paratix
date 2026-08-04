@@ -19,14 +19,23 @@ import {
   listArchiveMembers,
   normalizeArchiveMemberPath,
 } from "./archiveMemberValidation.js"
+import {
+  buildMemberTypeProbeScript,
+  buildOwnershipProbeScript,
+  encodeMemberTypeEntry,
+  OWNERSHIP_PROBE_FIELD_COUNT,
+  runBatchedProbe,
+} from "./archiveProbe.js"
 import { localSha256, sha256String } from "./fileHelpers.js"
-import { ownershipComponentMatches, renderChownSymlinkCommand } from "./fileMetadataHelpers.js"
+import {
+  ownershipComponentMatches,
+  renderBatchedChownSymlinkCommand,
+} from "./fileMetadataHelpers.js"
 
 const EXEC_OPTS = { ignoreExitCode: true, silent: true } as const
 const SILENT = { silent: true } as const
 const FLAGS_DIR = "/var/lib/paratix/flags"
 const ARCHIVE_MARKER_MODE = "0644"
-const ARCHIVE_OWNER_MEMBER_CONCURRENCY = 8
 /** Columns emitted by the member ownership probe: `%U %G %u %g`. */
 const ARCHIVE_STAT_OWNERSHIP_FIELDS = 4
 
@@ -34,34 +43,6 @@ type StagingMergeParameters = {
   destination: string
   guardPaths: string[]
   staging: string
-}
-
-async function mapWithConcurrencyLimit<TItem, TResult>(
-  items: TItem[],
-  limit: number,
-  mapper: (item: TItem, index: number) => Promise<TResult>
-): Promise<TResult[]> {
-  if (items.length === 0) return []
-
-  const results: TResult[] = []
-  let nextIndex = 0
-
-  async function worker(): Promise<void> {
-    for (;;) {
-      const index = nextIndex
-      nextIndex += 1
-      if (index >= items.length) return
-      // eslint-disable-next-line no-await-in-loop -- each worker intentionally runs one bounded queue slot at a time
-      results[index] = await mapper(items[index], index)
-    }
-  }
-
-  await Promise.all(
-    Array.from({ length: Math.min(limit, items.length) }, async () => {
-      await worker()
-    })
-  )
-  return results
 }
 
 /**
@@ -454,24 +435,22 @@ async function applyExtractedMemberOwner(
 ): Promise<ModuleResult | null> {
   if (parameters.owner == null || parameters.owner === "") return null
   const owner = parameters.owner
-  // R-0000267: chown errors (EPERM, ENOENT, quota) under the previous
-  // `{ silent: true }` would surface as unguarded CommandError exceptions
-  // through Promise.all in mapWithConcurrencyLimit and bypass the
-  // failedCommand pipeline. Run with `ignoreExitCode` and surface the first
-  // non-zero exit as a maskable failedCommand result with stdout/stderr.
-  const results = await mapWithConcurrencyLimit(
-    archiveMemberDestinationPaths(parameters.destination, parameters.members),
-    ARCHIVE_OWNER_MEMBER_CONCURRENCY,
-    async (path) => ({
-      path,
-      result: await conn.exec(renderChownSymlinkCommand(owner, path), EXEC_OPTS),
-    })
-  )
-  const failure = results.find(({ result }) => result.code !== 0)
-  if (failure !== undefined) {
+  const paths = archiveMemberDestinationPaths(parameters.destination, parameters.members)
+  if (paths.length === 0) return null
+  // R-0000267: chown errors (EPERM, ENOENT, quota) must reach the
+  // `failedCommand` pipeline rather than escaping as CommandError exceptions,
+  // hence `ignoreExitCode` plus an explicit non-zero check.
+  // Issue #180: one batched `chown -h` instead of one exec per member. `chown`
+  // names every path it could not change on stderr, so the diagnostic is wider
+  // than the previous first-failure-only message rather than narrower.
+  const result = await conn.exec(renderBatchedChownSymlinkCommand(owner), {
+    ...EXEC_OPTS,
+    input: paths.map((path) => `${path}\0`).join(""),
+  })
+  if (result.code !== 0) {
     return failedCommand(
-      `[archive.extract: ${parameters.source}] chown failed for ${failure.path}`,
-      failure.result
+      `[archive.extract: ${parameters.source}] chown failed for one or more extracted members`,
+      result
     )
   }
   return null
@@ -794,20 +773,9 @@ function isStringArray(value: unknown): value is string[] {
   return Array.isArray(value) && value.every((item) => typeof item === "string")
 }
 
-async function extractedMemberOwnerMatches(
-  conn: SshConnection,
-  parameters: { owner: string; path: string }
-): Promise<boolean> {
-  const { owner, path } = parameters
-  const exists = await conn.exec(
-    `[ -e ${shellQuote(path)} ] || [ -L ${shellQuote(path)} ]`,
-    EXEC_OPTS
-  )
-  if (exists.code !== 0) return false
-  const stat = await conn.exec(`stat -c '%U %G %u %g' -- ${shellQuote(path)}`, EXEC_OPTS)
-  if (stat.code !== 0) return false
-  return ownerMatchesStat(stat.stdout, owner)
-}
+// Issue #180: `extractedMemberOwnerMatches` used to run two execs per path — an
+// existence test and a `stat`. Both now happen inside the batched ownership
+// probe; see `ownerMatchesPaths`.
 
 async function archiveOwnerMatches(
   conn: SshConnection,
@@ -872,18 +840,27 @@ async function readMembersMarker(
   }
 }
 
-function memberTypeCheckCommand(member: ExtractedArchiveMember): string {
-  const path = shellQuote(member.path)
-  switch (member.kind) {
+/**
+ * Map a recorded member kind onto the probe's single-letter code.
+ *
+ * The codes stand for exactly the checks the previous per-member commands ran:
+ * `d` a directory that is not a symlink, `f` a regular file that is not a
+ * symlink, `l` a symlink. A hardlink is recorded as a regular file, as before.
+ *
+ * @param kind - The recorded member kind.
+ * @returns The probe kind code.
+ */
+function memberTypeProbeCode(kind: ExtractedArchiveMember["kind"]): string {
+  switch (kind) {
     case "directory": {
-      return `[ -d ${path} ] && [ ! -L ${path} ]`
+      return "d"
     }
     case "file":
     case "hardlink": {
-      return `[ -f ${path} ] && [ ! -L ${path} ]`
+      return "f"
     }
     case "symlink": {
-      return `[ -L ${path} ]`
+      return "l"
     }
   }
 }
@@ -892,15 +869,19 @@ async function extractedMembersMatch(conn: SshConnection, marker: string): Promi
   const members = await readMembersMarker(conn, marker)
   if (members === null) return false
   if (members === "invalid") return false
-  const matches = await mapWithConcurrencyLimit(
-    members,
-    ARCHIVE_OWNER_MEMBER_CONCURRENCY,
-    async (member) => {
-      const result = await conn.exec(memberTypeCheckCommand(member), EXEC_OPTS)
-      return result.code === 0
-    }
-  )
-  return matches.every(Boolean)
+  // Issue #180: one probe for every member instead of one exec per member. The
+  // marker read stays a separate call so the marker format is not coupled to
+  // the probe script for the sake of one saved round trip.
+  const outcome = await runBatchedProbe(conn, {
+    entries: members.map((member) =>
+      encodeMemberTypeEntry(memberTypeProbeCode(member.kind), member.path)
+    ),
+    script: buildMemberTypeProbeScript(),
+  })
+  // A probe that could not run proves nothing, so it counts as drift and lets
+  // apply heal the destination — never as a silent match.
+  if (outcome.kind === "failed") return false
+  return outcome.fields.length === 0
 }
 
 async function ownerMatchesPaths(
@@ -908,12 +889,28 @@ async function ownerMatchesPaths(
   parameters: { owner: string; paths: string[] }
 ): Promise<boolean> {
   const { owner, paths } = parameters
-  const matches = await mapWithConcurrencyLimit(
-    paths,
-    ARCHIVE_OWNER_MEMBER_CONCURRENCY,
-    async (path) => extractedMemberOwnerMatches(conn, { owner, path })
-  )
-  return matches.every(Boolean)
+  const [expectedUser = "", expectedGroup = ""] = owner.split(":", 2)
+  const outcome = await runBatchedProbe(conn, {
+    entries: paths,
+    script: buildOwnershipProbeScript(expectedUser, expectedGroup),
+  })
+  if (outcome.kind === "failed") return false
+  // The script only pre-filters; `ownerMatchesStat` remains the authority so
+  // the name-or-numeric-id rule of `ownershipComponentMatches` lives in exactly
+  // one place. Anything the script reported is re-decided here, and a path it
+  // could not `stat` arrives with empty fields and therefore never matches.
+  for (
+    let index = 0;
+    index + OWNERSHIP_PROBE_FIELD_COUNT <= outcome.fields.length;
+    index += OWNERSHIP_PROBE_FIELD_COUNT
+  ) {
+    const [, user = "", group = "", userId = "", groupId = ""] = outcome.fields.slice(
+      index,
+      index + OWNERSHIP_PROBE_FIELD_COUNT
+    )
+    if (!ownerMatchesStat(`${user} ${group} ${userId} ${groupId}`, owner)) return false
+  }
+  return true
 }
 
 async function readOwnerPathsMarker(conn: SshConnection, marker: string): Promise<null | string[]> {
