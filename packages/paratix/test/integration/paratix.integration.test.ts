@@ -688,27 +688,18 @@ describe.skipIf(SKIP_WITHOUT_DOCKER)("Paratix integration", () => {
     }
   })
 
-  // Skipped for #184, not for flakiness: `downloadFile` genuinely fails for
-  // every non-root connection — its staging copy into `/tmp` is refused. The
-  // defect predates #179 and was only ever hidden, first by the block's blanket
-  // skip and then by the stale assertion earlier in this same test. Skipping it
-  // here keeps the remaining 21 tests usable as a signal; removing this skip is
-  // part of fixing #184.
-  // oxlint-disable-next-line vitest/no-disabled-tests -- tracked product defect, see #184
-  it.skip("uses sudo finalization and cleanup for non-root SFTP transfers", async () => {
+  it("uses sudo finalization and cleans up temporary files for non-root SFTP uploads", async () => {
     const environment = getEnvironment()
     const ssh = await connectSsh([environment.primaryPort])
-    const remoteBase = `/root/non-root-sftp-${randomUUID()}`
+    const remoteBase = `/root/non-root-sftp-upload-${randomUUID()}`
     let localDirectory: string | undefined
 
     let primaryError: unknown
     try {
-      localDirectory = mkdtempSync(join(tmpdir(), "paratix-sftp-non-root-"))
+      localDirectory = mkdtempSync(join(tmpdir(), "paratix-sftp-non-root-upload-"))
       const localUploadPath = join(localDirectory, "upload.txt")
-      const localDownloadPath = join(localDirectory, "download.txt")
       const localFailedUploadPath = join(localDirectory, "failed-upload.txt")
       const remoteUploadPath = `${remoteBase}/uploaded.txt`
-      const remoteDownloadPath = `${remoteBase}/download.txt`
       const missingParentUploadPath = `${remoteBase}/missing-parent/uploaded.txt`
 
       writeFileSync(localUploadPath, "non-root upload\n", "utf8")
@@ -725,13 +716,6 @@ describe.skipIf(SKIP_WITHOUT_DOCKER)("Paratix integration", () => {
         owner: "root",
       })
 
-      await ssh.exec(
-        `printf %s ${shellQuote("sudo-only download\n")} > ${shellQuote(remoteDownloadPath)} && chmod 0600 ${shellQuote(remoteDownloadPath)} && chown root:root ${shellQuote(remoteDownloadPath)}`,
-        { silent: true }
-      )
-      await ssh.downloadFile(remoteDownloadPath, localDownloadPath)
-      expect(await readFile(localDownloadPath, "utf8")).toBe("sudo-only download\n")
-
       const temporaryUploadsBeforeFailure = await ssh.lines(
         "find /tmp -maxdepth 1 -user paratix -name 'paratix-upload.*' -print | sort"
       )
@@ -747,7 +731,60 @@ describe.skipIf(SKIP_WITHOUT_DOCKER)("Paratix integration", () => {
     } finally {
       await runCleanupSteps(
         [
-          removeRemoteDirectoryStep(ssh, remoteBase, "remove remote non-root SFTP test directory"),
+          removeRemoteDirectoryStep(
+            ssh,
+            remoteBase,
+            "remove remote non-root SFTP upload test directory"
+          ),
+          disconnectSshStep(ssh),
+          removeCreatedLocalDirectoryStep(() => localDirectory),
+        ],
+        primaryError
+      )
+    }
+  })
+
+  // Skipped for #184, not for flakiness: `downloadFile` genuinely fails for
+  // every non-root connection — its staging copy into `/tmp` is refused. The
+  // defect predates #179 and was only ever hidden, first by the block's blanket
+  // skip and then by the stale assertion that used to fail earlier in the same
+  // test. The skip covers `downloadFile` alone, so the sudo upload finalization
+  // and the temp-file cleanup guard it used to share a test with keep running;
+  // removing this skip is part of fixing #184.
+  // oxlint-disable-next-line vitest/no-disabled-tests -- tracked product defect, see #184
+  it.skip("downloads root-owned files through sudo for non-root connections", async () => {
+    const environment = getEnvironment()
+    const ssh = await connectSsh([environment.primaryPort])
+    const remoteBase = `/root/non-root-sftp-download-${randomUUID()}`
+    let localDirectory: string | undefined
+
+    let primaryError: unknown
+    try {
+      localDirectory = mkdtempSync(join(tmpdir(), "paratix-sftp-non-root-download-"))
+      const localDownloadPath = join(localDirectory, "download.txt")
+      const remoteDownloadPath = `${remoteBase}/download.txt`
+
+      await ssh.exec(`mkdir -p ${shellQuote(remoteBase)} && chmod 0755 ${shellQuote(remoteBase)}`, {
+        silent: true,
+      })
+      await ssh.exec(
+        `printf %s ${shellQuote("sudo-only download\n")} > ${shellQuote(remoteDownloadPath)} && chmod 0600 ${shellQuote(remoteDownloadPath)} && chown root:root ${shellQuote(remoteDownloadPath)}`,
+        { silent: true }
+      )
+
+      await ssh.downloadFile(remoteDownloadPath, localDownloadPath)
+      expect(await readFile(localDownloadPath, "utf8")).toBe("sudo-only download\n")
+    } catch (error) {
+      primaryError = error
+      throw error
+    } finally {
+      await runCleanupSteps(
+        [
+          removeRemoteDirectoryStep(
+            ssh,
+            remoteBase,
+            "remove remote non-root SFTP download test directory"
+          ),
           disconnectSshStep(ssh),
           removeCreatedLocalDirectoryStep(() => localDirectory),
         ],
