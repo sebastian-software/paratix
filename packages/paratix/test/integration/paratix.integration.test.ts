@@ -513,13 +513,9 @@ describe("CLI command helper", () => {
   })
 })
 
-// The GitHub Actions runners that execute `agent:check:integration` do not
-// currently provide a working Docker runtime, so the harness cannot launch
-// the sshd container that backs every test in this block. Re-enable the
-// block by removing the `.skip` once the CI environment exposes Docker
-// again (or once an alternative runtime such as Podman is wired up).
-// oxlint-disable-next-line vitest/no-disabled-tests -- block is intentionally skipped until CI provides Docker; see AGENTS.md
-describe.skip("Paratix integration", () => {
+// Every test in this block needs the sshd container the harness launches, so
+// it only runs where `agent:check:integration` has a working Docker runtime.
+describe("Paratix integration", () => {
   beforeAll(async () => {
     originalHome = process.env.HOME
     integrationEnvironment = await createIntegrationEnvironment(
