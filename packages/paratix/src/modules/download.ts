@@ -135,6 +135,22 @@ function canonicalizeHeaders(headers?: Record<string, string>): string {
 }
 
 /**
+ * Derive the destination-keyed prefix that wraps every large-download flag.
+ *
+ * Exported for the tests: they used to mirror this one-liner, and the copies
+ * drifted out of step with the production convention without anything noticing
+ * (R-0000010). One exported derivation removes the mirror instead of asking
+ * every copy to stay aligned by hand.
+ *
+ * @param destination - Download destination path the flag is keyed on.
+ * @returns The flag-name prefix, including its trailing separator.
+ */
+export function buildLargeDownloadFlagPrefix(destination: string): string {
+  const destinationHash = createHash("sha256").update(destination).digest("hex")
+  return `download-large-${destinationHash}-`
+}
+
+/**
  * R-0000274: derive both a destination-stable flag prefix and the
  * URL/headers-keyed flag name for `download.large`. The prefix encodes a
  * sha256 of the destination so {@link setVersionedFlag} can evict older flag
@@ -151,8 +167,7 @@ function buildLargeDownloadFlagInfo(
   flagName: string
   flagPrefix: string
 } {
-  const destinationHash = createHash("sha256").update(parameters.destination).digest("hex")
-  const flagPrefix = `download-large-${destinationHash}-`
+  const flagPrefix = buildLargeDownloadFlagPrefix(parameters.destination)
   const flagKey = JSON.stringify({
     destination: parameters.destination,
     headers: canonicalizeHeaders(parameters.headers),
