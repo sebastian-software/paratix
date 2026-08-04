@@ -18,7 +18,9 @@ import {
   buildOwnershipProbeScript,
   buildSymlinkProbeScript,
   encodeMemberTypeEntry,
+  encodeNulPayload,
 } from "../../src/modules/archiveProbe.js"
+import { renderBatchedChownSymlinkCommand } from "../../src/modules/fileMetadataHelpers.js"
 
 type ProbeResult = { code: number; fields: string[]; stderr: string }
 
@@ -33,7 +35,7 @@ type ProbeResult = { code: number; fields: string[]; stderr: string }
 function runProbe(script: string, entries: string[]): ProbeResult {
   const result = spawnSync("/bin/sh", ["-c", script], {
     encoding: "utf8",
-    input: entries.map((entry) => `${entry}\0`).join(""),
+    input: encodeNulPayload(entries),
     timeout: 10_000,
   })
   const fields = (result.stdout || "").split("\0")
@@ -43,6 +45,15 @@ function runProbe(script: string, entries: string[]): ProbeResult {
 
 function makeWorkspace(): string {
   return realpathSync(mkdtempSync(join(tmpdir(), "paratix-probe-smoke-")))
+}
+
+/**
+ * Whether `chown` is the GNU coreutils build.
+ *
+ * @returns True when `chown --version` succeeds.
+ */
+function hasGnuChown(): boolean {
+  return spawnSync("chown", ["--version"], { encoding: "utf8", timeout: 2000 }).status === 0
 }
 
 function hasGnuStat(): boolean {
@@ -64,8 +75,28 @@ function currentOwner(): { group: string; groupId: string; user: string; userId:
   return { group, groupId, user, userId }
 }
 
+/**
+ * Run the batched chown with its paths NUL-delimited on stdin.
+ *
+ * @param spec - The chown owner spec.
+ * @param paths - The target paths.
+ * @returns Exit code and stderr.
+ */
+function runChown(spec: string, paths: string[]): { code: number; stderr: string } {
+  const result = spawnSync("/bin/sh", ["-c", renderBatchedChownSymlinkCommand(spec)], {
+    encoding: "utf8",
+    input: encodeNulPayload(paths),
+    timeout: 10_000,
+  })
+  return { code: result.status ?? -1, stderr: result.stderr || "" }
+}
+
+/** Own uid:gid — the one spec an unprivileged process may chown to. */
+const ownSpec = `${String(process.getuid?.() ?? 0)}:${String(process.getgid?.() ?? 0)}`
+
 const SKIP_PLATFORM = process.platform === "win32"
 const SKIP_NO_GNU_STAT = !hasGnuStat()
+const SKIP_NO_GNU_CHOWN = !hasGnuChown()
 
 describe.skipIf(SKIP_PLATFORM)("archive.extract batched probes", () => {
   describe("symlink probe", () => {
@@ -224,6 +255,66 @@ describe.skipIf(SKIP_PLATFORM)("archive.extract batched probes", () => {
 
         expect(result.code).toBe(0)
         expect(result.fields).toStrictEqual([])
+      } finally {
+        rmSync(root, { force: true, recursive: true })
+      }
+    })
+  })
+
+  describe("batched chown", () => {
+    it("chowns every supplied path, including one containing a newline", () => {
+      const root = makeWorkspace()
+      try {
+        const plain = join(root, "plain.txt")
+        const awkward = join(root, "two\nlines.txt")
+        writeFileSync(plain, "x")
+        writeFileSync(awkward, "x")
+
+        const result = runChown(ownSpec, [plain, awkward])
+
+        expect(result.stderr).toBe("")
+        expect(result.code).toBe(0)
+      } finally {
+        rmSync(root, { force: true, recursive: true })
+      }
+    })
+
+    it.skipIf(SKIP_NO_GNU_CHOWN)("keeps -h in effect, proven by a dangling symlink", () => {
+      // A dangling symlink is the unprivileged way to prove the flag: GNU
+      // `chown -h` changes the link itself and succeeds, while a dereferencing
+      // `chown` cannot resolve the target and fails. Without `-h` this command
+      // would follow a planted symlink and rewrite an unrelated target's
+      // ownership. BSD `chown` does not fail on a dangling target, so the
+      // discriminator only holds on GNU coreutils — which is what paratix
+      // targets and what CI runs.
+      const root = makeWorkspace()
+      try {
+        const dangling = join(root, "dangling")
+        symlinkSync(join(root, "no-such-target"), dangling)
+
+        const batched = runChown(ownSpec, [dangling])
+        const dereferencing = spawnSync("/bin/sh", ["-c", `xargs -0 chown -- '${ownSpec}'`], {
+          encoding: "utf8",
+          input: encodeNulPayload([dangling]),
+          timeout: 10_000,
+        })
+
+        expect(batched.code).toBe(0)
+        expect(dereferencing.status).not.toBe(0)
+      } finally {
+        rmSync(root, { force: true, recursive: true })
+      }
+    })
+
+    it("exits non-zero and names the offending path when a target is missing", () => {
+      const root = makeWorkspace()
+      try {
+        const missing = join(root, "gone.txt")
+
+        const result = runChown(ownSpec, [missing])
+
+        expect(result.code).not.toBe(0)
+        expect(result.stderr).toContain("gone.txt")
       } finally {
         rmSync(root, { force: true, recursive: true })
       }
