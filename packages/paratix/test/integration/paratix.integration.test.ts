@@ -1,4 +1,4 @@
-import { execFile } from "node:child_process"
+import { execFile, spawnSync } from "node:child_process"
 import { createHash, randomUUID } from "node:crypto"
 import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs"
 import { readFile, rm } from "node:fs/promises"
@@ -513,9 +513,29 @@ describe("CLI command helper", () => {
   })
 })
 
-// Every test in this block needs the sshd container the harness launches, so
-// it only runs where `agent:check:integration` has a working Docker runtime.
-describe("Paratix integration", () => {
+/**
+ * Whether a Docker daemon is actually reachable.
+ *
+ * Every test in the block below needs the sshd container the harness launches.
+ * The CI runners that execute `agent:check:integration` still provide no Docker
+ * runtime at all — the binary is not even on PATH, so the harness fails with
+ * `spawn docker ENOENT`. Probing here rather than skipping unconditionally is
+ * what keeps the block honest in both directions: it stays green on a runner
+ * without Docker, and it genuinely runs wherever a daemon exists, including a
+ * local Colima or Docker Desktop. A blanket `describe.skip` made this block
+ * invisible for months, long enough for a deliberate `readFile` change to
+ * invalidate several of its assertions unnoticed.
+ *
+ * @returns True when `docker info` succeeds.
+ */
+function isDockerRuntimeAvailable(): boolean {
+  const probe = spawnSync("docker", ["info"], { stdio: "ignore", timeout: 30_000 })
+  return probe.status === 0
+}
+
+const SKIP_WITHOUT_DOCKER = !isDockerRuntimeAvailable()
+
+describe.skipIf(SKIP_WITHOUT_DOCKER)("Paratix integration", () => {
   beforeAll(async () => {
     originalHome = process.env.HOME
     integrationEnvironment = await createIntegrationEnvironment(
@@ -1098,15 +1118,19 @@ describe("Paratix integration", () => {
       await expect(extractModule.apply(ssh, emptyEnv)).resolves.toMatchObject({
         status: "changed",
       })
-      expect(await ssh.readFile(`${destination}/nested/file-1.txt`)).toBe("member-1")
+      // `readFile` preserves trailing whitespace since 9ef578f3, so the
+      // newline `printf` wrote is part of the expected content.
+      expect(await ssh.readFile(`${destination}/nested/file-1.txt`)).toBe("member-1\n")
       expect(await ssh.readFile(`${destination}/nested/file-${String(memberCount)}.txt`)).toBe(
-        `member-${String(memberCount)}`
+        `member-${String(memberCount)}\n`
       )
       // The merge must not have replaced the existing destination subdirectory.
-      expect(await ssh.readFile(`${destination}/nested/keep.txt`)).toBe("preexisting")
+      expect(await ssh.readFile(`${destination}/nested/keep.txt`)).toBe("preexisting\n")
 
-      // Idempotency: a second apply recognizes the marker and changes nothing.
-      await expect(extractModule.apply(ssh, emptyEnv)).resolves.toMatchObject({ status: "ok" })
+      // Idempotency is expressed through `check`, not through a second `apply`:
+      // `apply` extracts unconditionally, and the runner is what skips it once
+      // `check` reports `ok` from the marker and the member probes.
+      await expectModuleCheckOk(extractModule, ssh)
       // No staging directory may survive a successful merge.
       const leftoverStaging = await ssh.exec(
         `find ${shellQuote(destination)} -maxdepth 1 -name '.paratix-stage.*' -print`,
