@@ -157,6 +157,11 @@ function expandHomePath(path: string): string {
 // so an unspecified mode never widens access on the remote host.
 const DEFAULT_FILE_MODE = "0600"
 
+// #184: shared by the staging directory and the staged file of a non-root
+// `downloadFile`, so `validateMktempPath` checks both against one prefix.
+const DOWNLOAD_TEMP_PREFIX = "paratix-download"
+const DOWNLOAD_TEMP_TEMPLATE = `${DOWNLOAD_TEMP_PREFIX}.XXXXXX`
+
 /**
  * Resolve the effective file mode for `writeFile`/`uploadFile`. `options.mode`
  * is optional; when omitted it defaults to {@link DEFAULT_FILE_MODE} (`"0600"`)
@@ -507,14 +512,23 @@ export class SshConnectionImpl implements SshConnection {
   public async downloadFile(remotePath: string, localPath: string): Promise<void> {
     const client = this.ensureClient()
     let sourcePath = remotePath
+    // #184: assigned before the staged file is allocated, so the `finally`
+    // already covers the directory if that second `mktemp` fails.
+    let stagingDirectory: string | undefined
+    let stagedPath: string | undefined
     try {
       if (this.config.user !== "root") {
-        // R-0000565: pass `/tmp` via `-p` and the template via `--` so the
-        // prefix cannot be parsed as a `mktemp` option.
-        sourcePath = await this.createRemoteTempPath(
-          "mktemp -p /tmp -- paratix-download.XXXXXX",
-          "paratix-download"
-        )
+        // #184: the staged copy is written by root (`exec` sudo-wraps every
+        // non-root command) into a file `mktemp` created as the unprivileged
+        // user. Staging straight into `/tmp` made those two owners differ
+        // inside a world-writable sticky directory, which `fs.protected_regular`
+        // (default 2 on current kernels) refuses to open with `O_CREAT` — even
+        // for root. Allocating a private `0700` directory first removes that
+        // precondition entirely: it is not sticky, so the guard never applies.
+        // Do not collapse this back into a bare `/tmp` path.
+        stagingDirectory = await this.createRemoteStagingDirectory()
+        stagedPath = await this.createRemoteStagedFile(stagingDirectory)
+        sourcePath = stagedPath
         await this.exec(`cat ${shellQuote(remotePath)} > ${shellQuote(sourcePath)}`, {
           silent: true,
         })
@@ -531,14 +545,8 @@ export class SshConnectionImpl implements SshConnection {
         prepareSecrets(this.buildSecrets())
       )
     } finally {
-      if (sourcePath !== remotePath) {
-        try {
-          await this.cleanupRemoteTempFile(sourcePath)
-        } catch (cleanupError) {
-          process.stderr.write(
-            `Warning: failed to remove temp file ${sourcePath}: ${maskSecrets(String(cleanupError), this.buildSecrets())}\n`
-          )
-        }
+      if (stagingDirectory !== undefined) {
+        await this.cleanupRemoteStagingDirectory(stagingDirectory, stagedPath)
       }
     }
   }
@@ -1220,6 +1228,35 @@ sha256sum -- ${shellQuote(remotePath)} 2>/dev/null || printf 'paratix-hash-faile
     })
   }
 
+  /**
+   * #184: best-effort removal of a {@link downloadFile} staging directory.
+   * Deliberately bounded — `rm -f` on the single staged file followed by
+   * `rmdir` — instead of a recursive `rm -rf` on a path this class assembled
+   * itself: exactly one file is ever staged, so recursion buys nothing, and a
+   * non-empty directory should surface rather than be removed silently.
+   *
+   * Mirrors {@link cleanupRemoteTempFile}: skip once the transport is gone so a
+   * concurrent disconnect cannot produce a misleading warning, never throw out
+   * of the caller's `finally`, and mask the warning it writes instead.
+   *
+   * @param directory - The staging directory to remove.
+   * @param stagedPath - The staged file inside it, if it was already allocated.
+   */
+  private async cleanupRemoteStagingDirectory(
+    directory: string,
+    stagedPath: string | undefined
+  ): Promise<void> {
+    if (this.client == null) return
+    const removeFile = stagedPath == null ? "" : `rm -f -- ${shellQuote(stagedPath)} && `
+    try {
+      await this.execWithoutSudo(`${removeFile}rmdir -- ${shellQuote(directory)}`)
+    } catch (cleanupError) {
+      process.stderr.write(
+        `Warning: failed to remove temp directory ${directory}: ${maskSecrets(String(cleanupError), this.buildSecrets())}\n`
+      )
+    }
+  }
+
   private async cleanupRemoteTempFile(remotePath: string): Promise<void> {
     // R-0000690: a concurrent disconnect (e.g. SIGINT) may null out
     // `this.client` between the upload path completing and the `finally`
@@ -1448,6 +1485,41 @@ sha256sum -- ${shellQuote(remotePath)} 2>/dev/null || printf 'paratix-hash-faile
     const template = `${prefix}.XXXXXX`
     const path = await this.output(`mktemp -p ${shellQuote(directory)} -- ${shellQuote(template)}`)
     return validateMktempPath(directory, path, prefix)
+  }
+
+  /**
+   * #184: allocate the staged file inside an existing staging directory.
+   * Deliberately not {@link createRemoteTempPath}, which validates against a
+   * hardcoded `/tmp` parent. Creating it unprivileged keeps the connecting user
+   * as its owner, so the later SFTP read and the unprivileged cleanup both work.
+   *
+   * @param directory - The validated staging directory to allocate in.
+   * @returns The validated absolute path of the staged file.
+   */
+  private async createRemoteStagedFile(directory: string): Promise<string> {
+    const path = await this.outputWithoutSudo(
+      `mktemp -p ${shellQuote(directory)} -- ${shellQuote(DOWNLOAD_TEMP_TEMPLATE)}`
+    )
+    return validateMktempPath(directory, path, DOWNLOAD_TEMP_PREFIX)
+  }
+
+  /**
+   * #184: allocate the private staging directory for a non-root
+   * {@link downloadFile}. Created unprivileged so it belongs to the connecting
+   * user, and `mktemp -d` gives it mode `0700` — the staged file therefore
+   * lives outside the world-writable sticky `/tmp` that `fs.protected_regular`
+   * guards, while staying readable for the unprivileged SFTP transfer.
+   *
+   * R-0000565: pass `/tmp` via `-p` and the template via `--` so the prefix
+   * cannot be parsed as a `mktemp` option.
+   *
+   * @returns The validated absolute path of the staging directory.
+   */
+  private async createRemoteStagingDirectory(): Promise<string> {
+    const path = await this.outputWithoutSudo(
+      `mktemp -d -p /tmp -- ${shellQuote(DOWNLOAD_TEMP_TEMPLATE)}`
+    )
+    return validateMktempPath("/tmp", path, DOWNLOAD_TEMP_PREFIX)
   }
 
   private async createRemoteTempPath(command: string, prefix: string): Promise<string> {
