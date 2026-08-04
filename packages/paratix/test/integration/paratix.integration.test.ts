@@ -729,15 +729,7 @@ describe.skipIf(SKIP_WITHOUT_DOCKER)("Paratix integration", () => {
     }
   })
 
-  // Skipped for #184, not for flakiness: `downloadFile` genuinely fails for
-  // every non-root connection — its staging copy into `/tmp` is refused. The
-  // defect predates #179 and was only ever hidden, first by the block's blanket
-  // skip and then by the stale assertion that used to fail earlier in the same
-  // test. The skip covers `downloadFile` alone, so the sudo upload finalization
-  // and the temp-file cleanup guard it used to share a test with keep running;
-  // removing this skip is part of fixing #184.
-  // oxlint-disable-next-line vitest/no-disabled-tests -- tracked product defect, see #184
-  it.skip("downloads root-owned files through sudo for non-root connections", async () => {
+  it("downloads root-owned files through sudo for non-root connections", async () => {
     const environment = getEnvironment()
     const ssh = await connectSsh([environment.primaryPort])
     const remoteBase = `/root/non-root-sftp-download-${randomUUID()}`

@@ -3213,6 +3213,10 @@ describe("SshConnectionImpl", () => {
   // -------------------------------------------------------------------------
 
   describe("downloadFile", () => {
+    // #184: a non-root download stages into a private mktemp -d directory, so
+    // the mocked command sequence is mktemp -d, mktemp, sudo cat, cleanup.
+    const DOWNLOAD_STAGING_DIRECTORY = "/tmp/paratix-download.STAGING"
+
     function makeExecHandler(
       executedCommands: string[],
       output: string
@@ -3224,6 +3228,28 @@ describe("SshConnectionImpl", () => {
         stream.emit("data", Buffer.from(output))
         stream.emit("close", 0)
       }
+    }
+
+    function stagedPathFor(suffix: string): string {
+      return `${DOWNLOAD_STAGING_DIRECTORY}/paratix-download.${suffix}`
+    }
+
+    /**
+     * The three calls every successful non-root staging makes before cleanup.
+     *
+     * @param executedCommands - Sink that records each executed command.
+     * @param stagedPath - Path the staged-file `mktemp` should report.
+     * @returns A spy prepared with the staging calls, ready for a cleanup handler.
+     */
+    function makeStagingExecSpy(
+      executedCommands: string[],
+      stagedPath: string
+    ): ReturnType<typeof vi.fn> {
+      return vi
+        .fn()
+        .mockImplementationOnce(makeExecHandler(executedCommands, DOWNLOAD_STAGING_DIRECTORY))
+        .mockImplementationOnce(makeExecHandler(executedCommands, stagedPath))
+        .mockImplementationOnce(makeExecHandler(executedCommands, ""))
     }
 
     it("downloads directly via SFTP for root user", async () => {
@@ -3249,26 +3275,10 @@ describe("SshConnectionImpl", () => {
 
     it("creates the temporary copy without sudo and copies into it via sudo for non-root user", async () => {
       const executedCommands: string[] = []
-      const mktempOutput = "/tmp/paratix-download.ABCDEF"
+      const stagedPath = stagedPathFor("ABCDEF")
 
-      const execSpy = vi
-        .fn()
-        // First call: mktemp (via output())
-        .mockImplementationOnce((cmd: string, callback: ExecCallback) => {
-          executedCommands.push(cmd)
-          const stream = makeStream()
-          callback(undefined, stream)
-          stream.emit("data", Buffer.from(mktempOutput))
-          stream.emit("close", 0)
-        })
-        // Second call: sudo cat into the existing user-owned temp file
-        .mockImplementationOnce((cmd: string, callback: ExecCallback) => {
-          executedCommands.push(cmd)
-          const stream = makeStream()
-          callback(undefined, stream)
-          stream.emit("close", 0)
-        })
-        // Third call: rm -f
+      const execSpy = makeStagingExecSpy(executedCommands, stagedPath)
+        // Fourth call: bounded cleanup
         .mockImplementationOnce((cmd: string, callback: ExecCallback) => {
           executedCommands.push(cmd)
           const stream = makeStream()
@@ -3281,25 +3291,28 @@ describe("SshConnectionImpl", () => {
 
       await ssh.downloadFile("/var/log/secure", "/tmp/local-secure")
 
-      expect(executedCommands[0]).toBe("mktemp -p /tmp -- paratix-download.XXXXXX")
-      expect(executedCommands[1]).toMatch(/^(?:SUDO_PROMPT='' sudo -S|sudo) bash -c /v)
-      expect(executedCommands[1]).toContain("cat ")
-      expect(executedCommands[1]).toContain("/var/log/secure")
-      expect(executedCommands[1]).toContain(mktempOutput)
-      expect(executedCommands[2]).toBe(`rm -f -- '${mktempOutput}'`)
+      // #184: the staging directory is allocated first so the root-written copy
+      // never lands in the world-writable sticky /tmp that fs.protected_regular
+      // guards; the staged file inside it stays owned by the connecting user.
+      expect(executedCommands[0]).toBe("mktemp -d -p /tmp -- 'paratix-download.XXXXXX'")
+      expect(executedCommands[1]).toBe(
+        `mktemp -p '${DOWNLOAD_STAGING_DIRECTORY}' -- 'paratix-download.XXXXXX'`
+      )
+      expect(executedCommands[2]).toMatch(/^(?:SUDO_PROMPT='' sudo -S|sudo) bash -c /v)
+      expect(executedCommands[2]).toContain("cat ")
+      expect(executedCommands[2]).toContain("/var/log/secure")
+      expect(executedCommands[2]).toContain(stagedPath)
+      expect(executedCommands[3]).toBe(
+        `rm -f -- '${stagedPath}' && rmdir -- '${DOWNLOAD_STAGING_DIRECTORY}'`
+      )
     })
 
     it("uses user-owned temp file plus sudo copy, sftp, and user cleanup for non-root user", async () => {
       const executedCommands: string[] = []
-      const mktempOutput = "/tmp/paratix-download.ABCDEF"
+      const stagedPath = stagedPathFor("ABCDEF")
 
-      const execSpy = vi
-        .fn()
-        // First call: mktemp (via output()) — returns temp path
-        .mockImplementationOnce(makeExecHandler(executedCommands, mktempOutput))
-        // Second call: sudo cat into temp file
-        .mockImplementationOnce(makeExecHandler(executedCommands, ""))
-        // Third call: rm -f
+      const execSpy = makeStagingExecSpy(executedCommands, stagedPath)
+        // Fourth call: bounded cleanup
         .mockImplementationOnce(makeExecHandler(executedCommands, ""))
 
       const client = makeClientWithExecSpy(execSpy)
@@ -3307,12 +3320,12 @@ describe("SshConnectionImpl", () => {
 
       await ssh.downloadFile("/var/log/secure", "/tmp/local-secure")
 
-      expect(executedCommands[0]).toBe("mktemp -p /tmp -- paratix-download.XXXXXX")
-      expect(executedCommands[1]).toMatch(/^(?:SUDO_PROMPT='' sudo -S|sudo) bash -c /v)
-      expect(executedCommands[1]).toContain("cat ")
+      expect(executedCommands[0]).toBe("mktemp -d -p /tmp -- 'paratix-download.XXXXXX'")
+      expect(executedCommands[2]).toMatch(/^(?:SUDO_PROMPT='' sudo -S|sudo) bash -c /v)
+      expect(executedCommands[2]).toContain("cat ")
       expect(vi.mocked(sftpDownload)).toHaveBeenCalledWith(
         client,
-        mktempOutput,
+        stagedPath,
         "/tmp/local-secure",
         expect.any(Number),
         expect.any(AbortSignal),
@@ -3320,21 +3333,47 @@ describe("SshConnectionImpl", () => {
         // interpolation in any sftp error reason.
         expect.objectContaining({ variants: expect.any(Array) })
       )
-      expect(executedCommands[2]).toBe(`rm -f -- '${mktempOutput}'`)
+      expect(executedCommands[3]).toBe(
+        `rm -f -- '${stagedPath}' && rmdir -- '${DOWNLOAD_STAGING_DIRECTORY}'`
+      )
     })
 
-    it("cleans up the remote temp file even when sftpDownload rejects (regression)", async () => {
-      // Arrange
-      const mktempOutput = "/tmp/paratix-download.CLEANUP"
+    it("removes the staging directory when the staged file was never allocated (#184)", async () => {
+      // #184: the two allocations open a window the single-allocation code did
+      // not have — a failing inner mktemp must not orphan the directory.
       const executedCommands: string[] = []
 
       const execSpy = vi
         .fn()
-        // First call: mktemp (via output()) — returns temp path
-        .mockImplementationOnce(makeExecHandler(executedCommands, mktempOutput))
-        // Second call: sudo cat into temp file
+        .mockImplementationOnce(makeExecHandler(executedCommands, DOWNLOAD_STAGING_DIRECTORY))
+        // Second call: the staged-file mktemp fails
+        .mockImplementationOnce((cmd: string, callback: ExecCallback) => {
+          executedCommands.push(cmd)
+          const stream = makeStream()
+          callback(undefined, stream)
+          stream.emit("close", 1)
+        })
         .mockImplementationOnce(makeExecHandler(executedCommands, ""))
-        // Third call: rm -f (cleanup in finally)
+
+      const client = makeClientWithExecSpy(execSpy)
+      const ssh = makeConnectedSsh(client, { user: "deploy" })
+
+      await expect(ssh.downloadFile("/var/log/secure", "/tmp/local-secure")).rejects.toThrow(
+        "Command failed"
+      )
+
+      // The directory is still removed, and without an rm for a file that
+      // was never created.
+      expect(executedCommands[2]).toBe(`rmdir -- '${DOWNLOAD_STAGING_DIRECTORY}'`)
+    })
+
+    it("cleans up the remote temp file even when sftpDownload rejects (regression)", async () => {
+      // Arrange
+      const stagedPath = stagedPathFor("CLEANUP")
+      const executedCommands: string[] = []
+
+      const execSpy = makeStagingExecSpy(executedCommands, stagedPath)
+        // Fourth call: bounded cleanup in the finally
         .mockImplementationOnce(makeExecHandler(executedCommands, ""))
 
       vi.mocked(sftpDownload).mockRejectedValueOnce(new Error("SFTP transfer failed"))
@@ -3347,24 +3386,26 @@ describe("SshConnectionImpl", () => {
         "SFTP transfer failed"
       )
 
-      // Assert: rm -f must have been called for the temp file despite the SFTP error
-      const rmCommand = executedCommands.find((cmd) => cmd.includes("rm -f"))
+      // Assert: the staging directory must be removed despite the SFTP error
+      const rmCommand = executedCommands.find((cmd) => cmd.includes("rmdir"))
       expect(rmCommand).toBeDefined()
-      expect(rmCommand).toContain(mktempOutput)
+      expect(rmCommand).toContain(stagedPath)
+      expect(rmCommand).toContain(DOWNLOAD_STAGING_DIRECTORY)
     })
 
     it("uses raw non-sudo cleanup for non-root download temp files", async () => {
-      const mktempOutput = "/tmp/paratix-download.MASKSECRET"
+      const stagedPath = stagedPathFor("MASKSECRET")
       const executedCommands: string[] = []
 
-      const execSpy = vi
-        .fn()
-        .mockImplementationOnce(makeExecHandler(executedCommands, mktempOutput))
-        .mockImplementationOnce(makeExecHandler(executedCommands, ""))
-        .mockImplementationOnce((_cmd: string, callback: ExecCallback) => {
+      const execSpy = makeStagingExecSpy(executedCommands, stagedPath).mockImplementationOnce(
+        (_cmd: string, callback: ExecCallback) => {
           executedCommands.push(_cmd)
-          callback(new Error(`permission denied: rm -f ${mktempOutput}`), makeStream())
-        })
+          callback(
+            new Error(`permission denied: rmdir ${DOWNLOAD_STAGING_DIRECTORY}`),
+            makeStream()
+          )
+        }
+      )
 
       const client = makeClientWithExecSpy(execSpy)
       const ssh = makeConnectedSsh(client, { user: "deploy" })
@@ -3378,8 +3419,12 @@ describe("SshConnectionImpl", () => {
       })
 
       const stderrOutput = stderrSpy.mock.calls.map((args) => String(args[0])).join("")
-      expect(executedCommands[2]).toBe(`rm -f -- '${mktempOutput}'`)
-      expect(stderrOutput).toContain(`failed to remove temp file ${mktempOutput}`)
+      expect(executedCommands[3]).toBe(
+        `rm -f -- '${stagedPath}' && rmdir -- '${DOWNLOAD_STAGING_DIRECTORY}'`
+      )
+      expect(stderrOutput).toContain(
+        `failed to remove temp directory ${DOWNLOAD_STAGING_DIRECTORY}`
+      )
       expect(stderrOutput).not.toContain("sudo")
 
       stderrSpy.mockRestore()
@@ -3393,19 +3438,17 @@ describe("SshConnectionImpl", () => {
       // benefits from the shared sink.
       const { registerSecret, unregisterSecret } = await import("../src/secretSink.js")
       const opToken = "op-token-DO-NOT-LEAK"
-      const mktempOutput = "/tmp/paratix-download.LEAKTEST"
+      const stagedPath = stagedPathFor("LEAKTEST")
       const executedCommands: string[] = []
 
       registerSecret(opToken)
       try {
-        const execSpy = vi
-          .fn()
-          .mockImplementationOnce(makeExecHandler(executedCommands, mktempOutput))
-          .mockImplementationOnce(makeExecHandler(executedCommands, ""))
-          .mockImplementationOnce((_cmd: string, callback: ExecCallback) => {
+        const execSpy = makeStagingExecSpy(executedCommands, stagedPath).mockImplementationOnce(
+          (_cmd: string, callback: ExecCallback) => {
             executedCommands.push(_cmd)
-            callback(new Error(`rm -f failed: ${opToken} surfaced in error`), makeStream())
-          })
+            callback(new Error(`cleanup failed: ${opToken} surfaced in error`), makeStream())
+          }
+        )
 
         const client = makeClientWithExecSpy(execSpy)
         const ssh = makeConnectedSsh(client, { user: "deploy" })
@@ -3418,7 +3461,9 @@ describe("SshConnectionImpl", () => {
         })
 
         const stderrOutput = stderrSpy.mock.calls.map((args) => String(args[0])).join("")
-        expect(stderrOutput).toContain(`failed to remove temp file ${mktempOutput}`)
+        expect(stderrOutput).toContain(
+          `failed to remove temp directory ${DOWNLOAD_STAGING_DIRECTORY}`
+        )
         // The globally-registered secret must NOT appear verbatim in the
         // warning; it must be replaced by the redaction marker.
         expect(stderrOutput).not.toContain(opToken)
@@ -3436,17 +3481,15 @@ describe("SshConnectionImpl", () => {
       // the finally block would overwrite the original SFTP diagnostic with
       // the misleading rm trace. The fix swallows rm errors and writes a
       // best-effort warning to stderr instead.
-      const mktempOutput = "/tmp/paratix-download.ROOTCLEAN"
+      const stagedPath = stagedPathFor("ROOTCLEAN")
       const executedCommands: string[] = []
 
-      const execSpy = vi
-        .fn()
-        .mockImplementationOnce(makeExecHandler(executedCommands, mktempOutput))
-        .mockImplementationOnce(makeExecHandler(executedCommands, ""))
-        .mockImplementationOnce((_cmd: string, callback: ExecCallback) => {
+      const execSpy = makeStagingExecSpy(executedCommands, stagedPath).mockImplementationOnce(
+        (_cmd: string, callback: ExecCallback) => {
           executedCommands.push(_cmd)
-          callback(new Error("rm -f failed unexpectedly"), makeStream())
-        })
+          callback(new Error("cleanup failed unexpectedly"), makeStream())
+        }
+      )
 
       vi.mocked(sftpDownload).mockRejectedValueOnce(new Error("Original SFTP failure"))
 
@@ -3459,7 +3502,9 @@ describe("SshConnectionImpl", () => {
       )
 
       const stderrOutput = stderrSpy.mock.calls.map((args) => String(args[0])).join("")
-      expect(stderrOutput).toContain(`failed to remove temp file ${mktempOutput}`)
+      expect(stderrOutput).toContain(
+        `failed to remove temp directory ${DOWNLOAD_STAGING_DIRECTORY}`
+      )
 
       stderrSpy.mockRestore()
     })
