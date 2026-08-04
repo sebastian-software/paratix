@@ -11,6 +11,7 @@ import type { Environment, Module, SshConfig, SshConnection } from "../../src/ty
 
 import { archive, command, download, file, shellQuote } from "../../src/index.js"
 import { clearHostKeyCache, HostKeyVerificationError } from "../../src/knownHosts.js"
+import { buildLargeDownloadFlagPrefix } from "../../src/modules/download.js"
 import { runPlaybook } from "../../src/runner.js"
 import { server } from "../../src/server.js"
 import { SshConnectionImpl } from "../../src/ssh.js"
@@ -101,22 +102,6 @@ function allocateHttpPort(): number {
   const port = nextHttpPort
   nextHttpPort += 1
   return port
-}
-
-/**
- * Prefix of the flag `download.large` writes for a destination.
- *
- * Deliberately only the destination-keyed prefix, not the full flag name: the
- * full name folds in a hash of the request key, and mirroring that derivation
- * here is exactly what let the previous helper fall out of step with
- * `download.ts` unnoticed. Asserting that some flag exists under this prefix
- * checks the observable outcome and survives a future change to the hash.
- *
- * @param destination - The remote destination path.
- * @returns The flag-name prefix.
- */
-function largeDownloadFlagPrefix(destination: string): string {
-  return `download-large-${createHash("sha256").update(destination).digest("hex")}-`
 }
 
 async function readRemoteStat(ssh: SshConnection, remotePath: string): Promise<RemoteStat> {
@@ -1454,7 +1439,7 @@ describe.skipIf(SKIP_WITHOUT_DOCKER)("Paratix integration", () => {
       owner: "root",
       sha256: largeArtifactSha256,
     })
-    const largeFlagPrefix = largeDownloadFlagPrefix(largeArtifactRemotePath)
+    const largeFlagPrefix = buildLargeDownloadFlagPrefix(largeArtifactRemotePath)
 
     let primaryError: unknown
     try {

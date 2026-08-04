@@ -3,7 +3,7 @@ import { describe, expect, it, vi } from "vitest"
 
 import type { ExecOptions } from "../../src/types.js"
 
-import { download } from "../../src/modules/download.js"
+import { buildLargeDownloadFlagPrefix, download } from "../../src/modules/download.js"
 import {
   renderGuardedChmodCommand as buildGuardedChmodShell,
   renderGuardedChownCommand as buildGuardedChownShell,
@@ -111,15 +111,6 @@ function buildSafeDownloadApplyStubs(): NonNullable<
       result: { code: 0 },
     },
   ]
-}
-
-// R-0000274: keep this helper aligned with `buildLargeDownloadFlagInfo` in
-// download.ts: a destination-keyed prefix wraps the URL/headers-keyed
-// flag hash so older flag files for the same destination get evicted on
-// re-convergence by setVersionedFlag.
-function buildLargeDownloadFlagPrefix(destination: string): string {
-  const destinationHash = createHash("sha256").update(destination).digest("hex")
-  return `download-large-${destinationHash}-`
 }
 
 function buildLargeDownloadFlagName(parameters: {
