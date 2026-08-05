@@ -1,5 +1,28 @@
 # Changelog
 
+## [0.18.0](https://github.com/sebastian-software/paratix/compare/paratix-v0.17.0...paratix-v0.18.0) (2026-08-05)
+
+
+### ⚠ BREAKING CHANGES
+
+* **paratix:** a failed signal aborts the remaining signals of its list. Playbooks that relied on later signals still running after a failure must put independent work into separate signal lists.
+
+### Features
+
+* **paratix:** add a chainable b64decode template modifier ([#186](https://github.com/sebastian-software/paratix/issues/186)) ([4ecb3ea](https://github.com/sebastian-software/paratix/commit/4ecb3ea6775473c930074978c0184f5739c7d6c0)), closes [#183](https://github.com/sebastian-software/paratix/issues/183)
+* **paratix:** add onFailure option to timer.scheduled ([#165](https://github.com/sebastian-software/paratix/issues/165)) ([9bcd91d](https://github.com/sebastian-software/paratix/commit/9bcd91ddec41a89ff0a568988376ab2e31f15796))
+* **paratix:** detect a foreign container before touching a Quadlet unit ([#167](https://github.com/sebastian-software/paratix/issues/167)) ([38f0508](https://github.com/sebastian-software/paratix/commit/38f050870b462e6346b149d2d3fe9566c582396e)), closes [#149](https://github.com/sebastian-software/paratix/issues/149)
+* **paratix:** stop signal lists at the first failure and surface the restart cause ([#166](https://github.com/sebastian-software/paratix/issues/166)) ([93fbf59](https://github.com/sebastian-software/paratix/commit/93fbf594e33f9a853717e5648de7103955c86091)), closes [#149](https://github.com/sebastian-software/paratix/issues/149)
+
+
+### Bug Fixes
+
+* **paratix:** correct the stale integration assertions ([#185](https://github.com/sebastian-software/paratix/issues/185)) ([af674cd](https://github.com/sebastian-software/paratix/commit/af674cd92d5aeade75d2480a9e152e8c5b7e6906))
+* **paratix:** itemize every nested recipe in a dry run ([#161](https://github.com/sebastian-software/paratix/issues/161)) ([8de0113](https://github.com/sebastian-software/paratix/commit/8de011327dadbd6e5769b54b6e840fe9c0c43e78)), closes [#160](https://github.com/sebastian-software/paratix/issues/160)
+* **paratix:** itemize when() blocks in the run output ([#164](https://github.com/sebastian-software/paratix/issues/164)) ([36b966d](https://github.com/sebastian-software/paratix/commit/36b966dcfda383402e616795ce5dfe859a8aeed2)), closes [#163](https://github.com/sebastian-software/paratix/issues/163)
+* **paratix:** make archive.extract work against a stock sshd ([#179](https://github.com/sebastian-software/paratix/issues/179)) ([769961e](https://github.com/sebastian-software/paratix/commit/769961e9416f9957cf03761e5a490ce1e4b17807))
+* **paratix:** stage non-root downloads outside the sticky /tmp ([#188](https://github.com/sebastian-software/paratix/issues/188)) ([23bfc4f](https://github.com/sebastian-software/paratix/commit/23bfc4fe10d64713c7184ef774df8e675447d048)), closes [#184](https://github.com/sebastian-software/paratix/issues/184)
+
 ## [0.17.0](https://github.com/sebastian-software/paratix/compare/paratix-v0.16.1...paratix-v0.17.0) (2026-07-26)
 
 

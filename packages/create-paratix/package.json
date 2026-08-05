@@ -1,6 +1,6 @@
 {
   "name": "create-paratix",
-  "version": "0.17.0",
+  "version": "0.18.0",
   "description": "Scaffold a new Paratix server project",
   "type": "module",
   "main": "./dist/index.js",
