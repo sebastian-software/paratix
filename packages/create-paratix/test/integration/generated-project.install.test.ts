@@ -1,9 +1,51 @@
-import { spawnSync } from "node:child_process"
+import { spawnSync, type SpawnSyncReturns } from "node:child_process"
+import { readFileSync, writeFileSync } from "node:fs"
+import { join } from "node:path"
 import { describe, expect, it } from "vitest"
 
-import { createScaffoldedProject, SCAFFOLD_VARIANTS } from "../scaffoldFixtures.js"
+import {
+  createScaffoldedProject,
+  packParatixTarball,
+  SCAFFOLD_VARIANTS,
+} from "../scaffoldFixtures.js"
 
 const INSTALL_TIMEOUT_MS = 600_000
+
+/**
+ * Install a generated project, resolving `paratix` from the working tree.
+ *
+ * Every other dependency installs from the registry exactly as the scaffold
+ * declares it — that is what makes this check able to catch an install-level
+ * failure such as a missing build approval. Only `paratix` is redirected, via
+ * a `pnpm-workspace.yaml` override, because it is versioned in lockstep with
+ * `create-paratix` and so is not on the registry yet at release time; see
+ * `packParatixTarball`.
+ *
+ * The override is reverted once the install is done, so the project's own
+ * scripts run against exactly the files the scaffold wrote — `format:check`
+ * inspects `pnpm-workspace.yaml` too.
+ *
+ * @param projectDirectory - The generated project.
+ * @returns The completed install process.
+ */
+function installProject(projectDirectory: string): SpawnSyncReturns<string> {
+  const workspaceFilePath = join(projectDirectory, "pnpm-workspace.yaml")
+  const generatedWorkspaceFile = readFileSync(workspaceFilePath, "utf8")
+
+  writeFileSync(
+    workspaceFilePath,
+    `${generatedWorkspaceFile}overrides:\n  paratix: file:${packParatixTarball()}\n`
+  )
+  try {
+    return spawnSync("pnpm", ["install"], {
+      cwd: projectDirectory,
+      encoding: "utf8",
+      timeout: INSTALL_TIMEOUT_MS,
+    })
+  } finally {
+    writeFileSync(workspaceFilePath, generatedWorkspaceFile)
+  }
+}
 
 /**
  * Run one of the generated project's own scripts through pnpm.
@@ -36,10 +78,8 @@ function runProjectScript(
  * missing build approval. It needs network access and therefore lives in the
  * integration run rather than in `test` or `test:dist`.
  *
- * The `paratix` dependency resolves from the registry, not from the working
- * tree — a scaffolded project declares a published range. A failure here that
- * points at paratix itself is therefore about the published package; the rest
- * of the suite covers the working tree.
+ * `paratix` itself comes from the working tree rather than the registry, for
+ * the release-ordering reason `installProject` describes.
  */
 describe("a scaffolded project installs and passes its own scripts", () => {
   for (const variant of SCAFFOLD_VARIANTS) {
@@ -47,11 +87,7 @@ describe("a scaffolded project installs and passes its own scripts", () => {
       const { cleanup, projectDirectory } = createScaffoldedProject(variant)
 
       try {
-        const install = spawnSync("pnpm", ["install"], {
-          cwd: projectDirectory,
-          encoding: "utf8",
-          timeout: INSTALL_TIMEOUT_MS,
-        })
+        const install = installProject(projectDirectory)
         expect(
           install.status,
           `pnpm install failed in the generated project:\n${install.stdout}\n${install.stderr}`
