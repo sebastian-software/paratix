@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.18.0](https://github.com/sebastian-software/paratix/compare/create-paratix-v0.17.0...create-paratix-v0.18.0) (2026-08-05)
+
+
+### Features
+
+* **create-paratix:** scaffold projects with TypeScript 7 and 6 side by side ([#174](https://github.com/sebastian-software/paratix/issues/174)) ([d6d644a](https://github.com/sebastian-software/paratix/commit/d6d644acdfa521d16c2acf3d4fe458dab7e3a2e8))
+* **create-paratix:** verify that a scaffolded project passes its own checks ([#176](https://github.com/sebastian-software/paratix/issues/176)) ([9268b6e](https://github.com/sebastian-software/paratix/commit/9268b6e455768980463f083a64dcf62d51777c18))
+
+
+### Bug Fixes
+
+* **create-paratix:** make a scaffolded project pass its own checks ([#175](https://github.com/sebastian-software/paratix/issues/175)) ([c45232e](https://github.com/sebastian-software/paratix/commit/c45232e6d0518fb99afdf412001f536ef266f77b))
+
 ## [0.17.0](https://github.com/sebastian-software/paratix/compare/create-paratix-v0.16.1...create-paratix-v0.17.0) (2026-07-26)
 
 
