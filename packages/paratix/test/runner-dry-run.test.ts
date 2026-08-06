@@ -1075,6 +1075,89 @@ describe("runPlaybook dry-run recipe behaviour", () => {
     await expect(resolveEnvironment(receivedEnvInCheck!, "SECRET")).resolves.toBe("wrapped-secret")
     expect(dependentModule.apply).not.toHaveBeenCalled()
   })
+
+  // R-0000743 acceptance: --dry-run also triggers the up-front prewarm phase,
+  // and downstream modules see the same meta values as in a real run.
+  it("resolves op.resolve up front in --dry-run and reuses the value without a second spawn", async () => {
+    const capturedConfigs: unknown[] = []
+    const spawnCalls: string[] = []
+
+    vi.doMock("node:child_process", () => ({
+      spawn: vi.fn(() => {
+        spawnCalls.push("op-read")
+        return createMockSpawnChild("dry-run-secret\n")
+      }),
+    }))
+    vi.doMock("../src/ssh.js", () => ({
+      shellQuote: (s: string) => `'${s}'`,
+      SshConnectionImpl: makeMockSshClass(capturedConfigs, { lifecycle: "permissive" }),
+    }))
+
+    const [{ runPlaybook }, { op }] = await Promise.all([
+      import("../src/runner.js"),
+      import("../src/modules/op.js"),
+    ])
+
+    let receivedEnvInCheck: Environment | undefined
+    const dependentModule: Module = {
+      apply: vi.fn().mockResolvedValue({ status: "ok" } satisfies ModuleResult),
+      check: vi.fn().mockImplementation(async (_ssh, env: Environment) => {
+        await Promise.resolve()
+        receivedEnvInCheck = env
+        return "ok" as const
+      }),
+      name: "dependent-module",
+    }
+
+    const definition: ServerDefinition = {
+      host: "1.2.3.4",
+      name: "test-server",
+      run: [op.resolve({ SECRET: "op://vault/item/password" }), dependentModule],
+      ssh: { ports: [22], privateKey: "~/.ssh/id", user: "root" },
+    }
+
+    await runPlaybook(definition, { dryRun: true })
+
+    // Exactly one op read for the whole run: the prewarm phase resolved it,
+    // and the module's own apply()/dry-run meta pass reused the cached value.
+    expect(spawnCalls).toStrictEqual(["op-read"])
+    expect(receivedEnvInCheck).toBeDefined()
+    await expect(resolveEnvironment(receivedEnvInCheck!, "SECRET")).resolves.toBe("dry-run-secret")
+    expect(dependentModule.apply).not.toHaveBeenCalled()
+  })
+
+  it("prints the prewarm status line in --dry-run before any module output", async () => {
+    const capturedConfigs: unknown[] = []
+    const consoleLogs: string[] = []
+    vi.spyOn(console, "log").mockImplementation((...args: unknown[]) => {
+      consoleLogs.push(args.map(String).join(" "))
+    })
+
+    vi.doMock("node:child_process", () => ({
+      spawn: vi.fn(() => createMockSpawnChild("dry-run-secret\n")),
+    }))
+    vi.doMock("../src/ssh.js", () => ({
+      shellQuote: (s: string) => `'${s}'`,
+      SshConnectionImpl: makeMockSshClass(capturedConfigs, { lifecycle: "permissive" }),
+    }))
+
+    const [{ runPlaybook }, { op }] = await Promise.all([
+      import("../src/runner.js"),
+      import("../src/modules/op.js"),
+    ])
+
+    const definition: ServerDefinition = {
+      host: "1.2.3.4",
+      name: "test-server",
+      run: [op.resolve({ SECRET: "op://vault/item/password" })],
+      ssh: { ports: [22], privateKey: "~/.ssh/id", user: "root" },
+    }
+
+    await runPlaybook(definition, { dryRun: true })
+
+    const prewarmLines = consoleLogs.filter((line) => /resolving secrets/iv.test(line))
+    expect(prewarmLines).toHaveLength(1)
+  })
 })
 
 // Bug: modules with local: true receive an SSH connection instead of null

@@ -8,7 +8,12 @@ import { mergeEnvironmentFromMeta } from "../../src/meta.js"
 import { op } from "../../src/modules/op.js"
 import { OP_OUTPUT_CAPTURE_LIMIT_BYTES } from "../../src/modules/opOutputCapture.js"
 import { setRunnerAbortSignal } from "../../src/runnerAbortSignal.js"
-import { clearRegisteredSecrets, getRegisteredSecrets } from "../../src/secretSink.js"
+import { withSecretPrewarmScope } from "../../src/secretPrewarm.js"
+import {
+  clearRegisteredSecrets,
+  getRegisteredSecrets,
+  withRunScopedSecrets,
+} from "../../src/secretSink.js"
 
 type MockStdin = {
   end: Mock
@@ -973,5 +978,158 @@ describe("op.resolve — runner abort and timeout (R-0000220)", () => {
 
     expect(result.status).toBe("failed")
     expect(killCalls).toStrictEqual(["SIGTERM", "SIGKILL"])
+  })
+})
+
+// ---------------------------------------------------------------------------
+// _prewarmSecrets
+// ---------------------------------------------------------------------------
+
+describe("op.resolve — _prewarmSecrets", () => {
+  beforeEach(() => {
+    vi.resetAllMocks()
+    clearRegisteredSecrets()
+    spawnCalls = []
+    mockSpawnWith("")
+  })
+
+  afterEach(() => {
+    clearRegisteredSecrets()
+  })
+
+  it("resolves the secret into the cache so the later apply() makes no further spawn call", async () => {
+    mockSpawnWith("cached-secret\n")
+    const module_ = op.resolve({ password: "op://vault/item/password" })
+
+    await withSecretPrewarmScope(async () => {
+      await module_._prewarmSecrets?.()
+      expect(spawnCalls).toHaveLength(1)
+
+      // eslint-disable-next-line prefer-spread -- Module.apply, not Function.prototype.apply
+      const result = await module_.apply(null, emptyEnv)
+
+      expect(spawnCalls).toHaveLength(1)
+      expect(result.status).toBe("ok")
+      const metaEnvironment = await mergeEnvironmentFromMeta({}, result.meta)
+      await expect(resolveEnvironment(metaEnvironment, "password")).resolves.toBe("cached-secret")
+    })
+  })
+
+  it("OTP: reads the seed once during prewarm; later code computations spawn no further op call", async () => {
+    const otpauthUri =
+      "otpauth://totp/Test?secret=GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ&period=30&digits=6"
+    mockSpawnWith(`${otpauthUri}\n`)
+    const module_ = op.resolve({ token: "op://vault/item/one-time-password" })
+
+    await withSecretPrewarmScope(async () => {
+      await module_._prewarmSecrets?.()
+      expect(spawnCalls).toHaveLength(1)
+
+      // eslint-disable-next-line prefer-spread -- Module.apply, not Function.prototype.apply
+      const result = await module_.apply(null, emptyEnv)
+      expect(spawnCalls).toHaveLength(1)
+
+      const metaEnvironment = await mergeEnvironmentFromMeta({}, result.meta)
+      const codeOne = await resolveEnvironment(metaEnvironment, "token")
+      const codeTwo = await resolveEnvironment(metaEnvironment, "token")
+
+      expect(codeOne).toMatch(/^\d{6}$/v)
+      expect(codeTwo).toMatch(/^\d{6}$/v)
+      // Two separate TOTP computations, still exactly one op invocation total.
+      expect(spawnCalls).toHaveLength(1)
+    })
+  })
+
+  it("throws (instead of returning failed()) with message, cause, and stack all masked", async () => {
+    const resolvedValue = "prewarm-secret-value-12345"
+    const stderrLeak = `op failed while resolving; last value=${resolvedValue}`
+    mockedSpawnFn.mockImplementationOnce(((command: string, args: readonly string[]) => {
+      trackSpawn(command, args)
+      return createMockChild(`${resolvedValue}\n`)
+    }) as never)
+    mockedSpawnFn.mockImplementationOnce(((command: string, args: readonly string[]) => {
+      trackSpawn(command, args)
+      return createMockChild("", 1, stderrLeak)
+    }) as never)
+
+    const module_ = op.resolve({
+      password: "op://vault/item/password",
+      token: "op://vault/item/one-time-password",
+    })
+
+    let caught: unknown
+    await withSecretPrewarmScope(async () => {
+      try {
+        await module_._prewarmSecrets?.()
+      } catch (error) {
+        caught = error
+      }
+    })
+
+    expect(caught).toBeInstanceOf(Error)
+    const error = caught as Error
+
+    // Checked on the thrown object itself, not via the secret sink: by the
+    // time a caller would render this error the sink has already been
+    // drained by withRunScopedSecrets' finally block.
+    expect(error.message).not.toContain(resolvedValue)
+    expect(error.stack).toBeDefined()
+    expect(error.stack).not.toContain(resolvedValue)
+
+    expect(error.cause).toBeInstanceOf(Error)
+    const cause = error.cause as Error
+    expect(cause.message).not.toContain(resolvedValue)
+    expect(cause.stack).toBeDefined()
+    expect(cause.stack).not.toContain(resolvedValue)
+  })
+
+  it("leaves no registered secrets after _prewarmSecrets() runs without a surrounding runner", async () => {
+    mockSpawnWith("standalone-secret\n")
+    const module_ = op.resolve({ password: "op://vault/item/password" })
+
+    // No withSecretPrewarmScope wrapper: the hook must still bracket itself
+    // with its own withRunScopedSecrets so a direct call cannot leak a
+    // registration process-wide.
+    await module_._prewarmSecrets?.()
+
+    expect(getRegisteredSecrets()).toStrictEqual([])
+  })
+
+  // F2 regression: a cache hit must re-register the value in whichever
+  // withRunScopedSecrets bracket is active *at the moment it is read*, not
+  // just in the bracket that happened to be active for the original load.
+  // Construct the case so the loader bracket is demonstrably NOT the sink
+  // scope apply() runs in: _prewarmSecrets() gets its own, short-lived
+  // withRunScopedSecrets bracket that opens and fully closes before apply()
+  // ever runs, while the secret cache itself (withSecretPrewarmScope) spans
+  // both so the second read is a cache hit, not a fresh op read.
+  it("re-registers a cached value during apply() even when the loader's own scope already closed", async () => {
+    mockSpawnWith("cross-scope-secret\n")
+    const module_ = op.resolve({ password: "op://vault/item/password" })
+
+    await withSecretPrewarmScope(async () => {
+      // The loader bracket: opens fresh (no outer scope is active yet) and
+      // closes again before this callback returns, releasing its
+      // registration.
+      await withRunScopedSecrets(async () => {
+        await module_._prewarmSecrets?.()
+      })
+      expect(getRegisteredSecrets()).not.toContain("cross-scope-secret")
+
+      // A second, independent scope for apply() — not nested inside the
+      // loader's bracket above, so nothing but a fresh registration on this
+      // cache hit could make the value show up here.
+      await withRunScopedSecrets(async () => {
+        // eslint-disable-next-line prefer-spread -- Module.apply, not Function.prototype.apply
+        const result = await module_.apply(null, emptyEnv)
+
+        expect(result.status).toBe("ok")
+        expect(spawnCalls).toHaveLength(1)
+        expect(getRegisteredSecrets()).toContain("cross-scope-secret")
+      })
+
+      // Balanced again once apply()'s own scope closes.
+      expect(getRegisteredSecrets()).not.toContain("cross-scope-secret")
+    })
   })
 })

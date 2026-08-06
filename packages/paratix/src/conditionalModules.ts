@@ -1,5 +1,6 @@
 import { applyConditionalModules, getConditionalChildConnection } from "./conditionalExecution.js"
 import { createNullPrototypeEnvironment } from "./environment.js"
+import { hasSecretPrewarmCarriers, prewarmSecrets } from "./secretPrewarm.js"
 import {
   type Environment,
   type Module,
@@ -86,7 +87,7 @@ export function createConditionalModule(parameters: {
     return parameters.condition(ssh, environment)
   }
 
-  return {
+  const conditionalModule: Module = {
     async _applyDryRun(
       ssh: null | SshConnection,
       environment: Environment,
@@ -138,4 +139,31 @@ export function createConditionalModule(parameters: {
     },
     name: parameters.name,
   }
+
+  // The hook is attached only when the guarded children can actually contribute
+  // a secret. The child list is fixed at construction time, so the question is
+  // answered once, here — not per run.
+  //
+  // Attaching it unconditionally would turn every `when(...)` into a secret
+  // carrier: a playbook without a single secret module would print the
+  // "resolving secrets" status line before a run that never calls a provider,
+  // and `--filter` would warn about lost secrets that never existed. A nested
+  // `when(...)` composes correctly because the inner block is built before the
+  // outer one and therefore already carries (or lacks) its own hook.
+  if (hasSecretPrewarmCarriers(parameters.modules)) {
+    conditionalModule._prewarmSecrets = async (): Promise<void> => {
+      // The guarded children stay encapsulated in this closure, so the runner's
+      // tree walk cannot reach them; the block delegates on their behalf
+      // instead of exposing a public `_modules` surface for guarded blocks.
+      //
+      // The guard condition is deliberately NOT evaluated here: it is answered
+      // remotely and no connection exists yet at this point in the run. A
+      // secret inside a branch whose condition later turns out to be `false` is
+      // therefore resolved although nobody consumes it — the accepted price for
+      // the guarantee that no provider prompt can appear mid-run.
+      await prewarmSecrets(parameters.modules)
+    }
+  }
+
+  return conditionalModule
 }

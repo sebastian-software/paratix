@@ -411,6 +411,39 @@ export function printRunContext(parameters: {
   )
 }
 
+/**
+ * Print a single free-standing status line on stdout.
+ *
+ * Every other export of this module is bound to a fixed structural slot (CLI
+ * header, run context, module row, summary, …). This is the one helper for a
+ * standalone informational line produced by a run phase that has no row of its
+ * own — the up-front secret resolution uses it to explain why the terminal is
+ * waiting on a provider prompt.
+ *
+ * The text passes through {@link maskRegisteredSecrets} and the terminal
+ * sanitizer, so it carries the same redaction guarantee as every other line
+ * this module prints. Callers must sit outside the module loop: the helper
+ * deliberately does not coordinate with the animated module spinner.
+ *
+ * @param text - The message to print.
+ */
+export function printInfoLine(text: string): void {
+  console.log(pc.dim(sanitizeTerminalText(maskRegisteredSecrets(text))))
+}
+
+/**
+ * Print a single free-standing warning line on stderr, prefixed with
+ * `Warning:` like the other warnings this CLI emits.
+ *
+ * Same contract as {@link printInfoLine}: masked, sanitized, and intended for
+ * callers outside the module loop.
+ *
+ * @param text - The warning message to print, without the prefix.
+ */
+export function printWarningLine(text: string): void {
+  console.error(pc.yellow(`Warning: ${sanitizeTerminalText(maskRegisteredSecrets(text))}`))
+}
+
 function colorizeDiffLine(line: string): string {
   if (line.startsWith("---") || line.startsWith("+++") || line.startsWith("@@")) {
     return pc.dim(line)
