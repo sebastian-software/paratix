@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.19.0](https://github.com/sebastian-software/paratix/compare/create-paratix-v0.18.0...create-paratix-v0.19.0) (2026-08-06)
+
+
+### Miscellaneous Chores
+
+* **create-paratix:** Synchronize paratix workspace packages versions
+
 ## [0.18.0](https://github.com/sebastian-software/paratix/compare/create-paratix-v0.17.0...create-paratix-v0.18.0) (2026-08-05)
 
 
