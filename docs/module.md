@@ -648,15 +648,56 @@ import { meta } from "paratix"
 }
 ```
 
-**Lazy OTP-Aufloesung:** OTP-Felder (`one-time-password`) werden als
-**lazy Env-Werte** (Funktionen) in den Env geschrieben. Der TOTP-Code wird
-erst berechnet, wenn ein Modul oder Template tatsaechlich auf den Wert
-zugreift (via `resolveEnv`). Das ist notwendig, weil OTPs nur 30 Sekunden
-gueltig sind und zwischen `op.resolve()` und der tatsaechlichen Verwendung
-beliebig viel Zeit vergehen kann.
+**Vorab-Auflösung zu Lauf-Beginn:** Alle `op read`-Aufrufe eines Laufs
+werden gebündelt **vor dem SSH-Connect** ausgeführt — unabhängig davon, an
+welcher Position `op.resolve(...)` in `run` steht, und auch dann, wenn es
+innerhalb eines `recipe(...)`, eines `when(...)`-Guards oder in `signals`
+liegt. Dadurch erscheint ein biometrischer Unlock oder ein `op
+signin`-Prompt sofort nach dem Kommando-Aufruf statt irgendwann mitten im
+Lauf. Vor dem ersten `op read` gibt Paratix eine Statuszeile aus, die
+diese Wartesituation erklärt.
 
-Regulaere Secrets (Passwoerter, Tokens, etc.) werden sofort als Strings
-aufgeloest, da sie sich nicht zeitlich aendern.
+Im weiteren Verlauf des Laufs verwendet `op.resolve(...)` an seiner
+eigentlichen Position in `run` ausschließlich die bereits gelesenen Werte
+aus einem lauf-gebundenen Cache — es ruft `op` dafür kein zweites Mal auf.
+Nennen mehrere `op.resolve`-Module dieselbe Referenz, wird sie trotzdem
+nur einmal pro Lauf gelesen.
+
+Scheitert die Vorab-Auflösung — `op`-CLI fehlt, Session nicht angemeldet,
+Timeout, abgebrochene Biometrie —, bricht der gesamte Lauf **vor dem
+SSH-Connect** mit Exit-Code 2 ab. Das ist eine Verhaltensänderung
+gegenüber bisherigen Playbooks: bislang meldete `op.resolve` einen
+Fehlschlag als fehlgeschlagenes Modul an seiner Position in `run`; jetzt
+verhindert ein Fehlschlag den gesamten Lauf, bevor überhaupt eine
+Verbindung aufgebaut oder ein Task ausgeführt wurde.
+
+`--dry-run` löst die Vorab-Auflösung ebenfalls aus, damit nachgelagerte
+Module im Dry-Run dieselbe Umgebung sehen wie im echten Lauf. Schließt
+`--filter` ein `op.resolve`-Modul aus dem Lauf aus, gibt Paratix eine
+Warnung aus, weil Module, die den ausgeschlossenen Wert erwarten, ihn dann
+nicht im Env finden — das Laufverhalten selbst ändert sich dadurch nicht.
+
+Ein `op.resolve` in einem `when(...)`-Zweig wird ebenfalls immer vorab
+aufgelöst — auch dann, wenn die Guard-Bedingung später `false` ergibt und
+der Wert nie gebraucht wird. Das ist der bewusste Preis dafür, dass kein
+Prompt mitten im Lauf auftauchen kann.
+
+**Lazy OTP-Aufloesung:** OTP-Felder (`one-time-password`) werden als
+**lazy Env-Werte** (Funktionen) in den Env geschrieben. Die zugrunde
+liegende `otpauth://`-URI (der TOTP-Seed) wird bereits in der
+Vorab-Auflösung einmalig per `op read` gelesen; der TOTP-**Code** selbst
+wird erst berechnet, wenn ein Modul oder Template tatsaechlich auf den
+Wert zugreift (via `resolveEnv`) — und das rein lokal, ohne weiteren
+`op`-Aufruf und ohne erneute Biometrie. Das ist notwendig, weil OTPs nur
+30 Sekunden gueltig sind und zwischen dem Lesen des Seeds und der
+tatsaechlichen Verwendung beliebig viel Zeit vergehen kann. Der Seed
+rotiert innerhalb eines Laufs nicht; eine Rotation in 1Password wird erst
+mit dem naechsten `paratix apply`-Lauf sichtbar, der die Referenz erneut
+liest.
+
+Regulaere Secrets (Passwoerter, Tokens, etc.) werden bereits in der
+Vorab-Auflösung als Strings aufgeloest, da sie sich nicht zeitlich
+aendern.
 
 **Umsetzung via `op read`:** Das Modul nutzt `op read <reference>`, um jede
 reguläre Referenz direkt als Rohwert aufzulösen. Dadurch bleiben Anführungs-

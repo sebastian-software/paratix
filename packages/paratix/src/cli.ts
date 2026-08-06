@@ -14,8 +14,9 @@ import { inspectRedactedDiagnosticValue } from "./errorRedaction.js"
 import { runWithFirstRunFlag, runWithoutFirstRunFlag } from "./firstRunContext.js"
 import { describeHostValidationFailure, validateHostLabel } from "./hostValidation.js"
 import { applyModuleFilter, collectModuleNames, parseFilterNames } from "./moduleFilter.js"
-import { printCliHeader } from "./output.js"
+import { printCliHeader, printWarningLine } from "./output.js"
 import { performLastResortCleanup, type RunOptions, runPlaybook } from "./runner.js"
+import { collectSecretPrewarmCarrierNames } from "./secretPrewarm.js"
 import { maskRegisteredSecrets } from "./secretSink.js"
 import { collectSshConfigErrors } from "./serverDefinitionValidation.js"
 
@@ -719,6 +720,30 @@ export class CliUsageError extends Error {
 }
 
 /**
+ * Warn about every secret-resolving node that the filter removed from the run.
+ *
+ * A filtered-out node is replaced by a skip module, which carries no prewarm
+ * hook and therefore resolves nothing — so modules further down that expect its
+ * values find no environment entry. That is pre-existing behaviour and stays
+ * unchanged; the warning only makes the connection visible. Since the filter
+ * path knows nothing about which module consumes which value, the warning also
+ * appears when nobody in the remaining run needed the value: a warning is
+ * cheaper than a false-negative silence.
+ *
+ * @param original - The unfiltered top-level module list.
+ * @param filtered - The filtered module list that the run will use.
+ */
+function warnAboutFilteredSecretModules(original: Module[], filtered: Module[]): void {
+  const remaining = collectSecretPrewarmCarrierNames(filtered)
+  for (const name of collectSecretPrewarmCarrierNames(original)) {
+    if (remaining.has(name)) continue
+    printWarningLine(
+      `--filter excluded "${name}", so its secrets are not resolved. Modules that expect those values may fail.`
+    )
+  }
+}
+
+/**
  * Resolve the effective top-level module list for a run, applying the
  * `--filter` selection when the user requested one.
  *
@@ -751,7 +776,11 @@ export function resolveFilteredRun(definition: ServerDefinition, rawFilter: stri
     )
   }
 
-  return applyModuleFilter(definition.run, new Set(names))
+  // The filter itself stays a pure transformation with an unchanged signature;
+  // the visibility check sits next to it here, not inside `moduleFilter.ts`.
+  const filtered = applyModuleFilter(definition.run, new Set(names))
+  warnAboutFilteredSecretModules(definition.run, filtered)
+  return filtered
 }
 
 export async function runApplyCommand(

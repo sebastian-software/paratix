@@ -5,17 +5,17 @@ import type { Environment, Module, ModuleResult } from "../types.js"
 import { environmentToMetaEntries } from "../meta.js"
 import { failed } from "../moduleFailure.js"
 import { getRunnerAbortSignal } from "../runnerAbortSignal.js"
+import { resolveCachedSecret } from "../secretPrewarm.js"
 import {
   hasActiveRunScopedSecretScope,
   registerRunScopedSecret,
   withRunScopedSecrets,
 } from "../secretSink.js"
-import { maskSecrets } from "../sshHelpers.js"
 import { generateTotpCode } from "../totp.js"
+import { buildOpFailureDetail, buildPrewarmFailure, maskOpText } from "./opFailureMasking.js"
 import {
   type BoundedOutputCapture,
   createBoundedOutputCapture,
-  maskKnownSecretPrefixes,
   OP_OUTPUT_CAPTURE_LIMIT_BYTES,
 } from "./opOutputCapture.js"
 import { collectOpFailureOutputs, OpSpawnError } from "./opSpawnError.js"
@@ -43,18 +43,6 @@ const OP_AUTH_PATTERNS = [
 
 function isAuthFailure(stderr: string): boolean {
   return OP_AUTH_PATTERNS.some((pattern) => pattern.test(stderr))
-}
-
-/**
- * Build a single-string failure detail from a caught error so a later
- * `maskSecrets` pass can redact any resolved values that happened to leak
- * into the error message (typically via captured stderr from the op CLI).
- *
- * @param error - The thrown error caught from the op CLI invocation.
- * @returns The detail string (message or `String(value)` fallback) to mask and surface.
- */
-function buildOpFailureDetail(error: unknown): string {
-  return error instanceof Error ? error.message : String(error)
 }
 
 function describeSpawnError(command: string, error: unknown): Error {
@@ -284,6 +272,79 @@ function stripTrailingCliNewline(value: string): string {
 }
 
 /**
+ * Read a single 1Password reference, routed through the run-scoped prewarm
+ * cache so each reference costs exactly one `op read` per run — no matter how
+ * many `op.resolve` modules name it, and no matter whether the prewarm phase or
+ * the module's own `apply()` asks first.
+ *
+ * `normalize` post-processes the raw CLI stdout, and the **normalized** value —
+ * not the raw stdout — is what gets cached and registered. That distinction is
+ * load-bearing: the secret sink masks exactly the string it was handed, so a
+ * raw value registered with its trailing newline would leave the trimmed value
+ * that actually reaches the output unmasked.
+ *
+ * R-0000165 / R-0000850: the loader registers the value with the secret sink at
+ * the moment it is first observed, so the window between the up-front phase and
+ * the module's own execution is covered too. An empty value is cached and passed
+ * on like any other but never registered.
+ *
+ * Every *observation* registers as well, not just the load. The loader runs once
+ * per reference and run, so its registration is only as long-lived as whichever
+ * `withRunScopedSecrets` bracket happened to be active back then. A cache hit
+ * that re-registers inside the caller's own bracket makes each consumer
+ * self-supporting again — exactly the property `apply()` had before the cache
+ * existed — instead of depending on an ordering of scopes that nothing enforces.
+ * The registration is reference-counted, so the extra registration is released
+ * exactly as often as it was taken; the scope guard follows the precedent of the
+ * TOTP closure below and keeps a registration without a scope (which nothing
+ * would ever release) from happening.
+ *
+ * @param reference - The `op://` reference to read.
+ * @param normalize - Post-processing applied to the raw CLI stdout.
+ * @returns The normalized value, served from cache once the reference was read.
+ * @throws {Error} If the `op` CLI is not available or the session is not authenticated.
+ */
+async function readReference(
+  reference: string,
+  normalize: (stdout: string) => string
+): Promise<string> {
+  const value = await resolveCachedSecret(reference, async () => {
+    const stdout = await spawnWithInput("op", ["read", "--", reference], { input: "" })
+    const loaded = normalize(stdout)
+    if (loaded.length > 0) registerRunScopedSecret(loaded)
+    return loaded
+  })
+  if (value.length > 0 && hasActiveRunScopedSecretScope()) registerRunScopedSecret(value)
+  return value
+}
+
+/**
+ * Read a regular (non-OTP) reference: the secret value with the trailing
+ * newline the CLI appends removed.
+ *
+ * @param reference - The `op://` reference to read.
+ * @returns The resolved secret value.
+ */
+async function readSecretValue(reference: string): Promise<string> {
+  return readReference(reference, stripTrailingCliNewline)
+}
+
+/**
+ * Read an OTP reference: the `otpauth://` seed URI, trimmed. Only the seed is
+ * read here — the TOTP code itself stays lazy, see {@link resolveOtpReferences}.
+ *
+ * `splitReferences` assigns every reference to exactly one of the two branches
+ * by its suffix, so a single reference can never be cached under both
+ * normalizations.
+ *
+ * @param reference - The `op://` reference to read.
+ * @returns The resolved `otpauth://` URI.
+ */
+async function readOtpauthUri(reference: string): Promise<string> {
+  return readReference(reference, (stdout) => stripTrailingCliNewline(stdout).trim())
+}
+
+/**
  * Resolve regular (non-OTP) 1Password references via `op read`.
  *
  * @param entries - Map of logical names to 1Password references.
@@ -301,16 +362,9 @@ async function resolveRegularReferences(
 
   for (const [name, reference] of Object.entries(entries)) {
     // eslint-disable-next-line no-await-in-loop
-    const stdout = await spawnWithInput("op", ["read", "--", reference], { input: "" })
-    const value = stripTrailingCliNewline(stdout)
+    const value = await readSecretValue(reference)
     if (value.length > 0) {
       leakedValues.push(value)
-      // R-0000165: register the resolved secret in the process-scoped sink
-      // immediately. Without this, a later failure (e.g. an OTP resolve
-      // crash, op CLI timeout, unhandled rejection) before the caller's
-      // post-loop registration would let the value leak through stack
-      // traces and shared logger trap output in plaintext.
-      registerRunScopedSecret(value)
     }
     result[name] = value
   }
@@ -351,22 +405,20 @@ async function resolveOtpReferences(
   const result: Environment = {}
 
   for (const [name, reference] of Object.entries(entries)) {
+    // R-0000165: the otpauth URI is registered in the secret sink the moment it
+    // is first observed — inside `readReference` — so an exception thrown later
+    // (e.g. from a follow-up op invocation or from generateTotpCode) cannot
+    // leak the URI's `secret=` parameter through stack traces or shared error
+    // renderers.
+    //
+    // R-0000576: that registration still happens BEFORE the closure below is
+    // defined, because the awaited read completes first. A third-party catch
+    // site that stringifies the thrown error therefore never sees the raw URI
+    // before the sink masks it.
     // eslint-disable-next-line no-await-in-loop
-    const stdout = await spawnWithInput("op", ["read", "--", reference], { input: "" })
-
-    const otpauthUri = stripTrailingCliNewline(stdout).trim()
+    const otpauthUri = await readOtpauthUri(reference)
     if (otpauthUri.length > 0) {
       leakedValues.push(otpauthUri)
-      // R-0000165: register the otpauth URI in the secret sink as soon as
-      // it is resolved so an exception thrown later (e.g. from a follow-up
-      // op invocation or from generateTotpCode) cannot leak the URI's
-      // `secret=` parameter through stack traces or shared error renderers.
-      //
-      // R-0000576: register the URI BEFORE the closure is defined so the
-      // sink is already populated when the lazy callback runs. A third-party
-      // catch site that stringifies the thrown error would otherwise see the
-      // raw URI before the sink masks it.
-      registerRunScopedSecret(otpauthUri)
     }
     result[name] = () => {
       // R-0000576: the captured `otpauthUri` is closed over and would show
@@ -393,6 +445,46 @@ async function resolveOtpReferences(
 }
 
 /**
+ * Resolve every reference of one `op.resolve` module into the run-scoped cache,
+ * before the run connects.
+ *
+ * Resolution is sequential (as it is in `apply()`): parallel `op read` calls
+ * would stack several biometric prompts on top of each other. The resolved
+ * values are only warmed here — the lazy TOTP closure belongs to the module and
+ * is built in `apply()`, not in the cache.
+ *
+ * @param references - Map of logical names to 1Password references.
+ * @throws {Error} A fully redacted error when a reference cannot be resolved.
+ */
+async function prewarmReferences(references: Record<string, string>): Promise<void> {
+  // Mirrors the `leakedValues` list of `apply()`: every value observed here
+  // feeds the masking of a failure raised later in this phase. The list that
+  // `apply()` builds locally is not reachable from here.
+  const resolvedValues: string[] = []
+  try {
+    const [regularEntries, otpEntries] = splitReferences(references)
+    for (const reference of Object.values(regularEntries)) {
+      // eslint-disable-next-line no-await-in-loop -- sequential by design, see the doc comment above
+      const value = await readSecretValue(reference)
+      if (value.length > 0) resolvedValues.push(value)
+    }
+    for (const reference of Object.values(otpEntries)) {
+      // eslint-disable-next-line no-await-in-loop -- sequential by design, see the doc comment above
+      const otpauthUri = await readOtpauthUri(reference)
+      if (otpauthUri.length > 0) resolvedValues.push(otpauthUri)
+    }
+  } catch (error) {
+    throw buildPrewarmFailure(error, [
+      ...Object.values(references),
+      ...resolvedValues,
+      // R-0000589: fold the per-line captured stdout/stderr of the failing op
+      // invocation into the masking candidates, exactly as the apply() path does.
+      ...collectOpFailureOutputs(error),
+    ])
+  }
+}
+
+/**
  * Modules for resolving secrets from 1Password on the local controller.
  */
 export const op = {
@@ -408,6 +500,16 @@ export const op = {
    * `check` always returns `"needs-apply"` so the runner executes `apply`
    * unconditionally and propagates the resolved meta values.
    * If any CLI call fails the module returns `{ status: "failed", error }`.
+   *
+   * Inside a `runPlaybook` run every reference is already read at the very
+   * start of the run, before the SSH connect, so the 1Password interaction
+   * (biometric unlock, `op signin`) happens immediately and only once. `apply`
+   * then runs at its own position in `run`, serves its values from the
+   * run-scoped cache without another CLI call, and emits the same meta as
+   * before. A failure during that up-front phase aborts the run before any
+   * connection is opened, instead of surfacing as a failed module later on.
+   * Outside a run — a direct `op.resolve(...).apply(...)` call — there is no
+   * cache and the references are resolved on the spot, exactly as before.
    *
    * @param references - A map of logical names to 1Password secret references
    *   (e.g. `op://vault/item/field`). References ending in `/one-time-password`
@@ -428,6 +530,19 @@ export const op = {
 
     return {
       _dryRunMetaProducer: true,
+      async _prewarmSecrets(): Promise<void> {
+        // The hook opens its own run-scoped secret bracket, just like `apply()`
+        // does. Inside the runner the helper is re-entrant and this costs
+        // nothing, but it makes the hook self-supporting: on a direct call
+        // without a surrounding run scope, `registerRunScopedSecret` increments
+        // the process-wide count unconditionally and only *then* returns when
+        // there is no store (`secretSink.ts`), and no regular path ever releases
+        // it again (R-0000518). Without this bracket a direct call would leak
+        // its registrations process-wide.
+        await withRunScopedSecrets(async () => {
+          await prewarmReferences(references)
+        })
+      },
       async apply(): Promise<ModuleResult> {
         return withRunScopedSecrets(async () => {
           // Track every secret we observe locally (resolved values + otpauth
@@ -437,12 +552,14 @@ export const op = {
           try {
             const [regularEntries, otpEntries] = splitReferences(references)
             // R-0000041 / R-0000850: `resolveRegularReferences` and
-            // `resolveOtpReferences` register every resolved value with the
-            // process-scoped secret sink as soon as they observe it. We
-            // deliberately do not re-register here — keeping the helpers as the
-            // single source of truth for secret registration avoids the risk of
-            // the two sites drifting apart (e.g. when a future helper learns to
-            // register a derived value but the post-loop block is overlooked).
+            // `resolveOtpReferences` read through `readReference`, which
+            // registers every resolved value with the process-scoped secret
+            // sink as soon as it observes it — in this run that may already
+            // have happened during the prewarm phase. We deliberately do not
+            // re-register here — keeping that single loader as the source of
+            // truth for secret registration avoids the risk of the sites
+            // drifting apart (e.g. when a future helper learns to register a
+            // derived value but the post-loop block is overlooked).
             const resolvedRegular = await resolveRegularReferences(regularEntries, leakedValues)
             const resolvedOtp = await resolveOtpReferences(otpEntries, leakedValues)
 
@@ -461,7 +578,7 @@ export const op = {
               ...leakedValues,
               ...collectOpFailureOutputs(error),
             ]
-            const detail = maskKnownSecretPrefixes(maskSecrets(rawDetail, secrets), secrets)
+            const detail = maskOpText(rawDetail, secrets)
             // R-0000850: every value that ended up in `leakedValues` was already
             // registered with the secret sink by the helpers above (see
             // `resolveRegularReferences` / `resolveOtpReferences`). We rely on

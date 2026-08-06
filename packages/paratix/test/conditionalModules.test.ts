@@ -470,6 +470,75 @@ describe("when(...) guard evaluation", () => {
   })
 })
 
+describe("when(...) _prewarmSecrets delegation", () => {
+  it("delegates to its guarded children without evaluating the guard condition", async () => {
+    const prewarmHook = vi.fn().mockResolvedValue(undefined)
+    const secretChild: Module = {
+      _prewarmSecrets: prewarmHook,
+      apply: vi.fn().mockResolvedValue({ status: "ok" }),
+      check: vi.fn().mockResolvedValue("ok"),
+      name: "guarded-secret-module",
+    }
+    const guardCondition = vi.fn(() => true)
+    const block = createConditionalModule({
+      condition: guardCondition,
+      modules: [secretChild],
+      name: "guard-block",
+    })
+
+    expect(block._prewarmSecrets).toStrictEqual(expect.any(Function))
+    await block._prewarmSecrets?.()
+
+    expect(prewarmHook).toHaveBeenCalledOnce()
+    expect(guardCondition).not.toHaveBeenCalled()
+  })
+
+  it("delegates to every guarded child in order", async () => {
+    const order: string[] = []
+    const firstChild: Module = {
+      async _prewarmSecrets() {
+        order.push("first")
+        await Promise.resolve()
+      },
+      apply: vi.fn().mockResolvedValue({ status: "ok" }),
+      check: vi.fn().mockResolvedValue("ok"),
+      name: "first-secret-module",
+    }
+    const secondChild: Module = {
+      async _prewarmSecrets() {
+        order.push("second")
+        await Promise.resolve()
+      },
+      apply: vi.fn().mockResolvedValue({ status: "ok" }),
+      check: vi.fn().mockResolvedValue("ok"),
+      name: "second-secret-module",
+    }
+    const block = createConditionalModule({
+      condition: () => false,
+      modules: [firstChild, secondChild],
+      name: "guard-block",
+    })
+
+    await block._prewarmSecrets?.()
+
+    expect(order).toStrictEqual(["first", "second"])
+  })
+
+  it("carries no prewarm hook at all when none of the guarded children have one", () => {
+    const block = createConditionalModule({
+      condition: () => true,
+      modules: [makeSpyModule("plain-child")],
+      name: "guard-block",
+    })
+
+    // The hook is attached only when the guarded children can actually
+    // contribute a secret (F1): a block over a secret-free subtree must not
+    // become a carrier itself, so the status line and the --filter warning
+    // stay silent for playbooks that never touch a secret provider.
+    expect(block._prewarmSecrets).toBeUndefined()
+  })
+})
+
 describe("when(...) run summary", () => {
   beforeEach(() => {
     vi.resetModules()

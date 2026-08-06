@@ -284,6 +284,20 @@ that are expected to respond more slowly.
 | ------------ | ---------------------------------------------- | --------------------------------- |
 | `op.resolve` | `(references: Record<string, string>): Module` | No (always-applies, runs locally) |
 
+Inside a `runPlaybook` run, every `op.resolve` reference in the definition
+is read up front, before the SSH connect: all `op read` calls (and any
+provider prompt they trigger, e.g. a biometric unlock or `op signin`) happen
+once, right after the command starts, instead of somewhere in the middle of
+the run at the module's own position. The module still runs at its position
+in `run` and emits the same meta as before -- it just serves the value from
+that up-front resolution instead of invoking `op` again. A failure during
+this phase aborts the whole run before any connection is opened, with exit
+code 2, instead of surfacing as a failed module later on. This phase also
+runs during `--dry-run`, and `--filter` prints a warning (without changing
+run behavior) when it removes a module that would have resolved secrets.
+This up-front timing does not change what `op.resolve()` can feed into
+`SshConfig` -- see [Anti-Pattern 16](#dos-and-donts) below.
+
 ### `package`
 
 Import with renaming: `import { package as pkg } from "paratix/modules"`. The word `package` is reserved in JavaScript, so you must alias it.
@@ -1021,7 +1035,7 @@ The diff string is plain text — no ANSI codes. The output layer applies colors
 13. Do NOT call `server()` without all required fields (`name`, `host`, `ssh`, `run`) -- it throws at construction time. `name` and `host` must not be empty strings.
 14. Do NOT use empty arrays for `ssh.ports` or empty strings for `ssh.user`/`ssh.privateKey` -- validation rejects these. `ssh.privateKey` may be omitted entirely to use the SSH agent instead.
 15. Do NOT return loose `meta: { ... }` maps from custom modules -- always use typed meta entries.
-16. Do NOT set `ssh.sudoPassword` to a value from `op.resolve()` or `meta.env()` -- `SshConfig` is frozen at server construction time, before any module in `run` executes. Use a static source like `process.env.SUDO_PASSWORD` or a variable populated before the server definition is imported.
+16. Do NOT set `ssh.sudoPassword` to a value from `op.resolve()` or `meta.env()` -- `SshConfig` is frozen at server construction time, before any module in `run` executes. This still holds even though `op.resolve` now resolves its references up front, right after the command starts: that up-front resolution runs inside `runPlaybook`, which is already after construction time, so it is exactly as unreachable for `SshConfig` as the module's own `apply()` step always was. Use a static source like `process.env.SUDO_PASSWORD` or a variable populated before the server definition is imported.
 
 ## Testing Patterns
 

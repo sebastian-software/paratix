@@ -219,6 +219,30 @@ export type Module = {
    */
   _dryRunMetaProducer?: true
   /**
+   * Internal hook that resolves every secret this module needs up front, at the
+   * very beginning of a run.
+   *
+   * The runner walks the module tree once before it connects and awaits this
+   * hook on every node that exposes it, so an interactive secret provider (a
+   * biometric unlock, a session sign-in) prompts immediately after the command
+   * was started instead of somewhere in the middle of the run. Because the hook
+   * runs before the SSH connect it receives neither an `ssh` connection nor an
+   * {@link Environment}; it is deliberately parameterless, since everything a
+   * module needs was already handed to it at construction time.
+   *
+   * A failure is thrown rather than reported as a failed {@link ModuleResult}:
+   * the run must abort before any remote work happens when a secret provider is
+   * unavailable. Implementations mask their own errors before throwing, because
+   * the run-scoped secret sink is already drained by the time the CLI renders
+   * the failure.
+   *
+   * Composite modules that keep their children private (`when(...)`) implement
+   * the hook and delegate to their children, so the walk never needs access to
+   * an encapsulated child list.
+   * @internal
+   */
+  _prewarmSecrets?: () => Promise<void>
+  /**
    * Internal marker for composite modules that can expose child orchestration
    * steps to the surrounding runner scope.
    * @internal

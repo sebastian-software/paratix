@@ -2528,6 +2528,112 @@ describe("resolveFilteredRun", () => {
   })
 })
 
+// ---------------------------------------------------------------------------
+// resolveFilteredRun — secret prewarm carrier warning
+// ---------------------------------------------------------------------------
+
+describe("resolveFilteredRun — filtered secret carrier warning", () => {
+  let consoleErrors: string[]
+
+  beforeEach(() => {
+    consoleErrors = []
+    vi.spyOn(console, "error").mockImplementation((...args: unknown[]) => {
+      consoleErrors.push(args.map(String).join(" "))
+    })
+  })
+
+  afterEach(() => {
+    vi.restoreAllMocks()
+  })
+
+  it("warns with the module name exactly once when --filter excludes an op.resolve module", async () => {
+    const { op } = await import("../src/modules/op.js")
+    const definition: ServerDefinition = {
+      host: "1.2.3.4",
+      name: "s1",
+      run: [op.resolve({ SECRET: "op://vault/item/password" }), filterLeaf("dependent-step")],
+      ssh: { ports: [22], user: "root" },
+    }
+    const carrierName = definition.run[0].name
+
+    const filtered = resolveFilteredRun(definition, ["dependent-step"])
+
+    const warnings = consoleErrors.filter((line) => line.includes("Warning:"))
+    expect(warnings).toHaveLength(1)
+    expect(warnings[0]).toContain(carrierName)
+    // Structural shape: the excluded carrier becomes a skip module, the
+    // selected leaf is kept unchanged.
+    expect(filtered).toHaveLength(2)
+    expect(filtered[0].name).toBe(carrierName)
+    expect(filtered[0].local).toBe(true)
+    expect(filtered[1]).toBe(definition.run[1])
+  })
+
+  it("does not warn when --filter includes the op.resolve module", async () => {
+    const { op } = await import("../src/modules/op.js")
+    const definition: ServerDefinition = {
+      host: "1.2.3.4",
+      name: "s1",
+      run: [op.resolve({ SECRET: "op://vault/item/password" }), filterLeaf("dependent-step")],
+      ssh: { ports: [22], user: "root" },
+    }
+    const carrierName = definition.run[0].name
+
+    const filtered = resolveFilteredRun(definition, [carrierName])
+
+    const warnings = consoleErrors.filter((line) => line.includes("Warning:"))
+    expect(warnings).toHaveLength(0)
+    // The op.resolve module itself is selected and kept by reference; the
+    // unselected sibling becomes a skip module. Tree shape besides the
+    // warning check is unaffected by the new carrier check.
+    expect(filtered).toHaveLength(2)
+    expect(filtered[0]).toBe(definition.run[0])
+    expect(filtered[1].name).toBe("dependent-step")
+    expect(filtered[1].local).toBe(true)
+  })
+
+  it("produces the same module tree with or without the carrier warning check firing", async () => {
+    const { op } = await import("../src/modules/op.js")
+    const definition: ServerDefinition = {
+      host: "1.2.3.4",
+      name: "s1",
+      run: [op.resolve({ SECRET: "op://vault/item/password" }), filterLeaf("dependent-step")],
+      ssh: { ports: [22], user: "root" },
+    }
+
+    // Filtering by the dependent step (which triggers the warning) still
+    // yields the exact same skip/keep structure the ordinary filter tests
+    // assert for non-secret modules.
+    const filtered = resolveFilteredRun(definition, ["dependent-step"])
+
+    expect(filtered.map((module) => module.local)).toStrictEqual([true, undefined])
+  })
+
+  // R1 (review finding F1): a when(...) block over a secret-free subtree
+  // carries no _prewarmSecrets hook at all (see conditionalModules.test.ts),
+  // so excluding it via --filter must not trigger the carrier warning either
+  // — there was never a secret to lose.
+  it("does not warn when --filter excludes a when(...) block that contains no op.resolve", async () => {
+    const { when } = await import("../src/builtins.js")
+    const guardedLeaf = filterLeaf("guarded-plain-step")
+    const block = when(() => true, guardedLeaf)
+    const definition: ServerDefinition = {
+      host: "1.2.3.4",
+      name: "s1",
+      run: [block, filterLeaf("dependent-step")],
+      ssh: { ports: [22], user: "root" },
+    }
+
+    const filtered = resolveFilteredRun(definition, ["dependent-step"])
+
+    const warnings = consoleErrors.filter((line) => line.includes("Warning:"))
+    expect(warnings).toHaveLength(0)
+    expect(filtered).toHaveLength(2)
+    expect(filtered[0].name).toBe(block.name)
+    expect(filtered[0].local).toBe(true)
+  })
+})
+
 describe("runApplyCommand --filter", () => {
   it("aborts before connecting when a filter name matches nothing", async () => {
     const tempDirectory = mkdtempSync(join(tmpdir(), "paratix-cli-filter-"))

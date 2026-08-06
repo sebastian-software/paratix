@@ -3,10 +3,12 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 import {
   printCommandError,
   printCommandFailure,
+  printInfoLine,
   printModuleResult,
   printRecipeHeader,
   printSummary,
   printVerboseCommandError,
+  printWarningLine,
   renderCliHeader,
   resetLiveOutputForTests,
   startModuleSpinner,
@@ -688,6 +690,83 @@ describe("printRecipeHeader", () => {
 
     expect(consoleLogs).toHaveLength(1)
     expect(consoleLogs[0]).toContain("  [service-layer]")
+  })
+})
+
+// ---------------------------------------------------------------------------
+// printInfoLine
+// ---------------------------------------------------------------------------
+
+describe("printInfoLine", () => {
+  let consoleLogs: string[]
+
+  beforeEach(() => {
+    consoleLogs = []
+    vi.spyOn(console, "log").mockImplementation((...args: unknown[]) => {
+      consoleLogs.push(args.map(String).join(" "))
+    })
+  })
+
+  afterEach(() => {
+    clearRegisteredSecrets()
+    vi.restoreAllMocks()
+  })
+
+  it("prints a single line with the given text", () => {
+    printInfoLine("Resolving secrets before connecting …")
+
+    expect(consoleLogs).toHaveLength(1)
+    expect(consoleLogs[0]).toContain("Resolving secrets before connecting")
+  })
+
+  it("masks a registered secret before printing", () => {
+    const secret = "info-line-secret-XYZ123"
+    registerSecret(secret)
+
+    printInfoLine(`status for ${secret}`)
+
+    const output = consoleLogs.join("\n")
+    expect(output).not.toContain(secret)
+    expect(output).toContain("[REDACTED]")
+  })
+})
+
+// ---------------------------------------------------------------------------
+// printWarningLine
+// ---------------------------------------------------------------------------
+
+describe("printWarningLine", () => {
+  let consoleErrors: string[]
+
+  beforeEach(() => {
+    consoleErrors = []
+    vi.spyOn(console, "error").mockImplementation((...args: unknown[]) => {
+      consoleErrors.push(args.map(String).join(" "))
+    })
+  })
+
+  afterEach(() => {
+    clearRegisteredSecrets()
+    vi.restoreAllMocks()
+  })
+
+  it("prints a single line prefixed with 'Warning:'", () => {
+    printWarningLine('--filter excluded "op.resolve: SECRET"')
+
+    expect(consoleErrors).toHaveLength(1)
+    expect(consoleErrors[0]).toContain("Warning:")
+    expect(consoleErrors[0]).toContain("op.resolve: SECRET")
+  })
+
+  it("masks a registered secret before printing", () => {
+    const secret = "warning-line-secret-XYZ123"
+    registerSecret(secret)
+
+    printWarningLine(`leaked ${secret}`)
+
+    const output = consoleErrors.join("\n")
+    expect(output).not.toContain(secret)
+    expect(output).toContain("[REDACTED]")
   })
 })
 

@@ -21,6 +21,7 @@ import {
 } from "./meta.js"
 import {
   printCommandFailure,
+  printInfoLine,
   printModuleResult,
   printRecipeHeader,
   printRunContext,
@@ -31,6 +32,7 @@ import {
 import { isRecipe } from "./recipe.js"
 import { withRunnerAbortSignal } from "./runnerAbortSignal.js"
 import { resolveExitCode, signalExitCode } from "./runnerHelpers.js"
+import { prewarmSecrets, withSecretPrewarmScope } from "./secretPrewarm.js"
 import { clearRegisteredSecrets, withRunScopedSecrets } from "./secretSink.js"
 import { validateServerDefinition } from "./server.js"
 import { getSignalBus } from "./signalBus.js"
@@ -1284,6 +1286,59 @@ function initializeRunPlaybookContext(options: RunOptions): {
   return { handleShutdownSignal, promptAbortSignal, rebootGrace, setSsh, shutdownSignal }
 }
 
+/**
+ * Status line printed once before the first secret is read, so the operator
+ * understands why the terminal is waiting instead of assuming a hang.
+ *
+ * Deliberately without a counter, progress, or reference names: a reference
+ * such as `op://vault/item/field` discloses vault and item structure, and a
+ * progress counter would add an output surface without value for the one to
+ * five references a run typically holds.
+ */
+const SECRET_PREWARM_NOTICE = "Resolving secrets before connecting (your provider may prompt) …"
+
+/**
+ * Open both per-run secret scopes around `body`.
+ *
+ * The run-scoped sink bracket spans the whole run body instead of just
+ * `executeRun`: the up-front secret phase registers resolved values with the
+ * sink, and without an active store those registrations would never be released
+ * again (`secretSink.ts`). The secret cache spans exactly the same body, so the
+ * modules serve their values from it later at their own position in `run`
+ * instead of invoking the provider a second time.
+ *
+ * The nesting order is load-bearing and must not be swapped: the sink scope goes
+ * **outside**, the cache scope inside. A value is resolved once but read
+ * throughout the run, so only a sink registration that outlives the cache keeps
+ * it redacted for every later reader — including the remote command output of
+ * the modules that consume it through the environment.
+ *
+ * @param body - The run body both scopes wrap.
+ * @returns Whatever `body` resolves to.
+ */
+async function withRunSecretScopes<T>(body: () => Promise<T>): Promise<T> {
+  return withRunScopedSecrets(async () => withSecretPrewarmScope(body))
+}
+
+/**
+ * Resolve every secret the run needs, before the SSH connect.
+ *
+ * Runs inside the `withRunnerAbortSignal` scope so a Ctrl-C during a provider
+ * prompt is seen by the pre-spawn abort check of the resolving module and ends
+ * the child process instead of leaving it hanging.
+ *
+ * @param definition - The (already filtered) server definition of this run.
+ */
+async function prewarmRunSecrets(definition: ServerDefinition): Promise<void> {
+  // Signal handlers run in the same run and can hold secret modules too, so
+  // they are walked alongside `run`.
+  await prewarmSecrets([...definition.run, ...(definition.signals ?? [])], {
+    onBeforeFirstPrewarm() {
+      printInfoLine(SECRET_PREWARM_NOTICE)
+    },
+  })
+}
+
 export async function runPlaybook(
   definition: ServerDefinition,
   options: RunOptions = {}
@@ -1310,20 +1365,24 @@ export async function runPlaybook(
     })
 
     // No catch block: connect errors propagate to cli.ts, which prints them and exits with code 2.
-    try {
-      const connectedSsh = await connectAndRegister({
-        definition,
-        options,
-        promptAbortSignal,
-        setSsh(connection) {
-          ssh = connection
-          setSsh(connection)
-        },
-        shutdownSignal,
-      })
-      ssh = connectedSsh
-      await withRunScopedSecrets(async () =>
-        executeRun({
+    await withRunSecretScopes(async () => {
+      try {
+        // Resolving the secrets first is the point of this phase: the provider
+        // interaction happens right here, before any connection is opened, and
+        // an unavailable provider aborts the run before remote work started.
+        await prewarmRunSecrets(definition)
+        const connectedSsh = await connectAndRegister({
+          definition,
+          options,
+          promptAbortSignal,
+          setSsh(connection) {
+            ssh = connection
+            setSsh(connection)
+          },
+          shutdownSignal,
+        })
+        ssh = connectedSsh
+        await executeRun({
           definition,
           diff,
           dryRun,
@@ -1334,12 +1393,12 @@ export async function runPlaybook(
           stats,
           verbose,
         })
-      )
-    } catch (error) {
-      rethrowIfNotShutdown(error, shutdownSignal)
-    } finally {
-      teardownPlaybookResources({ handleShutdownSignal, ssh })
-    }
+      } catch (error) {
+        rethrowIfNotShutdown(error, shutdownSignal)
+      } finally {
+        teardownPlaybookResources({ handleShutdownSignal, ssh })
+      }
+    })
 
     resolveExitCode(shutdownSignal(), stats)
   })
