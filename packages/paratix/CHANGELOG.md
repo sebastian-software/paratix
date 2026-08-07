@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.19.0](https://github.com/sebastian-software/paratix/compare/paratix-v0.18.0...paratix-v0.19.0) (2026-08-06)
+
+
+### Features
+
+* **paratix:** resolve 1Password references before connecting ([#190](https://github.com/sebastian-software/paratix/issues/190)) ([5d3975a](https://github.com/sebastian-software/paratix/commit/5d3975ae37ba4cf27d7c0a7db44472194f463b48))
+
 ## [0.18.0](https://github.com/sebastian-software/paratix/compare/paratix-v0.17.0...paratix-v0.18.0) (2026-08-05)
 
 
