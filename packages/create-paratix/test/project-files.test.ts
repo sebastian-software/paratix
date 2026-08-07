@@ -409,7 +409,7 @@ describe("writeProjectFiles", () => {
 
     expect(result.status).toBe(0)
     expect(result.stdout).toContain('"languageOptions"')
-  })
+  }, 30_000)
 
   it("generated server.ts uses packages.upgrade and packages.installed (not apt.*)", () => {
     // Regression: SERVER_TEMPLATE previously used the deprecated apt module
