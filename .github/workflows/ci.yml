@@ -1,5 +1,7 @@
 name: CI
 
+# Hosted-runner canary change; this branch is not intended to merge.
+
 on:
   pull_request:
   push:
