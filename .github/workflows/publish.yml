@@ -9,9 +9,10 @@ on:
       mode:
         description: "Publish mode"
         required: true
-        default: "release"
+        default: "verify"
         type: choice
         options:
+          - verify
           - release
           - recover-create-paratix
 
@@ -21,7 +22,7 @@ concurrency:
 
 jobs:
   validate:
-    runs-on: [self-hosted, linux, x64]
+    runs-on: ubuntu-24.04
     timeout-minutes: 30
     permissions:
       contents: read
@@ -36,8 +37,7 @@ jobs:
       - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e
         with:
           node-version: "24"
-          registry-url: "https://registry.npmjs.org/"
-          cache: pnpm
+          package-manager-cache: false
       - run: pnpm install --frozen-lockfile
       - run: pnpm agent:check:integration
       # actions/upload-artifact@v4
@@ -51,7 +51,7 @@ jobs:
 
   release-please-pr:
     if: github.event_name == 'push'
-    runs-on: [self-hosted, linux, x64]
+    runs-on: ubuntu-24.04
     timeout-minutes: 30
     permissions:
       contents: write
@@ -71,7 +71,7 @@ jobs:
     if: github.event_name == 'push'
     needs:
       - validate
-    runs-on: [self-hosted, linux, x64]
+    runs-on: ubuntu-24.04
     timeout-minutes: 30
     permissions:
       contents: write
@@ -90,52 +90,76 @@ jobs:
           manifest-file: .release-please-manifest.json
           skip-github-pull-request: true
 
+  verify:
+    needs:
+      - validate
+    if: github.event_name == 'workflow_dispatch' && inputs.mode == 'verify'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    steps:
+      # actions/checkout@v6
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd
+        with:
+          persist-credentials: false
+      # actions/setup-node@v6
+      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e
+        with:
+          node-version: "24"
+          package-manager-cache: false
+      # actions/download-artifact@v4
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
+        with:
+          name: package-dist
+          path: packages
+      - name: Verify package tarballs
+        run: node scripts/publishWorkspacePackages.mjs verify
+
   publish:
     needs:
       - validate
       - release-please-release
     if: >-
       always() &&
+      github.ref == 'refs/heads/main' &&
       needs.validate.result == 'success' &&
       (
         needs.release-please-release.outputs.release_created == 'true' ||
-        github.event_name == 'workflow_dispatch'
+        (github.event_name == 'workflow_dispatch' && inputs.mode != 'verify')
       )
-    runs-on: [self-hosted, linux, x64]
+    runs-on: ubuntu-24.04
+    environment: npm
     timeout-minutes: 30
     permissions:
       contents: read
-      # pnpm/npm request an OIDC token for npm trusted publishing even though
-      # provenance is disabled while this repository is private (see R-0001025
-      # in scripts/publishWorkspacePackages.mjs).
+      # npm requests an OIDC token for trusted publishing.
       id-token: write
     steps:
       # actions/checkout@v6
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd
         with:
           persist-credentials: false
-      # pnpm/action-setup@v6
-      - uses: pnpm/action-setup@5d6f3fe6c685be83c141aea1141d8a825903c82a
       # actions/setup-node@v6
       - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e
         with:
           node-version: "24"
           registry-url: "https://registry.npmjs.org/"
-          cache: pnpm
-      - run: pnpm install --frozen-lockfile --ignore-scripts
+          package-manager-cache: false
+      - name: Check minimum npm version
+        shell: bash
+        run: |
+          minimum_npm_version="11.5.1"
+          installed_npm_version="$(npm --version)"
+          if [ "$(printf '%s\n' "$minimum_npm_version" "$installed_npm_version" | sort -V | head -n 1)" != "$minimum_npm_version" ]; then
+            echo "npm $minimum_npm_version or newer is required; installed version: $installed_npm_version." >&2
+            exit 1
+          fi
       # actions/download-artifact@v4
       - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
         with:
           name: package-dist
           path: packages
-      # NOTE: npm authentication currently relies on the self-hosted runner's
-      # persistent ~/.npmrc. To make it explicit and portable, add an
-      # `NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}` env to the publish steps
-      # below — but only once an `NPM_TOKEN` repository/org secret actually
-      # exists. It does not today (org secrets: CARGO_REGISTRY_TOKEN,
-      # RELEASE_PLEASE_TOKEN, VERCEL_TOKEN), so wiring it now would inject an
-      # empty token into setup-node's generated .npmrc and could break a
-      # working publish.
       - if: github.event_name == 'push'
         run: node scripts/publishWorkspacePackages.mjs release
       - if: github.event_name == 'workflow_dispatch'

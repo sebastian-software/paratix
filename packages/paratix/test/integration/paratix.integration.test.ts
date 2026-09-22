@@ -523,14 +523,13 @@ describe("CLI command helper", () => {
  * Whether a Docker daemon is actually reachable.
  *
  * Every test in the block below needs the sshd container the harness launches.
- * The CI runners that execute `agent:check:integration` still provide no Docker
- * runtime at all — the binary is not even on PATH, so the harness fails with
- * `spawn docker ENOENT`. Probing here rather than skipping unconditionally is
- * what keeps the block honest in both directions: it stays green on a runner
- * without Docker, and it genuinely runs wherever a daemon exists, including a
- * local Colima or Docker Desktop. A blanket `describe.skip` made this block
- * invisible for months, long enough for a deliberate `readFile` change to
- * invalidate several of its assertions unnoticed.
+ * GitHub-hosted CI is expected to provide a reachable Docker daemon, and the
+ * workflow verifies it in a dedicated preflight step. This runtime probe lets
+ * local `pnpm agent:check` skip the block only when a developer machine lacks a
+ * daemon. In CI, the preflight fails first if Docker is unavailable, so missing
+ * infrastructure cannot become a silent skip. A blanket `describe.skip`
+ * previously hid this block for months, allowing a deliberate `readFile`
+ * change to invalidate several assertions unnoticed.
  *
  * @returns True when `docker info` succeeds.
  */
