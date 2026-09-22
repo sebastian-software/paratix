@@ -52,7 +52,12 @@ const packages = [
 
 const PUBLISH_MODE_RECOVER_CREATE_PARATIX = "recover-create-paratix"
 const PUBLISH_MODE_RELEASE = "release"
-const PUBLISH_MODES = new Set([PUBLISH_MODE_RECOVER_CREATE_PARATIX, PUBLISH_MODE_RELEASE])
+const PUBLISH_MODE_VERIFY = "verify"
+const PUBLISH_MODES = new Set([
+  PUBLISH_MODE_RECOVER_CREATE_PARATIX,
+  PUBLISH_MODE_RELEASE,
+  PUBLISH_MODE_VERIFY,
+])
 
 function validatePublishMode(mode) {
   if (PUBLISH_MODES.has(mode)) return mode
@@ -278,7 +283,7 @@ async function waitForPublishedPackage(parameters, attempt = 1) {
   await waitForPublishedPackage(parameters, attempt + 1)
 }
 
-// R-0000660: `pnpm publish` defaults to the `latest` dist-tag regardless of
+// R-0000660: `npm publish` defaults to the `latest` dist-tag regardless of
 // any prerelease suffix on the version, so a 1.2.3-beta.1 publish would
 // silently overwrite the `latest` tag and offer an unstable build to every
 // `pnpm install paratix` user. Inspect the version for a SemVer prerelease
@@ -507,7 +512,7 @@ async function readBuildInputMtime(packageInfo, sourceDirectory, filesystem) {
 }
 
 // R-0000661: confirm every artefact npm would ship actually exists and is
-// at least as fresh as the source tree and build inputs before pnpm
+// at least as fresh as the source tree and build inputs before npm
 // publish runs. Without this guard a skipped build would publish empty
 // or stale dist files under `--provenance`, which cannot easily be
 // retracted from the registry once the manifest is signed.
@@ -602,33 +607,12 @@ async function publishPackage({
   console.log(
     `Publishing ${packageInfo.name}@${packageInfo.version} under --tag ${distributionTag}.`
   )
-  await commandRunner.spawn(
-    "pnpm",
-    [
-      // R-0001024: `pnpm publish` takes the workspace package as a positional
-      // argument (`pnpm publish [<tarball>|<dir>] …`), not as the global
-      // `--dir <path>` flag. The previous `--dir <path> publish` form ended up
-      // forwarding `paratix-X.Y.Z.tgz <path> publish …` to npm publish under
-      // the hood, which emits `EUSAGE` because npm sees two extra positionals
-      // before the real `--tag` flag. The positional form below mirrors what
-      // `pnpm publish --help` documents and matches the manual `pnpm publish
-      // <dir>` invocation a maintainer would run by hand.
-      "publish",
-      packageInfo.directory,
-      "--no-git-checks",
-      // R-0001025: npm's sigstore provenance verification rejects releases
-      // when the GitHub source repository is marked private ("Unsupported
-      // GitHub Actions source repository visibility"). The repo is currently
-      // private, so dropping `--provenance` is the only way the publish step
-      // can succeed. Re-enable provenance once the repository is made public.
-      "--tag",
-      distributionTag,
-    ],
-    { cwd: repositoryRoot }
-  )
+  await commandRunner.spawn("npm", ["publish", packageInfo.directory, "--tag", distributionTag], {
+    cwd: repositoryRoot,
+  })
 
   // R-0000861: registry propagation can lag behind a successful
-  // `pnpm publish`. Use the bounded availability wait after every new
+  // `npm publish`. Use the bounded availability wait after every new
   // publish instead of aborting on the first missing `npm view` result,
   // so transient propagation delays get the same retry budget that
   // protects the paratix -> create-paratix publish order.
@@ -639,6 +623,13 @@ async function publishPackage({
     repositoryRoot,
     retries: availabilityRetries,
     version: packageInfo.version,
+  })
+}
+
+async function verifyPackageTarball({ commandRunner, packageInfo, repositoryRoot }) {
+  console.log(`Verifying the ${packageInfo.name}@${packageInfo.version} package tarball.`)
+  await commandRunner.spawn("npm", ["pack", packageInfo.directory, "--dry-run", "--json"], {
+    cwd: repositoryRoot,
   })
 }
 
@@ -724,58 +715,29 @@ function validateWorkspacePackages(workspacePackages) {
   }
 }
 
-export async function publishWorkspacePackages(options) {
-  const {
-    availabilityDelayMilliseconds,
-    availabilityRetries,
-    commandRunner = {
-      execFile: execFileAsync,
-      spawn: (command, commandArguments, spawnOptions) =>
-        new Promise((resolve, reject) => {
-          const child = spawn(command, commandArguments, {
-            cwd: REPOSITORY_ROOT,
-            ...spawnOptions,
-            stdio: "inherit",
-          })
-          child.on("error", reject)
-          child.on("exit", (code) => {
-            if (code === 0) {
-              resolve(undefined)
-              return
-            }
+async function runPublishMode({
+  availabilityDelayMilliseconds,
+  availabilityRetries,
+  commandRunner,
+  createParatixPackage,
+  environment,
+  paratixPackage,
+  publishMode,
+}) {
+  if (publishMode === PUBLISH_MODE_VERIFY) {
+    await verifyPackageTarball({
+      commandRunner,
+      packageInfo: paratixPackage,
+      repositoryRoot: REPOSITORY_ROOT,
+    })
+    await verifyPackageTarball({
+      commandRunner,
+      packageInfo: createParatixPackage,
+      repositoryRoot: REPOSITORY_ROOT,
+    })
+    return
+  }
 
-            reject(
-              new Error(`${command} ${commandArguments.join(" ")} failed with exit code ${code}.`)
-            )
-          })
-        }),
-    },
-    environment = process.env,
-    fs = { lstat, readdir, readFile, stat },
-    filesystem = fs,
-    mode = "release",
-  } = options ?? {}
-  const publishMode = validatePublishMode(mode)
-  // R-0000740: assert the static `packages` list matches the actual
-  // `packages/` directory contents before reading any package.json so a
-  // new workspace package added without updating this script aborts the
-  // publish flow with a clear diagnostic instead of being silently
-  // skipped.
-  await assertWorkspacePackagesMatchFilesystem(fs)
-  const [paratixPackage, createParatixPackage] = await readWorkspacePackages(fs)
-  validateWorkspacePackages([paratixPackage, createParatixPackage])
-
-  // R-0000661: verify the dist artefacts before issuing the first pnpm
-  // publish. Splitting the verification out of `publishPackage` keeps the
-  // abort point well before any registry side effects so a missing or stale
-  // artefact never produces a half-published workspace. Recovery mode only
-  // publishes create-paratix; the paratix package is protected by registry
-  // availability checks below instead of local artefact freshness.
-  await Promise.all(
-    packageArtefactsForMode({ createParatixPackage, paratixPackage, publishMode }).map(
-      (packageInfo) => verifyDistributionArtefacts(packageInfo, filesystem)
-    )
-  )
   await assertPublishGitPreflight({
     commandRunner,
     environment,
@@ -828,6 +790,70 @@ export async function publishWorkspacePackages(options) {
     commandRunner,
     packageInfo: createParatixPackage,
     repositoryRoot: REPOSITORY_ROOT,
+  })
+}
+
+export async function publishWorkspacePackages(options) {
+  const {
+    availabilityDelayMilliseconds,
+    availabilityRetries,
+    commandRunner = {
+      execFile: execFileAsync,
+      spawn: (command, commandArguments, spawnOptions) =>
+        new Promise((resolve, reject) => {
+          const child = spawn(command, commandArguments, {
+            cwd: REPOSITORY_ROOT,
+            ...spawnOptions,
+            stdio: "inherit",
+          })
+          child.on("error", reject)
+          child.on("exit", (code) => {
+            if (code === 0) {
+              resolve(undefined)
+              return
+            }
+
+            reject(
+              new Error(`${command} ${commandArguments.join(" ")} failed with exit code ${code}.`)
+            )
+          })
+        }),
+    },
+    environment = process.env,
+    fs = { lstat, readdir, readFile, stat },
+    filesystem = fs,
+    mode = "release",
+  } = options ?? {}
+  const publishMode = validatePublishMode(mode)
+  // R-0000740: assert the static `packages` list matches the actual
+  // `packages/` directory contents before reading any package.json so a
+  // new workspace package added without updating this script aborts the
+  // publish flow with a clear diagnostic instead of being silently
+  // skipped.
+  await assertWorkspacePackagesMatchFilesystem(fs)
+  const [paratixPackage, createParatixPackage] = await readWorkspacePackages(fs)
+  validateWorkspacePackages([paratixPackage, createParatixPackage])
+
+  // R-0000661: verify the dist artefacts before issuing the first npm
+  // publish. Splitting the verification out of `publishPackage` keeps the
+  // abort point well before any registry side effects so a missing or stale
+  // artefact never produces a half-published workspace. Recovery mode only
+  // publishes create-paratix; the paratix package is protected by registry
+  // availability checks below instead of local artefact freshness.
+  await Promise.all(
+    packageArtefactsForMode({ createParatixPackage, paratixPackage, publishMode }).map(
+      (packageInfo) => verifyDistributionArtefacts(packageInfo, filesystem)
+    )
+  )
+
+  await runPublishMode({
+    availabilityDelayMilliseconds,
+    availabilityRetries,
+    commandRunner,
+    createParatixPackage,
+    environment,
+    paratixPackage,
+    publishMode,
   })
 }
 

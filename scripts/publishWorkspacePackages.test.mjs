@@ -26,6 +26,7 @@ const ABSOLUTE_CREATE_PARATIX_DIRECTORY = join(REPOSITORY_ROOT, CREATE_PARATIX_D
 const ABSOLUTE_PARATIX_DIRECTORY = join(REPOSITORY_ROOT, PARATIX_DIRECTORY)
 const ABSOLUTE_PACKAGES_DIRECTORY = join(REPOSITORY_ROOT, "packages")
 const RECOVER_CREATE_PARATIX_MODE = "recover-create-paratix"
+const VERIFY_MODE = "verify"
 const CREATE_PARATIX_SPECIFIER = `${CREATE_PARATIX_NAME}@${DEFAULT_STABLE_VERSION}`
 const PARATIX_SPECIFIER = `${PARATIX_NAME}@${DEFAULT_STABLE_VERSION}`
 const BOTH_PACKAGE_SPECIFIERS = [CREATE_PARATIX_SPECIFIER, PARATIX_SPECIFIER]
@@ -283,7 +284,7 @@ function createCommandRunner(initiallyPublished, publishedVersions, options) {
     calls,
     async execFile(command, commandArguments, options) {
       calls.push([command, ...commandArguments])
-      execFileOptions.push({ command, options })
+      execFileOptions.push({ command, commandArguments, options })
 
       if (command === "git") {
         return runGitCommand(commandArguments)
@@ -301,6 +302,7 @@ function createCommandRunner(initiallyPublished, publishedVersions, options) {
     async spawn(command, commandArguments, options) {
       calls.push([command, ...commandArguments])
       spawnOptions.push(options)
+      if (commandArguments.includes("--dry-run")) return
       const directory = commandArguments[1]
       // Use the explicit per-directory version override when provided so
       // tests can simulate publishing arbitrary prerelease/build-metadata
@@ -321,12 +323,36 @@ function createCommandRunner(initiallyPublished, publishedVersions, options) {
   }
 }
 
-function hasCommandCall(calls, command) {
-  for (const call of calls) {
-    if (call[0] === command) return true
-  }
+function isNpmPublishCall(call) {
+  return call[0] === "npm" && call[1] === "publish"
+}
 
-  return false
+function isNpmPackCall(call) {
+  return call[0] === "npm" && call[1] === "pack"
+}
+
+function isNpmViewCall(call) {
+  return call[0] === "npm" && call[1] === "view"
+}
+
+function npmPackCalls(calls) {
+  return calls.filter((call) => isNpmPackCall(call))
+}
+
+function npmPublishCalls(calls) {
+  return calls.filter((call) => isNpmPublishCall(call))
+}
+
+function hasNpmPublishCall(calls) {
+  return calls.some((call) => isNpmPublishCall(call))
+}
+
+function hasNpmViewCall(calls) {
+  return calls.some((call) => isNpmViewCall(call))
+}
+
+function hasGitCall(calls) {
+  return calls.some((call) => call[0] === "git")
 }
 
 function hasGitCommandCall(calls, gitCommand) {
@@ -334,13 +360,17 @@ function hasGitCommandCall(calls, gitCommand) {
 }
 
 function publishDirectories(calls) {
-  return calls.filter((call) => call[0] === "pnpm").map((call) => call[2])
+  return npmPublishCalls(calls).map((call) => call[2])
 }
 
 function npmViewOptions(commandRunner) {
   return commandRunner.execFileOptions
-    .filter(({ command }) => command === "npm")
+    .filter(({ command, commandArguments }) => command === "npm" && commandArguments[0] === "view")
     .map(({ options }) => options)
+}
+
+function areAllOptionsRepositoryAnchored(options) {
+  return options.every(({ cwd }) => cwd === REPOSITORY_ROOT)
 }
 
 function areAllFilesystemCallsRepositoryAnchored(calls) {
@@ -379,10 +409,10 @@ describe("publishWorkspacePackages", () => {
       ...GIT_PREFLIGHT_CALLS,
       ["npm", "view", CREATE_PARATIX_SPECIFIER, "version", "--json"],
       ["npm", "view", PARATIX_SPECIFIER, "version", "--json"],
-      ["pnpm", "publish", ABSOLUTE_PARATIX_DIRECTORY, "--no-git-checks", "--tag", "latest"],
+      ["npm", "publish", ABSOLUTE_PARATIX_DIRECTORY, "--tag", "latest"],
       ["npm", "view", PARATIX_SPECIFIER, "version", "--json"],
       ["npm", "view", CREATE_PARATIX_SPECIFIER, "version", "--json"],
-      ["pnpm", "publish", ABSOLUTE_CREATE_PARATIX_DIRECTORY, "--no-git-checks", "--tag", "latest"],
+      ["npm", "publish", ABSOLUTE_CREATE_PARATIX_DIRECTORY, "--tag", "latest"],
       ["npm", "view", CREATE_PARATIX_SPECIFIER, "version", "--json"],
     ])
   })
@@ -396,10 +426,10 @@ describe("publishWorkspacePackages", () => {
       fs: createFs(),
     })
 
-    assert.equal(hasCommandCall(commandRunner.calls, "pnpm"), false)
+    assert.equal(hasNpmPublishCall(commandRunner.calls), false)
   })
 
-  it("anchors filesystem reads and pnpm publish to the repository root from a foreign cwd", async () => {
+  it("anchors filesystem reads and npm publish to the repository root from a foreign cwd", async () => {
     const commandRunner = createCommandRunner()
     const fs = createFs()
     const originalCwd = process.cwd()
@@ -463,8 +493,8 @@ describe("publishWorkspacePackages", () => {
       "dirty Git working tree"
     )
 
-    assert.equal(hasCommandCall(commandRunner.calls, "npm"), false)
-    assert.equal(hasCommandCall(commandRunner.calls, "pnpm"), false)
+    assert.equal(hasNpmViewCall(commandRunner.calls), false)
+    assert.equal(hasNpmPublishCall(commandRunner.calls), false)
   })
 
   it("rejects a non-main local Git branch before registry lookups", async () => {
@@ -481,8 +511,8 @@ describe("publishWorkspacePackages", () => {
       "expected main"
     )
 
-    assert.equal(hasCommandCall(commandRunner.calls, "npm"), false)
-    assert.equal(hasCommandCall(commandRunner.calls, "pnpm"), false)
+    assert.equal(hasNpmViewCall(commandRunner.calls), false)
+    assert.equal(hasNpmPublishCall(commandRunner.calls), false)
   })
 
   it("allows a GitHub Actions detached checkout when the ref and SHA match", async () => {
@@ -501,7 +531,7 @@ describe("publishWorkspacePackages", () => {
 
     assert.equal(hasGitCommandCall(commandRunner.calls, GIT_REV_PARSE_HEAD_COMMAND), true)
     assert.equal(hasGitCommandCall(commandRunner.calls, GIT_SYMBOLIC_REF_BRANCH_COMMAND), false)
-    assert.equal(hasCommandCall(commandRunner.calls, "pnpm"), false)
+    assert.equal(hasNpmPublishCall(commandRunner.calls), false)
   })
 
   it("rejects a non-main GitHub Actions ref before registry lookups", async () => {
@@ -521,8 +551,8 @@ describe("publishWorkspacePackages", () => {
       "expected refs/heads/main"
     )
 
-    assert.equal(hasCommandCall(commandRunner.calls, "npm"), false)
-    assert.equal(hasCommandCall(commandRunner.calls, "pnpm"), false)
+    assert.equal(hasNpmViewCall(commandRunner.calls), false)
+    assert.equal(hasNpmPublishCall(commandRunner.calls), false)
   })
 
   it("rejects a mismatched GitHub Actions SHA before registry lookups", async () => {
@@ -544,8 +574,54 @@ describe("publishWorkspacePackages", () => {
 
     assert.equal(hasGitCommandCall(commandRunner.calls, GIT_REV_PARSE_HEAD_COMMAND), true)
     assert.equal(hasGitCommandCall(commandRunner.calls, GIT_SYMBOLIC_REF_BRANCH_COMMAND), false)
-    assert.equal(hasCommandCall(commandRunner.calls, "npm"), false)
-    assert.equal(hasCommandCall(commandRunner.calls, "pnpm"), false)
+    assert.equal(hasNpmViewCall(commandRunner.calls), false)
+    assert.equal(hasNpmPublishCall(commandRunner.calls), false)
+  })
+})
+
+describe("publishWorkspacePackages verify mode", () => {
+  it("dry-runs both stable packages without Git preflight or registry lookups", async () => {
+    const commandRunner = createCommandRunner(undefined, undefined, {
+      gitBranch: "release-candidate",
+      gitStatus: " M scripts/publishWorkspacePackages.mjs\n",
+    })
+
+    await publishWorkspacePackages({
+      commandRunner,
+      fs: createFs(),
+      mode: VERIFY_MODE,
+    })
+
+    assert.deepEqual(commandRunner.calls, [
+      ["npm", "pack", ABSOLUTE_PARATIX_DIRECTORY, "--dry-run", "--json"],
+      ["npm", "pack", ABSOLUTE_CREATE_PARATIX_DIRECTORY, "--dry-run", "--json"],
+    ])
+    assert.deepEqual(commandRunner.spawnOptions, [
+      { cwd: REPOSITORY_ROOT },
+      { cwd: REPOSITORY_ROOT },
+    ])
+    assert.equal(hasNpmViewCall(commandRunner.calls), false)
+    assert.equal(hasNpmPublishCall(commandRunner.calls), false)
+    assert.equal(hasGitCall(commandRunner.calls), false)
+  })
+
+  it("dry-runs prerelease package tarballs without a dist-tag", async () => {
+    const commandRunner = createCommandRunner()
+
+    await publishWorkspacePackages({
+      commandRunner,
+      fs: createFs({
+        createParatixVersion: BETA_PRERELEASE_VERSION,
+        paratixVersion: BETA_PRERELEASE_VERSION,
+      }),
+      mode: VERIFY_MODE,
+    })
+
+    assert.deepEqual(npmPackCalls(commandRunner.calls), [
+      ["npm", "pack", ABSOLUTE_PARATIX_DIRECTORY, "--dry-run", "--json"],
+      ["npm", "pack", ABSOLUTE_CREATE_PARATIX_DIRECTORY, "--dry-run", "--json"],
+    ])
+    assert.equal(hasNpmPublishCall(commandRunner.calls), false)
   })
 })
 
@@ -561,6 +637,8 @@ describe("publishWorkspacePackages recovery mode", () => {
     })
 
     assert.deepEqual(publishDirectories(commandRunner.calls), [ABSOLUTE_CREATE_PARATIX_DIRECTORY])
+    assert.deepEqual(commandRunner.spawnOptions, [{ cwd: REPOSITORY_ROOT }])
+    assert.equal(areAllOptionsRepositoryAnchored(npmViewOptions(commandRunner)), true)
   })
 
   it("does not check paratix build artefacts when recovering create-paratix", async () => {
@@ -597,7 +675,7 @@ describe("publishWorkspacePackages recovery mode", () => {
       "Recovery mode requires paratix@1.2.3 to already be published"
     )
 
-    assert.equal(hasCommandCall(commandRunner.calls, "pnpm"), false)
+    assert.equal(hasNpmPublishCall(commandRunner.calls), false)
   })
 
   it("rejects recovery mode when create-paratix is already published", async () => {
@@ -613,7 +691,7 @@ describe("publishWorkspacePackages recovery mode", () => {
       "Recovery mode requires create-paratix@1.2.3 to be missing"
     )
 
-    assert.equal(hasCommandCall(commandRunner.calls, "pnpm"), false)
+    assert.equal(hasNpmPublishCall(commandRunner.calls), false)
   })
 
   it("rejects unsupported publish modes", async () => {
@@ -642,30 +720,30 @@ describe("publishWorkspacePackages release validations", () => {
     assert.equal(commandRunner.calls.length, 0)
   })
 
-  // R-0000660: `pnpm publish` defaults to `--tag latest`, which would silently
+  // R-0000660: `npm publish` defaults to `--tag latest`, which would silently
   // overwrite the `latest` dist-tag with a prerelease build. Versions
   // containing a SemVer prerelease segment must publish under `next`
   // instead, while stable versions must continue to set `--tag latest`
-  // explicitly so the dist-tag intent never depends on pnpm's default.
+  // explicitly so the dist-tag intent never depends on npm's default.
   it("R-0000660: publishes prerelease versions under --tag next", async () => {
-    assertPublishCallsUseDistributionTag({
+    await assertPublishCallsUseDistributionTag({
       expectedTag: "next",
       version: BETA_PRERELEASE_VERSION,
     })
   })
 
   it("R-0000660: keeps stable versions with build metadata on --tag latest", async () => {
-    assertPublishCallsUseDistributionTag({
+    await assertPublishCallsUseDistributionTag({
       expectedTag: "latest",
       version: STABLE_BUILD_METADATA_VERSION,
     })
   })
 
-  // R-0000861: pnpm publish can exit 0 before the registry exposes the
+  // R-0000861: npm publish can exit 0 before the registry exposes the
   // new version. The publish flow must spend the bounded propagation
   // retry budget instead of treating the first missing `npm view` as a
   // hard failure.
-  it("R-0000861: retries registry propagation after pnpm publish", async () => {
+  it("R-0000861: retries registry propagation after npm publish", async () => {
     const commandRunner = createCommandRunner()
     const defaultExecFile = commandRunner.execFile
     const publishedBySpawn = new Set()
@@ -707,10 +785,10 @@ describe("publishWorkspacePackages release validations", () => {
     })
 
     assert.equal(viewCounts.get(PARATIX_SPECIFIER), 3)
-    assert.equal(hasCommandCall(commandRunner.calls, "pnpm"), true)
+    assert.equal(hasNpmPublishCall(commandRunner.calls), true)
   })
 
-  // R-0000661: refuse to invoke pnpm publish when dist artefacts referenced
+  // R-0000661: refuse to invoke npm publish when dist artefacts referenced
   // by package.json#files are missing. Without the guard, a skipped build
   // would publish empty or stale tarballs under --provenance, and signed
   // bad artefacts cannot easily be retracted from the registry.
@@ -732,7 +810,7 @@ describe("publishWorkspacePackages release validations", () => {
       "package.json#files is missing"
     )
 
-    assert.equal(hasCommandCall(commandRunner.calls, "pnpm"), false)
+    assert.equal(hasNpmPublishCall(commandRunner.calls), false)
   })
 
   it("R-0000661: aborts when a create-paratix dist artefact is missing", async () => {
@@ -757,7 +835,7 @@ describe("publishWorkspacePackages release validations", () => {
     assert.ok(caught, "publishWorkspacePackages should reject")
     assert.equal(caught.message.includes(CREATE_PARATIX_NAME), true, caught.message)
     assert.equal(caught.message.includes("is missing"), true, caught.message)
-    assert.equal(hasCommandCall(commandRunner.calls, "pnpm"), false)
+    assert.equal(hasNpmPublishCall(commandRunner.calls), false)
   })
 
   it("R-0000661: aborts when a dist artefact mtime is older than the src tree", async () => {
@@ -781,7 +859,7 @@ describe("publishWorkspacePackages release validations", () => {
       STALE_ARTEFACT_MESSAGE_FRAGMENT
     )
 
-    assert.equal(hasCommandCall(commandRunner.calls, "pnpm"), false)
+    assert.equal(hasNpmPublishCall(commandRunner.calls), false)
   })
 
   it("aborts when dist output is older than a build configuration input", async () => {
@@ -803,7 +881,7 @@ describe("publishWorkspacePackages release validations", () => {
       STALE_ARTEFACT_MESSAGE_FRAGMENT
     )
 
-    assert.equal(hasCommandCall(commandRunner.calls, "pnpm"), false)
+    assert.equal(hasNpmPublishCall(commandRunner.calls), false)
   })
 
   it("aborts when stale dist output is masked by a fresh non-built file", async () => {
@@ -827,7 +905,7 @@ describe("publishWorkspacePackages release validations", () => {
       "is older than"
     )
 
-    assert.equal(hasCommandCall(commandRunner.calls, "pnpm"), false)
+    assert.equal(hasNpmPublishCall(commandRunner.calls), false)
   })
 
   it("R-0000661: aborts when package.json#files is empty", async () => {
@@ -843,7 +921,7 @@ describe("publishWorkspacePackages release validations", () => {
       'must declare a "files" allowlist'
     )
 
-    assert.equal(hasCommandCall(commandRunner.calls, "pnpm"), false)
+    assert.equal(hasNpmPublishCall(commandRunner.calls), false)
   })
 
   // R-0000862: top-level package.json#files entries must be materialised
@@ -872,7 +950,7 @@ describe("publishWorkspacePackages release validations", () => {
       "referenced by package.json#files is a symbolic link"
     )
 
-    assert.equal(hasCommandCall(commandRunner.calls, "pnpm"), false)
+    assert.equal(hasNpmPublishCall(commandRunner.calls), false)
   })
 
   // R-0000685: a missing `src/` directory previously leaked the raw
@@ -896,7 +974,7 @@ describe("publishWorkspacePackages release validations", () => {
       "packages/paratix/src is missing — run pnpm build before publishing"
     )
 
-    assert.equal(hasCommandCall(commandRunner.calls, "pnpm"), false)
+    assert.equal(hasNpmPublishCall(commandRunner.calls), false)
   })
 
   // R-0000685: a non-ENOENT readdir failure (EACCES, EIO) on src/ has to
@@ -919,7 +997,7 @@ describe("publishWorkspacePackages release validations", () => {
       "Run pnpm build before publishing"
     )
 
-    assert.equal(hasCommandCall(commandRunner.calls, "pnpm"), false)
+    assert.equal(hasNpmPublishCall(commandRunner.calls), false)
   })
 
   // R-0000862: the symlink rejection must happen before the freshness
@@ -959,7 +1037,7 @@ describe("publishWorkspacePackages release validations", () => {
     )
     assert.equal(caught.message.includes(symlinkedDistributionPath), true, caught.message)
     assert.equal(caught.message.includes("Materialize"), true, caught.message)
-    assert.equal(hasCommandCall(commandRunner.calls, "pnpm"), false)
+    assert.equal(hasNpmPublishCall(commandRunner.calls), false)
   })
 })
 
@@ -1032,7 +1110,7 @@ async function assertPublishCallsUseDistributionTag({ expectedTag, version }) {
     fs: createFs({ createParatixVersion: version, paratixVersion: version }),
   })
 
-  const publishCalls = commandRunner.calls.filter((call) => call[0] === "pnpm")
+  const publishCalls = npmPublishCalls(commandRunner.calls)
   assert.equal(publishCalls.length, 2)
   const everyCallHasExpectedTag = publishCalls.every(
     (call) => call.includes("--tag") && call[call.indexOf("--tag") + 1] === expectedTag
