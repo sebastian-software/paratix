@@ -1,10 +1,23 @@
+import { readFileSync } from "node:fs"
+import { resolve } from "node:path"
 import { describe, expect, it } from "vitest"
 
-import { file } from "../src/modules/file.js"
-import { pkg } from "../src/modules/package.js"
-import { service } from "../src/modules/service.js"
-import { recipe } from "../src/recipe.js"
-import { server } from "../src/server.js"
+import { recipe, server } from "../src/index.js"
+import { file, package as pkg, service } from "../src/modules/index.js"
+
+function extractServerExportJSDoc(entryPointSource: string): string {
+  const matches = [
+    ...entryPointSource.matchAll(
+      /(?<jsdoc>\/\*\*(?:(?!\/\*\*)[\s\S])*?\*\/)\s*export \{ server \} from "\.\/server\.js"/gv
+    ),
+  ]
+  if (matches.length !== 1) {
+    throw new Error(`Expected exactly one server export JSDoc block, got ${matches.length}`)
+  }
+  const jsdoc = matches[0]?.groups?.jsdoc
+  if (jsdoc == null) throw new Error("Could not extract the server export JSDoc")
+  return jsdoc
+}
 
 // ---------------------------------------------------------------------------
 // Drift guard for the published JSDoc @example blocks.
@@ -21,6 +34,23 @@ import { server } from "../src/server.js"
 // ---------------------------------------------------------------------------
 
 describe("JSDoc @example blocks", () => {
+  it("documents the supported two-entry-point import contract", () => {
+    const entryPointSource = readFileSync(resolve(import.meta.dirname, "../src/index.ts"), "utf8")
+    const serverExportJSDoc = extractServerExportJSDoc(entryPointSource)
+
+    const exampleLines = serverExportJSDoc
+      .slice(serverExportJSDoc.indexOf("@example") + "@example".length)
+      .replaceAll("*/", "")
+      .split("\n")
+      .map((line) => line.replace(/^\s*\* ?/v, "").trim())
+      .filter((line) => line.length > 0)
+
+    expect(exampleLines).toStrictEqual([
+      'import { server, recipe } from "paratix";',
+      'import { apt, file, service } from "paratix/modules";',
+    ])
+  })
+
   it("server() example constructs a valid definition with pkg.installed", () => {
     // Mirrors the @example block of server() in src/server.ts (keys sorted to
     // satisfy perfectionist/sort-objects; the example itself is unordered).

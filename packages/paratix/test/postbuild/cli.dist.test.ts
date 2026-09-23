@@ -26,6 +26,111 @@ const CLI_COMMAND_TIMEOUT_MS = 30_000
 const CLI_COMMAND_MAX_BUFFER = 10 * 1024 * 1024
 const PACKAGE_COMMAND_TIMEOUT_MS = 60_000
 
+const EXPECTED_PACKAGE_EXPORTS = [
+  "NEEDS_APPLY",
+  "apt",
+  "archive",
+  "assert",
+  "assertValidModuleMetaEntries",
+  "assertValidModuleMetaEntry",
+  "buildKeyValueDiff",
+  "buildUnifiedDiff",
+  "command",
+  "compose",
+  "cron",
+  "debug",
+  "diffEnvironmentToMetaEntries",
+  "download",
+  "environmentMeta",
+  "environmentToMetaEntries",
+  "fail",
+  "failed",
+  "failedCommand",
+  "failedCommandWithDiagnostic",
+  "file",
+  "firstRun",
+  "git",
+  "group",
+  "hostname",
+  "isBooleanEnvironmentMetaEntry",
+  "isEnvironmentMetaEntry",
+  "isFirstRun",
+  "isLazyEnvironmentMetaEntry",
+  "isNumberEnvironmentMetaEntry",
+  "isSshdPortMetaEntry",
+  "isStringEnvironmentMetaEntry",
+  "isSystemHostMetaEntry",
+  "isSystemRebootMetaEntry",
+  "mergeEnvironmentFromMeta",
+  "meta",
+  "mount",
+  "net",
+  "op",
+  "package",
+  "pause",
+  "quadlet",
+  "recipe",
+  "releaseUpgrade",
+  "resolveEnvironment",
+  "restartSystemdUnit",
+  "rsync",
+  "script",
+  "server",
+  "service",
+  "shellQuote",
+  "signals",
+  "ssh",
+  "sshd",
+  "sshdPortMeta",
+  "swap",
+  "sysctl",
+  "system",
+  "systemHostMeta",
+  "systemRebootMeta",
+  "systemd",
+  "timer",
+  "ufw",
+  "user",
+  "when",
+] as const
+
+const EXPECTED_MODULE_EXPORTS = [
+  "apt",
+  "archive",
+  "buildKeyValueDiff",
+  "buildUnifiedDiff",
+  "command",
+  "compose",
+  "cron",
+  "download",
+  "file",
+  "git",
+  "group",
+  "hostname",
+  "mount",
+  "net",
+  "op",
+  "package",
+  "quadlet",
+  "releaseUpgrade",
+  "restartSystemdUnit",
+  "rsync",
+  "script",
+  "service",
+  "ssh",
+  "sshd",
+  "swap",
+  "sysctl",
+  "system",
+  "systemd",
+  "timer",
+  "ufw",
+  "user",
+] as const
+
+const PUBLIC_API_IMPORTS_START = "<!-- public-api-imports:start -->"
+const PUBLIC_API_IMPORTS_END = "<!-- public-api-imports:end -->"
+
 type CommandResponse = {
   code: number
   stderr?: string
@@ -38,6 +143,38 @@ type TestSshServer = {
   close: () => Promise<void>
   port: number
   privateKey: string
+}
+
+function extractPublicApiImports(markdown: string): string {
+  const startMarkerOffsets = [...markdown.matchAll(/<!-- public-api-imports:start -->/gv)].map(
+    (match) => match.index
+  )
+  const endMarkerCount = markdown.split(PUBLIC_API_IMPORTS_END).length - 1
+  if (startMarkerOffsets.length !== 1 || endMarkerCount !== 1) {
+    throw new Error(
+      `Expected exactly one public API import marker pair, got ${startMarkerOffsets.length} start and ${endMarkerCount} end markers`
+    )
+  }
+
+  const startOffset = startMarkerOffsets[0]
+  const endOffset = markdown.indexOf(PUBLIC_API_IMPORTS_END)
+  if (endOffset <= startOffset) {
+    throw new Error("Public API import markers are out of order")
+  }
+
+  const markedContent = markdown
+    .slice(startOffset + PUBLIC_API_IMPORTS_START.length, endOffset)
+    .trim()
+  const openingFence = "```typescript\n"
+  const closingFence = "\n```"
+  if (!markedContent.startsWith(openingFence) || !markedContent.endsWith(closingFence)) {
+    throw new Error("Public API import markers must contain exactly one TypeScript block")
+  }
+  const source = markedContent.slice(openingFence.length, -closingFence.length)
+  if (source.includes("```")) {
+    throw new Error("Public API import markers contain more than one fenced block")
+  }
+  return source
 }
 
 function endExecStream(stream: ServerChannel, response: CommandResponse): void {
@@ -200,6 +337,19 @@ describe("dist CLI", () => {
     )
     expect(packedTarballEntries.some((entry) => entry.startsWith("package/src/"))).toBe(false)
     expect(packedTarballEntries.some((entry) => entry.startsWith("package/test/"))).toBe(false)
+  })
+
+  it("publishes exactly the two supported package entry points", () => {
+    const packageJson = JSON.parse(
+      readFileSync(join(packedPackageRootDirectory, "package.json"), "utf8")
+    ) as {
+      exports: Record<string, string>
+    }
+
+    expect(packageJson.exports).toStrictEqual({
+      ".": "./dist/index.js",
+      "./modules": "./dist/modules/index.js",
+    })
   })
 
   it("runs the published CLI for version and apply validation errors", () => {
@@ -519,19 +669,71 @@ export default server({
     ).resolves.toBe("resolved-secret")
   })
 
-  it("re-exports every built-in module from the published package entry point", async () => {
-    const distIndexUrl = pathToFileURL(resolve(packageRootDirectory, "dist/index.js")).href
+  it("publishes the complete runtime APIs with identical module re-exports", async () => {
+    const distIndexUrl = pathToFileURL(resolve(packedPackageRootDirectory, "dist/index.js")).href
     const distModulesUrl = pathToFileURL(
-      resolve(packageRootDirectory, "dist/modules/index.js")
+      resolve(packedPackageRootDirectory, "dist/modules/index.js")
     ).href
     const packageApi = (await import(distIndexUrl)) as Record<string, unknown>
     const moduleApi = (await import(distModulesUrl)) as Record<string, unknown>
 
-    for (const [exportName, exportValue] of Object.entries(moduleApi)) {
+    expect(Object.keys(packageApi).sort()).toStrictEqual(EXPECTED_PACKAGE_EXPORTS)
+    expect(Object.keys(moduleApi).sort()).toStrictEqual(EXPECTED_MODULE_EXPORTS)
+
+    for (const exportName of EXPECTED_MODULE_EXPORTS) {
       expect(packageApi, `missing dist root built-in export: ${exportName}`).toHaveProperty(
         exportName
       )
-      expect(packageApi[exportName]).toBe(exportValue)
+      expect(packageApi[exportName]).toBe(moduleApi[exportName])
+    }
+  })
+
+  it("type-checks the marked guide imports unchanged in an isolated NodeNext consumer", () => {
+    const tempDirectory = mkdtempSync(join(tmpdir(), "paratix-guide-imports-dist-"))
+    const nodeModulesDirectory = join(tempDirectory, "node_modules")
+    const emptyTypeRootsDirectory = join(tempDirectory, "empty-types")
+    const consumerSourcePath = join(tempDirectory, "consumer.ts")
+
+    try {
+      mkdirSync(nodeModulesDirectory)
+      mkdirSync(emptyTypeRootsDirectory)
+      symlinkSync(packedPackageRootDirectory, join(nodeModulesDirectory, "paratix"))
+      writeFileSync(join(tempDirectory, "package.json"), '{ "type": "module" }\n')
+      writeFileSync(
+        join(tempDirectory, "tsconfig.json"),
+        `${JSON.stringify(
+          {
+            compilerOptions: {
+              module: "NodeNext",
+              moduleResolution: "NodeNext",
+              noEmit: true,
+              skipLibCheck: false,
+              strict: true,
+              target: "ES2022",
+              typeRoots: ["./empty-types"],
+              types: [],
+            },
+            include: ["consumer.ts"],
+          },
+          null,
+          2
+        )}\n`
+      )
+
+      const packedGuide = readFileSync(join(packedPackageRootDirectory, "llm-guide.md"), "utf8")
+      const publicApiImports = extractPublicApiImports(packedGuide)
+      writeFileSync(consumerSourcePath, publicApiImports)
+      expect(readFileSync(consumerSourcePath, "utf8")).toBe(publicApiImports)
+
+      execFileSync(resolve(packageRootDirectory, "../../node_modules/.bin/tsc"), ["-p", "."], {
+        cwd: tempDirectory,
+        encoding: "utf8",
+        killSignal: "SIGTERM",
+        maxBuffer: CLI_COMMAND_MAX_BUFFER,
+        timeout: PACKAGE_COMMAND_TIMEOUT_MS,
+      })
+    } finally {
+      rmSync(tempDirectory, { force: true, recursive: true })
     }
   })
 
@@ -602,31 +804,12 @@ export default server({
       writeFileSync(
         consumerScriptPath,
         `
-import { failedCommandWithDiagnostic, resolveEnvironment } from "paratix"
-import {
-  buildKeyValueDiff,
-  buildUnifiedDiff,
-  file,
-  package as pkg,
-  restartSystemdUnit,
-  service,
-  swap,
-  timer,
-} from "paratix/modules"
+import { resolveEnvironment } from "paratix"
+import { file, package as pkg, service, swap, timer } from "paratix/modules"
 import { swap as rootSwap, timer as rootTimer } from "paratix"
 
 if (typeof resolveEnvironment !== "function") {
   throw new Error("paratix did not export resolveEnvironment")
-}
-for (const [name, helper] of Object.entries({
-  buildKeyValueDiff,
-  buildUnifiedDiff,
-  failedCommandWithDiagnostic,
-  restartSystemdUnit,
-})) {
-  if (typeof helper !== "function") {
-    throw new Error("public package entry point did not export " + name)
-  }
 }
 if (typeof file?.directory !== "function") {
   throw new Error("paratix/modules did not export file.directory")
@@ -753,20 +936,80 @@ console.log("consumer imports ok")
         consumerSourcePath,
         `
 import {
+  assertValidModuleMetaEntries,
+  assertValidModuleMetaEntry,
+  diffEnvironmentToMetaEntries,
+  environmentMeta,
+  environmentToMetaEntries,
   failedCommandWithDiagnostic,
+  isBooleanEnvironmentMetaEntry,
+  isEnvironmentMetaEntry,
+  isFirstRun,
+  isLazyEnvironmentMetaEntry,
+  isNumberEnvironmentMetaEntry,
+  isSshdPortMetaEntry,
+  isStringEnvironmentMetaEntry,
+  isSystemHostMetaEntry,
+  isSystemRebootMetaEntry,
+  mergeEnvironmentFromMeta,
+  meta,
   recipe,
+  sshdPortMeta,
+  systemHostMeta,
+  systemRebootMeta,
+  type Environment,
+  type EnvironmentMetaEntry,
+  type EnvironmentValue,
+  type ExecOptions,
   type ExecResult,
+  type MetaEnvironmentValue,
   type Module,
+  type ModuleMetaEntry,
   type ModuleResult,
+  type ServerDefinition,
   type ShutdownSignal,
+  type SshConfig,
   type SshConnection,
+  type SshdPortMetaEntry,
+  type SystemHostMetaEntry,
+  type SystemRebootMetaEntry,
   type UnifiedDiffOptions,
 } from "paratix"
 import {
+  apt,
+  archive,
   buildKeyValueDiff,
   buildUnifiedDiff,
+  command,
+  compose,
+  cron,
+  download,
+  file,
+  git,
+  group,
+  hostname,
+  mount,
+  net,
+  op,
+  package as pkg,
+  quadlet,
+  releaseUpgrade,
   restartSystemdUnit,
+  rsync,
+  script,
+  service,
+  ssh,
+  sshd,
+  swap,
+  sysctl,
+  system,
+  systemd,
+  timer,
+  ufw,
+  user,
+  type PackageSpec,
   type UnifiedDiffOptions as ModulesUnifiedDiffOptions,
+  type UpgradeOptions,
 } from "paratix/modules"
 
 const failedCommandWithDiagnosticSignature: (parameters: {
@@ -806,6 +1049,129 @@ void [
   restartSystemdUnitSignature,
   roundTrippedDiffOptions,
 ]
+
+type IsExact<Left, Right> =
+  (<Value>() => Value extends Left ? 1 : 2) extends
+  (<Value>() => Value extends Right ? 1 : 2)
+    ? (<Value>() => Value extends Right ? 1 : 2) extends
+        (<Value>() => Value extends Left ? 1 : 2)
+      ? true
+      : false
+    : false
+type Expect<Condition extends true> = Condition
+
+type PublicTypeContract = {
+  environment: Environment
+  environmentMetaEntry: EnvironmentMetaEntry
+  environmentValue: EnvironmentValue
+  execOptions: ExecOptions
+  execResult: ExecResult
+  metaEnvironmentValue: MetaEnvironmentValue
+  module: Module
+  moduleMetaEntry: ModuleMetaEntry
+  moduleResult: ModuleResult
+  serverDefinition: ServerDefinition
+  shutdownSignal: ShutdownSignal
+  sshConfig: SshConfig
+  sshConnection: SshConnection
+  sshdPortMetaEntry: SshdPortMetaEntry
+  systemHostMetaEntry: SystemHostMetaEntry
+  systemRebootMetaEntry: SystemRebootMetaEntry
+}
+
+type ExpectedConnectionInfo = {
+  agentSocket?: string
+  authMethod?: "agent" | "password" | "privateKey"
+  configuredPorts: number[]
+  host: string
+  port: number
+  privateKeyPath?: string
+  user: string
+  verifiedHostPublicKey?: string
+}
+
+type AddPortContract = Expect<IsExact<SshConnection["addPort"], (port: number) => boolean>>
+type ReconnectContract = Expect<
+  IsExact<
+    SshConnection["reconnect"],
+    (options?: { defaultTimeout?: number }) => Promise<void>
+  >
+>
+type RemovePortContract = Expect<IsExact<SshConnection["removePort"], (port: number) => void>>
+type ConnectionInfoContract = Expect<
+  IsExact<ReturnType<SshConnection["getConnectionInfo"]>, ExpectedConnectionInfo>
+>
+
+declare const publicTypes: PublicTypeContract
+declare const sshContracts: [
+  AddPortContract,
+  ConnectionInfoContract,
+  ReconnectContract,
+  RemovePortContract,
+]
+void publicTypes
+void sshContracts
+
+const packageSpec: PackageSpec = { name: "curl", version: "8.0.0" }
+const upgradeOptions: UpgradeOptions = { timeout: 30_000 }
+void packageSpec
+void upgradeOptions
+
+const builtInModules = [
+  apt,
+  archive,
+  command,
+  compose,
+  cron,
+  download,
+  file,
+  git,
+  group,
+  hostname,
+  mount,
+  net,
+  op,
+  pkg,
+  quadlet,
+  releaseUpgrade,
+  rsync,
+  script,
+  service,
+  ssh,
+  sshd,
+  swap,
+  sysctl,
+  system,
+  systemd,
+  timer,
+  ufw,
+  user,
+] as const
+void builtInModules
+
+const publicMetaApi = [
+  assertValidModuleMetaEntries,
+  assertValidModuleMetaEntry,
+  diffEnvironmentToMetaEntries,
+  environmentMeta,
+  environmentToMetaEntries,
+  isBooleanEnvironmentMetaEntry,
+  isEnvironmentMetaEntry,
+  isLazyEnvironmentMetaEntry,
+  isNumberEnvironmentMetaEntry,
+  isSshdPortMetaEntry,
+  isStringEnvironmentMetaEntry,
+  isSystemHostMetaEntry,
+  isSystemRebootMetaEntry,
+  mergeEnvironmentFromMeta,
+  meta,
+  sshdPortMeta,
+  systemHostMeta,
+  systemRebootMeta,
+] as const
+const firstRunFlag: boolean = isFirstRun()
+void publicMetaApi
+void firstRunFlag
 
 const moduleWithOptions: Module = {
   name: "typed public module",
