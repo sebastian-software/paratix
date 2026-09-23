@@ -5,7 +5,9 @@ import { formatCliValue } from "./cliFormat.js"
 import { deriveParatixDependencyRange } from "./dependencyRange.js"
 import { createServerTemplate } from "./serverTemplate.js"
 import {
+  AGENTS_TEMPLATE,
   AUTO_UPGRADES_20_TEMPLATE,
+  CLAUDE_TEMPLATE,
   createAdminNopasswdSudoersContent,
   CSPELL_TEMPLATE,
   ENV_EXAMPLE_TEMPLATE,
@@ -99,6 +101,8 @@ function writeManagedScaffoldFile(
 }
 
 function writeSharedScaffoldFiles(projectDirectory: string): void {
+  writeManagedScaffoldFile(projectDirectory, "AGENTS.md", AGENTS_TEMPLATE)
+  writeManagedScaffoldFile(projectDirectory, "CLAUDE.md", CLAUDE_TEMPLATE)
   writeManagedScaffoldFile(projectDirectory, "tsconfig.json", TSCONFIG_TEMPLATE)
   writeManagedScaffoldFile(projectDirectory, ".gitignore", GITIGNORE_TEMPLATE)
   writeManagedScaffoldFile(projectDirectory, ".prettierrc", PRETTIER_RC_TEMPLATE)

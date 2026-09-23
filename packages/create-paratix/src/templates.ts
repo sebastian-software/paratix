@@ -1,5 +1,19 @@
 export type InitialUserConfig = { kind: "admin"; user: string } | { kind: "root" }
 
+export const AGENTS_TEMPLATE = `# Paratix project instructions
+
+Before changing \`server.ts\`, playbooks, or custom modules, read the
+[agent authoring guidance](node_modules/paratix/llm-guide.md#agent-authoring-guidance)
+for the installed Paratix version. If \`node_modules\` is missing, complete the
+project installation first.
+
+Import the core API from \`paratix\` and built-in modules from \`paratix/modules\`.
+Use the installed guide for the actual API and authoring patterns.
+`
+
+export const CLAUDE_TEMPLATE = `@AGENTS.md
+`
+
 export const TSCONFIG_TEMPLATE = `{
   "compilerOptions": {
     "target": "ES2024",
