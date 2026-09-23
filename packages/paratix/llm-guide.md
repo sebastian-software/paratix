@@ -17,44 +17,66 @@ changes, and follow the [Do's and Don'ts](#dos-and-donts) and [testing patterns]
 
 Paratix has exactly two import paths:
 
+<!-- public-api-imports:start -->
+
 ```typescript
-// Core API
 import {
-  server,
-  recipe,
   assert,
+  assertValidModuleMetaEntries,
+  assertValidModuleMetaEntry,
   debug,
+  diffEnvironmentToMetaEntries,
+  environmentMeta,
+  environmentToMetaEntries,
   fail,
-  firstRun,
-  pause,
-  resolveEnvironment,
-  signals,
-  when,
-  shellQuote,
-  NEEDS_APPLY,
   failed,
   failedCommand,
   failedCommandWithDiagnostic,
+  firstRun,
+  isBooleanEnvironmentMetaEntry,
+  isEnvironmentMetaEntry,
+  isFirstRun,
+  isLazyEnvironmentMetaEntry,
+  isNumberEnvironmentMetaEntry,
+  isSshdPortMetaEntry,
+  isStringEnvironmentMetaEntry,
+  isSystemHostMetaEntry,
+  isSystemRebootMetaEntry,
+  mergeEnvironmentFromMeta,
   meta,
+  NEEDS_APPLY,
+  pause,
+  recipe,
+  resolveEnvironment,
+  server,
+  shellQuote,
+  signals,
+  sshdPortMeta,
+  systemHostMeta,
+  systemRebootMeta,
+  when,
 } from "paratix"
 
-// Types (only when needed)
 import type {
-  Module,
+  Environment,
   EnvironmentMetaEntry,
+  EnvironmentValue,
+  ExecOptions,
+  ExecResult,
+  MetaEnvironmentValue,
+  Module,
   ModuleMetaEntry,
   ModuleResult,
   ServerDefinition,
-  SshConnection,
+  ShutdownSignal,
   SshConfig,
+  SshConnection,
+  SshdPortMetaEntry,
+  SystemHostMetaEntry,
+  SystemRebootMetaEntry,
   UnifiedDiffOptions,
-  Environment,
-  EnvironmentValue,
-  ExecResult,
-  ExecOptions,
 } from "paratix"
 
-// Built-in modules
 import {
   apt,
   archive,
@@ -88,7 +110,19 @@ import {
   ufw,
   user,
 } from "paratix/modules"
+
+import type {
+  PackageSpec,
+  UnifiedDiffOptions as ModulesUnifiedDiffOptions,
+  UpgradeOptions,
+} from "paratix/modules"
 ```
+
+<!-- public-api-imports:end -->
+
+Use `paratix/modules` for built-in modules in new playbooks. The same 28 module values are also
+re-exported from `paratix` for compatibility with existing playbooks, and both entry points return
+the same references. Only these two package entry points are public; do not use deep imports.
 
 ## Playbook Structure
 
@@ -187,7 +221,7 @@ the idiomatic way to ensure a previously installed cron job is gone.
 | ----------------- | -------------------------------------------------------------------------------------------------------------------- | ---------- |
 | `compose.config`  | `(options: { content?: string; projectDirectory: string; runtime?: "docker" \| "podman"; src?: string }): Module`    | Yes        |
 | `compose.up`      | `(options: { projectDirectory: string; runtime?: "docker" \| "podman"; services?: string[] }): Module`               | Yes        |
-| `compose.down`    | `(options: { projectDirectory: string; runtime?: "docker" \| "podman" }): Module`                                    | Yes        |
+| `compose.down`    | `(options: { projectDirectory: string; runtime?: "docker" \| "podman"; volumes?: boolean }): Module`                 | Yes        |
 | `compose.pull`    | `(options: { projectDirectory: string; runtime?: "docker" \| "podman" }): Module`                                    | Partial    |
 | `compose.restart` | `(options: { projectDirectory: string; runtime?: "docker" \| "podman" }): Module`                                    | No         |
 | `compose.systemd` | `(options: { detached?: boolean; name?: string; projectDirectory: string; runtime?: "docker" \| "podman" }): Module` | Yes        |
@@ -274,11 +308,11 @@ reported by the host, so a numerically declared owner converges to `status: "ok"
 | Method          | Signature                                                                                                                                                                                               | Idempotent |
 | --------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------- |
 | `net.hosts`     | `(ip: string, hostnames: string[], options?: { state?: "absent" \| "present" }): Module`                                                                                                                | Yes        |
-| `net.interface` | `(name: string, options: InterfaceOptions): Module`                                                                                                                                                     | Yes        |
+| `net.interface` | `(name: string, options: { addresses?: string[]; dhcp?: boolean; gateway?: string; nameservers?: string[] }): Module`                                                                                   | Yes        |
 | `net.request`   | `(url: string, options?: { allowInsecureHttpHeaders?: boolean; body?: string; connectTimeout?: number; headers?: Record<string, string>; method?: string; status?: number; timeout?: number }): Module` | Yes        |
 | `net.resolv`    | `(options: { nameservers: string[]; search?: string[] }): Module`                                                                                                                                       | Yes        |
 | `net.route`     | `(destination: string, gateway: string, options?: { device?: string; state?: "absent" \| "present" }): Module`                                                                                          | Yes        |
-| `net.waitFor`   | `(options: WaitForOptions): Module`                                                                                                                                                                     | Yes        |
+| `net.waitFor`   | `(options: { contains?: string; file?: string; host?: string; interval?: number; port?: number; timeout?: number }): Module`                                                                            | Yes        |
 
 `net.request` uses bounded curl timing by default (`connectTimeout: 10000`,
 `timeout: 300000`, both in milliseconds). Override these values for endpoints
@@ -324,10 +358,10 @@ type UpgradeOptions = {
 }
 ```
 
-Für `package.installed` / `package.absent` wird das Options-Objekt als **letztes** Argument
-nach den Paketnamen übergeben; bestehende variadische Aufrufe wie `pkg.installed("git", "curl")`
-funktionieren unverändert weiter. Verwende einen höheren `timeout` für langsame Operationen auf
-Produktionsservern mit großem Update-Rückstand:
+For `package.installed` and `package.absent`, pass the options object as the **last** argument after
+the package names. Existing variadic calls such as `pkg.installed("git", "curl")` continue to work
+unchanged. Use a higher `timeout` for slow operations on production servers with a large update
+backlog:
 
 ```typescript
 pkg.upgrade("2026-05-01", { timeout: 900_000 })
@@ -335,56 +369,55 @@ pkg.installed("texlive-full", { timeout: 900_000 })
 apt.distUpgrade("2026-05-01", { timeout: 1_200_000 })
 ```
 
-#### `PackageSpec` — Versions-Pinning
+#### `PackageSpec` — Version Pinning
 
 ```typescript
 type PackageSpec = {
   name: string
-  version?: string // Exakte Zielversion. Ohne `version` wird nur die Anwesenheit erzwungen.
+  version?: string // Exact target version. Without `version`, only presence is enforced.
 }
 ```
 
-Ein Paket kann auf eine exakte Version festgenagelt werden, indem statt eines Strings ein
-`PackageSpec`-Objekt übergeben wird. Ein bloßer String `"grafana"` ist äquivalent zu
-`{ name: "grafana" }` (kein Pin). Die paketmanager-spezifische Syntax (`name=version`,
-`name-version`) wird **niemals** als Pass-through-String akzeptiert — ein String mit `=` bleibt
-ein ungültiger Paketname. Die Argumente werden über ihre **Form** unterschieden, nicht über die
-Position: ein Objekt **mit** `name`-Feld ist ein `PackageSpec` (darf auch an letzter Stelle
-stehen), ein Objekt **ohne** `name`-Feld an letzter Position ist das `UpgradeOptions`-Objekt.
+Pin a package to an exact version by passing a `PackageSpec` object instead of a string. A plain
+`"grafana"` string is equivalent to `{ name: "grafana" }` without a pin. Package-manager-specific
+syntax such as `name=version` or `name-version` is **not** accepted as a pass-through string; a
+string containing `=` remains an invalid package name. Arguments are distinguished by their
+**shape**, not their position: an object **with** a `name` field is a `PackageSpec` and may also be
+the last argument, while a final object **without** a `name` field is `UpgradeOptions`.
 
 ```typescript
 pkg.installed({ name: "grafana", version: "13.1.0" })
 pkg.installed("curl", { name: "grafana", version: "13.1.0" }, { timeout: 600_000 })
 ```
 
-Übersetzung des Install-Tokens je Paketmanager:
+Installation token by package manager:
 
-| Paketmanager | Install-Token  | Beispiel               |
-| ------------ | -------------- | ---------------------- |
-| apt          | `name=version` | `grafana=13.1.0`       |
-| apk          | `name=version` | `grafana=13.1.0-r0`    |
-| dnf / yum    | `name-version` | `grafana-13.1.0-1.el9` |
+| Package manager | Installation token | Example                |
+| --------------- | ------------------ | ---------------------- |
+| apt             | `name=version`     | `grafana=13.1.0`       |
+| apk             | `name=version`     | `grafana=13.1.0-r0`    |
+| dnf / yum       | `name-version`     | `grafana-13.1.0-1.el9` |
 
-Semantik:
+Semantics:
 
-- **`check`** vergleicht die installierte gegen die gepinnte Version; jede Abweichung ergibt
-  `needs-apply`. Ohne gepinnte Version bleibt es eine reine Anwesenheitsprüfung.
-- **`apply`** installiert exakt die gepinnte Version — auch als **Downgrade**. Für apt wird bei
-  gepinnter Version automatisch `--allow-downgrades` ergänzt; für dnf/yum wird bei einer bereits
-  installierten höheren Version `dnf downgrade` / `yum downgrade` statt `install` verwendet
-  (apk installiert die exakte Version auch abwärts ohne Extra-Flag). Die Richtungsbestimmung für
-  dnf/yum nutzt einen versionsbewussten Vergleich auf dem Zielhost (`sort -V`), damit mehrstellige
-  Komponenten wie `13.9.0` vs. `13.10.0` korrekt geordnet werden.
-- Nach der Installation wird zusätzlich die Version verifiziert: eine Teil- oder Falschversions-
-  Installation meldet `failed`, nicht `changed`.
-- **Kein Hold.** Es wird ausschließlich die Version installiert — es werden **keine**
-  `apt-mark hold`-Marker und **keine** `preferences.d`-Dateien angelegt. Ohne einen erneuten
-  Lauf mit gepinnter Version kann ein späterer `apt upgrade` das Paket also wieder anheben.
+- **`check`** compares the installed version with the pinned version; any mismatch returns
+  `needs-apply`. Without a pinned version, it remains a presence check.
+- **`apply`** installs exactly the pinned version, including a **downgrade**. For apt, a pinned
+  version automatically adds `--allow-downgrades`. If dnf/yum finds a newer installed version, it
+  uses `dnf downgrade` or `yum downgrade` instead of `install` (apk installs the exact version in
+  either direction without an extra flag). The dnf/yum direction check uses a version-aware
+  comparison on the target host (`sort -V`) so multi-digit components such as `13.9.0` and
+  `13.10.0` are ordered correctly.
+- After installation, Paratix verifies the installed version. A partial or incorrect version
+  reports `failed`, not `changed`.
+- **No hold.** Paratix only installs the version; it creates no `apt-mark hold` marker or
+  `preferences.d` file. A later `apt upgrade` can therefore upgrade the package again unless the
+  pinned playbook runs again.
 
-Gültige Versionen beginnen alphanumerisch und dürfen `[A-Za-z0-9]` sowie `. + ~ : _ -` enthalten
-(deckt apt-Epoch/Revision wie `1:2.3-1ubuntu0.2` und rpm-`version-release` wie `13.1.0-1.el9` ab).
-Whitespace und Shell-Metazeichen werden abgelehnt. `package.absent` ist rein namensbasiert; ein
-`PackageSpec` mit gesetzter `version` führt dort zu einem klaren Fehler.
+Valid versions start with an alphanumeric character and may contain `[A-Za-z0-9]` plus
+`. + ~ : _ -`. This covers apt epoch/revision values such as `1:2.3-1ubuntu0.2` and RPM
+`version-release` values such as `13.1.0-1.el9`. Whitespace and shell metacharacters are rejected.
+`package.absent` is name-based; passing a `PackageSpec` with `version` produces a clear error.
 
 ### `quadlet`
 
@@ -396,15 +429,15 @@ Whitespace und Shell-Metazeichen werden abgelehnt. `package.absent` ist rein nam
 
 ### `releaseUpgrade`
 
-| Method                   | Signature                                                                                         | Idempotent |
-| ------------------------ | ------------------------------------------------------------------------------------------------- | ---------- |
-| `releaseUpgrade.upgrade` | `(options?: { dryRun?: boolean; resolveHost?: () => Promise<string>; timeout?: number }): Module` | Yes        |
+| Method                   | Signature                                                                                                                                            | Idempotent |
+| ------------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------- | ---------- |
+| `releaseUpgrade.upgrade` | `(options?: { dryRun?: boolean; resolveHost?: (signal?: AbortSignal) => Promise<string>; resolveHostTimeoutMs?: number; timeout?: number }): Module` | Yes        |
 
 ### `rsync`
 
-| Method       | Signature                                                                                                                                                                                                                    | Idempotent |
-| ------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------- |
-| `rsync.sync` | `(options: { src: string; dest: string; chmod?: string; delete?: boolean; exclude?: string[]; group?: string; include?: string[]; owner?: string; strictHostKeyChecking?: "accept-new" \| "no" \| "off" \| "yes" }): Module` | Yes        |
+| Method       | Signature                                                                                                                                                                                                                                      | Idempotent |
+| ------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------- |
+| `rsync.sync` | `(options: { src: string; dest: string; chmod?: string; delete?: boolean; exclude?: string[]; group?: string; include?: string[]; owner?: string; strictHostKeyChecking?: "accept-new" \| "no" \| "off" \| "yes"; timeout?: number }): Module` | Yes        |
 
 When the active Paratix SSH session already verified the host via `ssh.expectedHostFingerprint`
 or `ssh.expectedHostPublicKey`, `rsync.sync()` reuses that verified host key for the external
@@ -460,11 +493,11 @@ rsync SSH process and does not depend on a local `known_hosts` entry.
 
 ### `system`
 
-| Method          | Signature                                                     | Idempotent                                          |
-| --------------- | ------------------------------------------------------------- | --------------------------------------------------- |
-| `system.facts`  | `(): Module`                                                  | No (always-applies, emits typed `env` meta entries) |
-| `system.reboot` | `(options?: { resolveHost?: () => Promise<string> }): Module` | No (always-applies)                                 |
-| `system.uptime` | `(): Module`                                                  | No (always-applies, emits typed `env` meta entries) |
+| Method          | Signature                                                                                                        | Idempotent                                          |
+| --------------- | ---------------------------------------------------------------------------------------------------------------- | --------------------------------------------------- |
+| `system.facts`  | `(): Module`                                                                                                     | No (always-applies, emits typed `env` meta entries) |
+| `system.reboot` | `(options?: { resolveHost?: (signal?: AbortSignal) => Promise<string>; resolveHostTimeoutMs?: number }): Module` | No (always-applies)                                 |
+| `system.uptime` | `(): Module`                                                                                                     | No (always-applies, emits typed `env` meta entries) |
 
 ### `systemd`
 
@@ -539,10 +572,10 @@ yourself with `systemd.unit`.
 
 ### `user`
 
-| Method         | Signature                                                                                                                 | Idempotent |
-| -------------- | ------------------------------------------------------------------------------------------------------------------------- | ---------- |
-| `user.present` | `(name: string, options?: { uid?: number; shell?: string; home?: string; groups?: string[]; password?: string }): Module` | Yes        |
-| `user.absent`  | `(name: string, options?: { removeHome?: boolean }): Module`                                                              | Yes        |
+| Method         | Signature                                                                                                                                    | Idempotent |
+| -------------- | -------------------------------------------------------------------------------------------------------------------------------------------- | ---------- |
+| `user.present` | `(name: string, options?: { uid?: number; shell?: string; home?: string; homeMode?: string; groups?: string[]; password?: string }): Module` | Yes        |
+| `user.absent`  | `(name: string, options?: { removeHome?: boolean }): Module`                                                                                 | Yes        |
 
 ## Custom Modules
 
@@ -580,8 +613,8 @@ function myCustomModule(configPath: string, content: string): Module {
 
 - Always check `if (!ssh) return NEEDS_APPLY` in check and return `failed("...")` with a useful message in apply.
 - Prefer `failedCommand("...", result)` when you used `ssh.exec(..., { ignoreExitCode: true })` and want stdout/stderr preserved for central runner output. It carries the first few non-empty output lines (bounded by a line and byte budget) so multi-line diagnostics such as systemd's `See "journalctl -xeu <unit>"` hint are not dropped; the full streams stay on `CommandError.fullStderr`/`fullStdout` for `--verbose`.
-- Use `failedCommandWithDiagnostic({ ... })` when the failing command's own output does not name the cause and a follow-up probe supplied it. Keep such probes best-effort: any problem in the probe must yield no diagnostic rather than a worse failure.
-- To restart a systemd unit, use `restartSystemdUnit({ ... })` from `paratix/modules` instead of calling `systemctl restart` directly. It returns `null` on success and, on failure, attaches the unit name plus a bounded journal excerpt scoped to that attempt.
+- Use `failedCommandWithDiagnostic({ ... })` when a best-effort follow-up probe supplies the cause missing from a failed command's own output.
+- Use `restartSystemdUnit({ ... })` from `paratix/modules` for a bounded, attempt-scoped systemd restart diagnostic.
 - Return `NEEDS_APPLY` (the exported constant), never the string literal `"needs-apply"`.
 - `ModuleResult.status` must be one of: `"changed"`, `"failed"`, `"ok"`, `"skipped"`.
 - Optionally return `ModuleResult.detail` with a short single-line reason; the runner appends it to the step line. Use it to say what a `changed` step actually did, and leave it unset when the step did no work. See [Status Detail on Changed Steps](#status-detail-on-changed-steps).
@@ -593,27 +626,63 @@ function myCustomModule(configPath: string, content: string): Module {
 - Use the exported guards such as `isEnvironmentMetaEntry(...)`, `isStringEnvironmentMetaEntry(...)`, `isNumberEnvironmentMetaEntry(...)`, `isBooleanEnvironmentMetaEntry(...)`, `isLazyEnvironmentMetaEntry(...)`, `isSshdPortMetaEntry(...)`, `isSystemHostMetaEntry(...)`, and `isSystemRebootMetaEntry(...)` when you need to inspect meta entries safely.
 - Set `local: true` on the module object if it runs on the local machine (ssh will be `null`).
 
+### Failure, restart, and diff helpers
+
+| Helper                        | Signature                                                                                                                       | Result                                                                                  |
+| ----------------------------- | ------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------- |
+| `failedCommandWithDiagnostic` | `(parameters: { diagnostic: null \| string; message: string; result: ExecResult; secrets?: string[] }): ModuleResult`           | A failed result with bounded command output and the optional, secret-masked diagnostic. |
+| `restartSystemdUnit`          | `(parameters: { failureMessage: string; secrets?: string[]; ssh: SshConnection; unit: string }): Promise<ModuleResult \| null>` | `null` on success; otherwise a failed result with a best-effort journal excerpt.        |
+| `buildUnifiedDiff`            | `(current: string, desired: string, options?: UnifiedDiffOptions): string`                                                      | Unified diff text, or `""` when the normalized inputs are identical.                    |
+| `buildKeyValueDiff`           | `(key: string, currentValue: null \| string, desiredValue: string): string`                                                     | A compact scalar diff, or `""` when both values match.                                  |
+
+`UnifiedDiffOptions` has three optional fields: `contextLines?: number` (default `3`, clamped to
+at least `0`), `currentLabel?: string` (default `"current"`), and `desiredLabel?: string` (default
+`"desired"`). The diff helpers are available from `paratix/modules` and are re-exported at the
+root for compatibility; `UnifiedDiffOptions` is exported as a type from both entry points.
+
+### Meta API
+
+Use the `meta` object for normal module authoring. Its `env`, `sshdPort`, `systemHost`, and
+`systemReboot` methods create the four public meta-entry variants. The same constructors are also
+available as `environmentMeta`, `sshdPortMeta`, `systemHostMeta`, and `systemRebootMeta` for
+advanced code that prefers standalone functions.
+
+The remaining public helpers cover validation, narrowing, and conversion:
+
+| Purpose                      | Public helpers                                                                                                                                          |
+| ---------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Validate entries             | `assertValidModuleMetaEntry`, `assertValidModuleMetaEntries`                                                                                            |
+| Narrow environment entries   | `isEnvironmentMetaEntry`, `isBooleanEnvironmentMetaEntry`, `isLazyEnvironmentMetaEntry`, `isNumberEnvironmentMetaEntry`, `isStringEnvironmentMetaEntry` |
+| Narrow control-plane entries | `isSshdPortMetaEntry`, `isSystemHostMetaEntry`, `isSystemRebootMetaEntry`                                                                               |
+| Convert environments         | `environmentToMetaEntries`, `diffEnvironmentToMetaEntries`, `mergeEnvironmentFromMeta`                                                                  |
+
 ### SshConnection API
 
 Methods available on the `ssh` parameter:
 
-| Method                                            | Return type                             | Description                                                                                    |
-| ------------------------------------------------- | --------------------------------------- | ---------------------------------------------------------------------------------------------- |
-| `ssh.exec(cmd, options?)`                         | `Promise<ExecResult>`                   | Run command, get `{ code, stdout, stderr }`. Throws on non-zero unless `ignoreExitCode: true`. |
-| `ssh.test(cmd)`                                   | `Promise<boolean>`                      | Run command, return `true` if exit code is 0.                                                  |
-| `ssh.output(cmd)`                                 | `Promise<string>`                       | Run command, return trimmed stdout.                                                            |
-| `ssh.lines(cmd)`                                  | `Promise<string[]>`                     | Run command, return stdout split into lines.                                                   |
-| `ssh.exists(path)`                                | `Promise<boolean>`                      | Check if remote path exists.                                                                   |
-| `ssh.readFile(path)`                              | `Promise<string>`                       | Read remote file content.                                                                      |
-| `ssh.writeFile(path, content, { mode: "0644" })`  | `Promise<void>`                         | Write content to remote file. `mode` is optional and defaults to `"0600"`.                     |
-| `ssh.uploadFile(local, remote, { mode: "0644" })` | `Promise<void>`                         | Upload local file via SFTP. `mode` is optional and defaults to `"0600"`.                       |
-| `ssh.downloadFile(remote, local)`                 | `Promise<void>`                         | Download remote file.                                                                          |
-| `ssh.sha256(path)`                                | `Promise<string \| null>`               | Get SHA-256 hex digest, or null if not found.                                                  |
-| `ssh.addPort(port)`                               | `void`                                  | Register an additional port opened on the remote host (advanced).                              |
-| `ssh.disconnect()`                                | `void`                                  | Close the SSH connection.                                                                      |
-| `ssh.getConnectionInfo()`                         | `{ host, port, privateKeyPath?, user }` | Return current connection parameters.                                                          |
-| `ssh.probeSudo()`                                 | `Promise<void>`                         | Probe/cache sudo access; prompts interactively if needed.                                      |
-| `ssh.updateHost(host)`                            | `void`                                  | Update the target host address (e.g., after IP change).                                        |
+| Method                                            | Return type                                                                                                 | Description                                                                                            |
+| ------------------------------------------------- | ----------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------ |
+| `ssh.addPort(port)`                               | `boolean`                                                                                                   | Register a reconnect candidate; return `true` when it was added.                                       |
+| `ssh.disconnect()`                                | `void`                                                                                                      | Close the SSH connection.                                                                              |
+| `ssh.downloadFile(remotePath, localPath)`         | `Promise<void>`                                                                                             | Download a remote file.                                                                                |
+| `ssh.exec(command, options?)`                     | `Promise<ExecResult>`                                                                                       | Run a command and return `{ code, stdout, stderr }`. Throws on non-zero unless `ignoreExitCode: true`. |
+| `ssh.exists(remotePath)`                          | `Promise<boolean>`                                                                                          | Check whether a remote path exists.                                                                    |
+| `ssh.getConnectionInfo()`                         | `{ agentSocket?, authMethod?, configuredPorts, host, port, privateKeyPath?, user, verifiedHostPublicKey? }` | Return the active connection and authentication details.                                               |
+| `ssh.lines(command)`                              | `Promise<string[]>`                                                                                         | Run a command and return stdout split into lines.                                                      |
+| `ssh.output(command)`                             | `Promise<string>`                                                                                           | Run a command and return trimmed stdout.                                                               |
+| `ssh.probeSudo()`                                 | `Promise<void>`                                                                                             | Probe and cache sudo access, prompting interactively if needed.                                        |
+| `ssh.readFile(remotePath)`                        | `Promise<string>`                                                                                           | Read the full contents of a remote file.                                                               |
+| `ssh.reconnect(options?)`                         | `Promise<void>`                                                                                             | Reconnect; `options.defaultTimeout` supplies a call-specific fallback in milliseconds.                 |
+| `ssh.removePort(port)`                            | `void`                                                                                                      | Remove a registered reconnect candidate.                                                               |
+| `ssh.sha256(remotePath)`                          | `Promise<string \| null>`                                                                                   | Return the SHA-256 hex digest, or `null` when the file is not found.                                   |
+| `ssh.test(command)`                               | `Promise<boolean>`                                                                                          | Run a command and return whether its exit code is zero.                                                |
+| `ssh.updateHost(host)`                            | `void`                                                                                                      | Update the target host address.                                                                        |
+| `ssh.uploadFile(localPath, remotePath, options?)` | `Promise<void>`                                                                                             | Upload through SFTP; `options.mode` defaults to `"0600"`.                                              |
+| `ssh.writeFile(remotePath, content, options?)`    | `Promise<void>`                                                                                             | Create or replace a remote file; `options.mode` defaults to `"0600"`.                                  |
+
+`getConnectionInfo().authMethod`, when present, is `"agent"`, `"password"`, or `"privateKey"`.
+`reconnect` accepts `options?: { defaultTimeout?: number }`; `uploadFile` and `writeFile` accept
+`options?: { mode?: string }`.
 
 ### ExecOptions
 
@@ -799,6 +868,30 @@ Stops the current run cleanly when Paratix was started with `--first-run`. Usefu
 firstRun.stop("Bootstrap foundation complete; rerun without --first-run to continue.")
 ```
 
+### `isFirstRun()`
+
+Returns `true` while the CLI imports and evaluates a playbook passed to `paratix apply --first-run`.
+Use it only while constructing the exported server definition:
+
+```typescript
+import { isFirstRun, server, type Module } from "paratix"
+
+const bootstrapModules: Module[] = []
+const regularModules: Module[] = []
+
+export default server({
+  host: "10.0.0.1",
+  name: "web-01",
+  run: isFirstRun() ? bootstrapModules : regularModules,
+  ssh: { ports: [22], user: "root" },
+})
+```
+
+The first-run context ends after import and definition generation. `isFirstRun()` therefore
+returns `false` later inside module `check` and `apply` methods, and there is no public `init` hook.
+The helper reads an async-local context; the CLI does not mutate
+`process.env.PARATIX_FIRST_RUN`.
+
 ### `signals.flush(message?)`
 
 Immediately runs all currently pending signals in the active scope and clears their pending state.
@@ -907,9 +1000,8 @@ Rules:
 - Modules that do not opt in keep showing only `changed (dry-run)`.
 - Every diff line is masked through the registered-secret sink and a terminal
   sanitizer before printing, so secret-laden file contents never leak verbatim.
-- `_dryRunDetail` (inline suffix) and `diff` (multi-line block) are independent
-  output layers — a module may emit both at once; the runner renders detail next
-  to the status line and the diff below it.
+- Inline status detail and multi-line diff blocks are independent output layers. A built-in module
+  may emit both at once; the runner renders detail next to the status line and the diff below it.
 
 Diff-producing built-in modules:
 
@@ -958,58 +1050,22 @@ container that a Quadlet unit started itself is never a conflict:
 `PODMAN_SYSTEMD_UNIT` holds the full unit name (`%n`), so both sides are
 normalized before comparison.
 
-`quadlet.container` carries `_dryRunBlocker: true` so the guard also runs in a
-plain `--dry-run`; its unit-file diff still requires `--diff`.
+The `quadlet.container` conflict guard also runs in a plain `--dry-run`; its unit-file diff still
+requires `--diff`.
 
-### Implementing a Diff for a Custom Module
+### Custom-module diff output
 
-A module participates in `--diff` output by setting `_dryRunDiffProducer: true`
-and implementing `_applyDryRun`. The runner calls `_applyDryRun` only when the
-user passed `--diff` and `check()` returned `"needs-apply"`.
-
-```typescript
-import { buildUnifiedDiff } from "paratix/modules"
-// or, for scalar drift:
-import { buildKeyValueDiff } from "paratix/modules"
-```
-
-```typescript
-return {
-  _dryRunDiffProducer: true,
-  async _applyDryRun(ssh) {
-    if (!ssh) return { status: "changed" }
-    try {
-      const current = (await ssh.exists(remotePath)) ? await ssh.readFile(remotePath) : ""
-      const diff = buildUnifiedDiff(current, desired, {
-        currentLabel: remotePath,
-        desiredLabel: localPath,
-      })
-      return diff === "" ? { status: "changed" } : { diff, status: "changed" }
-    } catch {
-      // A read failure must not abort the dry-run. Drop the diff and fall back
-      // to the generic "(dry-run)" suffix.
-      return { status: "changed" }
-    }
-  },
-  async check(ssh) {
-    /* unchanged */
-  },
-  async apply(ssh) {
-    /* unchanged */
-  },
-  name: "myModule: ...",
-}
-```
-
-The diff string is plain text — no ANSI codes. The output layer applies colors
-(`-` red, `+` green, headers dimmed) and indentation.
+`buildUnifiedDiff` and `buildKeyValueDiff` from `paratix/modules` are public formatting helpers.
+`UnifiedDiffOptions` is available as a type from either public entry point. Runner integration for a
+custom diff is not a stable extension API, however: custom modules should use the documented `check`
+and `apply` contract and may return a short `detail`; do not depend on internal module fields.
 
 ## Do's and Don'ts
 
 ### DO
 
 1. Always use `export default server({...})` as the default export of a playbook.
-2. Import modules from `"paratix/modules"`, not from `"paratix"`.
+2. Import modules from `"paratix/modules"` in new code. Root re-exports remain supported for compatibility.
 3. `package` must be aliased on import: `import { package as pkg } from "paratix/modules"` -- `package` is a reserved word in JavaScript.
 4. For idempotency with `command.shell()`, always provide a `check` command.
 5. Use `{{KEY|shell}}`, `{{KEY|raw}}` or a chain such as `{{KEY|b64decode|shell}}` in `.tmpl` files — strict mode is on by default and bare `{{KEY}}` will throw. Provide values via `env` in `server()`.
@@ -1024,7 +1080,7 @@ The diff string is plain text — no ANSI codes. The output layer applies colors
 
 ### DON'T
 
-1. Do NOT `import { package } from "paratix"` -- modules come from `"paratix/modules"`.
+1. Do NOT use deep imports. The only public paths are `"paratix"` and `"paratix/modules"`.
 2. Do NOT use `service.restart()` directly in `run` -- it runs EVERY time. Use it as a signal in a `recipe()`.
 3. Do NOT use the string literal `"needs-apply"` -- always use the exported constant `NEEDS_APPLY`.
 4. Do NOT assume `ssh` is non-null in custom modules -- always check it and return `failed("...")` with context.
@@ -1049,8 +1105,9 @@ Tests use vitest with a `createMockSsh` helper:
 
 ```typescript
 import { describe, expect, it } from "vitest"
+import { NEEDS_APPLY } from "paratix"
+
 import { createMockSsh } from "./helpers/mockSsh.js"
-import { NEEDS_APPLY } from "../src/types.js"
 
 describe("myModule", () => {
   it("should detect needs-apply when file is missing", async () => {

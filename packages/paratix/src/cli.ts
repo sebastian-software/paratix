@@ -366,10 +366,10 @@ export function isDirectCliExecution(moduleUrl: string, candidateEntryScript?: s
  * by the runner and threaded into module execution; runner code never reads
  * {@link FIRST_RUN_ENV_NAME} from `process.env` directly.
  *
- * The companion {@link withCliProcessEnvironment} mutates the global
- * `process.env` only for the duration of the serialized playbook
- * `import()` so playbooks can read `process.env.PARATIX_FIRST_RUN` at module
- * scope without contaminating another concurrent playbook import.
+ * The returned Environment value is separate from the async-local context
+ * exposed by `isFirstRun()`. That context exists only while the CLI imports
+ * and evaluates the playbook definition; it never mutates global `process.env`
+ * and ends before module `check` and `apply` methods run.
  *
  * @param environment - The base environment supplied by the caller.
  * @param options - Overrides derived from CLI flags.
@@ -401,7 +401,8 @@ export { isFirstRun } from "./firstRunContext.js"
 /**
  * Runs `body` while the CLI-derived first-run flag is observable through
  * `isFirstRun` and guarantees the flag is cleared before returning,
- * regardless of whether `body` resolves or rejects.
+ * regardless of whether `body` resolves or rejects. The CLI uses this scope
+ * only while importing and evaluating the playbook definition.
  *
  * R-0000265: this helper replaces the previous `applyCliProcessEnvironment`
  * which returned a manual restore callback. That API trusted every caller
@@ -409,20 +410,18 @@ export { isFirstRun } from "./firstRunContext.js"
  * the flag stuck on the process for the rest of its lifetime. Wrapping the
  * body internally removes the discipline burden.
  *
- * R-0000695: the flag no longer touches `process.env`. The runner already
- * consumes the value through the typed Environment returned by
- * {@link applyCliEnvironmentOverrides}, so business logic stays free of
- * implicit globals. Playbooks that previously read
- * `process.env.PARATIX_FIRST_RUN` at module scope should call
- * `isFirstRun` inside their async surface area
- * (`init`/`apply`/`check`) instead — the flag is async-local, not global.
+ * R-0000695: the flag does not touch `process.env`. The runner separately
+ * consumes the typed Environment returned by {@link applyCliEnvironmentOverrides}.
+ * Playbooks can call `isFirstRun()` while constructing their exported server
+ * definition. The context ends before module `check` and `apply` methods
+ * run, and there is no public `init` hook.
  *
  * Reentrant CLI calls are supported: a nested invocation that sets
  * `firstRun: true` extends the inner async context but does not leak the
  * value into the surrounding caller. After every nested call returns, the
  * outer context's flag remains visible until its own `body` completes.
  *
- * @param options - CLI flags that determine which mutations to apply.
+ * @param options - CLI flags that select the async-local first-run context.
  * @param options.firstRun - When `true`, marks the current async context
  *   as a first-run invocation for the duration of `body`.
  * @param body - Async work to run while the flag is installed. Its
@@ -889,7 +888,7 @@ const applyCommand = program
     collectFilter,
     []
   )
-  .option("--first-run", "Set PARATIX_FIRST_RUN=true before loading the playbook", false)
+  .option("--first-run", "Expose first-run mode while loading the playbook", false)
   .option(
     "--reconnect-timeout <seconds>",
     "SSH reconnect timeout override for reboots and port changes (seconds, max 86400; reboot default 300)",
