@@ -25,6 +25,19 @@ export function getCliUsage(): string {
   return CLI_USAGE
 }
 
+export function getCliHelp(): string {
+  return `${getCliUsage()}
+
+Options:
+  --host <domain-or-ip>                  Server hostname or IP address.
+  --initial-user <root|name>             Bootstrap as root or a named admin user.
+  --expected-host-fingerprint <fingerprint>  Expected OpenSSH SHA256 host fingerprint.
+  --admin-public-key <ssh-public-key>    Admin SSH public key.
+  --admin-public-key-file <path>         File containing the admin SSH public key.
+  -h                                     Show this help.
+  --help                                 Show this help.`
+}
+
 export function normalizeInitialUserName(name: string): string {
   return name.trim()
 }
