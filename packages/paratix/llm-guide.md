@@ -33,6 +33,8 @@ import {
   shellQuote,
   NEEDS_APPLY,
   failed,
+  failedCommand,
+  failedCommandWithDiagnostic,
   meta,
 } from "paratix"
 
@@ -45,6 +47,7 @@ import type {
   ServerDefinition,
   SshConnection,
   SshConfig,
+  UnifiedDiffOptions,
   Environment,
   EnvironmentValue,
   ExecResult,
@@ -55,6 +58,8 @@ import type {
 import {
   apt,
   archive,
+  buildKeyValueDiff,
+  buildUnifiedDiff,
   command,
   compose,
   cron,
@@ -69,6 +74,7 @@ import {
   package as pkg,
   quadlet,
   releaseUpgrade,
+  restartSystemdUnit,
   rsync,
   script,
   service,
@@ -575,7 +581,7 @@ function myCustomModule(configPath: string, content: string): Module {
 - Always check `if (!ssh) return NEEDS_APPLY` in check and return `failed("...")` with a useful message in apply.
 - Prefer `failedCommand("...", result)` when you used `ssh.exec(..., { ignoreExitCode: true })` and want stdout/stderr preserved for central runner output. It carries the first few non-empty output lines (bounded by a line and byte budget) so multi-line diagnostics such as systemd's `See "journalctl -xeu <unit>"` hint are not dropped; the full streams stay on `CommandError.fullStderr`/`fullStdout` for `--verbose`.
 - Use `failedCommandWithDiagnostic({ ... })` when the failing command's own output does not name the cause and a follow-up probe supplied it. Keep such probes best-effort: any problem in the probe must yield no diagnostic rather than a worse failure.
-- To restart a systemd unit, use `restartSystemdUnit({ ... })` from `modules/systemctlRestart.js` instead of calling `systemctl restart` directly. It returns `null` on success and, on failure, attaches the unit name plus a bounded journal excerpt scoped to that attempt.
+- To restart a systemd unit, use `restartSystemdUnit({ ... })` from `paratix/modules` instead of calling `systemctl restart` directly. It returns `null` on success and, on failure, attaches the unit name plus a bounded journal excerpt scoped to that attempt.
 - Return `NEEDS_APPLY` (the exported constant), never the string literal `"needs-apply"`.
 - `ModuleResult.status` must be one of: `"changed"`, `"failed"`, `"ok"`, `"skipped"`.
 - Optionally return `ModuleResult.detail` with a short single-line reason; the runner appends it to the step line. Use it to say what a `changed` step actually did, and leave it unset when the step did no work. See [Status Detail on Changed Steps](#status-detail-on-changed-steps).
@@ -962,7 +968,7 @@ and implementing `_applyDryRun`. The runner calls `_applyDryRun` only when the
 user passed `--diff` and `check()` returned `"needs-apply"`.
 
 ```typescript
-import { buildUnifiedDiff } from "paratix/modules" // not exported publicly today
+import { buildUnifiedDiff } from "paratix/modules"
 // or, for scalar drift:
 import { buildKeyValueDiff } from "paratix/modules"
 ```

@@ -28,10 +28,12 @@ export {
   systemHostMeta,
   systemRebootMeta,
 } from "./meta.js"
-export { failed, failedCommand } from "./moduleFailure.js"
+export { failed, failedCommand, failedCommandWithDiagnostic } from "./moduleFailure.js"
 export {
   apt,
   archive,
+  buildKeyValueDiff,
+  buildUnifiedDiff,
   command,
   compose,
   cron,
@@ -46,6 +48,7 @@ export {
   package,
   quadlet,
   releaseUpgrade,
+  restartSystemdUnit,
   rsync,
   script,
   service,
@@ -59,6 +62,7 @@ export {
   ufw,
   user,
 } from "./modules/index.js"
+export type { UnifiedDiffOptions } from "./modules/index.js"
 export { recipe } from "./recipe.js"
 /**
  * Paratix — public API entry point.
