@@ -94,6 +94,14 @@ This page lists only confirmed changes that require action in an existing projec
 
 **Upgrade:** Replace zero, negative, or fractional values with a positive whole number of seconds.
 
+### 0.18.0: signal lists stop at the first failure
+
+**Before:** In versions before 0.18.0, playbook authors could rely on later signals in the same list still running after an earlier signal returned a `"failed"` status or threw an exception. The surrounding recipe or run handled the failure only after the list finished.
+
+**Now:** Since 0.18.0, the first signal that returns a `"failed"` status or throws an exception stops the current signal list; its remaining signals are skipped and the list reports `"failed"`. There is no `continueOnError` option. The stop is scoped to the current list, but the surrounding recipe or run may also stop before any later list is reached.
+
+**Upgrade:** Keep dependent signals together when fail-fast behavior is intended. Move work that must be attempted independently despite another failure into separate playbook runs; a separate signal list in the same run does not guarantee execution. After a failure, fix the first cause and rerun the playbook so skipped signals can be attempted. If an older Paratix version already left a Quadlet stack split, follow [A Quadlet container cannot be replaced](./troubleshooting.md#a-quadlet-container-cannot-be-replaced); upgrading does not repair that host state automatically.
+
 ## `create-paratix`
 
 ### 0.2.0: Node.js 24 or newer
@@ -147,5 +155,7 @@ Confirmed unreleased breaking changes will be collected above. When the actual `
 ## Audit note
 
 Reviewed on 2026-07-10 from the 0.1 baseline commit `ee125596` through all package tags from `paratix-v0.2.0` and `create-paratix-v0.2.0` to their respective `v0.13.0` tags, plus the then-current repository state. The review covered public API exports and types, CLI options, defaults, and generated scaffold files. The former unprefixed root metadata `v1.0.0` and `v1.0.1` was excluded because it did not represent a release of either package.
+
+On 2026-09-23, a targeted follow-up verified only the 0.18.0 signal-list change against `paratix-v0.17.0`, `paratix-v0.18.0`, the Paratix changelog, ADR-0006, the implementation, regression tests, and the agent guide. This was not a full re-audit of releases 0.14.0 through 0.19.0.
 
 [Back to the user guide](./README.md)
