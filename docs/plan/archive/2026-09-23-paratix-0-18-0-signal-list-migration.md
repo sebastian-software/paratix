@@ -46,11 +46,15 @@ unangetastet.
 - Der Migrationseintrag verspricht nicht pauschal, dass jede separate Liste nach einem Fehler noch
   ausgeführt wird. Der Recipe- oder Run-Kontrollfluss kann den umgebenden Lauf bereits beendet
   haben.
-- Nach einem Signalfehler wird die Ursache behoben und das Playbook erneut ausgeführt, damit zuvor
-  übersprungene Signale erneut versucht werden. Für einen bereits unter einer älteren Version
-  entstandenen geteilten Quadlet-Stack verweist der Eintrag auf den vorhandenen sicheren
-  Wiederherstellungsweg in `troubleshooting.md`; ein Downgrade auf das frühere Verhalten wird nicht
-  empfohlen.
+- Nach einem Signalfehler wird zuerst die Ursache behoben. Ein normaler erneuter Playbook-Lauf
+  versucht die übersprungenen Signale nur, wenn mindestens ein Modul im selben Recipe- oder
+  Top-Level-Scope erneut `changed` meldet. Meldet der ganze Scope `ok`, steht keine Signal-Liste
+  aus; auch `signals.flush()` kann sie dann nicht erzwingen. Zur Wiederherstellung wird deshalb
+  entweder eine echte, beabsichtigte Zustandsänderung ausgelöst, die in diesem Scope zu `changed`
+  führt, oder die übersprungene Operation wird direkt ausgeführt. Für einen bereits unter einer
+  älteren Version entstandenen geteilten Quadlet-Stack verweist der Eintrag auf den vorhandenen
+  sicheren Wiederherstellungsweg in `troubleshooting.md`; ein Downgrade auf das frühere Verhalten
+  wird nicht empfohlen.
 - Der Auditvermerk behält die ursprüngliche Prüfung bis 0.13.0 bei und ergänzt eine datierte,
   gezielte 0.18.0-Prüfung gegen `paratix-v0.17.0`, `paratix-v0.18.0`, Changelog, ADR,
   Implementierung, Tests und Agent-Guide.
