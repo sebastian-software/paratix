@@ -602,12 +602,31 @@ export default server({
       writeFileSync(
         consumerScriptPath,
         `
-import { resolveEnvironment } from "paratix"
-import { file, package as pkg, service, swap, timer } from "paratix/modules"
+import { failedCommandWithDiagnostic, resolveEnvironment } from "paratix"
+import {
+  buildKeyValueDiff,
+  buildUnifiedDiff,
+  file,
+  package as pkg,
+  restartSystemdUnit,
+  service,
+  swap,
+  timer,
+} from "paratix/modules"
 import { swap as rootSwap, timer as rootTimer } from "paratix"
 
 if (typeof resolveEnvironment !== "function") {
   throw new Error("paratix did not export resolveEnvironment")
+}
+for (const [name, helper] of Object.entries({
+  buildKeyValueDiff,
+  buildUnifiedDiff,
+  failedCommandWithDiagnostic,
+  restartSystemdUnit,
+})) {
+  if (typeof helper !== "function") {
+    throw new Error("public package entry point did not export " + name)
+  }
 }
 if (typeof file?.directory !== "function") {
   throw new Error("paratix/modules did not export file.directory")
@@ -733,7 +752,60 @@ console.log("consumer imports ok")
       writeFileSync(
         consumerSourcePath,
         `
-import { recipe, type Module, type ShutdownSignal } from "paratix"
+import {
+  failedCommandWithDiagnostic,
+  recipe,
+  type ExecResult,
+  type Module,
+  type ModuleResult,
+  type ShutdownSignal,
+  type SshConnection,
+  type UnifiedDiffOptions,
+} from "paratix"
+import {
+  buildKeyValueDiff,
+  buildUnifiedDiff,
+  restartSystemdUnit,
+  type UnifiedDiffOptions as ModulesUnifiedDiffOptions,
+} from "paratix/modules"
+
+const failedCommandWithDiagnosticSignature: (parameters: {
+  diagnostic: null | string
+  message: string
+  result: ExecResult
+  secrets?: string[]
+}) => ModuleResult = failedCommandWithDiagnostic
+const buildUnifiedDiffSignature: (
+  current: string,
+  desired: string,
+  options?: UnifiedDiffOptions
+) => string = buildUnifiedDiff
+const buildKeyValueDiffSignature: (
+  key: string,
+  currentValue: null | string,
+  desiredValue: string
+) => string = buildKeyValueDiff
+const restartSystemdUnitSignature: (parameters: {
+  failureMessage: string
+  secrets?: string[]
+  ssh: SshConnection
+  unit: string
+}) => Promise<ModuleResult | null> = restartSystemdUnit
+
+const rootDiffOptions: UnifiedDiffOptions = {
+  contextLines: 2,
+  currentLabel: "current",
+  desiredLabel: "desired",
+}
+const modulesDiffOptions: ModulesUnifiedDiffOptions = rootDiffOptions
+const roundTrippedDiffOptions: UnifiedDiffOptions = modulesDiffOptions
+void [
+  failedCommandWithDiagnosticSignature,
+  buildUnifiedDiffSignature,
+  buildKeyValueDiffSignature,
+  restartSystemdUnitSignature,
+  roundTrippedDiffOptions,
+]
 
 const moduleWithOptions: Module = {
   name: "typed public module",
