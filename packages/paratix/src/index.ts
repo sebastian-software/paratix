@@ -1,8 +1,9 @@
 export { assert, debug, fail, firstRun, pause, signals, when } from "./builtins.js"
 export { resolveEnvironment } from "./environment.js"
 // R-0000695: public helper that returns the async-local first-run flag.
-// Playbooks should call this from `init`/`apply`/`check` rather than
-// reading `process.env.PARATIX_FIRST_RUN`, which the CLI no longer mutates.
+// Playbooks can call it while their top-level module is imported and the
+// server definition is created. Module check/apply runs after this context
+// ends, and the CLI does not expose the flag through `process.env`.
 // R-0000729: imported from the dedicated `firstRunContext` module instead
 // of `cli.ts` so the library bundle does not transitively pull `cli.ts`
 // (and its `import.meta.url` direct-run guard) which broke esbuild chunk
@@ -67,11 +68,12 @@ export { recipe } from "./recipe.js"
 /**
  * Paratix — public API entry point.
  *
- * Re-exports all symbols needed to define servers, recipes, and modules.
- * Import from this module in your server definition files:
+ * Re-exports the core APIs needed to define servers, recipes, and modules.
+ * Import built-in modules from the dedicated `paratix/modules` entry point:
  *
  * @example
- * import { server, recipe, apt, file, service } from "paratix";
+ * import { server, recipe } from "paratix";
+ * import { apt, file, service } from "paratix/modules";
  */
 export { server } from "./server.js"
 export { shellQuote } from "./ssh.js"

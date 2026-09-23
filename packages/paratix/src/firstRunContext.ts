@@ -33,14 +33,16 @@ const firstRunContext = new AsyncLocalStorage<boolean>()
 /**
  * Public API helper that returns the current first-run flag.
  *
- * Returns `true` only when called from inside a
- * `withCliProcessEnvironment` body whose `firstRun` option was `true`.
- * Outside of a CLI invocation, or when the flag was not set, the helper
- * returns `false`. The helper is async-context aware: a playbook that
- * schedules its own microtasks/timers within the CLI body keeps observing
- * the same flag, while concurrent work outside that body sees `false`.
+ * Returns `true` while the CLI imports and evaluates a playbook for an
+ * invocation that uses `--first-run`. This includes construction of the
+ * exported server definition. The context ends before module `check` and
+ * `apply` methods run, and there is no public `init` hook.
  *
- * @returns `true` when the current async context is a first-run CLI body.
+ * The flag is stored in an async-local context and never mutates
+ * `process.env.PARATIX_FIRST_RUN`. Outside the playbook import, or when
+ * `--first-run` was not set, the helper returns `false`.
+ *
+ * @returns `true` while a first-run playbook is being imported and evaluated.
  */
 export function isFirstRun(): boolean {
   return firstRunContext.getStore() === true
