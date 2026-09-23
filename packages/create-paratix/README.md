@@ -187,7 +187,7 @@ All exports from the package root are listed below. CLI and prompt helpers are a
 
 Edit `server.ts` and extend the generated baseline with your own services, files, deployments, and runtime configuration. The scaffold is meant to get you to a safe and productive starting point quickly, not to lock you into a fixed project shape.
 
-For changes to generated project structure, CLI usage, and bootstrap defaults, see the [migration notes](../../docs/user-guide/migration.md). Connection failures in a generated project are covered by the [troubleshooting guide](../../docs/user-guide/troubleshooting.md).
+For changes to generated project structure, CLI usage, and bootstrap defaults, see the [migration notes](https://github.com/sebastian-software/paratix/blob/main/docs/user-guide/migration.md). Connection failures in a generated project are covered by the [troubleshooting guide](https://github.com/sebastian-software/paratix/blob/main/docs/user-guide/troubleshooting.md).
 
 ## License
 

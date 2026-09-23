@@ -148,8 +148,8 @@ Options:
 
 - For project scaffolding, see [`create-paratix`](https://www.npmjs.com/package/create-paratix).
 - See the complete [TypeScript API and Module Reference](./llm-guide.md).
-- For common runtime and connection failures, see [Troubleshooting](../../docs/user-guide/troubleshooting.md).
-- Before upgrading an existing project, see the [migration notes](../../docs/user-guide/migration.md).
+- For common runtime and connection failures, see [Troubleshooting](https://github.com/sebastian-software/paratix/blob/main/docs/user-guide/troubleshooting.md).
+- Before upgrading an existing project, see the [migration notes](https://github.com/sebastian-software/paratix/blob/main/docs/user-guide/migration.md).
 
 ## License
 
