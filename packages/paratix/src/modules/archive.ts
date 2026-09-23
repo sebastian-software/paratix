@@ -2,6 +2,7 @@
 import { failed, failedCommand } from "../moduleFailure.js"
 import { maskRegisteredSecrets } from "../secretSink.js"
 import { shellQuote, validateMktempPath } from "../ssh.js"
+import { CAPTURE_TRUNCATION_MARKER } from "../sshHelpers.js"
 import { type Module, type ModuleResult, NEEDS_APPLY, type SshConnection } from "../types.js"
 import {
   archiveMemberDestinationPaths,
@@ -14,6 +15,7 @@ import {
   validateResolvedDestinationPath,
 } from "./archiveDestinationValidation.js"
 import {
+  ARCHIVE_CAPTURE_LIMIT_BYTES,
   type ArchiveMember,
   archiveMemberUnsafeReason,
   listArchiveMembers,
@@ -34,11 +36,16 @@ import {
 } from "./fileMetadataHelpers.js"
 
 const EXEC_OPTS = { ignoreExitCode: true, silent: true } as const
+const ARCHIVE_CAPTURE_EXEC_OPTS = {
+  ...EXEC_OPTS,
+  maxOutputBytes: ARCHIVE_CAPTURE_LIMIT_BYTES,
+} as const
 const SILENT = { silent: true } as const
 const FLAGS_DIR = "/var/lib/paratix/flags"
 const ARCHIVE_MARKER_MODE = "0644"
 /** Columns emitted by the member ownership probe: `%U %G %u %g`. */
 const ARCHIVE_STAT_OWNERSHIP_FIELDS = 4
+const MISSING_OWNER_PATHS_MARKER_PATTERN = /no such file or directory/iv
 
 type StagingMergeParameters = {
   destination: string
@@ -72,6 +79,14 @@ type ExtractedArchiveMember = {
 }
 
 type MembersMarkerReadResult = "invalid" | ExtractedArchiveMember[] | null
+
+type ArchiveMarkerPayloads = {
+  members: string
+  ownerPaths: null | string
+}
+
+type OwnerPathsMarkerReadResult =
+  { kind: "invalid" } | { kind: "missing" } | { kind: "valid"; paths: string[] }
 
 /**
  * Build the extract command based on the file extension of the original source.
@@ -460,14 +475,11 @@ async function applyExtractedMemberOwner(
 async function writeOwnerPathsMarker(
   conn: SshConnection,
   parameters: {
-    destination: string
+    content: null | string
     marker: string
-    members: ArchiveMember[]
-    owner?: string
-    upload: boolean
   }
 ): Promise<ModuleResult | null> {
-  if (parameters.owner == null || parameters.owner === "") return null
+  if (parameters.content === null) return null
   // R-0000166: persist the member list in *both* upload and non-upload mode.
   // The previous implementation only stored the list when `upload === true`
   // and re-derived it from the live archive (`tar -tvzf <source>`) in the
@@ -477,10 +489,9 @@ async function writeOwnerPathsMarker(
   // owner drift on disk because the per-path stat operated on the wrong
   // file list. Writing the marker on every successful apply ties the owner
   // re-check to the same paths the extract actually touched.
-  const paths = archiveMemberDestinationPaths(parameters.destination, parameters.members)
   const marker = ownerPathsMarkerPath(parameters.marker)
   try {
-    await conn.writeFile(marker, JSON.stringify(paths), {
+    await conn.writeFile(marker, parameters.content, {
       mode: ARCHIVE_MARKER_MODE,
     })
   } catch (error) {
@@ -505,17 +516,44 @@ function extractedArchiveMembers(
   return [...extractedMembers.values()]
 }
 
+function serializeArchiveMarkerPayloads(parameters: {
+  destination: string
+  members: ArchiveMember[]
+  owner?: string
+  source: string
+}): ArchiveMarkerPayloads | ModuleResult {
+  const members = JSON.stringify(
+    extractedArchiveMembers(parameters.destination, parameters.members)
+  )
+  const membersBytes = Buffer.byteLength(members, "utf8")
+  if (membersBytes > ARCHIVE_CAPTURE_LIMIT_BYTES) {
+    return failed(
+      `[archive.extract] refusing to extract ${parameters.source}: archive members marker payload is ${String(membersBytes)} bytes and exceeds the limit of ${String(ARCHIVE_CAPTURE_LIMIT_BYTES)} bytes`
+    )
+  }
+
+  if (parameters.owner == null || parameters.owner === "") {
+    return { members, ownerPaths: null }
+  }
+  const ownerPaths = JSON.stringify(
+    archiveMemberDestinationPaths(parameters.destination, parameters.members)
+  )
+  const ownerPathsBytes = Buffer.byteLength(ownerPaths, "utf8")
+  if (ownerPathsBytes > ARCHIVE_CAPTURE_LIMIT_BYTES) {
+    return failed(
+      `[archive.extract] refusing to extract ${parameters.source}: archive owner-paths marker payload is ${String(ownerPathsBytes)} bytes and exceeds the limit of ${String(ARCHIVE_CAPTURE_LIMIT_BYTES)} bytes`
+    )
+  }
+  return { members, ownerPaths }
+}
+
 async function writeMembersMarker(
   conn: SshConnection,
-  parameters: { destination: string; marker: string; members: ArchiveMember[] }
+  parameters: { content: string; marker: string }
 ): Promise<ModuleResult | null> {
   const marker = membersMarkerPath(parameters.marker)
   try {
-    await conn.writeFile(
-      marker,
-      JSON.stringify(extractedArchiveMembers(parameters.destination, parameters.members)),
-      { mode: ARCHIVE_MARKER_MODE }
-    )
+    await conn.writeFile(marker, parameters.content, { mode: ARCHIVE_MARKER_MODE })
   } catch (error) {
     const reason = error instanceof Error ? error.message : String(error)
     return failed(`[archive.extract] failed to write archive members marker ${marker}: ${reason}`)
@@ -523,7 +561,7 @@ async function writeMembersMarker(
   return null
 }
 
-async function prepareExtractDestination(
+async function preflightExtractDestination(
   conn: SshConnection,
   parameters: { destination: string; source: string }
 ): Promise<{ destination: string } | ModuleResult> {
@@ -534,31 +572,32 @@ async function prepareExtractDestination(
     source: parameters.source,
   })
   if (unsafeDestinationAncestor !== null) return unsafeDestinationAncestor
+  return validatedDestination
+}
+
+async function createAndValidateExtractDestination(
+  conn: SshConnection,
+  parameters: { destination: string; source: string }
+): Promise<ModuleResult | null> {
   const createDestinationFailure = await createExtractDestinationDirectory(
     conn,
-    validatedDestination.destination
+    parameters.destination
   )
   if (createDestinationFailure !== null) return createDestinationFailure
   const unsafeResolvedDestination = await validateResolvedDestinationPath(conn, {
-    destination: validatedDestination.destination,
+    destination: parameters.destination,
     source: parameters.source,
   })
   if (unsafeResolvedDestination !== null) return unsafeResolvedDestination
-  return validatedDestination
+  return null
 }
 
 async function validateMembersForExtraction(
   conn: SshConnection,
-  parameters: { destination: string; remoteSource: string; source: string }
+  parameters: { remoteSource: string; source: string }
 ): Promise<ArchiveMember[] | ModuleResult> {
-  const { destination, remoteSource, source } = parameters
-  const members = await validatedArchiveMembers(conn, { archivePath: remoteSource, source })
-  if (!Array.isArray(members)) return members
-  const unsafeMemberPath = await validateNoSymlinkPaths(conn, {
-    paths: archiveMemberPathsWithAncestors(destination, members),
-    source,
-  })
-  return unsafeMemberPath ?? members
+  const { remoteSource, source } = parameters
+  return validatedArchiveMembers(conn, { archivePath: remoteSource, source })
 }
 
 async function validateTargetsForStagingMerge(
@@ -650,9 +689,13 @@ async function extractViaStagingDirectory(
 
 async function finalizeExtraction(
   conn: SshConnection,
-  parameters: { members: ArchiveMember[]; remoteSource: string } & ApplyParameters
+  parameters: {
+    markerPayloads: ArchiveMarkerPayloads
+    members: ArchiveMember[]
+    remoteSource: string
+  } & ApplyParameters
 ): Promise<ModuleResult> {
-  const { destination, marker, members, owner, remoteSource, source } = parameters
+  const { destination, marker, markerPayloads, members, owner, remoteSource, source } = parameters
 
   const ownerFailure = await applyExtractedMemberOwner(conn, {
     destination,
@@ -664,14 +707,14 @@ async function finalizeExtraction(
 
   const markerFailure = await writeMarker(conn, remoteSource, { marker })
   if (markerFailure !== null) return markerFailure
-  const membersMarkerFailure = await writeMembersMarker(conn, { destination, marker, members })
+  const membersMarkerFailure = await writeMembersMarker(conn, {
+    content: markerPayloads.members,
+    marker,
+  })
   if (membersMarkerFailure !== null) return membersMarkerFailure
   const ownerPathsMarkerFailure = await writeOwnerPathsMarker(conn, {
-    destination,
+    content: markerPayloads.ownerPaths,
     marker,
-    members,
-    owner,
-    upload: parameters.upload,
   })
   if (ownerPathsMarkerFailure !== null) return ownerPathsMarkerFailure
   return { status: "changed" }
@@ -684,20 +727,38 @@ async function runExtraction(
 ): Promise<ModuleResult> {
   const { destination, source } = parameters
 
-  const validatedDestination = await prepareExtractDestination(conn, { destination, source })
+  const validatedDestination = await preflightExtractDestination(conn, { destination, source })
   if ("status" in validatedDestination) return validatedDestination
 
   // R-0000067: validate every archive member before we hand the archive to
-  // tar/unzip. This must happen after guarded destination creation (so the
-  // destination exists) but before the actual extract command runs, otherwise a
-  // malicious archive could already have written a file outside the
-  // destination by the time we notice.
+  // tar/unzip. Static member validation and marker-payload sizing intentionally
+  // happen before destination creation so an invalid or oversized archive
+  // cannot mutate the destination tree before it is rejected.
   const members = await validateMembersForExtraction(conn, {
-    destination: validatedDestination.destination,
     remoteSource,
     source,
   })
   if (!Array.isArray(members)) return members
+
+  const markerPayloads = serializeArchiveMarkerPayloads({
+    destination: validatedDestination.destination,
+    members,
+    owner: parameters.owner,
+    source,
+  })
+  if ("status" in markerPayloads) return markerPayloads
+
+  const destinationFailure = await createAndValidateExtractDestination(conn, {
+    destination: validatedDestination.destination,
+    source,
+  })
+  if (destinationFailure !== null) return destinationFailure
+
+  const unsafeMemberPath = await validateNoSymlinkPaths(conn, {
+    paths: archiveMemberPathsWithAncestors(validatedDestination.destination, members),
+    source,
+  })
+  if (unsafeMemberPath !== null) return unsafeMemberPath
 
   const stagedFailure = await extractViaStagingDirectory(conn, {
     destination: validatedDestination.destination,
@@ -710,6 +771,7 @@ async function runExtraction(
   return finalizeExtraction(conn, {
     ...parameters,
     destination: validatedDestination.destination,
+    markerPayloads,
     members,
     remoteSource,
   })
@@ -796,7 +858,8 @@ async function archiveOwnerMatches(
   // owner re-check stays deterministic even when the source archive is
   // mutated, replaced or removed between apply and the next check.
   const paths = await readOwnerPathsMarker(conn, marker)
-  if (paths !== null) return ownerMatchesPaths(conn, { owner, paths })
+  if (paths.kind === "valid") return ownerMatchesPaths(conn, { owner, paths: paths.paths })
+  if (paths.kind === "invalid") return false
 
   // Backwards compatibility: previous paratix versions only wrote the
   // marker when `upload === true`, so a host extracted by an older release
@@ -829,8 +892,17 @@ async function readMembersMarker(
   conn: SshConnection,
   marker: string
 ): Promise<MembersMarkerReadResult> {
-  const markerResult = await conn.exec(`cat ${shellQuote(membersMarkerPath(marker))}`, EXEC_OPTS)
+  const markerResult = await conn.exec(
+    `cat ${shellQuote(membersMarkerPath(marker))}`,
+    ARCHIVE_CAPTURE_EXEC_OPTS
+  )
   if (markerResult.code !== 0) return null
+  if (
+    markerResult.stdout.endsWith(CAPTURE_TRUNCATION_MARKER) ||
+    markerResult.stderr.endsWith(CAPTURE_TRUNCATION_MARKER)
+  ) {
+    return "invalid"
+  }
   try {
     const members: unknown = JSON.parse(markerResult.stdout)
     return Array.isArray(members) && members.every((member) => isExtractedArchiveMember(member))
@@ -914,21 +986,35 @@ async function ownerMatchesPaths(
   return true
 }
 
-async function readOwnerPathsMarker(conn: SshConnection, marker: string): Promise<null | string[]> {
-  const markerResult = await conn.exec(`cat ${shellQuote(ownerPathsMarkerPath(marker))}`, EXEC_OPTS)
+async function readOwnerPathsMarker(
+  conn: SshConnection,
+  marker: string
+): Promise<OwnerPathsMarkerReadResult> {
+  const markerResult = await conn.exec(`cat ${shellQuote(ownerPathsMarkerPath(marker))}`, {
+    ...ARCHIVE_CAPTURE_EXEC_OPTS,
+    env: { LC_ALL: "C" },
+  })
   if (markerResult.code !== 0) {
     // R-0000276: previously a non-"no such file" stderr (e.g. permission
     // denied after a flag-dir mode drift, or a transient truncate race) raised
     // an exception that propagated past archiveOwnerMatches and aborted the
-    // whole run. Falling through to NEEDS_APPLY lets apply heal the marker,
-    // mirroring the recovery path used by download.ts:compareUnverifiedHashMarker.
-    return null
+    // whole run. Such failures remain recoverable drift, but only a genuine
+    // missing-file diagnostic may use the legacy live-archive fallback.
+    return MISSING_OWNER_PATHS_MARKER_PATTERN.test(markerResult.stderr)
+      ? { kind: "missing" }
+      : { kind: "invalid" }
+  }
+  if (
+    markerResult.stdout.endsWith(CAPTURE_TRUNCATION_MARKER) ||
+    markerResult.stderr.endsWith(CAPTURE_TRUNCATION_MARKER)
+  ) {
+    return { kind: "invalid" }
   }
   try {
     const paths: unknown = JSON.parse(markerResult.stdout)
-    return isStringArray(paths) ? paths : null
+    return isStringArray(paths) ? { kind: "valid", paths } : { kind: "invalid" }
   } catch {
-    return null
+    return { kind: "invalid" }
   }
 }
 

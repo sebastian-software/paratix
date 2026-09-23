@@ -1,6 +1,15 @@
 import type * as NodeFs from "node:fs"
 
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs"
+import {
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  readlinkSync,
+  rmSync,
+  symlinkSync,
+  writeFileSync,
+} from "node:fs"
 import { tmpdir } from "node:os"
 import { join, resolve } from "node:path"
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
@@ -10,6 +19,7 @@ import {
   createStagedProjectDirectory,
   finalizeStagedProjectDirectory,
 } from "../src/projectDirectory.js"
+import { AGENTS_TEMPLATE, CLAUDE_TEMPLATE } from "../src/templates.js"
 import { expectProcessExit, TEST_ADMIN_PUBLIC_KEY } from "./helpers.js"
 
 describe("scaffoldProject", () => {
@@ -96,6 +106,31 @@ describe("scaffoldProject", () => {
     expect(process.exitCode).toBeUndefined()
   })
 
+  it.each([
+    {
+      adminPublicKey: TEST_ADMIN_PUBLIC_KEY,
+      bootstrap: "root",
+      initialUser: { kind: "root" as const },
+    },
+    {
+      adminPublicKey: undefined,
+      bootstrap: "admin",
+      initialUser: { kind: "admin" as const, user: "deploy" },
+    },
+  ])("publishes both agent files for $bootstrap bootstrap", ({ adminPublicKey, initialUser }) => {
+    const installer = vi.fn().mockReturnValue(true)
+
+    const result = scaffoldProject(
+      projectName,
+      { command: { args: ["install"], executable: "pnpm" }, name: "pnpm" },
+      { adminPublicKey, host: "example.com", initialUser, installer }
+    )
+
+    expect(result).toBe(true)
+    expect(readFileSync(join(projectDirectory, "AGENTS.md"), "utf8")).toBe(AGENTS_TEMPLATE)
+    expect(readFileSync(join(projectDirectory, "CLAUDE.md"), "utf8")).toBe(CLAUDE_TEMPLATE)
+  })
+
   it("does not clean a replacement final path when installer failure cleanup runs", () => {
     const sentinelPath = join(projectDirectory, "sentinel.txt")
     const installer = vi.fn(() => {
@@ -133,6 +168,8 @@ describe("scaffoldProject", () => {
 
     expect(result).toBe(false)
     expect(existsSync(join(projectDirectory, "package.json"))).toBe(true)
+    expect(readFileSync(join(projectDirectory, "AGENTS.md"), "utf8")).toBe(AGENTS_TEMPLATE)
+    expect(readFileSync(join(projectDirectory, "CLAUDE.md"), "utf8")).toBe(CLAUDE_TEMPLATE)
     expect(console.log).toHaveBeenCalledWith(
       expect.stringContaining("Project files created, but dependency installation failed.")
     )
@@ -326,6 +363,52 @@ describe("scaffoldProject", () => {
     expect(installer).not.toHaveBeenCalled()
     expect(readFileSync(sentinelPath, "utf8")).toBe("PRE_EXISTING_CONTENT")
   })
+
+  it.each(["AGENTS.md", "CLAUDE.md"])(
+    "does not overwrite a pre-existing %s when staging a project",
+    async (fileName) => {
+      const installer = vi.fn().mockReturnValue(true)
+      mkdirSync(projectDirectory)
+      const agentPath = join(projectDirectory, fileName)
+      writeFileSync(agentPath, "FOREIGN_AGENT_INSTRUCTIONS\n")
+
+      await expectProcessExit(() => {
+        scaffoldProject(
+          projectName,
+          { command: { args: ["install"], executable: "pnpm" }, name: "pnpm" },
+          { host: "example.com", installer }
+        )
+      })
+
+      expect(readFileSync(agentPath, "utf8")).toBe("FOREIGN_AGENT_INSTRUCTIONS\n")
+      expect(existsSync(join(projectDirectory, "package.json"))).toBe(false)
+      expect(installer).not.toHaveBeenCalled()
+    }
+  )
+
+  it.each(["AGENTS.md", "CLAUDE.md"])(
+    "does not follow a pre-existing %s symlink when staging a project",
+    async (fileName) => {
+      const installer = vi.fn().mockReturnValue(true)
+      mkdirSync(projectDirectory)
+      const symlinkTarget = join(scaffoldRoot, "outside-agent-target")
+      const agentPath = join(projectDirectory, fileName)
+      symlinkSync(symlinkTarget, agentPath)
+
+      await expectProcessExit(() => {
+        scaffoldProject(
+          projectName,
+          { command: { args: ["install"], executable: "pnpm" }, name: "pnpm" },
+          { host: "example.com", installer }
+        )
+      })
+
+      expect(readlinkSync(agentPath)).toBe(symlinkTarget)
+      expect(existsSync(symlinkTarget)).toBe(false)
+      expect(existsSync(join(projectDirectory, "package.json"))).toBe(false)
+      expect(installer).not.toHaveBeenCalled()
+    }
+  )
 
   it("reserves the target path and rejects a replacement before staged publish", async () => {
     const stagedProjectDirectory = createStagedProjectDirectory(projectDirectory, projectName)

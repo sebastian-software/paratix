@@ -164,3 +164,32 @@ jobs:
         run: node scripts/publishWorkspacePackages.mjs release
       - if: github.event_name == 'workflow_dispatch'
         run: node scripts/publishWorkspacePackages.mjs "${{ inputs.mode }}"
+
+  refresh-context7:
+    needs:
+      - publish
+      - release-please-release
+    if: >-
+      always() &&
+      needs.publish.result == 'success' &&
+      needs.release-please-release.outputs.release_created == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions: {}
+    steps:
+      - name: Refresh Context7 documentation
+        env:
+          CONTEXT7_API_KEY: ${{ secrets.CONTEXT7_API_KEY }}
+        run: |
+          if [ -z "${CONTEXT7_API_KEY}" ]; then
+            echo "::error::CONTEXT7_API_KEY is not configured."
+            exit 1
+          fi
+
+          curl --fail-with-body --silent --show-error \
+            --max-time 30 \
+            --request POST \
+            --url https://context7.com/api/v1/refresh \
+            --header "Authorization: Bearer ${CONTEXT7_API_KEY}" \
+            --header "Content-Type: application/json" \
+            --data "{\"libraryName\":\"/${GITHUB_REPOSITORY}\"}"

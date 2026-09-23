@@ -11,17 +11,21 @@ import {
   mkdtempSync,
   readdirSync,
   readFileSync,
+  realpathSync,
   rmSync,
+  statSync,
   symlinkSync,
   writeFileSync,
 } from "node:fs"
 import { tmpdir } from "node:os"
-import { dirname, join, resolve } from "node:path"
+import { dirname, join, resolve, sep } from "node:path"
 import { pathToFileURL } from "node:url"
 import { Server, type ServerChannel } from "ssh2"
 import { afterAll, beforeAll, describe, expect, it } from "vitest"
 
 const packageRootDirectory = resolve(import.meta.dirname, "../..")
+const repositoryRootDirectory = resolve(packageRootDirectory, "../..")
+const GITHUB_DOCUMENTATION_PREFIX = "https://github.com/sebastian-software/paratix/blob/main/"
 const CLI_COMMAND_TIMEOUT_MS = 30_000
 const CLI_COMMAND_MAX_BUFFER = 10 * 1024 * 1024
 const PACKAGE_COMMAND_TIMEOUT_MS = 60_000
@@ -175,6 +179,67 @@ function extractPublicApiImports(markdown: string): string {
     throw new Error("Public API import markers contain more than one fenced block")
   }
   return source
+}
+
+function markdownLinkTargets(markdown: string): string[] {
+  const inlineLinkPattern = /!?\[[^\x5B\x5D]*\]\((?<destination>[^\)]*)\)/gv
+  const referenceDefinitionPattern =
+    /^ {0,3}\[[^\x5B\x5D]+\]:[ \t]*(?<destination><[^>\n]+>|\S+)/gmv
+  return [
+    ...markdown.matchAll(inlineLinkPattern),
+    ...markdown.matchAll(referenceDefinitionPattern),
+  ].map((match) => {
+    const destination = (match.groups?.destination ?? "").trim()
+    if (destination.startsWith("<")) return destination.slice(1, destination.indexOf(">"))
+    return destination.split(/\s/v, 1)[0]
+  })
+}
+
+function isWithinDirectory(directory: string, candidate: string): boolean {
+  return candidate === directory || candidate.startsWith(`${directory}${sep}`)
+}
+
+function isPackedFile(
+  markdownPath: string,
+  decodedPath: string,
+  packageRoots: { lexical: string; real: string }
+): boolean {
+  const resolvedPath = resolve(dirname(markdownPath), decodedPath)
+  if (!isWithinDirectory(packageRoots.lexical, resolvedPath)) return false
+  if (!existsSync(resolvedPath) || !statSync(resolvedPath).isFile()) return false
+  return isWithinDirectory(packageRoots.real, realpathSync(resolvedPath))
+}
+
+function invalidPackageFileLinks(
+  markdown: string,
+  markdownPath: string,
+  packageRoot: string
+): string[] {
+  const packageRoots = { lexical: resolve(packageRoot), real: realpathSync(packageRoot) }
+  const invalidLinks: string[] = []
+
+  for (const target of markdownLinkTargets(markdown)) {
+    if (target.startsWith("#") || target.startsWith("//") || /^[a-z][\da-z+.\-]*:/iv.test(target)) {
+      continue
+    }
+
+    const filePath = target.split(/[?#]/v, 1)[0]
+    if (filePath === "") continue
+
+    let decodedPath: string
+    try {
+      decodedPath = decodeURIComponent(filePath)
+    } catch {
+      invalidLinks.push(target)
+      continue
+    }
+
+    if (!isPackedFile(markdownPath, decodedPath, packageRoots)) {
+      invalidLinks.push(target)
+    }
+  }
+
+  return invalidLinks
 }
 
 function endExecStream(stream: ServerChannel, response: CommandResponse): void {
@@ -337,6 +402,77 @@ describe("dist CLI", () => {
     )
     expect(packedTarballEntries.some((entry) => entry.startsWith("package/src/"))).toBe(false)
     expect(packedTarballEntries.some((entry) => entry.startsWith("package/test/"))).toBe(false)
+  })
+
+  it("keeps every packed Markdown file link within the published package", () => {
+    const markdownEntries = packedTarballEntries.filter((entry) =>
+      /^package\/.*\.md$/iv.test(entry)
+    )
+    expect(markdownEntries).toStrictEqual(
+      expect.arrayContaining(["package/README.md", "package/llm-guide.md"])
+    )
+
+    const packedMarkdown = markdownEntries.map((entry) => ({
+      entry,
+      markdown: readFileSync(
+        join(packedPackageRootDirectory, entry.slice("package/".length)),
+        "utf8"
+      ),
+    }))
+    const invalidLinks = packedMarkdown.flatMap(({ entry, markdown }) =>
+      invalidPackageFileLinks(
+        markdown,
+        join(packedPackageRootDirectory, entry.slice("package/".length)),
+        packedPackageRootDirectory
+      ).map((target) => `${entry}: ${target}`)
+    )
+    expect(invalidLinks).toStrictEqual([])
+
+    const packedReadme = packedMarkdown.find(({ entry }) => entry === "package/README.md")?.markdown
+    expect(packedReadme).toContain("[TypeScript API and Module Reference](./llm-guide.md)")
+
+    const githubDocumentationTargets = packedMarkdown.flatMap(({ markdown }) =>
+      markdownLinkTargets(markdown).filter((target) =>
+        target.startsWith(GITHUB_DOCUMENTATION_PREFIX)
+      )
+    )
+    expect(githubDocumentationTargets).toStrictEqual(
+      expect.arrayContaining([
+        `${GITHUB_DOCUMENTATION_PREFIX}docs/user-guide/troubleshooting.md`,
+        `${GITHUB_DOCUMENTATION_PREFIX}docs/user-guide/migration.md`,
+        `${GITHUB_DOCUMENTATION_PREFIX}docs/adr/0006-signal-lists-stop-at-the-first-failed-signal.md`,
+      ])
+    )
+    for (const target of githubDocumentationTargets) {
+      expect(
+        existsSync(join(repositoryRootDirectory, target.slice(GITHUB_DOCUMENTATION_PREFIX.length)))
+      ).toBe(true)
+    }
+  })
+
+  it("rejects missing and escaping Markdown file links while allowing local and anchor links", () => {
+    const outsidePath = join(dirname(packedPackageRootDirectory), "outside.md")
+    const fixture = [
+      "[local](./llm-guide.md)",
+      "[anchor](#dos-and-donts)",
+      "[missing](./missing.md)",
+      "[escape](../outside.md)",
+      "[reference][outside]",
+      "[outside]: ../outside.md",
+    ].join("\n")
+
+    writeFileSync(outsidePath, "outside the package\n")
+    try {
+      expect(
+        invalidPackageFileLinks(
+          fixture,
+          join(packedPackageRootDirectory, "README.md"),
+          packedPackageRootDirectory
+        )
+      ).toStrictEqual(["./missing.md", "../outside.md", "../outside.md"])
+    } finally {
+      rmSync(outsidePath)
+    }
   })
 
   it("publishes exactly the two supported package entry points", () => {

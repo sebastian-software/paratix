@@ -761,7 +761,7 @@ export const nginxRecipe = recipe(
 - Signals follow the same failure rule as modules: a failed signal stops the remaining signals of
   that list, and the recipe or run status becomes `"failed"`. There is no `continueOnError`. Put
   restarts that must all be attempted independently into separate signal lists. See
-  [ADR-0006](../../docs/adr/0006-signal-lists-stop-at-the-first-failed-signal.md).
+  [ADR-0006](https://github.com/sebastian-software/paratix/blob/main/docs/adr/0006-signal-lists-stop-at-the-first-failed-signal.md).
 - `signals.flush()` can be used inside the same scope to execute currently pending signals early.
 - Recipes can be nested: include a recipe in another recipe's module list.
 

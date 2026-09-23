@@ -4,15 +4,17 @@ import {
   existsSync,
   mkdirSync,
   mkdtempSync,
+  readdirSync,
   readFileSync,
   realpathSync,
   rmSync,
+  statSync,
   symlinkSync,
   writeFileSync,
 } from "node:fs"
 import { createRequire } from "node:module"
 import { tmpdir } from "node:os"
-import { delimiter, dirname, join, resolve } from "node:path"
+import { delimiter, dirname, join, resolve, sep } from "node:path"
 import { fileURLToPath, pathToFileURL } from "node:url"
 import { afterAll, beforeAll, describe, expect, it } from "vitest"
 
@@ -20,6 +22,8 @@ import { TEST_ADMIN_PUBLIC_KEY, TEST_HOST_FINGERPRINT } from "../helpers.js"
 
 const require = createRequire(import.meta.url)
 const packageRootDirectory = resolve(import.meta.dirname, "../..")
+const repositoryRootDirectory = resolve(packageRootDirectory, "../..")
+const GITHUB_DOCUMENTATION_PREFIX = "https://github.com/sebastian-software/paratix/blob/main/"
 const paratixIndexPath = resolve(
   fileURLToPath(new URL("../../../paratix/src/index.ts", import.meta.url))
 )
@@ -30,6 +34,73 @@ const paratixCliPath = resolve(
   fileURLToPath(new URL("../../../paratix/src/cli.ts", import.meta.url))
 )
 const CLI_COMMAND_TIMEOUT_MS = 30_000
+const CLI_HELP_INVOCATIONS = [
+  ["--help"],
+  ["-h"],
+  ["help-project", "--help"],
+  ["help-project", "-h"],
+]
+
+function markdownLinkTargets(markdown: string): string[] {
+  const inlineLinkPattern = /!?\[[^\x5B\x5D]*\]\((?<destination>[^\)]*)\)/gv
+  const referenceDefinitionPattern =
+    /^ {0,3}\[[^\x5B\x5D]+\]:[ \t]*(?<destination><[^>\n]+>|\S+)/gmv
+  return [
+    ...markdown.matchAll(inlineLinkPattern),
+    ...markdown.matchAll(referenceDefinitionPattern),
+  ].map((match) => {
+    const destination = (match.groups?.destination ?? "").trim()
+    if (destination.startsWith("<")) return destination.slice(1, destination.indexOf(">"))
+    return destination.split(/\s/v, 1)[0]
+  })
+}
+
+function isWithinDirectory(directory: string, candidate: string): boolean {
+  return candidate === directory || candidate.startsWith(`${directory}${sep}`)
+}
+
+function isPackedFile(
+  markdownPath: string,
+  decodedPath: string,
+  packageRoots: { lexical: string; real: string }
+): boolean {
+  const resolvedPath = resolve(dirname(markdownPath), decodedPath)
+  if (!isWithinDirectory(packageRoots.lexical, resolvedPath)) return false
+  if (!existsSync(resolvedPath) || !statSync(resolvedPath).isFile()) return false
+  return isWithinDirectory(packageRoots.real, realpathSync(resolvedPath))
+}
+
+function invalidPackageFileLinks(
+  markdown: string,
+  markdownPath: string,
+  packageRoot: string
+): string[] {
+  const packageRoots = { lexical: resolve(packageRoot), real: realpathSync(packageRoot) }
+  const invalidLinks: string[] = []
+
+  for (const target of markdownLinkTargets(markdown)) {
+    if (target.startsWith("#") || target.startsWith("//") || /^[a-z][\da-z+.\-]*:/iv.test(target)) {
+      continue
+    }
+
+    const filePath = target.split(/[?#]/v, 1)[0]
+    if (filePath === "") continue
+
+    let decodedPath: string
+    try {
+      decodedPath = decodeURIComponent(filePath)
+    } catch {
+      invalidLinks.push(target)
+      continue
+    }
+
+    if (!isPackedFile(markdownPath, decodedPath, packageRoots)) {
+      invalidLinks.push(target)
+    }
+  }
+
+  return invalidLinks
+}
 
 describe("dist CLI", () => {
   let packedPackageRootDirectory: string
@@ -111,6 +182,71 @@ describe("dist CLI", () => {
     expect(packedTarballEntries.some((entry) => entry.startsWith("package/test/"))).toBe(false)
   })
 
+  it("keeps every packed Markdown file link within the published package", () => {
+    const markdownEntries = packedTarballEntries.filter((entry) =>
+      /^package\/.*\.md$/iv.test(entry)
+    )
+    expect(markdownEntries).toStrictEqual(expect.arrayContaining(["package/README.md"]))
+
+    const packedMarkdown = markdownEntries.map((entry) => ({
+      entry,
+      markdown: readFileSync(
+        join(packedPackageRootDirectory, entry.slice("package/".length)),
+        "utf8"
+      ),
+    }))
+    const invalidLinks = packedMarkdown.flatMap(({ entry, markdown }) =>
+      invalidPackageFileLinks(
+        markdown,
+        join(packedPackageRootDirectory, entry.slice("package/".length)),
+        packedPackageRootDirectory
+      ).map((target) => `${entry}: ${target}`)
+    )
+    expect(invalidLinks).toStrictEqual([])
+
+    const githubDocumentationTargets = packedMarkdown.flatMap(({ markdown }) =>
+      markdownLinkTargets(markdown).filter((target) =>
+        target.startsWith(GITHUB_DOCUMENTATION_PREFIX)
+      )
+    )
+    expect(githubDocumentationTargets).toStrictEqual(
+      expect.arrayContaining([
+        `${GITHUB_DOCUMENTATION_PREFIX}docs/user-guide/migration.md`,
+        `${GITHUB_DOCUMENTATION_PREFIX}docs/user-guide/troubleshooting.md`,
+      ])
+    )
+    for (const target of githubDocumentationTargets) {
+      expect(
+        existsSync(join(repositoryRootDirectory, target.slice(GITHUB_DOCUMENTATION_PREFIX.length)))
+      ).toBe(true)
+    }
+  })
+
+  it("rejects missing and escaping Markdown file links while allowing local and anchor links", () => {
+    const outsidePath = join(dirname(packedPackageRootDirectory), "outside.md")
+    const fixture = [
+      "[local](./README.md)",
+      "[anchor](#usage)",
+      "[missing](./missing.md)",
+      "[escape](../outside.md)",
+      "[reference][outside]",
+      "[outside]: ../outside.md",
+    ].join("\n")
+
+    writeFileSync(outsidePath, "outside the package\n")
+    try {
+      expect(
+        invalidPackageFileLinks(
+          fixture,
+          join(packedPackageRootDirectory, "README.md"),
+          packedPackageRootDirectory
+        )
+      ).toStrictEqual(["./missing.md", "../outside.md", "../outside.md"])
+    } finally {
+      rmSync(outsidePath)
+    }
+  })
+
   it("runs the published binary target for an early usage error", () => {
     const packageJson = readPackageJson()
     expect(packageJson.bin["create-paratix"]).toBe("./dist/index.js")
@@ -129,6 +265,72 @@ describe("dist CLI", () => {
     expect(result.status).toBe(1)
     expect(result.stdout).toBe("")
     expect(result.stderr).toContain("Usage: create-paratix <project-name>")
+  })
+
+  it.each(CLI_HELP_INVOCATIONS)("prints complete help without side effects for %j", (...args) => {
+    const packageJson = readPackageJson()
+    const distCliPath = resolve(packedPackageRootDirectory, packageJson.bin["create-paratix"])
+    const tempDirectory = mkdtempSync(join(tmpdir(), "create-paratix-dist-help-"))
+
+    try {
+      const result = spawnSync(process.execPath, [distCliPath, ...args], {
+        cwd: tempDirectory,
+        encoding: "utf8",
+        input: "",
+        killSignal: "SIGTERM",
+        timeout: CLI_COMMAND_TIMEOUT_MS,
+      })
+
+      expect(result.status).toBe(0)
+      expect(result.stderr).toBe("")
+      expect(result.stdout).toBe(
+        [
+          "Usage: create-paratix <project-name> [--host <domain-or-ip>] [--initial-user <root|name>] [--expected-host-fingerprint <fingerprint>] [--admin-public-key <ssh-public-key>] [--admin-public-key-file <path>]",
+          "",
+          "Options:",
+          "  --host <domain-or-ip>                  Server hostname or IP address.",
+          "  --initial-user <root|name>             Bootstrap as root or a named admin user.",
+          "  --expected-host-fingerprint <fingerprint>  Expected OpenSSH SHA256 host fingerprint.",
+          "  --admin-public-key <ssh-public-key>    Admin SSH public key.",
+          "  --admin-public-key-file <path>         File containing the admin SSH public key.",
+          "  -h                                     Show this help.",
+          "  --help                                 Show this help.",
+          "",
+        ].join("\n")
+      )
+      expect(readdirSync(tempDirectory)).toStrictEqual([])
+    } finally {
+      rmSync(tempDirectory, { force: true, recursive: true })
+    }
+  })
+
+  it("treats a help flag used as an option value as a CLI error", () => {
+    const packageJson = readPackageJson()
+    const distCliPath = resolve(packedPackageRootDirectory, packageJson.bin["create-paratix"])
+    const tempDirectory = mkdtempSync(join(tmpdir(), "create-paratix-dist-help-value-"))
+
+    try {
+      const result = spawnSync(
+        process.execPath,
+        [distCliPath, "help-project", "--host", "--help"],
+        {
+          cwd: tempDirectory,
+          encoding: "utf8",
+          input: "",
+          killSignal: "SIGTERM",
+          timeout: CLI_COMMAND_TIMEOUT_MS,
+        }
+      )
+
+      expect(result.status).toBe(1)
+      expect(result.stdout).toBe("")
+      expect(result.stderr).toContain(
+        'Error: Expected a value for "--host" but got the flag "--help".'
+      )
+      expect(readdirSync(tempDirectory)).toStrictEqual([])
+    } finally {
+      rmSync(tempDirectory, { force: true, recursive: true })
+    }
   })
 
   it("exposes the published dist entry point to ESM consumers", () => {
@@ -178,6 +380,12 @@ describe("dist CLI", () => {
     // before the alias; its tsconfig below has no `baseUrl`, so TypeScript 7
     // would work here too, but switching it would change what the test proves.
     const tscPath = require.resolve("typescript/bin/tsc6")
+    const packedReadme = readFileSync(join(packedPackageRootDirectory, "README.md"), "utf8")
+    const programmaticApi = packedReadme.split("## Programmatic API\n")[1].split("\n## ")[0]
+    const readmeExamples = extractReadmeTypeScriptExamples(programmaticApi)
+    expect(readmeExamples).toHaveLength(2)
+    expect(readmeExamples[0]).toContain("scaffoldProject(")
+    expect(readmeExamples[1]).toContain("writeProjectFiles(")
 
     try {
       mkdirSync(nodeModulesDirectory)
@@ -197,7 +405,7 @@ describe("dist CLI", () => {
               strict: true,
               target: "ES2022",
             },
-            files: ["index.ts"],
+            files: ["index.ts", "readme-scaffold.ts", "readme-write-files.ts"],
           },
           null,
           2
@@ -214,6 +422,8 @@ describe("dist CLI", () => {
           "",
         ].join("\n")
       )
+      writeFileSync(join(tempDirectory, "readme-scaffold.ts"), `${readmeExamples[0]}\n`)
+      writeFileSync(join(tempDirectory, "readme-write-files.ts"), `${readmeExamples[1]}\n`)
 
       const result = spawnSync(process.execPath, [tscPath, "--project", "tsconfig.json"], {
         cwd: tempDirectory,
@@ -379,6 +589,12 @@ describe("dist CLI", () => {
     }
   })
 })
+
+function extractReadmeTypeScriptExamples(programmaticApi: string): string[] {
+  return [...programmaticApi.matchAll(/```typescript\n(?<example>[\s\S]*?)\n```/gv)].map(
+    (match) => match.groups?.example ?? ""
+  )
+}
 
 function readPackageJson(): {
   bin: { "create-paratix": string }

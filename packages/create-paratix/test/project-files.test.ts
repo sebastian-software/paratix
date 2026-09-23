@@ -4,6 +4,7 @@ import {
   mkdirSync,
   mkdtempSync,
   readFileSync,
+  readlinkSync,
   rmSync,
   symlinkSync,
   writeFileSync,
@@ -284,6 +285,78 @@ describe("writeProjectFiles", () => {
 
     expect(existsSync(join(TEST_DIR, "server.ts"))).toBe(true)
   })
+
+  it("writes the same project-specific agent guidance for admin and root bootstrap", () => {
+    const agentGuidance: string[] = []
+
+    for (const initialUser of [
+      { kind: "admin" as const, user: "deploy" },
+      { kind: "root" as const },
+    ]) {
+      const projectDirectory = join(TEST_DIR, initialUser.kind)
+      writeProjectFiles(projectDirectory, {
+        adminPublicKey: TEST_ADMIN_PUBLIC_KEY,
+        host: "deploy.example.com",
+        initialUser,
+      })
+
+      const agents = readFileSync(join(projectDirectory, "AGENTS.md"), "utf8")
+      const claude = readFileSync(join(projectDirectory, "CLAUDE.md"), "utf8")
+
+      expect(agents).toContain(
+        "[agent authoring guidance](node_modules/paratix/llm-guide.md#agent-authoring-guidance)"
+      )
+      expect(agents).toContain("server.ts")
+      expect(agents).toContain("playbooks")
+      expect(agents).toContain("custom modules")
+      expect(agents).toMatch(
+        /If `node_modules` is missing, complete the\s+project installation first\./v
+      )
+      expect(agents).toContain("`paratix`")
+      expect(agents).toContain("`paratix/modules`")
+      expect(agents).not.toContain("deploy.example.com")
+      expect(agents).not.toContain(TEST_ADMIN_PUBLIC_KEY)
+      expect(agents).not.toContain("pnpm agent:check")
+      expect(agents).not.toContain("packages/paratix/llm-guide.md")
+      expect(agents.endsWith("\n")).toBe(true)
+      expect(claude).toBe("@AGENTS.md\n")
+      agentGuidance.push(agents)
+    }
+
+    expect(agentGuidance[0]).toBe(agentGuidance[1])
+  })
+
+  it.each(["AGENTS.md", "CLAUDE.md"])(
+    "does not overwrite an existing %s during direct project writing",
+    (fileName) => {
+      const existingContent = "FOREIGN_AGENT_INSTRUCTIONS\n"
+      const agentPath = join(TEST_DIR, fileName)
+      writeFileSync(agentPath, existingContent)
+
+      expect(() => {
+        writeProjectFiles(TEST_DIR)
+      }).toThrow(/already exists/v)
+
+      expect(readFileSync(agentPath, "utf8")).toBe(existingContent)
+      expect(existsSync(join(TEST_DIR, "package.json"))).toBe(true)
+    }
+  )
+
+  it.each(["AGENTS.md", "CLAUDE.md"])(
+    "does not follow an existing %s symlink during direct project writing",
+    (fileName) => {
+      const symlinkTarget = join(TEST_DIR, "outside-agent-target")
+      const agentPath = join(TEST_DIR, fileName)
+      symlinkSync(symlinkTarget, agentPath)
+
+      expect(() => {
+        writeProjectFiles(TEST_DIR)
+      }).toThrow(/already exists/v)
+
+      expect(readlinkSync(agentPath)).toBe(symlinkTarget)
+      expect(existsSync(symlinkTarget)).toBe(false)
+    }
+  )
 
   it("does not overwrite an existing managed project file", () => {
     const existingPackageJson = '{"name":"keep-me"}\n'
