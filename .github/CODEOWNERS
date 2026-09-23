@@ -1,9 +1,9 @@
-/.github/CODEOWNERS @swernerx @fastner
-/.github/workflows/** @swernerx @fastner
-/scripts/publishWorkspacePackages.mjs @swernerx @fastner
-/scripts/publishWorkspacePackages.test.mjs @swernerx @fastner
-/package.json @swernerx @fastner
-/**/package.json @swernerx @fastner
-/pnpm-lock.yaml @swernerx @fastner
-/release-please-config.json @swernerx @fastner
-/.release-please-manifest.json @swernerx @fastner
+/.github/CODEOWNERS @fastner
+/.github/workflows/** @fastner
+/scripts/publishWorkspacePackages.mjs @fastner
+/scripts/publishWorkspacePackages.test.mjs @fastner
+/package.json @fastner
+/**/package.json @fastner
+/pnpm-lock.yaml @fastner
+/release-please-config.json @fastner
+/.release-please-manifest.json @fastner
