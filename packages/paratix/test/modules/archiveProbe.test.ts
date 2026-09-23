@@ -46,7 +46,11 @@ describe("runBatchedProbe", () => {
     })
 
     expect(execCalls).toHaveLength(1)
-    expect(execCalls[0]?.options?.input).toBe("/opt/app\u0000/opt/two\nlines\u0000")
+    expect(execCalls[0]?.options).toStrictEqual({
+      ignoreExitCode: true,
+      input: "/opt/app\u0000/opt/two\nlines\u0000",
+      silent: true,
+    })
   })
 
   it("reports a non-zero exit as a failure rather than an empty violation list", async () => {

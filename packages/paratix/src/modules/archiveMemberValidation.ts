@@ -1,6 +1,10 @@
 import type { SshConnection } from "../types.js"
 
 import { shellQuote } from "../ssh.js"
+import { CAPTURE_TRUNCATION_MARKER } from "../sshHelpers.js"
+
+/** Maximum captured bytes for archive listings and persisted member metadata. */
+export const ARCHIVE_CAPTURE_LIMIT_BYTES = 16_777_216
 
 /**
  * R-0000067: select the appropriate `tar` listing flag for an archive based
@@ -380,7 +384,19 @@ export async function listArchiveMembers(
   if (command === null) {
     return { failureReason: `unsupported archive format for ${parameters.source}` }
   }
-  const result = await conn.exec(command, { ignoreExitCode: true, silent: true })
+  const result = await conn.exec(command, {
+    ignoreExitCode: true,
+    maxOutputBytes: ARCHIVE_CAPTURE_LIMIT_BYTES,
+    silent: true,
+  })
+  if (
+    result.stdout.endsWith(CAPTURE_TRUNCATION_MARKER) ||
+    result.stderr.endsWith(CAPTURE_TRUNCATION_MARKER)
+  ) {
+    return {
+      failureReason: `archive listing for ${parameters.source} was truncated at the captured-output limit of ${String(ARCHIVE_CAPTURE_LIMIT_BYTES)} bytes; refusing to validate incomplete member data`,
+    }
+  }
   if (result.code !== 0) {
     return {
       failureReason: `failed to list members of ${parameters.source}: ${result.stderr.trim()}`,
