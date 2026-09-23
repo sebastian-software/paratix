@@ -27,6 +27,7 @@ const HTTP_SERVER_READY_RETRIES = 20
 const CLI_COMMAND_TIMEOUT_MS = 60_000
 const CLI_COMMAND_FAILURE_OUTPUT_LIMIT = 8 * 1024
 const CLI_COMMAND_MAX_BUFFER = 10 * 1024 * 1024
+const LEGACY_SSH_CAPTURE_LIMIT_BYTES = 1_048_576
 const unicodeFileName = "über datei こんにちは.txt"
 const unicodeTemplateName = "grüße-vorlage.tmpl"
 const unicodeContent = "Grüße aus Köln – こんにちは мир\n"
@@ -1190,6 +1191,62 @@ describe.skipIf(SKIP_WITHOUT_DOCKER)("Paratix integration", () => {
         { ignoreExitCode: true, silent: true }
       )
       expect(leftoverStaging.stdout.trim()).toBe("")
+    } catch (error) {
+      primaryError = error
+      throw error
+    } finally {
+      await runCleanupSteps(
+        [
+          removeRemoteDirectoryStep(ssh, remoteBase, "remove remote archive test directory"),
+          disconnectSshStep(ssh),
+        ],
+        primaryError
+      )
+    }
+  })
+
+  it("extracts a runner-scale archive whose listing exceeds the legacy capture limit", async () => {
+    // Issue #206: a real tar listing may safely exceed the SSH layer's legacy
+    // 1 MiB capture default. Repeated entries isolate that listing boundary:
+    // destination validation deduplicates the one normalized path, so this
+    // regression does not depend on the separate staging-command size limit.
+    const ssh = await connectSsh([getEnvironment().primaryPort], {}, "root")
+    const remoteBase = `/root/integration-${randomUUID()}`
+    const sourceTree = `${remoteBase}/tree`
+    const archivePath = `${remoteBase}/bundle.tar.gz`
+    const destination = `${remoteBase}/destination`
+    const memberCount = 11_446
+    const memberPath = "nested/runner-scale-distribution-archive-member.txt"
+    const sourceMemberPath = `${sourceTree}/${memberPath}`
+
+    let primaryError: unknown
+    try {
+      await ssh.exec(`mkdir -p ${shellQuote(sourceTree)}/nested`, { silent: true })
+      await ssh.exec(`printf '%s\\n' 'runner-scale member' > ${shellQuote(sourceMemberPath)}`, {
+        silent: true,
+      })
+      await ssh.exec(
+        `cd ${shellQuote(sourceTree)} && yes ${shellQuote(memberPath)} | head -n ${String(memberCount)} | tar -czf ${shellQuote(archivePath)} -T -`,
+        { silent: true }
+      )
+      const listingBytes = Number.parseInt(
+        await ssh.output(`tar -tvzf ${shellQuote(archivePath)} | wc -c`),
+        10
+      )
+      const listedMemberCount = Number.parseInt(
+        await ssh.output(`tar -tzf ${shellQuote(archivePath)} | wc -l`),
+        10
+      )
+      expect(listedMemberCount).toBe(memberCount)
+      expect(listingBytes).toBeGreaterThan(LEGACY_SSH_CAPTURE_LIMIT_BYTES)
+
+      const extractModule = archive.extract(archivePath, destination)
+
+      await expect(extractModule.apply(ssh, emptyEnv)).resolves.toMatchObject({
+        status: "changed",
+      })
+      await expectModuleCheckOk(extractModule, ssh)
+      await expectRemoteFileContent(ssh, `${destination}/${memberPath}`, "runner-scale member\n")
     } catch (error) {
       primaryError = error
       throw error
