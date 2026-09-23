@@ -6,7 +6,6 @@ Root-README.md für das Monorepo erweitern mit:
 
 - Überblick über das Projekt
 - Links zu packages/paratix und packages/create-paratix
-- Homepage https://paratix.oss.sebastian-software.com
 - Copyright Sebastian Software GmbH
 
 ## Betroffene Dateien
@@ -15,9 +14,9 @@ Root-README.md für das Monorepo erweitern mit:
 
 ## Implementierung
 
-### 1. Homepage- und GitHub-Links
+### 1. GitHub-Link
 
-Zeile 3: `[Homepage](https://paratix.oss.sebastian-software.com) · [GitHub](https://github.com/sebastian-software/paratix)`
+Zeile 3: `[GitHub](https://github.com/sebastian-software/paratix)`
 
 ### 2. Packages-Tabelle
 

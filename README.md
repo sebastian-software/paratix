@@ -1,6 +1,6 @@
 # Paratix
 
-[Homepage](https://paratix.oss.sebastian-software.com) · [GitHub](https://github.com/sebastian-software/paratix)
+[GitHub](https://github.com/sebastian-software/paratix)
 
 Paratix is an idempotent server automation tool for people who want the control of code without the overhead of a larger infrastructure platform. You describe the desired state of a VPS in TypeScript, run it over SSH, and Paratix makes only the changes that are actually needed.
 
