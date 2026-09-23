@@ -16,3 +16,4 @@ sebastian-gmbh-paratix-test
 init-test.sh
 .claude/scheduled_tasks.lock
 .effective-flow/
+.DS_Store

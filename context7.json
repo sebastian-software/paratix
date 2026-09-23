@@ -1,0 +1,29 @@
+{
+  "$schema": "https://context7.com/schema/context7.json",
+  "projectTitle": "Paratix",
+  "description": "Idempotent VPS automation over SSH with TypeScript playbooks, a CLI, and project scaffolding.",
+  "folders": ["docs/user-guide", "packages/paratix", "packages/create-paratix"],
+  "excludeFolders": ["coverage", "dist", "node_modules", "src", "test"],
+  "excludeFiles": [
+    "AGENTS.md",
+    "CHANGELOG.md",
+    "CHANGELOG.mdx",
+    "CLAUDE.md",
+    "CODE_OF_CONDUCT.md",
+    "CONTRIBUTING.md",
+    "LICENSE",
+    "LICENSE.md",
+    "SECURITY.md",
+    "changelog.md",
+    "changelog.mdx",
+    "code_of_conduct.md",
+    "license.md"
+  ],
+  "rules": [
+    "Treat packages/paratix/llm-guide.md as the normative API and module reference.",
+    "Import the core API from paratix and built-in modules from paratix/modules.",
+    "For idempotency with command.shell(), always provide a check command.",
+    "Use shellQuote() whenever dynamic values are interpolated into shell commands.",
+    "In strict file.template() templates, every placeholder must use an explicit modifier; use shell for shell output."
+  ]
+}
