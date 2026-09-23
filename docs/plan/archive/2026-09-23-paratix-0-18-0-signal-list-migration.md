@@ -95,9 +95,12 @@ ausschließlich Analyse- und Validierungsquellen und werden nicht geändert.
 5. In `Upgrade` abhängige Schritte zusammenlassen und unabhängig auszuführende Arbeit in separate
    Playbook-Läufe verlegen. Ausdrücklich davor warnen, eine separate oder später angeordnete
    Signal-Liste im bereits fehlgeschlagenen Lauf als garantiert anzunehmen. Als Recovery nach einem
-   tatsächlichen Fehler die Ursache beheben und das Playbook erneut ausführen; für einen bereits
-   geteilten Quadlet-Stack auf den Abschnitt `A Quadlet container cannot be replaced` in
-   `troubleshooting.md` verweisen.
+   tatsächlichen Fehler zuerst die Ursache beheben. Klarstellen, dass ein normaler erneuter Lauf die
+   übersprungenen Signale nur versucht, wenn im selben Scope erneut `changed` entsteht; bei einem
+   vollständig mit `ok` bewerteten Scope steht keine Signal-Liste aus und `signals.flush()` kann sie
+   nicht erzwingen. Deshalb entweder eine echte, beabsichtigte Zustandsänderung auslösen oder die
+   übersprungene Operation direkt ausführen. Für einen bereits geteilten Quadlet-Stack auf den
+   Abschnitt `A Quadlet container cannot be replaced` in `troubleshooting.md` verweisen.
 6. Den bestehenden Auditvermerk um einen separaten Satz zur gezielten 0.18.0-Prüfung am 23. September 2026 ergänzen. Die ursprüngliche Reichweite bis 0.13.0 bleibt unverändert sichtbar.
 7. Format, Patchsauberkeit, bestehendes Rücklinkziel und den vollständigen Repository-Check gemäß
    Validierungsplan prüfen.
@@ -138,8 +141,10 @@ ausschließlich Analyse- und Validierungsquellen und werden nicht geändert.
       eine später angeordnete Liste im selben Recipe oder Run werde garantiert ausgeführt.
 - [ ] `Upgrade` empfiehlt für Arbeit, die trotz eines anderen Fehlers garantiert versucht werden
       soll, separate Playbook-Läufe. Der Text stellt klar, dass eine separate Signal-Liste allein
-      diese Garantie nicht bietet, erwähnt den fehlenden `continueOnError`-Schalter und nennt als
-      Recovery das Beheben der ersten Fehlerursache mit anschließendem erneuten Playbook-Lauf.
+      diese Garantie nicht bietet, erwähnt den fehlenden `continueOnError`-Schalter und erklärt,
+      dass ein erneuter Lauf die übersprungenen Signale nur bei erneutem `changed` im selben Scope
+      versucht. Für einen vollständig mit `ok` bewerteten Scope nennt der Text als Recovery eine
+      echte, beabsichtigte Zustandsänderung oder die direkte Ausführung der übersprungenen Operation.
 - [ ] Ein vorhandener geteilter Quadlet-Stack wird nicht als automatisch repariert dargestellt;
       der Eintrag verweist dafür auf den bestehenden Wiederherstellungsweg in
       `docs/user-guide/troubleshooting.md`.
@@ -215,9 +220,12 @@ ausschließlich Analyse- und Validierungsquellen und werden nicht geändert.
   Signal-Liste allein wird ausdrücklich nicht als Garantie dargestellt.
 - **Fehlerfälle (Hinweis):** Die Formulierung muss Statusfehler und Exceptions abdecken und die
   Listen-Grenze von der Wirkung des umgebenden Recipe- oder Run-Abbruchs unterscheiden.
-- **Fehlerfälle (Hinweis, eingearbeitet):** Der Plan nennt nun das Beheben der Fehlerursache mit
-  anschließendem erneutem Lauf und verweist für einen bereits geteilten Quadlet-Stack auf den
-  vorhandenen sicheren Wiederherstellungsweg. Ein Downgrade wird nicht empfohlen.
+- **Fehlerfälle (Hinweis, eingearbeitet):** Der Plan nennt nun zuerst das Beheben der Fehlerursache
+  und begrenzt den erneuten Lauf auf Scopes, in denen erneut `changed` entsteht. Für einen
+  vollständig mit `ok` bewerteten Scope verlangt er eine echte, beabsichtigte Zustandsänderung oder
+  die direkte Ausführung der übersprungenen Operation. Für einen bereits geteilten Quadlet-Stack
+  verweist er auf den vorhandenen sicheren Wiederherstellungsweg. Ein Downgrade wird nicht
+  empfohlen.
 - **Testbarkeit (Hinweis):** Es existiert kein eigener Markdown-Test. Format- und Patchprüfung,
   Quellenabgleich sowie `pnpm agent:check` bilden den belastbaren repository-nativen Prüfpfad.
 - **Testbarkeit (Hinweis, eingearbeitet):** Tag-Auflösung, historischer Implementierungsdiff,
