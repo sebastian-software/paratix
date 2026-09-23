@@ -1,5 +1,21 @@
 # Changelog
 
+## [0.20.0](https://github.com/sebastian-software/paratix/compare/paratix-v0.19.0...paratix-v0.20.0) (2026-09-23)
+
+
+### Features
+
+* **ci:** migrate workflows to hosted runners ([6b39ee2](https://github.com/sebastian-software/paratix/commit/6b39ee287d9cd00ded834be1d701c12f9ceb413c))
+
+
+### Bug Fixes
+
+* expose documented helper APIs ([1b3efd7](https://github.com/sebastian-software/paratix/commit/1b3efd70554efe4f0d61ba94d9e3615cf51d9d21))
+* handle large archive member listings ([f957f33](https://github.com/sebastian-software/paratix/commit/f957f3355be4aef1d1425f4cda5c5273a9651b1a))
+* keep packaged documentation links reachable ([#214](https://github.com/sebastian-software/paratix/issues/214)) ([d300566](https://github.com/sebastian-software/paratix/commit/d300566aba2999acfa0776f8afb3490a4e1616b2))
+* **paratix:** synchronize public API documentation ([b60471d](https://github.com/sebastian-software/paratix/commit/b60471d1b1308b48444cd4e5af3926cd7d207064))
+* remove obsolete homepage references ([#200](https://github.com/sebastian-software/paratix/issues/200)) ([de85501](https://github.com/sebastian-software/paratix/commit/de855012dc98ba6019b8a0955cd1bb569bada98c))
+
 ## [0.19.0](https://github.com/sebastian-software/paratix/compare/paratix-v0.18.0...paratix-v0.19.0) (2026-08-06)
 
 
