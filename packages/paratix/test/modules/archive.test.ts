@@ -4,10 +4,15 @@ import type { ExecResult } from "../../src/types.js"
 
 import { archive } from "../../src/modules/archive.js"
 import {
+  ARCHIVE_CAPTURE_LIMIT_BYTES,
+  listArchiveMembers,
+} from "../../src/modules/archiveMemberValidation.js"
+import {
   buildMemberTypeProbeScript,
   buildOwnershipProbeScript,
   buildSymlinkProbeScript,
 } from "../../src/modules/archiveProbe.js"
+import { CAPTURE_TRUNCATION_MARKER } from "../../src/sshHelpers.js"
 import { createMockSsh as createBaseMockSsh } from "../helpers/mockSsh.js"
 
 const emptyEnv = {}
@@ -16,6 +21,8 @@ const src = "/tmp/app.tar.gz"
 const destination = "/opt/app"
 const alternateDestination = "/opt/app-alt"
 const safeTarListing = "-rw-r--r-- root/root 0 1970-01-01 00:00 app/file"
+const archiveListingMaxOutputBytes = ARCHIVE_CAPTURE_LIMIT_BYTES
+const legacyCaptureLimitBytes = 1_048_576
 
 // Stable hash of `${src}\n${destination}` for marker file naming.
 const srcHash = "2889be4b654d6b7f7922971e7fb3fdf1c5ebd92b9c52462be2683a735c7562ef"
@@ -99,6 +106,31 @@ function tarListingForMemberPaths(memberPaths: string[]): string {
   return memberPaths
     .map((memberPath) => `-rw-r--r-- root/root 0 1970-01-01 00:00 ${memberPath}`)
     .join("\n")
+}
+
+function listingLargerThanLegacyCaptureLimit(memberLine: string): string {
+  const line = `${memberLine}\n`
+  return line.repeat(Math.floor(legacyCaptureLimitBytes / line.length) + 1)
+}
+
+function singleMemberTarListingOfUtf8Size(sizeBytes: number, suffix = ""): string {
+  const prefix = "-rw-r--r-- root/root 0 1970-01-01 00:00 app/"
+  const paddingBytes =
+    sizeBytes - Buffer.byteLength(prefix, "utf8") - Buffer.byteLength(suffix, "utf8")
+  if (paddingBytes < 1) throw new Error("tar listing size is too small for a valid member")
+  return `${prefix}${"a".repeat(paddingBytes)}${suffix}`
+}
+
+function expectArchiveCaptureExecCall(mockSsh: MockSsh, command: string, pinCLocale = false): void {
+  expect(mockSsh.execCalls).toContainEqual({
+    command,
+    options: {
+      ...(pinCLocale ? { env: { LC_ALL: "C" } } : {}),
+      ignoreExitCode: true,
+      maxOutputBytes: archiveListingMaxOutputBytes,
+      silent: true,
+    },
+  })
 }
 
 const archiveApplyResponseStubs: NonNullable<
@@ -318,6 +350,7 @@ describe("archive.extract — check", () => {
     const mod = archive.extract(src, destination)
     const result = await mod.check(mockSsh, emptyEnv)
     expect(result).toBe("ok")
+    expectArchiveCaptureExecCall(mockSsh, `cat '${membersMarker}'`)
   })
 
   it("returns needs-apply when an extracted member was deleted after extraction", async () => {
@@ -374,6 +407,25 @@ describe("archive.extract — check", () => {
     const result = await mod.check(mockSsh, emptyEnv)
     expect(result).toBe("needs-apply")
     expect(mockSsh.calls).not.toContain(`cat '${marker}'`)
+    expectArchiveCaptureExecCall(mockSsh, `cat '${membersMarker}'`)
+  })
+
+  it("returns needs-apply when the members marker read was truncated", async () => {
+    const mockSsh = createMockSsh({
+      [`cat '${membersMarker}'`]: {
+        code: 0,
+        stdout: `${JSON.stringify([extractedFileMember])}${CAPTURE_TRUNCATION_MARKER}`,
+      },
+      [`test -d '${destination}'`]: { code: 0 },
+      [`test -f '${marker}'`]: { code: 0 },
+    })
+
+    const result = await archive.extract(src, destination).check(mockSsh, emptyEnv)
+
+    expect(result).toBe("needs-apply")
+    expectArchiveCaptureExecCall(mockSsh, `cat '${membersMarker}'`)
+    expect(mockSsh.calls).not.toContain(extractedFileTypeProbe)
+    expect(mockSsh.calls).not.toContain(`cat '${marker}'`)
   })
 
   it("returns needs-apply when the members marker has an invalid schema", async () => {
@@ -414,6 +466,8 @@ describe("archive.extract — check", () => {
     const mod = archive.extract(src, destination, { owner: "www-data:www-data" })
     const result = await mod.check(mockSsh, emptyEnv)
     expect(result).toBe("ok")
+    expectArchiveCaptureExecCall(mockSsh, `cat '${membersMarker}'`)
+    expectArchiveCaptureExecCall(mockSsh, `cat '${ownerPathsMarker}'`, true)
   })
 
   it("returns needs-apply when extracted owner has drifted", async () => {
@@ -540,10 +594,9 @@ describe("archive.extract — check", () => {
 
   it("R-0000276: returns needs-apply when owner-paths marker cat fails with permission denied", async () => {
     // Permission drift on the owner-paths marker (or any non-"no such file"
-    // stderr) must not abort the run. Treat the unreadable marker like a
-    // drift so apply heals it on the next run. With upload=false the
-    // archiveOwnerMatches helper falls back to listing the source archive,
-    // and reports drift when the on-disk owner does not match.
+    // stderr) must not abort the run, but it also must not be confused with a
+    // genuinely missing legacy marker. Fail closed without consulting a live
+    // archive that may no longer describe the extracted paths.
     const ownerPathsMarker = `${marker}.owner-paths`
     const mockSsh = createMockSsh({
       [`cat '${membersMarker}'`]: validMembersMarkerResponse(),
@@ -551,21 +604,17 @@ describe("archive.extract — check", () => {
         code: 1,
         stderr: `cat: '${ownerPathsMarker}': Permission denied`,
       },
-      [`tar -tvzf '${src}'`]: { code: 0, stdout: safeTarListing },
       [`test -d '${destination}'`]: { code: 0 },
       [`test -f '${marker}'`]: { code: 0 },
       [extractedFileTypeProbe]: memberTypeMatchResponse,
-      [ownershipProbeCommand("www-data:www-data")]: ownershipReport(
-        `${destination}/app/file`,
-        "root root 0 0"
-      ),
     })
     const mod = archive.extract(src, destination, { owner: "www-data:www-data" })
     const result = await mod.check(mockSsh, emptyEnv)
     expect(result).toBe("needs-apply")
     expect(mockSsh.calls).toContain(`cat '${ownerPathsMarker}'`)
-    expect(mockSsh.calls).toContain(`tar -tvzf '${src}'`)
-    expect(mockSsh.calls).toContain(ownershipProbeCommand("www-data:www-data"))
+    expectArchiveCaptureExecCall(mockSsh, `cat '${ownerPathsMarker}'`, true)
+    expect(mockSsh.calls).not.toContain(`tar -tvzf '${src}'`)
+    expect(mockSsh.calls).not.toContain(ownershipProbeCommand("www-data:www-data"))
   })
 
   it("computes local sha256 when upload is true without uploading", async () => {
@@ -815,6 +864,116 @@ describe("archive.extract — apply", () => {
     expect(mockSsh.calls).toContain(
       `tar --no-same-owner --no-overwrite-dir -xzf '${tgzSrc}' -C '${archiveStageDirectory}'`
     )
+  })
+
+  // Issue #206: realistic distribution archives can emit more than the SSH
+  // layer's default 1 MiB capture limit while every member is still safe.
+  // The mock does not apply capture limits, so the options assertion is the
+  // evidence that production requests the archive-specific 16 MiB budget.
+  it.each([
+    {
+      extractCommand: `tar --no-same-owner --no-overwrite-dir -xzf '${src}' -C '${archiveStageDirectory}'`,
+      format: "tar",
+      listingCommand: `tar -tvzf '${src}'`,
+      memberLine: safeTarListing,
+      source: src,
+    },
+    {
+      extractCommand: `unzip -o '/tmp/app.zip' -d '${archiveStageDirectory}'`,
+      format: "zip",
+      listingCommand: "unzip -Zs '/tmp/app.zip'",
+      memberLine: "-rw-r--r--  2.0 unx        0 b- defN 26-May-04 00:00 app/file",
+      source: "/tmp/app.zip",
+    },
+  ])("accepts a safe $format listing above the legacy capture limit", async (testCase) => {
+    const listing = listingLargerThanLegacyCaptureLimit(testCase.memberLine)
+    expect(listing.length).toBeGreaterThan(legacyCaptureLimitBytes)
+    const mockSsh = createMockSsh({
+      [testCase.extractCommand]: { code: 0 },
+      [testCase.listingCommand]: { code: 0, stdout: listing },
+    })
+    vi.spyOn(mockSsh, "sha256").mockResolvedValue(archiveSha)
+    vi.spyOn(mockSsh, "writeFile").mockResolvedValue()
+
+    const mod = archive.extract(testCase.source, destination)
+    const result = await mod.apply(mockSsh, emptyEnv)
+
+    expect(result.status).toBe("changed")
+    expectArchiveCaptureExecCall(mockSsh, testCase.listingCommand)
+  })
+
+  it("accepts a complete archive listing at the exact capture limit", async () => {
+    const listing = singleMemberTarListingOfUtf8Size(archiveListingMaxOutputBytes)
+    const mockSsh = createMockSsh({
+      [`tar -tvzf '${src}'`]: { code: 0, stdout: listing },
+    })
+
+    const result = await listArchiveMembers(mockSsh, { archivePath: src, source: src })
+
+    expect(Buffer.byteLength(listing, "utf8")).toBe(archiveListingMaxOutputBytes)
+    expect(result).toMatchObject({ members: [{ format: "tar", kind: "file" }] })
+    expectArchiveCaptureExecCall(mockSsh, `tar -tvzf '${src}'`)
+  })
+
+  it("treats the truncation marker as authoritative at the capture boundary", async () => {
+    const listing = singleMemberTarListingOfUtf8Size(
+      archiveListingMaxOutputBytes,
+      CAPTURE_TRUNCATION_MARKER
+    )
+    const mockSsh = createMockSsh({
+      [`tar -tvzf '${src}'`]: { code: 0, stdout: listing },
+    })
+
+    const result = await listArchiveMembers(mockSsh, { archivePath: src, source: src })
+
+    expect(Buffer.byteLength(listing, "utf8")).toBe(archiveListingMaxOutputBytes)
+    expect(result).toStrictEqual({
+      failureReason: expect.stringMatching(/truncat/iv),
+    })
+    expectArchiveCaptureExecCall(mockSsh, `tar -tvzf '${src}'`)
+  })
+
+  it("reports an actionable failure when the archive listing is truncated", async () => {
+    const mockSsh = createMockSsh({
+      [`tar -tvzf '${src}'`]: {
+        code: 0,
+        stdout: `${safeTarListing}${CAPTURE_TRUNCATION_MARKER}`,
+      },
+    })
+
+    const mod = archive.extract(src, destination)
+    const result = await mod.apply(mockSsh, emptyEnv)
+
+    expect(result.status).toBe("failed")
+    const message = String(result.error)
+    expect(message).toMatch(/truncat/iv)
+    expect(message).toContain(String(archiveListingMaxOutputBytes))
+    expect(message).not.toContain("could not parse tar listing line")
+    expect(findGuardedArchiveMkdirCall(mockSsh.calls, destination)).toBeUndefined()
+    expectNoTarExtractCalls(mockSsh)
+    expectNoArchiveMarkerWrite(mockSsh)
+  })
+
+  it("rejects a UTF-8 members marker above the byte limit before destination mutation", async () => {
+    const unicodeMemberPath = `app/${"é".repeat(Math.floor(archiveListingMaxOutputBytes / 2))}`
+    const listing = `-rw-r--r-- root/root 0 1970-01-01 00:00 ${unicodeMemberPath}`
+    const expectedPayload = JSON.stringify([
+      { kind: "file", path: `${destination}/${unicodeMemberPath}` },
+    ])
+    const mockSsh = createMockSsh({
+      [`tar -tvzf '${src}'`]: { code: 0, stdout: listing },
+    })
+
+    const result = await archive.extract(src, destination).apply(mockSsh, emptyEnv)
+
+    expect(expectedPayload.length).toBeLessThan(archiveListingMaxOutputBytes)
+    expect(Buffer.byteLength(expectedPayload, "utf8")).toBeGreaterThan(archiveListingMaxOutputBytes)
+    expect(result.status).toBe("failed")
+    expect(String(result.error)).toContain("archive members marker payload")
+    expect(String(result.error)).toContain(String(Buffer.byteLength(expectedPayload, "utf8")))
+    expect(findGuardedArchiveMkdirCall(mockSsh.calls, destination)).toBeUndefined()
+    expectNoTarExtractCalls(mockSsh)
+    expectNoArchiveMarkerWrite(mockSsh)
   })
 
   it("limits chown to extracted members when owner is specified", async () => {
@@ -1194,6 +1353,7 @@ describe("archive.extract — apply", () => {
     const remoteTmp = "/tmp/paratix-upload.AbCdEfGh"
     const mockSsh = createMockSsh(
       {
+        [`tar -tvzf '${remoteTmp}'`]: { code: 0, stdout: safeTarListing },
         "mktemp /tmp/paratix-upload.XXXXXXXX": { code: 0, stdout: remoteTmp },
       },
       {
@@ -1215,7 +1375,7 @@ describe("archive.extract — apply", () => {
     expect(String(result.error)).toContain("failed to create destination directory")
     expect(mockSsh.uploadFile).toHaveBeenCalledWith(localFile, remoteTmp)
     expect(mockSsh.calls).toContain(`rm -f -- '${remoteTmp}'`)
-    expect(mockSsh.calls).not.toContain(`tar -tvzf '${remoteTmp}'`)
+    expect(mockSsh.calls).toContain(`tar -tvzf '${remoteTmp}'`)
     expect(mockSsh.calls).not.toContain(
       `tar --no-same-owner --no-overwrite-dir -xzf '${remoteTmp}' -C '${archiveStageDirectory}'`
     )
@@ -2057,6 +2217,35 @@ describe("archive.extract — apply", () => {
     )
   })
 
+  it("serializes UTF-8 bytes consistently in members and owner-paths markers", async () => {
+    const unicodePath = "app/grüße-こんにちは.txt"
+    const listing = `-rw-r--r-- root/root 0 1970-01-01 00:00 ${unicodePath}`
+    const ownerPathsMarker = `${marker}.owner-paths`
+    const membersPayload = JSON.stringify([{ kind: "file", path: `${destination}/${unicodePath}` }])
+    const ownerPathsPayload = JSON.stringify([`${destination}/${unicodePath}`])
+    const mockSsh = createMockSsh({
+      [`tar --no-same-owner --no-overwrite-dir -xzf '${src}' -C '${archiveStageDirectory}'`]: {
+        code: 0,
+      },
+      [`tar -tvzf '${src}'`]: { code: 0, stdout: listing },
+      [batchedChownCommand]: { code: 0 },
+    })
+    vi.spyOn(mockSsh, "sha256").mockResolvedValue(archiveSha)
+    vi.spyOn(mockSsh, "writeFile").mockResolvedValue()
+
+    const result = await archive
+      .extract(src, destination, { owner: "www-data:www-data" })
+      .apply(mockSsh, emptyEnv)
+
+    expect(result.status).toBe("changed")
+    expect(Buffer.byteLength(membersPayload, "utf8")).toBeGreaterThan(membersPayload.length)
+    expect(Buffer.byteLength(ownerPathsPayload, "utf8")).toBeGreaterThan(ownerPathsPayload.length)
+    expect(mockSsh.writeFile).toHaveBeenCalledWith(membersMarker, membersPayload, { mode: "0644" })
+    expect(mockSsh.writeFile).toHaveBeenCalledWith(ownerPathsMarker, ownerPathsPayload, {
+      mode: "0644",
+    })
+  })
+
   it("R-0000166: non-upload owner check operates on the persisted member list, not the live archive", async () => {
     const ownerPathsMarker = `${marker}.owner-paths`
     // The live archive on disk now contains a *different* member; without
@@ -2093,6 +2282,32 @@ describe("archive.extract — apply", () => {
     expect(mockSsh.calls).not.toContain(`tar -tvzf '${src}'`)
   })
 
+  it.each([
+    { label: "malformed", ownerPaths: "{not-json" },
+    {
+      label: "truncated",
+      ownerPaths: `${JSON.stringify([extractedFileMember.path])}${CAPTURE_TRUNCATION_MARKER}`,
+    },
+  ])("fails closed for a $label owner-paths marker without legacy fallback", async (testCase) => {
+    const ownerPathsMarker = `${marker}.owner-paths`
+    const mockSsh = createMockSsh({
+      [`cat '${membersMarker}'`]: validMembersMarkerResponse(),
+      [`cat '${ownerPathsMarker}'`]: { code: 0, stdout: testCase.ownerPaths },
+      [`test -d '${destination}'`]: { code: 0 },
+      [`test -f '${marker}'`]: { code: 0 },
+      [extractedFileTypeProbe]: memberTypeMatchResponse,
+    })
+
+    const result = await archive
+      .extract(src, destination, { owner: "www-data:www-data" })
+      .check(mockSsh, emptyEnv)
+
+    expect(result).toBe("needs-apply")
+    expectArchiveCaptureExecCall(mockSsh, `cat '${ownerPathsMarker}'`, true)
+    expect(mockSsh.calls).not.toContain(`tar -tvzf '${src}'`)
+    expect(mockSsh.calls).not.toContain(ownershipProbeCommand("www-data:www-data"))
+  })
+
   it("R-0000166: falls back to the live archive listing when the owner-paths marker is missing (legacy host)", async () => {
     const ownerPathsMarker = `${marker}.owner-paths`
     const mockSsh = createMockSsh({
@@ -2120,6 +2335,8 @@ describe("archive.extract — apply", () => {
     const result = await mod.check(mockSsh, emptyEnv)
 
     expect(result).toBe("ok")
+    expectArchiveCaptureExecCall(mockSsh, `cat '${ownerPathsMarker}'`, true)
+    expectArchiveCaptureExecCall(mockSsh, `tar -tvzf '${src}'`)
     expect(mockSsh.calls).toContain(`tar -tvzf '${src}'`)
   })
 
