@@ -4,6 +4,7 @@ import {
   existsSync,
   mkdirSync,
   mkdtempSync,
+  readdirSync,
   readFileSync,
   realpathSync,
   rmSync,
@@ -30,6 +31,12 @@ const paratixCliPath = resolve(
   fileURLToPath(new URL("../../../paratix/src/cli.ts", import.meta.url))
 )
 const CLI_COMMAND_TIMEOUT_MS = 30_000
+const CLI_HELP_INVOCATIONS = [
+  ["--help"],
+  ["-h"],
+  ["help-project", "--help"],
+  ["help-project", "-h"],
+]
 
 describe("dist CLI", () => {
   let packedPackageRootDirectory: string
@@ -131,6 +138,72 @@ describe("dist CLI", () => {
     expect(result.stderr).toContain("Usage: create-paratix <project-name>")
   })
 
+  it.each(CLI_HELP_INVOCATIONS)("prints complete help without side effects for %j", (...args) => {
+    const packageJson = readPackageJson()
+    const distCliPath = resolve(packedPackageRootDirectory, packageJson.bin["create-paratix"])
+    const tempDirectory = mkdtempSync(join(tmpdir(), "create-paratix-dist-help-"))
+
+    try {
+      const result = spawnSync(process.execPath, [distCliPath, ...args], {
+        cwd: tempDirectory,
+        encoding: "utf8",
+        input: "",
+        killSignal: "SIGTERM",
+        timeout: CLI_COMMAND_TIMEOUT_MS,
+      })
+
+      expect(result.status).toBe(0)
+      expect(result.stderr).toBe("")
+      expect(result.stdout).toBe(
+        [
+          "Usage: create-paratix <project-name> [--host <domain-or-ip>] [--initial-user <root|name>] [--expected-host-fingerprint <fingerprint>] [--admin-public-key <ssh-public-key>] [--admin-public-key-file <path>]",
+          "",
+          "Options:",
+          "  --host <domain-or-ip>                  Server hostname or IP address.",
+          "  --initial-user <root|name>             Bootstrap as root or a named admin user.",
+          "  --expected-host-fingerprint <fingerprint>  Expected OpenSSH SHA256 host fingerprint.",
+          "  --admin-public-key <ssh-public-key>    Admin SSH public key.",
+          "  --admin-public-key-file <path>         File containing the admin SSH public key.",
+          "  -h                                     Show this help.",
+          "  --help                                 Show this help.",
+          "",
+        ].join("\n")
+      )
+      expect(readdirSync(tempDirectory)).toStrictEqual([])
+    } finally {
+      rmSync(tempDirectory, { force: true, recursive: true })
+    }
+  })
+
+  it("treats a help flag used as an option value as a CLI error", () => {
+    const packageJson = readPackageJson()
+    const distCliPath = resolve(packedPackageRootDirectory, packageJson.bin["create-paratix"])
+    const tempDirectory = mkdtempSync(join(tmpdir(), "create-paratix-dist-help-value-"))
+
+    try {
+      const result = spawnSync(
+        process.execPath,
+        [distCliPath, "help-project", "--host", "--help"],
+        {
+          cwd: tempDirectory,
+          encoding: "utf8",
+          input: "",
+          killSignal: "SIGTERM",
+          timeout: CLI_COMMAND_TIMEOUT_MS,
+        }
+      )
+
+      expect(result.status).toBe(1)
+      expect(result.stdout).toBe("")
+      expect(result.stderr).toContain(
+        'Error: Expected a value for "--host" but got the flag "--help".'
+      )
+      expect(readdirSync(tempDirectory)).toStrictEqual([])
+    } finally {
+      rmSync(tempDirectory, { force: true, recursive: true })
+    }
+  })
+
   it("exposes the published dist entry point to ESM consumers", () => {
     const packageJson = readPackageJson()
     expect(packageJson.main).toBe("./dist/index.js")
@@ -178,6 +251,12 @@ describe("dist CLI", () => {
     // before the alias; its tsconfig below has no `baseUrl`, so TypeScript 7
     // would work here too, but switching it would change what the test proves.
     const tscPath = require.resolve("typescript/bin/tsc6")
+    const packedReadme = readFileSync(join(packedPackageRootDirectory, "README.md"), "utf8")
+    const programmaticApi = packedReadme.split("## Programmatic API\n")[1].split("\n## ")[0]
+    const readmeExamples = extractReadmeTypeScriptExamples(programmaticApi)
+    expect(readmeExamples).toHaveLength(2)
+    expect(readmeExamples[0]).toContain("scaffoldProject(")
+    expect(readmeExamples[1]).toContain("writeProjectFiles(")
 
     try {
       mkdirSync(nodeModulesDirectory)
@@ -197,7 +276,7 @@ describe("dist CLI", () => {
               strict: true,
               target: "ES2022",
             },
-            files: ["index.ts"],
+            files: ["index.ts", "readme-scaffold.ts", "readme-write-files.ts"],
           },
           null,
           2
@@ -214,6 +293,8 @@ describe("dist CLI", () => {
           "",
         ].join("\n")
       )
+      writeFileSync(join(tempDirectory, "readme-scaffold.ts"), `${readmeExamples[0]}\n`)
+      writeFileSync(join(tempDirectory, "readme-write-files.ts"), `${readmeExamples[1]}\n`)
 
       const result = spawnSync(process.execPath, [tscPath, "--project", "tsconfig.json"], {
         cwd: tempDirectory,
@@ -379,6 +460,12 @@ describe("dist CLI", () => {
     }
   })
 })
+
+function extractReadmeTypeScriptExamples(programmaticApi: string): string[] {
+  return [...programmaticApi.matchAll(/```typescript\n(?<example>[\s\S]*?)\n```/gv)].map(
+    (match) => match.groups?.example ?? ""
+  )
+}
 
 function readPackageJson(): {
   bin: { "create-paratix": string }

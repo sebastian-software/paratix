@@ -23,6 +23,7 @@ import {
   type StagedProjectDirectory,
 } from "./projectDirectory.js"
 import {
+  getCliHelp,
   normalizeProgrammaticScaffoldStringOptions,
   parseInitialUserConfig as parseScaffoldInitialUserConfig,
 } from "./scaffoldConfig.js"
@@ -301,7 +302,33 @@ function forceExitAfterHandling(): void {
   })
 }
 
+const CLI_VALUE_OPTIONS = new Set([
+  "--admin-public-key",
+  "--admin-public-key-file",
+  "--expected-host-fingerprint",
+  "--host",
+  "--initial-user",
+])
+
+function hasHelpFlag(argv: string[]): boolean {
+  for (let index = 0; index < argv.length; index++) {
+    const argument = argv[index]
+    if (CLI_VALUE_OPTIONS.has(argument)) {
+      index++
+      continue
+    }
+    if (argument === "--help" || argument === "-h") return true
+  }
+  return false
+}
+
 function main(): void {
+  const argv = process.argv.slice(2)
+  if (hasHelpFlag(argv)) {
+    console.log(getCliHelp())
+    return
+  }
+
   // R-0000739: install global last-resort handlers so a rejection or
   // throw that escapes the in-flight async pipeline (e.g. an `await`
   // missed inside a prompt callback, or a synchronous throw inside a
@@ -332,7 +359,7 @@ function main(): void {
       host,
       initialUser,
       projectName,
-    } = parseCliArguments(process.argv.slice(2))
+    } = parseCliArguments(argv)
 
     const normalizedProjectName = validateProjectName(projectName)
 
