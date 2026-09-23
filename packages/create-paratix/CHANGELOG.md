@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.20.0](https://github.com/sebastian-software/paratix/compare/create-paratix-v0.19.0...create-paratix-v0.20.0) (2026-09-23)
+
+
+### Features
+
+* add agent guidance and CLI help to create-paratix ([4690a59](https://github.com/sebastian-software/paratix/commit/4690a593645a012577d532d069bca877f93fb149))
+
+
+### Bug Fixes
+
+* keep packaged documentation links reachable ([#214](https://github.com/sebastian-software/paratix/issues/214)) ([d300566](https://github.com/sebastian-software/paratix/commit/d300566aba2999acfa0776f8afb3490a4e1616b2))
+* remove obsolete homepage references ([#200](https://github.com/sebastian-software/paratix/issues/200)) ([de85501](https://github.com/sebastian-software/paratix/commit/de855012dc98ba6019b8a0955cd1bb569bada98c))
+
 ## [0.19.0](https://github.com/sebastian-software/paratix/compare/create-paratix-v0.18.0...create-paratix-v0.19.0) (2026-08-06)
 
 
