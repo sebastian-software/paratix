@@ -2,6 +2,8 @@
   "$schema": "https://context7.com/schema/context7.json",
   "projectTitle": "Paratix",
   "description": "Idempotent VPS automation over SSH with TypeScript playbooks, a CLI, and project scaffolding.",
+  "url": "https://context7.com/sebastian-software/paratix",
+  "public_key": "pk_XL0OOkjh9m35HpKd4VHyx",
   "folders": ["docs/user-guide", "packages/paratix", "packages/create-paratix"],
   "excludeFolders": ["coverage", "dist", "node_modules", "src", "test"],
   "excludeFiles": [
