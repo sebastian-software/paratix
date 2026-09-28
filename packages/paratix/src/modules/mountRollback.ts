@@ -4,7 +4,7 @@ import type { BindSource, LiveMount, LiveMountChange } from "./mountTypes.js"
 import { failed, failedCommand } from "../moduleFailure.js"
 import { shellQuote } from "../ssh.js"
 import { buildBindRemountCommand, buildRestoreMountCommand } from "./mountConvergence.js"
-import { knownLiveVfsFlags } from "./mountOptions.js"
+import { renderBindRollbackVfsFlags } from "./mountOptions.js"
 
 const EXEC_OPTS = { ignoreExitCode: true, silent: true } as const
 const MOUNT_PRESENT = "mount.present"
@@ -14,6 +14,8 @@ export type LiveMountRollbackParameters = {
   /** The resolved bind source, or `null` for a non-bind desired mount. */
   bindSource: BindSource | null
   change: LiveMountChange
+  /** The desired mount options the live change was applied with. */
+  opts: string
   path: string
   previousLive: LiveMount | null
   src: string
@@ -33,7 +35,9 @@ export function appendLiveRollbackFailure(
 /**
  * Roll a bind mount back after the fstab write failed, for a change that
  * kept or replaced an existing mount: a remount-only change is remounted back
- * to the previous VFS flags without an unmount, and an identity change keeps
+ * to the complete previous VFS flag state (including clearing tokens such as
+ * `exec`, so a flag the forward remount added is removed again) without an
+ * unmount, and an identity change keeps
  * the new mount (an unmount would leave the path empty, and the previous
  * mount cannot be recreated from its SOURCE text) and only adds a note. A
  * fresh bind mount is not handled here; it is unmounted like any other mount.
@@ -46,7 +50,7 @@ async function rollbackBindChangeAfterFstabFailure(
   ssh: SshConnection,
   parameters: LiveMountRollbackParameters
 ): Promise<ModuleResult | null> {
-  const { change, path, previousLive, src } = parameters
+  const { change, opts, path, previousLive, src } = parameters
   if (change === "replace") {
     return failed(
       `[${MOUNT_PRESENT}: ${path}] note: the new bind mount was kept in place and the ` +
@@ -56,7 +60,11 @@ async function rollbackBindChangeAfterFstabFailure(
   if (previousLive == null) return null
 
   const remountResult = await ssh.exec(
-    buildBindRemountCommand({ flags: knownLiveVfsFlags(previousLive.vfsOptions), path, src }),
+    buildBindRemountCommand({
+      flags: renderBindRollbackVfsFlags(previousLive.vfsOptions, opts),
+      path,
+      src,
+    }),
     EXEC_OPTS
   )
   return remountResult.code === 0

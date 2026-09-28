@@ -299,15 +299,21 @@ export function renderBindRemountVfsFlags(liveVfsOptions: string, desiredOpts: s
 }
 
 /**
- * Keep only the known VFS flag tokens of a live VFS-OPTIONS value, in their
- * original order, so a rollback remount never passes unexpected tokens from
- * remote output to mount(8).
+ * Render the flags for the rollback remount after a bind flag remount: the
+ * complete previous VFS flag state, so every flag the forward remount changed
+ * (see {@link renderBindRemountVfsFlags}) is set back on every mount API,
+ * including a flag it added such as `noexec`, which is cleared with `exec`.
  *
- * @param vfsOptions - The live VFS-OPTIONS value.
- * @returns The comma-separated known VFS flag tokens.
+ * @param previousVfsOptions - The live VFS-OPTIONS value before the forward
+ *   remount.
+ * @param appliedOpts - The desired bind mount options the forward remount
+ *   applied.
+ * @returns The comma-separated canonical flag tokens.
  */
-export function knownLiveVfsFlags(vfsOptions: string): string {
-  return optionTokens(vfsOptions)
-    .filter((option) => VFS_FLAG_TOKENS.has(option))
-    .join(",")
+export function renderBindRollbackVfsFlags(
+  previousVfsOptions: string,
+  appliedOpts: string
+): string {
+  const previous = liveVfsFlags(previousVfsOptions)
+  return renderVfsFlagState(previous, overrideVfsFlags(previous, explicitVfsFlags(appliedOpts)))
 }

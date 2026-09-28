@@ -389,6 +389,7 @@ async function ensurePersistedMountAfterLiveChange(
     bindSource: BindSource | null
     desiredLine: string
     liveResult: EnsureLiveMountResult
+    opts: string
     path: string
     src: string
   }
@@ -402,6 +403,7 @@ async function ensurePersistedMountAfterLiveChange(
   const rollbackFailure = await rollbackLiveMountAfterFstabFailure(ssh, {
     bindSource: parameters.bindSource,
     change: parameters.liveResult.change,
+    opts: parameters.opts,
     path: parameters.path,
     previousLive: parameters.liveResult.previousLive,
     src: parameters.src,
@@ -740,8 +742,8 @@ export const mount = {
    * flags.
    *
    * If writing `/etc/fstab` fails after a live change, a fresh mount is
-   * unmounted again, a bind flag remount is remounted back to the previous
-   * VFS flags, and a replaced bind mount is kept (the failure notes that the
+   * unmounted again, a bind flag remount is remounted back to the complete
+   * previous VFS flag state, and a replaced bind mount is kept (the failure notes that the
    * previous mount was not restored). A previous mount whose FSROOT is not
    * `/` is never recreated automatically; the new mount is then kept in place
    * instead of being unmounted, so the path is never left empty.
@@ -790,6 +792,7 @@ export const mount = {
             bindSource,
             desiredLine,
             liveResult,
+            opts,
             path,
             src,
           })

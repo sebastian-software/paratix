@@ -2622,7 +2622,7 @@ describe("mount — rollback after an fstab write failure (#218)", () => {
 
   it("bind remount-only change: remounts back to the previous known VFS flags without umount", async () => {
     const remountRo = bindRemountCmd("ro,nosuid,nodev,exec,relatime,diratime")
-    const remountBack = bindRemountCmd("rw,relatime,nodev,nosuid")
+    const remountBack = bindRemountCmd("rw,nosuid,nodev,exec,relatime,diratime")
     const applySsh = createMountApplyMockSsh({
       ...bindResolutionResponses(),
       ...fstabFailure,
@@ -2638,9 +2638,45 @@ describe("mount — rollback after an fstab write failure (#218)", () => {
     expect(mountMutations(applySsh.calls)).toStrictEqual([remountRo, remountBack])
   })
 
+  it.each([
+    {
+      forward: "rw,suid,dev,noexec,relatime,diratime",
+      opts: "bind,noexec",
+      rollback: "rw,suid,dev,exec,relatime,diratime",
+    },
+    {
+      forward: "rw,suid,dev,exec,relatime,diratime,nosymfollow",
+      opts: "bind,nosymfollow",
+      rollback: "rw,suid,dev,exec,relatime,diratime,symfollow",
+    },
+  ])(
+    "bind remount-only change ($opts from live rw,relatime): the remount back clears the flag the forward remount added",
+    async ({ forward, opts, rollback }) => {
+      const applySsh = createMountApplyMockSsh({
+        ...bindResolutionResponses(),
+        ...fstabFailure,
+        [bindRemountCmd(forward)]: { code: 0 },
+        [bindRemountCmd(rollback)]: { code: 0 },
+        [findmntCheckCmd]: { code: 0, stdout: boundLive({ vfsOptions: "rw,relatime" }) },
+      })
+      const result = await mount
+        .present(bindOptions(opts, { persist: true }))
+        .apply(applySsh, emptyEnv)
+
+      expectFstabFailure(result)
+      expect(mountMutations(applySsh.calls)).toStrictEqual([
+        bindRemountCmd(forward),
+        bindRemountCmd(rollback),
+      ])
+      const [, rollbackCall] = mountMutations(applySsh.calls)
+      expect(rollbackCall).toMatch(/,exec,/v)
+      expect(rollbackCall).not.toContain("noexec")
+    }
+  )
+
   it("bind remount-only change: reports a failed remount back", async () => {
     const remountRo = bindRemountCmd("ro,nosuid,nodev,exec,relatime,diratime")
-    const remountBack = bindRemountCmd("rw,nosuid,nodev,relatime")
+    const remountBack = bindRemountCmd("rw,nosuid,nodev,exec,relatime,diratime")
     const applySsh = createMountApplyMockSsh({
       ...bindResolutionResponses(),
       ...fstabFailure,
