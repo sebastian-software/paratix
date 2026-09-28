@@ -4,6 +4,7 @@ import { describe, expect, it } from "vitest"
 import type { ExecOptions, ExecResult } from "../../src/types.js"
 
 import { detectPackageManager, pkg } from "../../src/modules/package.js"
+import { dpkgStatusQueryCommand } from "../../src/modules/packageAbsent.js"
 import { CommandError } from "../../src/sshHelpers.js"
 import { createMockSsh } from "../helpers/mockSsh.js"
 
@@ -904,6 +905,45 @@ describe("pkg.installed version pinning", () => {
 // pkg.absent
 // ---------------------------------------------------------------------------
 
+/** Exec options every dpkg purge-detection query must use (no timeout). */
+const PURGE_QUERY_OPTS = { ignoreExitCode: true, silent: true }
+
+/**
+ * Legacy apt presence probe used by the plain remove path.
+ *
+ * @param name - Package name.
+ * @returns The probe command as issued by `isPackageInstalled`.
+ */
+const legacyAptProbe = (name: string): string =>
+  `dpkg-query -W -f='\${Status}' '${name}' 2>/dev/null | grep -q 'install ok installed'`
+
+/**
+ * Exact apt purge command for already shell-quoted identifiers.
+ *
+ * @param quotedIds - Space-separated, shell-quoted dpkg identifiers.
+ * @returns The purge command as issued by `package.absent`.
+ */
+const aptPurgeCommand = (quotedIds: string): string =>
+  `DEBIAN_FRONTEND=noninteractive apt-get purge -y -- ${quotedIds}`
+
+/**
+ * Recorded `apt-get purge` exec calls.
+ *
+ * @param ssh - Mock connection.
+ * @returns The matching exec calls in order.
+ */
+const aptPurgeCalls = (ssh: MockSsh) =>
+  ssh.execCalls.filter((call) => call.command.includes("apt-get purge"))
+
+/**
+ * Recorded dpkg purge-detection query exec calls.
+ *
+ * @param ssh - Mock connection.
+ * @returns The matching exec calls in order.
+ */
+const dpkgQueryCalls = (ssh: MockSsh) =>
+  ssh.execCalls.filter((call) => call.command.startsWith("dpkg-query -W -f='${binary:Package}"))
+
 describe("pkg.absent", () => {
   // check
 
@@ -1055,6 +1095,364 @@ describe("pkg.absent", () => {
   it("accepts a PackageSpec without a version", () => {
     const mod = pkg.absent({ name: "nginx" })
     expect(mod.name).toBe("package.absent: nginx")
+  })
+
+  // -------------------------------------------------------------------------
+  // purge option
+  // -------------------------------------------------------------------------
+
+  describe("purge", () => {
+    it("builds a newline-terminated multiarch dpkg query", () => {
+      expect(dpkgStatusQueryCommand("foo")).toBe(
+        "dpkg-query -W -f='${binary:Package} ${db:Status-Status}\\n' 'foo' 2>/dev/null"
+      )
+    })
+
+    it("apply purges an installed package and reports changed without detail", async () => {
+      const ssh = createMockSsh({
+        ...APT_FOUND,
+        [aptPurgeCommand("'foo'")]: { code: 0 },
+        [dpkgStatusQueryCommand("foo")]: { code: 0, stdout: "foo installed\n" },
+      })
+      const mod = pkg.absent("foo", { purge: true })
+      expect(await mod.apply(ssh, emptyEnv)).toStrictEqual({ status: "changed" })
+      expect(aptPurgeCalls(ssh).map((call) => call.command)).toStrictEqual([
+        aptPurgeCommand("'foo'"),
+      ])
+      expect(mod.name).toBe("package.absent: foo")
+    })
+
+    it("check returns needs-apply for an installed package", async () => {
+      const ssh = createMockSsh({
+        ...APT_FOUND,
+        [dpkgStatusQueryCommand("foo")]: { code: 0, stdout: "foo installed\n" },
+      })
+      const mod = pkg.absent("foo", { purge: true })
+      expect(await mod.check(ssh, emptyEnv)).toBe("needs-apply")
+    })
+
+    it("apply purges a package left in the config-files (rc) state", async () => {
+      const ssh = createMockSsh({
+        ...APT_FOUND,
+        [aptPurgeCommand("'foo'")]: { code: 0 },
+        [dpkgStatusQueryCommand("foo")]: { code: 0, stdout: "foo config-files\n" },
+      })
+      const mod = pkg.absent("foo", { purge: true })
+      expect(await mod.apply(ssh, emptyEnv)).toStrictEqual({ status: "changed" })
+      expect(aptPurgeCalls(ssh)).toHaveLength(1)
+    })
+
+    it("check returns needs-apply for a package in the rc state", async () => {
+      const ssh = createMockSsh({
+        ...APT_FOUND,
+        [dpkgStatusQueryCommand("foo")]: { code: 0, stdout: "foo config-files\n" },
+      })
+      const mod = pkg.absent("foo", { purge: true })
+      expect(await mod.check(ssh, emptyEnv)).toBe("needs-apply")
+    })
+
+    // Regression: without `purge` an rc remnant is not "installed", so the
+    // plain path keeps reporting ok and never issues the purge query.
+    it("without purge an rc package stays ok in check and apply", async () => {
+      const ssh = createMockSsh({
+        ...APT_FOUND,
+        [legacyAptProbe("foo")]: { code: 1 },
+      })
+      const mod = pkg.absent("foo")
+      expect(await mod.check(ssh, emptyEnv)).toBe("ok")
+      expect(await mod.apply(ssh, emptyEnv)).toStrictEqual({ status: "ok" })
+      expect(dpkgQueryCalls(ssh)).toHaveLength(0)
+      expect(ssh.calls.some((call) => /apt-get (?:remove|purge)/v.test(call))).toBe(false)
+    })
+
+    it("an unknown package (dpkg-query exit 1) is ok in apply and check without a purge", async () => {
+      const ssh = createMockSsh({
+        ...APT_FOUND,
+        [dpkgStatusQueryCommand("foo")]: { code: 1, stdout: "" },
+      })
+      const mod = pkg.absent("foo", { purge: true })
+      expect(await mod.apply(ssh, emptyEnv)).toStrictEqual({ status: "ok" })
+      expect(await mod.check(ssh, emptyEnv)).toBe("ok")
+      expect(aptPurgeCalls(ssh)).toHaveLength(0)
+    })
+
+    it("an entry in the not-installed state counts as absent", async () => {
+      const ssh = createMockSsh({
+        ...APT_FOUND,
+        [dpkgStatusQueryCommand("foo")]: { code: 0, stdout: "foo not-installed\n" },
+      })
+      const mod = pkg.absent("foo", { purge: true })
+      expect(await mod.apply(ssh, emptyEnv)).toStrictEqual({ status: "ok" })
+      expect(await mod.check(ssh, emptyEnv)).toBe("ok")
+      expect(aptPurgeCalls(ssh)).toHaveLength(0)
+    })
+
+    it("apply queries every name and purges only the installed and rc entries of a mixed list", async () => {
+      const ssh = createMockSsh({
+        ...APT_FOUND,
+        [aptPurgeCommand("'alpha' 'beta'")]: { code: 0 },
+        [dpkgStatusQueryCommand("alpha")]: { code: 0, stdout: "alpha installed\n" },
+        [dpkgStatusQueryCommand("beta")]: { code: 0, stdout: "beta config-files\n" },
+        [dpkgStatusQueryCommand("gamma")]: { code: 1, stdout: "" },
+      })
+      const mod = pkg.absent("alpha", "beta", "gamma", { purge: true })
+      expect(await mod.apply(ssh, emptyEnv)).toStrictEqual({ status: "changed" })
+      expect(dpkgQueryCalls(ssh).map((call) => call.command)).toStrictEqual([
+        dpkgStatusQueryCommand("alpha"),
+        dpkgStatusQueryCommand("beta"),
+        dpkgStatusQueryCommand("gamma"),
+      ])
+      expect(aptPurgeCalls(ssh).map((call) => call.command)).toStrictEqual([
+        aptPurgeCommand("'alpha' 'beta'"),
+      ])
+    })
+
+    it("apply purges a foreign-architecture rc remnant by its name:arch identifier", async () => {
+      const ssh = createMockSsh({
+        ...APT_FOUND,
+        [aptPurgeCommand("'foo:i386'")]: { code: 0 },
+        [dpkgStatusQueryCommand("foo")]: { code: 0, stdout: "foo:i386 config-files\n" },
+      })
+      const mod = pkg.absent("foo", { purge: true })
+      expect(await mod.apply(ssh, emptyEnv)).toStrictEqual({ status: "changed" })
+      expect(aptPurgeCalls(ssh).map((call) => call.command)).toStrictEqual([
+        aptPurgeCommand("'foo:i386'"),
+      ])
+
+      // Second run: dpkg no longer knows the name, so the module is idempotent.
+      const purgedSsh = createMockSsh({
+        ...APT_FOUND,
+        [dpkgStatusQueryCommand("foo")]: { code: 1, stdout: "" },
+      })
+      expect(await mod.check(purgedSsh, emptyEnv)).toBe("ok")
+      expect(await mod.apply(purgedSsh, emptyEnv)).toStrictEqual({ status: "ok" })
+    })
+
+    it("apply purges every remnant entry of a multiarch package", async () => {
+      const ssh = createMockSsh({
+        ...APT_FOUND,
+        [aptPurgeCommand("'foo:amd64' 'foo:i386'")]: { code: 0 },
+        [dpkgStatusQueryCommand("foo")]: {
+          code: 0,
+          stdout: "foo:amd64 installed\nfoo:i386 config-files\nfoo:arm64 not-installed\n",
+        },
+      })
+      const mod = pkg.absent("foo", { purge: true })
+      expect(await mod.apply(ssh, emptyEnv)).toStrictEqual({ status: "changed" })
+      expect(aptPurgeCalls(ssh).map((call) => call.command)).toStrictEqual([
+        aptPurgeCommand("'foo:amd64' 'foo:i386'"),
+      ])
+    })
+
+    it.each(["half-installed", "unpacked", "half-configured"])(
+      "a package in the %s state counts as present and is purged",
+      async (status) => {
+        const ssh = createMockSsh({
+          ...APT_FOUND,
+          [aptPurgeCommand("'foo'")]: { code: 0 },
+          [dpkgStatusQueryCommand("foo")]: { code: 0, stdout: `foo ${status}\n` },
+        })
+        const mod = pkg.absent("foo", { purge: true })
+        expect(await mod.check(ssh, emptyEnv)).toBe("needs-apply")
+        expect(await mod.apply(ssh, emptyEnv)).toStrictEqual({ status: "changed" })
+        expect(aptPurgeCalls(ssh)).toHaveLength(1)
+      }
+    )
+
+    it("apply passes a package named twice only once to apt-get purge", async () => {
+      const ssh = createMockSsh({
+        ...APT_FOUND,
+        [aptPurgeCommand("'foo'")]: { code: 0 },
+        [dpkgStatusQueryCommand("foo")]: { code: 0, stdout: "foo installed\n" },
+      })
+      const mod = pkg.absent("foo", "foo", { purge: true })
+      expect(await mod.apply(ssh, emptyEnv)).toStrictEqual({ status: "changed" })
+      expect(aptPurgeCalls(ssh).map((call) => call.command)).toStrictEqual([
+        aptPurgeCommand("'foo'"),
+      ])
+    })
+
+    it("the purge command runs no autoremove", async () => {
+      const ssh = createMockSsh({
+        ...APT_FOUND,
+        [aptPurgeCommand("'foo'")]: { code: 0 },
+        [dpkgStatusQueryCommand("foo")]: { code: 0, stdout: "foo installed\n" },
+      })
+      await pkg.absent("foo", { purge: true }).apply(ssh, emptyEnv)
+      const purgeCommands = aptPurgeCalls(ssh).map((call) => call.command)
+      expect(purgeCommands).toStrictEqual([
+        "DEBIAN_FRONTEND=noninteractive apt-get purge -y -- 'foo'",
+      ])
+      expect(purgeCommands.join("\n")).not.toContain("autoremove")
+      expect(purgeCommands.join("\n")).not.toContain("--auto-remove")
+    })
+
+    it("apply forwards options.timeout to the purge call but not to the dpkg queries", async () => {
+      const ssh = createMockSsh({
+        ...APT_FOUND,
+        [aptPurgeCommand("'alpha' 'beta'")]: { code: 0 },
+        [dpkgStatusQueryCommand("alpha")]: { code: 0, stdout: "alpha installed\n" },
+        [dpkgStatusQueryCommand("beta")]: { code: 0, stdout: "beta config-files\n" },
+      })
+      const mod = pkg.absent("alpha", "beta", { purge: true, timeout: 300_000 })
+      expect(await mod.apply(ssh, emptyEnv)).toStrictEqual({ status: "changed" })
+      expect(aptPurgeCalls(ssh).map((call) => call.options)).toStrictEqual([
+        { ...PURGE_QUERY_OPTS, timeout: 300_000 },
+      ])
+      expect(dpkgQueryCalls(ssh).map((call) => call.options)).toStrictEqual([
+        PURGE_QUERY_OPTS,
+        PURGE_QUERY_OPTS,
+      ])
+    })
+
+    it("check runs the dpkg queries without a timeout", async () => {
+      const ssh = createMockSsh({
+        ...APT_FOUND,
+        [dpkgStatusQueryCommand("foo")]: { code: 1, stdout: "" },
+      })
+      const mod = pkg.absent("foo", { purge: true, timeout: 300_000 })
+      expect(await mod.check(ssh, emptyEnv)).toBe("ok")
+      expect(dpkgQueryCalls(ssh).map((call) => call.options)).toStrictEqual([PURGE_QUERY_OPTS])
+    })
+
+    it("apply without options does not set a timeout key on the purge call", async () => {
+      const ssh = createMockSsh({
+        ...APT_FOUND,
+        [aptPurgeCommand("'foo'")]: { code: 0 },
+        [dpkgStatusQueryCommand("foo")]: { code: 0, stdout: "foo installed\n" },
+      })
+      await pkg.absent("foo", { purge: true }).apply(ssh, emptyEnv)
+      expect(aptPurgeCalls(ssh)[0]?.options).not.toHaveProperty("timeout")
+    })
+
+    it("a dpkg-query exit code other than 0 and 1 fails apply and needs-apply in check", async () => {
+      const ssh = createMockSsh({
+        ...APT_FOUND,
+        [dpkgStatusQueryCommand("foo")]: { code: 2, stdout: "" },
+      })
+      const mod = pkg.absent("foo", { purge: true })
+      const result = await mod.apply(ssh, emptyEnv)
+      expect(result.status).toBe("failed")
+      expect(result.error).toBeInstanceOf(CommandError)
+      expect(result.error?.message).toContain("[package.absent: foo] package status query failed")
+      expect(await mod.check(ssh, emptyEnv)).toBe("needs-apply")
+      expect(aptPurgeCalls(ssh)).toHaveLength(0)
+    })
+
+    it("an unparsable dpkg-query line fails apply and needs-apply in check", async () => {
+      const ssh = createMockSsh({
+        ...APT_FOUND,
+        [dpkgStatusQueryCommand("foo")]: { code: 0, stdout: "garbage\n" },
+      })
+      const mod = pkg.absent("foo", { purge: true })
+      const result = await mod.apply(ssh, emptyEnv)
+      expect(result.status).toBe("failed")
+      expect(result.error?.message).toContain(
+        "[package.absent: foo] unexpected dpkg-query output for foo"
+      )
+      expect(result.error?.message).toContain("garbage")
+      expect(await mod.check(ssh, emptyEnv)).toBe("needs-apply")
+      expect(aptPurgeCalls(ssh)).toHaveLength(0)
+    })
+
+    it("apply returns failed when apt-get purge fails", async () => {
+      const ssh = createMockSsh({
+        ...APT_FOUND,
+        [aptPurgeCommand("'foo'")]: {
+          code: 100,
+          stderr:
+            "E: Held packages were changed and -y was used without --allow-change-held-packages",
+        },
+        [dpkgStatusQueryCommand("foo")]: { code: 0, stdout: "foo installed\n" },
+      })
+      const result = await pkg.absent("foo", { purge: true }).apply(ssh, emptyEnv)
+      expect(result.status).toBe("failed")
+      expect(result.error).toBeInstanceOf(CommandError)
+      expect(result.error?.message).toContain("[package.absent: foo] package removal failed")
+    })
+
+    it.each([["yes"], [null], [1], [0], [{}]])(
+      "throws at construction when purge is the non-boolean %j",
+      (value) => {
+        expect(() => pkg.absent("foo", { purge: value as unknown as boolean })).toThrow(
+          "package.absent: purge must be a boolean"
+        )
+      }
+    )
+
+    it.each([true, false])("accepts purge: %s", (value) => {
+      expect(pkg.absent("foo", { purge: value }).name).toBe("package.absent: foo")
+    })
+
+    it("types accept purge only on absent", () => {
+      // A literal options object with `purge` passes the excess-property check.
+      expect(pkg.absent("foo", "bar", { purge: true, timeout: 5 }).name).toBe(
+        "package.absent: foo, bar"
+      )
+      // @ts-expect-error -- `purge` is not an option of `installed`
+      expect(pkg.installed("foo", { purge: true }).name).toBe("package.installed: foo")
+      // @ts-expect-error -- `purge` must be a boolean
+      expect(() => pkg.absent("foo", { purge: "yes" })).toThrow(
+        "package.absent: purge must be a boolean"
+      )
+    })
+
+    it.each([
+      {
+        found: APK_FOUND,
+        pm: "apk",
+        probe: "apk info -e 'foo'",
+        remove: "apk del -- 'foo'",
+      },
+      {
+        found: DNF_FOUND,
+        pm: "dnf",
+        probe: "rpm -q 'foo'",
+        remove: "dnf remove -y -- 'foo'",
+      },
+      {
+        found: YUM_FOUND,
+        pm: "yum",
+        probe: "rpm -q 'foo'",
+        remove: "yum remove -y -- 'foo'",
+      },
+    ])("on $pm purge maps to the plain remove command and detection", async (testCase) => {
+      const ssh = createMockSsh({
+        ...testCase.found,
+        [testCase.probe]: { code: 0 },
+        [testCase.remove]: { code: 0 },
+      })
+      const mod = pkg.absent("foo", { purge: true })
+      expect(await mod.check(ssh, emptyEnv)).toBe("needs-apply")
+      expect(await mod.apply(ssh, emptyEnv)).toStrictEqual({ status: "changed" })
+      expect(ssh.calls).toContain(testCase.probe)
+      expect(ssh.execCalls.map((call) => call.command)).toContain(testCase.remove)
+      expect(ssh.calls.some((call) => call.includes("dpkg-query"))).toBe(false)
+      expect(ssh.calls.some((call) => call.includes("purge"))).toBe(false)
+    })
+
+    it("purge: false behaves exactly like no option on apt", async () => {
+      const responses = {
+        ...APT_FOUND,
+        "DEBIAN_FRONTEND=noninteractive apt-get remove -y -- 'foo'": { code: 0 },
+        [legacyAptProbe("foo")]: { code: 0 },
+      }
+      const withoutOption = createMockSsh(responses)
+      const withFalse = createMockSsh(responses)
+      const plain = pkg.absent("foo")
+      const explicitFalse = pkg.absent("foo", { purge: false })
+
+      expect(await explicitFalse.check(withFalse, emptyEnv)).toBe(
+        await plain.check(withoutOption, emptyEnv)
+      )
+      expect(await explicitFalse.apply(withFalse, emptyEnv)).toStrictEqual(
+        await plain.apply(withoutOption, emptyEnv)
+      )
+      expect(withFalse.execCalls).toStrictEqual(withoutOption.execCalls)
+      expect(withFalse.calls).toStrictEqual(withoutOption.calls)
+      expect(withFalse.calls).toContain("DEBIAN_FRONTEND=noninteractive apt-get remove -y -- 'foo'")
+      expect(dpkgQueryCalls(withFalse)).toHaveLength(0)
+    })
   })
 })
 
