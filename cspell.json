@@ -215,6 +215,9 @@
     "userlist",
     "usermod",
     "worktree",
-    "Xstugo"
+    "Xstugo",
+    "multiarch",
+    "noninteractive",
+    "rpmsave"
   ]
 }
