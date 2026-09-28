@@ -4,6 +4,7 @@ import type { ModuleResult, SshConnection } from "../types.js"
 
 import { failed, failedCommand } from "../moduleFailure.js"
 import { shellQuote } from "../ssh.js"
+import { archiveSymlinkTargetPrefixes } from "./archiveLinkValidation.js"
 import { type ArchiveMember, normalizeArchiveMemberPath } from "./archiveMemberValidation.js"
 import { buildSymlinkProbeScript, runBatchedProbe } from "./archiveProbe.js"
 
@@ -107,24 +108,87 @@ export function archiveMemberDestinationPaths(
   return [...paths]
 }
 
-export function archiveMemberPathsWithAncestors(
-  destination: string,
-  members: ArchiveMember[]
-): string[] {
+/**
+ * Issue #219: list the destination paths that must not be symlinks while an
+ * archive is extracted — every member path with all of its ancestors, except
+ * the leaf path of an archive symlink member.
+ *
+ * The leaf used to be included, so an archive that ships symlinks tripped its
+ * own guard: during the merge as soon as an earlier top-level entry had copied
+ * the link, and on every later run because the link from the previous run was
+ * still there. The merge replaces such a leaf with `cp --remove-destination`
+ * and never writes through it. Ancestors of symlink members stay guarded, and
+ * `archiveLinkUnsafeReason` rejects any member below an archive symlink, so no
+ * guarded path can be reached through an omitted leaf.
+ *
+ * @param destination - The validated destination directory.
+ * @param members - The validated archive members.
+ * @returns The guarded absolute paths, including the destination and its ancestors.
+ */
+export function archiveMemberGuardPaths(destination: string, members: ArchiveMember[]): string[] {
   const paths = new Set<string>()
-  for (const destinationPath of archiveMemberDestinationPaths(destination, members)) {
-    for (const ancestor of pathWithAncestors(destinationPath)) {
-      paths.add(ancestor)
-    }
+  for (const member of members) {
+    const destinationPath = memberDestinationPath(destination, member)
+    if (destinationPath === null) continue
+    const chain = pathWithAncestors(destinationPath)
+    const guarded = member.kind === "symlink" ? chain.slice(0, -1) : chain
+    for (const path of guarded) paths.add(path)
   }
   return [...paths]
 }
 
+/**
+ * Issue #219: map the non-member paths visited while resolving the archive's
+ * symlink targets to absolute destination paths, each with the raw path of the
+ * symlink member that visited it, for {@link validateNoSymlinkPaths}.
+ *
+ * @param destination - The validated destination directory.
+ * @param members - The validated archive members.
+ * @returns Absolute host path to the raw path of the symlink member.
+ */
+export function archiveSymlinkTargetProbePaths(
+  destination: string,
+  members: ArchiveMember[]
+): Map<string, string> {
+  const paths = new Map<string, string>()
+  for (const prefix of archiveSymlinkTargetPrefixes(members)) {
+    paths.set(`${destination}/${prefix.path}`, prefix.symlink)
+  }
+  return paths
+}
+
+function symlinkProbeViolation(
+  unsafe: string,
+  parameters: { linkTargets?: ReadonlyMap<string, string>; paths: string[] }
+): string {
+  const symlinkMember = parameters.paths.includes(unsafe)
+    ? undefined
+    : parameters.linkTargets?.get(unsafe)
+  if (symlinkMember === undefined) return `destination path ${JSON.stringify(unsafe)} is a symlink`
+  return `link target of member ${JSON.stringify(symlinkMember)} passes through existing host symlink ${JSON.stringify(unsafe)}`
+}
+
+/**
+ * Refuse the extraction when any of the given host paths is a symlink, with
+ * one batched probe.
+ *
+ * Issue #219: `linkTargets` adds the paths that archive symlink targets pass
+ * through (see {@link archiveSymlinkTargetProbePaths}) to the same probe. A
+ * hit there is reported against the symlink member it belongs to; a path in
+ * `paths` keeps the plain destination-path message.
+ *
+ * @param conn - The SSH connection.
+ * @param parameters - Probe inputs.
+ * @param parameters.linkTargets - Optional link-target paths mapped to their symlink member.
+ * @param parameters.paths - Absolute destination paths that must not be symlinks.
+ * @param parameters.source - The archive source, for the failure message.
+ * @returns A failure when a probed path is a symlink or the probe failed, otherwise null.
+ */
 export async function validateNoSymlinkPaths(
   conn: SshConnection,
-  parameters: { paths: string[]; source: string }
+  parameters: { linkTargets?: ReadonlyMap<string, string>; paths: string[]; source: string }
 ): Promise<ModuleResult | null> {
-  const paths = [...new Set(parameters.paths)]
+  const paths = [...new Set([...parameters.paths, ...(parameters.linkTargets?.keys() ?? [])])]
   const outcome = await runBatchedProbe(conn, {
     entries: paths,
     script: buildSymlinkProbeScript(),
@@ -140,7 +204,7 @@ export async function validateNoSymlinkPaths(
   if (outcome.fields.length === 0) return null
   const [unsafe] = outcome.fields
   return failed(
-    `[archive.extract] refusing to extract ${parameters.source}: destination path ${JSON.stringify(unsafe)} is a symlink`
+    `[archive.extract] refusing to extract ${parameters.source}: ${symlinkProbeViolation(unsafe, parameters)}`
   )
 }
 

@@ -16,9 +16,12 @@
  */
 import { spawnSync } from "node:child_process"
 import {
+  lstatSync,
   mkdirSync,
   mkdtempSync,
+  readdirSync,
   readFileSync,
+  readlinkSync,
   realpathSync,
   rmSync,
   symlinkSync,
@@ -28,7 +31,13 @@ import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { describe, expect, it } from "vitest"
 
+import type { ArchiveMember } from "../../src/modules/archiveMemberValidation.js"
+
 import { buildStagingMergeScript } from "../../src/modules/archive.js"
+import {
+  archiveMemberGuardPaths,
+  destinationPathWithAncestors,
+} from "../../src/modules/archiveDestinationValidation.js"
 
 type ShellResult = { code: number; stderr: string; stdout: string }
 
@@ -85,6 +94,60 @@ function makeWorkspace(): { destination: string; root: string; staging: string }
 function hasGnuCp(): boolean {
   const result = spawnSync("cp", ["--version"], { encoding: "utf8", timeout: 2000 })
   return result.status === 0 && result.stdout.includes("coreutils")
+}
+
+/**
+ * Issue #219: an archive member as the tar listing parser produces it, for the
+ * product guard-set functions.
+ *
+ * @param path - Destination-relative member path.
+ * @param linkTarget - Symlink target, or null for a regular file.
+ * @returns The archive member.
+ */
+function tarMember(path: string, linkTarget: null | string = null): ArchiveMember {
+  return linkTarget === null
+    ? { format: "tar", kind: "file", linkTarget, mode: "-rw-r--r--", path }
+    : { format: "tar", kind: "symlink", linkTarget, mode: "lrwxrwxrwx", path }
+}
+
+/**
+ * Issue #219: the guard set `archive.extract` passes to the merge, built with
+ * the product functions exactly as `extractViaStagingDirectory` does — the
+ * destination with its ancestors plus `archiveMemberGuardPaths`, deduplicated
+ * like `moveExtractedContentsIntoDestination`.
+ *
+ * @param destination - The resolved destination directory.
+ * @param members - The archive members.
+ * @returns Absolute guard paths.
+ */
+function productGuardPaths(destination: string, members: ArchiveMember[]): string[] {
+  return [
+    ...new Set([
+      ...destinationPathWithAncestors(destination),
+      ...archiveMemberGuardPaths(destination, members),
+    ]),
+  ]
+}
+
+/**
+ * Describe a directory tree by entry type, symlink target and file content so
+ * two merges can be compared for idempotence.
+ *
+ * @param root - The directory to describe.
+ * @param prefix - Path prefix for the recursion.
+ * @returns One sorted line per entry.
+ */
+function describeTree(root: string, prefix = ""): string[] {
+  const lines: string[] = []
+  for (const name of readdirSync(join(root, prefix)).toSorted()) {
+    const relative = prefix === "" ? name : `${prefix}/${name}`
+    const absolute = join(root, relative)
+    const stat = lstatSync(absolute)
+    if (stat.isSymbolicLink()) lines.push(`l ${relative} -> ${readlinkSync(absolute)}`)
+    else if (stat.isDirectory()) lines.push(`d ${relative}`, ...describeTree(root, relative))
+    else lines.push(`f ${relative} ${readFileSync(absolute, "utf8")}`)
+  }
+  return lines
 }
 
 const SKIP_PLATFORM = process.platform === "win32"
@@ -162,6 +225,44 @@ describe.skipIf(SKIP_PLATFORM)("archive.extract staging merge shell smoke tests"
     }
   })
 
+  it("still refuses a destination symlink where the staged entry is a directory (Issue #219)", () => {
+    const { destination, root, staging } = makeWorkspace()
+    try {
+      const incoming = join(staging, "shared")
+      mkdirSync(incoming)
+      writeFileSync(join(incoming, "added.txt"), "added\n")
+      const elsewhere = join(root, "elsewhere")
+      mkdirSync(elsewhere)
+      symlinkSync(elsewhere, join(destination, "shared"))
+
+      const result = runMergeScript({ destination, sourcePaths: [incoming] })
+
+      expect(result.code).toBe(64)
+      expect(result.stderr).toContain("is a symlink")
+      expect(readdirSync(elsewhere)).toStrictEqual([])
+    } finally {
+      rmSync(root, { force: true, recursive: true })
+    }
+  })
+
+  it("lets a staged symlink reach cp when the destination entry is already a symlink (Issue #219)", () => {
+    // Only a staged symlink may replace a destination symlink: `cp -aT
+    // --no-dereference --remove-destination` swaps the link and never writes
+    // through it. Reaching `cp` is the signal here, so this runs without GNU cp.
+    const { destination, root, staging } = makeWorkspace()
+    try {
+      const incoming = join(staging, "current")
+      symlinkSync("releases/new", incoming)
+      symlinkSync("releases/old", join(destination, "current"))
+
+      const result = runMergeScript({ destination, sourcePaths: [incoming] })
+
+      expect(result.stderr).not.toContain("refusing staging merge")
+    } finally {
+      rmSync(root, { force: true, recursive: true })
+    }
+  })
+
   it("succeeds with no staging entries at all", () => {
     // `find -mindepth 1 -maxdepth 1 -exec … {} +` runs the script zero times on
     // an empty staging directory, but an explicit no-entry invocation must not
@@ -229,6 +330,106 @@ describe.skipIf(SKIP_PLATFORM)("archive.extract staging merge shell smoke tests"
         expect(result.code).toBe(0)
         expect(readFileSync(join(existing, "added.txt"), "utf8")).toBe("added\n")
         expect(readFileSync(join(existing, "keep.txt"), "utf8")).toBe("keep\n")
+      } finally {
+        rmSync(root, { force: true, recursive: true })
+      }
+    })
+
+    it("merges a second top-level entry after one that ships sibling symlinks (Issue #219)", () => {
+      const { destination, root, staging } = makeWorkspace()
+      try {
+        const corepackTarget = "../lib/node_modules/corepack/dist/corepack.js"
+        mkdirSync(join(staging, "externals/node20/bin"), { recursive: true })
+        mkdirSync(join(staging, "externals/node20/lib/node_modules/corepack/dist"), {
+          recursive: true,
+        })
+        writeFileSync(
+          join(staging, "externals/node20/lib/node_modules/corepack/dist/corepack.js"),
+          "corepack\n"
+        )
+        symlinkSync(corepackTarget, join(staging, "externals/node20/bin/corepack"))
+        writeFileSync(join(staging, "run.sh"), "#!/bin/sh\n")
+        const members = [
+          tarMember("externals/node20/lib/node_modules/corepack/dist/corepack.js"),
+          tarMember("externals/node20/bin/corepack", corepackTarget),
+          tarMember("run.sh"),
+        ]
+
+        const guardPaths = productGuardPaths(destination, members)
+        // The product guard set keeps the symlink's ancestors and drops its leaf.
+        expect(guardPaths).toContain(join(destination, "externals/node20/bin"))
+        expect(guardPaths).not.toContain(join(destination, "externals/node20/bin/corepack"))
+
+        const result = runMergeScript({
+          destination,
+          guardPaths,
+          sourcePaths: [join(staging, "externals"), join(staging, "run.sh")],
+        })
+
+        expect(result.stderr).toBe("")
+        expect(result.code).toBe(0)
+        const corepack = join(destination, "externals/node20/bin/corepack")
+        expect(readlinkSync(corepack)).toBe(corepackTarget)
+        expect(readFileSync(corepack, "utf8")).toBe("corepack\n")
+        expect(readFileSync(join(destination, "run.sh"), "utf8")).toBe("#!/bin/sh\n")
+      } finally {
+        rmSync(root, { force: true, recursive: true })
+      }
+    })
+
+    it("re-merges over the archive's own symlinks from an earlier run idempotently (Issue #219)", () => {
+      const { destination, root, staging } = makeWorkspace()
+      try {
+        mkdirSync(join(staging, "releases/x/bin"), { recursive: true })
+        mkdirSync(join(staging, "releases/x/lib"))
+        writeFileSync(join(staging, "releases/x/lib/tool.js"), "tool\n")
+        symlinkSync("../lib/tool.js", join(staging, "releases/x/bin/tool"))
+        symlinkSync("releases/x", join(staging, "current"))
+        const members = [
+          tarMember("releases/x/lib/tool.js"),
+          tarMember("releases/x/bin/tool", "../lib/tool.js"),
+          tarMember("current", "releases/x"),
+        ]
+        const merge = (): ShellResult =>
+          runMergeScript({
+            destination,
+            guardPaths: productGuardPaths(destination, members),
+            sourcePaths: [join(staging, "releases"), join(staging, "current")],
+          })
+
+        const first = merge()
+        expect(first.stderr).toBe("")
+        expect(first.code).toBe(0)
+        const afterFirstRun = describeTree(destination)
+
+        const second = merge()
+
+        expect(second.stderr).toBe("")
+        expect(second.code).toBe(0)
+        expect(describeTree(destination)).toStrictEqual(afterFirstRun)
+        expect(readlinkSync(join(destination, "current"))).toBe("releases/x")
+        expect(readFileSync(join(destination, "current/bin/tool"), "utf8")).toBe("tool\n")
+      } finally {
+        rmSync(root, { force: true, recursive: true })
+      }
+    })
+
+    it("replaces a destination symlink with a staged symlink without writing through it (Issue #219)", () => {
+      const { destination, root, staging } = makeWorkspace()
+      try {
+        const elsewhere = join(root, "elsewhere")
+        mkdirSync(elsewhere)
+        writeFileSync(join(elsewhere, "keep.txt"), "keep\n")
+        symlinkSync(elsewhere, join(destination, "current"))
+        symlinkSync("releases/new", join(staging, "current"))
+
+        const result = runMergeScript({ destination, sourcePaths: [join(staging, "current")] })
+
+        expect(result.stderr).toBe("")
+        expect(result.code).toBe(0)
+        expect(readlinkSync(join(destination, "current"))).toBe("releases/new")
+        expect(readdirSync(elsewhere)).toStrictEqual(["keep.txt"])
+        expect(readFileSync(join(elsewhere, "keep.txt"), "utf8")).toBe("keep\n")
       } finally {
         rmSync(root, { force: true, recursive: true })
       }

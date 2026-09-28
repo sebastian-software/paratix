@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from "vitest"
 
-import type { ExecResult } from "../../src/types.js"
+import type { ExecResult, ModuleResult } from "../../src/types.js"
 
 import { archive } from "../../src/modules/archive.js"
 import {
@@ -262,6 +262,140 @@ async function consumeNextUploadMktemp(
   await Promise.resolve()
   mockSsh.calls.push(command)
   return remaining.shift() ?? ""
+}
+
+// Issue #219: builders for inline `tar -tv` listings with directory, symlink
+// and hardlink members, plus recorders for the batched symlink probe payloads
+// and the staging-merge guard paths.
+const tarListingLineFields = "root/root 0 1970-01-01 00:00"
+const stagedTarExtractCommand = `tar --no-same-owner --no-overwrite-dir -xzf '${src}' -C '${archiveStageDirectory}'`
+const archiveStageMergeGuardPathsPattern =
+  / sh '\/opt\/app' '\/opt\/app' '(?<guards>[^']*)' \{\} \+$/v
+
+function tarFileLine(path: string): string {
+  return `-rw-r--r-- ${tarListingLineFields} ${path}`
+}
+
+function tarDirectoryLine(path: string): string {
+  return `drwxr-xr-x ${tarListingLineFields} ${path}`
+}
+
+function tarSymlinkLine(path: string, target: string): string {
+  return `lrwxrwxrwx ${tarListingLineFields} ${path} -> ${target}`
+}
+
+function tarHardlinkLine(path: string, target: string): string {
+  return `hrw-r--r-- ${tarListingLineFields} ${path} link to ${target}`
+}
+
+type SymlinkProbeRecord = { callIndex: number; entries: string[] }
+
+/**
+ * Record the NUL-separated payload of every batched symlink probe and report
+ * the given host paths as symlinks whenever a probe carries them.
+ *
+ * @param mockSsh - The mock connection to patch.
+ * @param hostSymlinks - Absolute host paths the probe reports as symlinks.
+ * @returns The recorded probes, in call order, with their position in `mockSsh.calls`.
+ */
+function recordSymlinkProbes(
+  mockSsh: MockSsh,
+  hostSymlinks: readonly string[] = []
+): SymlinkProbeRecord[] {
+  const originalExec = mockSsh.exec.bind(mockSsh)
+  const probes: SymlinkProbeRecord[] = []
+  vi.spyOn(mockSsh, "exec").mockImplementation(async (command, options) => {
+    const result = await originalExec(command, options)
+    if (command !== symlinkProbeCommand) return result
+    const entries = (options?.input ?? "").split("\u0000").filter((entry) => entry !== "")
+    probes.push({ callIndex: mockSsh.calls.length - 1, entries })
+    const reported = entries.filter((entry) => hostSymlinks.includes(entry))
+    if (reported.length === 0) return result
+    return { ...result, stdout: reported.map((entry) => `${entry}\u0000`).join("") }
+  })
+  return probes
+}
+
+type TarListingApplyRun = {
+  markerWrites: () => number
+  mockSsh: MockSsh
+  probes: SymlinkProbeRecord[]
+  result: ModuleResult
+}
+
+async function applyTarListing(
+  lines: readonly string[],
+  options: { hostSymlinks?: readonly string[] } = {}
+): Promise<TarListingApplyRun> {
+  const mockSsh = createMockSsh({
+    [`tar -tvzf '${src}'`]: { code: 0, stdout: `${lines.join("\n")}\n` },
+    [stagedTarExtractCommand]: { code: 0 },
+  })
+  vi.spyOn(mockSsh, "sha256").mockResolvedValue(archiveSha)
+  const writeFile = vi.spyOn(mockSsh, "writeFile").mockResolvedValue()
+  const probes = recordSymlinkProbes(mockSsh, options.hostSymlinks)
+  const result = await archive.extract(src, destination).apply(mockSsh, emptyEnv)
+  return { markerWrites: () => writeFile.mock.calls.length, mockSsh, probes, result }
+}
+
+/**
+ * Condense an apply run into the facts the link-target tests assert on. The
+ * summary carries the rejection reason, so a failing acceptance case prints
+ * why it was refused.
+ *
+ * @param run - The recorded apply run.
+ * @returns Status, error text, `tar -x` invocations and whether markers were written.
+ */
+function extractionSummary(run: TarListingApplyRun): {
+  error: string | undefined
+  markerWritten: boolean
+  status: ModuleResult["status"]
+  tarExtractCalls: string[]
+} {
+  return {
+    error: run.result.error === undefined ? undefined : String(run.result.error),
+    markerWritten: run.markerWrites() > 0,
+    status: run.result.status,
+    tarExtractCalls: run.mockSsh.calls.filter((command) => /^tar\b.*\s-x\S*\s/v.test(command)),
+  }
+}
+
+const extractedThroughStaging = {
+  error: undefined,
+  markerWritten: true,
+  status: "changed",
+  tarExtractCalls: [stagedTarExtractCommand],
+}
+
+function refusedBeforeExtraction(reason: string): ReturnType<typeof extractionSummary> {
+  return {
+    error: expect.stringContaining(`[archive.extract] refusing to extract ${src}: ${reason}`),
+    markerWritten: false,
+    status: "failed",
+    tarExtractCalls: [],
+  }
+}
+
+/**
+ * Collect the entries of every symlink probe issued after the archive listing
+ * and before the staged `tar -x`, i.e. the pre-staging member probe.
+ *
+ * @param run - The recorded apply run.
+ * @returns The probed host paths.
+ */
+function preStagingProbeEntries(run: TarListingApplyRun): string[] {
+  const listingIndex = run.mockSsh.calls.indexOf(`tar -tvzf '${src}'`)
+  const extractIndex = run.mockSsh.calls.indexOf(stagedTarExtractCommand)
+  const endIndex = extractIndex === -1 ? Number.POSITIVE_INFINITY : extractIndex
+  return run.probes
+    .filter((probe) => probe.callIndex > listingIndex && probe.callIndex < endIndex)
+    .flatMap((probe) => probe.entries)
+}
+
+function stagingMergeGuardPaths(mockSsh: MockSsh): string[] {
+  const mergeCommand = mockSsh.calls.find((command) => archiveStageMovePattern.test(command))
+  const guards = archiveStageMergeGuardPathsPattern.exec(mergeCommand ?? "")?.groups?.guards
+  return guards === undefined ? [] : guards.split("\n")
 }
 
 describe("archive.extract — check", () => {
@@ -1652,6 +1786,454 @@ describe("archive.extract — apply", () => {
     expectNoArchiveMarkerWrite(mockSsh)
   })
 
+  // Issue #219: relative symlink targets resolve from the directory that
+  // contains the link, hardlink targets from the archive root. Accepted links
+  // must reach the staged `tar -x`; every link that could point, write or
+  // resolve outside the destination is still refused before it.
+  describe("archive.extract link targets (Issue #219)", () => {
+    function nodeDistributionLines(version: string): string[] {
+      const root = `./externals/${version}`
+      return [
+        tarDirectoryLine(`${root}/`),
+        tarDirectoryLine(`${root}/bin/`),
+        `-rwxr-xr-x ${tarListingLineFields} ${root}/bin/node`,
+        tarSymlinkLine(`${root}/bin/corepack`, "../lib/node_modules/corepack/dist/corepack.js"),
+        tarSymlinkLine(`${root}/bin/npm`, "../lib/node_modules/npm/bin/npm-cli.js"),
+        tarSymlinkLine(`${root}/bin/npx`, "../lib/node_modules/npm/bin/npx-cli.js"),
+        tarDirectoryLine(`${root}/lib/`),
+        tarDirectoryLine(`${root}/lib/node_modules/`),
+        tarDirectoryLine(`${root}/lib/node_modules/corepack/`),
+        tarDirectoryLine(`${root}/lib/node_modules/corepack/dist/`),
+        tarFileLine(`${root}/lib/node_modules/corepack/dist/corepack.js`),
+        tarDirectoryLine(`${root}/lib/node_modules/npm/`),
+        tarDirectoryLine(`${root}/lib/node_modules/npm/bin/`),
+        tarFileLine(`${root}/lib/node_modules/npm/bin/npm-cli.js`),
+        tarFileLine(`${root}/lib/node_modules/npm/bin/npx-cli.js`),
+      ]
+    }
+
+    /**
+     * A chain `l0 -> l1 -> … -> l<links-1> -> end` that ends at a regular file.
+     *
+     * @param links - Number of symlinks in the chain.
+     * @returns The listing lines, the target file last.
+     */
+    function symlinkChainLines(links: number): string[] {
+      const chain = Array.from({ length: links - 1 }, (_value, index) =>
+        tarSymlinkLine(`l${String(index)}`, `l${String(index + 1)}`)
+      )
+      return [...chain, tarSymlinkLine(`l${String(links - 1)}`, "end"), tarFileLine("end")]
+    }
+
+    it("extracts the actions runner layout with bin -> ../lib symlinks for node20 and node24", async () => {
+      const run = await applyTarListing([
+        tarDirectoryLine("./"),
+        tarDirectoryLine("./externals/"),
+        ...nodeDistributionLines("node20"),
+        ...nodeDistributionLines("node24"),
+        `-rwxr-xr-x ${tarListingLineFields} ./run.sh`,
+      ])
+
+      expect(extractionSummary(run)).toStrictEqual(extractedThroughStaging)
+    })
+
+    it("accepts a symlink into a sibling directory (a/bin/x -> ../lib/y)", async () => {
+      const run = await applyTarListing([
+        tarDirectoryLine("a/"),
+        tarDirectoryLine("a/bin/"),
+        tarSymlinkLine("a/bin/x", "../lib/y"),
+        tarDirectoryLine("a/lib/"),
+        tarFileLine("a/lib/y"),
+      ])
+
+      expect(extractionSummary(run)).toStrictEqual(extractedThroughStaging)
+    })
+
+    it("rejects a depth-1 symlink whose target climbs two levels (a/x -> ../../y)", async () => {
+      const run = await applyTarListing([tarDirectoryLine("a/"), tarSymlinkLine("a/x", "../../y")])
+
+      expect(extractionSummary(run)).toStrictEqual(
+        refusedBeforeExtraction('member "a/x" -> "../../y" would escape destination')
+      )
+    })
+
+    it("still rejects a root-level symlink that climbs out (x -> ../y)", async () => {
+      const run = await applyTarListing([tarSymlinkLine("x", "../y")])
+
+      expect(extractionSummary(run)).toStrictEqual(
+        refusedBeforeExtraction('member "x" -> "../y" would escape destination')
+      )
+    })
+
+    it("accepts root-level symlinks to a sibling and to the destination root (x -> y, z -> .)", async () => {
+      const run = await applyTarListing([
+        tarSymlinkLine("x", "y"),
+        tarFileLine("y"),
+        tarSymlinkLine("z", "."),
+      ])
+
+      expect(extractionSummary(run)).toStrictEqual(extractedThroughStaging)
+    })
+
+    it.each([".", "./"])("rejects a symlink member at the destination root (%s)", async (path) => {
+      const run = await applyTarListing([tarSymlinkLine(path, "app"), tarDirectoryLine("app/")])
+
+      expect(extractionSummary(run)).toStrictEqual(
+        refusedBeforeExtraction(`member ${JSON.stringify(path)} is a link at the destination root`)
+      )
+    })
+
+    it("rejects a hardlink member at the destination root", async () => {
+      const run = await applyTarListing([tarFileLine("app"), tarHardlinkLine(".", "app")])
+
+      expect(extractionSummary(run)).toStrictEqual(
+        refusedBeforeExtraction('member "." is a link at the destination root')
+      )
+    })
+
+    it("still rejects an absolute symlink target below the destination root", async () => {
+      const run = await applyTarListing([
+        tarDirectoryLine("a/"),
+        tarSymlinkLine("a/passwd", "/etc/passwd"),
+      ])
+
+      expect(extractionSummary(run)).toStrictEqual(
+        refusedBeforeExtraction('member "a/passwd" -> "/etc/passwd" would escape destination')
+      )
+    })
+
+    it("resolves hardlink targets from the archive root (a/h link to b/f)", async () => {
+      const run = await applyTarListing([
+        tarDirectoryLine("a/"),
+        tarDirectoryLine("b/"),
+        tarFileLine("b/f"),
+        tarHardlinkLine("a/h", "b/f"),
+      ])
+
+      expect(extractionSummary(run)).toStrictEqual(extractedThroughStaging)
+    })
+
+    it("rejects a hardlink whose archive-root-relative target climbs out (a/h link to ../f)", async () => {
+      // A symlink `a/h -> ../f` would be fine; a hardlink target is a member
+      // name relative to the archive root, so `../f` leaves the destination.
+      const run = await applyTarListing([tarDirectoryLine("a/"), tarHardlinkLine("a/h", "../f")])
+
+      expect(extractionSummary(run)).toStrictEqual(
+        refusedBeforeExtraction('member "a/h" -> "../f" would escape destination')
+      )
+    })
+
+    it("rejects a symlink that escapes through another archive symlink (a/up -> .., a/esc -> up/..)", async () => {
+      const run = await applyTarListing([
+        tarDirectoryLine("a/"),
+        tarSymlinkLine("a/up", ".."),
+        tarSymlinkLine("a/esc", "up/.."),
+      ])
+
+      expect(extractionSummary(run)).toStrictEqual(
+        refusedBeforeExtraction('member "a/esc" -> "up/.." would escape destination')
+      )
+    })
+
+    it("accepts a symlink to its parent directory on its own (a/up -> ..)", async () => {
+      const run = await applyTarListing([tarDirectoryLine("a/"), tarSymlinkLine("a/up", "..")])
+
+      expect(extractionSummary(run)).toStrictEqual(extractedThroughStaging)
+    })
+
+    it("accepts a symlink that resolves through an archive symlink to a directory (lib64 -> lib)", async () => {
+      const run = await applyTarListing([
+        tarDirectoryLine("venv/"),
+        tarDirectoryLine("venv/lib/"),
+        tarFileLine("venv/lib/site.py"),
+        tarSymlinkLine("venv/lib64", "lib"),
+        tarDirectoryLine("venv/bin/"),
+        tarSymlinkLine("venv/bin/site.py", "../lib64/site.py"),
+      ])
+
+      expect(extractionSummary(run)).toStrictEqual(extractedThroughStaging)
+    })
+
+    it("rejects a symlink cycle with the resolution-limit reason", async () => {
+      const run = await applyTarListing([tarSymlinkLine("a", "b"), tarSymlinkLine("b", "a")])
+
+      expect(extractionSummary(run)).toStrictEqual(
+        refusedBeforeExtraction('member "a" -> "b" exceeds the symlink resolution limit')
+      )
+    })
+
+    it("rejects a chain of more than 40 symlink hops", async () => {
+      // 42 links l0 -> l1 -> … -> l41 -> end: resolving l0 needs more than the
+      // 40 hops Linux allows (MAXSYMLINKS), whichever end of the chain counts.
+      const run = await applyTarListing(symlinkChainLines(42))
+
+      expect(extractionSummary(run)).toStrictEqual(
+        refusedBeforeExtraction('member "l0" -> "l1" exceeds the symlink resolution limit')
+      )
+    })
+
+    it("accepts a chain of 40 symlink hops that ends inside the destination", async () => {
+      const run = await applyTarListing(symlinkChainLines(40))
+
+      expect(extractionSummary(run)).toStrictEqual(extractedThroughStaging)
+    })
+
+    // Issue #219: listed tail first, every link finds its successor already
+    // memoized, so the limit is reached by summing hop counts rather than by
+    // the recursion-depth cut-off. The first member over the limit in listing
+    // order is the one with 41 hops: l0 in a 41-link chain, l1 in a 42-link one.
+    it.each([
+      { failing: "l0", links: 41, target: "l1" },
+      { failing: "l1", links: 42, target: "l2" },
+    ])(
+      "rejects a reversed chain of $links symlinks by summing memoized hops",
+      async ({ failing, links, target }) => {
+        const run = await applyTarListing(symlinkChainLines(links).toReversed())
+
+        expect(extractionSummary(run)).toStrictEqual(
+          refusedBeforeExtraction(
+            `member ${JSON.stringify(failing)} -> ${JSON.stringify(target)} exceeds the symlink resolution limit`
+          )
+        )
+      }
+    )
+
+    it("accepts a reversed chain of 40 symlink hops", async () => {
+      const run = await applyTarListing(symlinkChainLines(40).toReversed())
+
+      expect(extractionSummary(run)).toStrictEqual(extractedThroughStaging)
+    })
+
+    // Issue #219: `tar -tv` does not escape ` -> ` or ` link to ` inside names
+    // or targets, so a link line that carries a separator more than once has
+    // no recoverable name/target split and fails the listing before `tar -x`.
+    it.each([
+      {
+        detail: 'link separator " -> " occurs more than once',
+        line: tarSymlinkLine("d/a -> b", "../../../x"),
+        name: "a symlink named d/a -> b whose real target escapes",
+      },
+      {
+        detail: 'link separator " -> " occurs more than once',
+        line: tarSymlinkLine("a -> b", "/etc"),
+        name: "a symlink line a -> b -> /etc",
+      },
+      {
+        detail: 'hardlink contains both " -> " and " link to "',
+        line: tarHardlinkLine("a -> b", "d/e/c"),
+        name: "a hardlink named a -> b to d/e/c",
+      },
+      {
+        detail: 'link separator " link to " occurs more than once',
+        line: tarHardlinkLine("a link to b", "c"),
+        name: "a hardlink line a link to b link to c",
+      },
+    ])("refuses an ambiguous listing line: $name", async ({ detail, line }) => {
+      const run = await applyTarListing([
+        tarDirectoryLine("d/"),
+        tarDirectoryLine("d/e/"),
+        tarSymlinkLine("d/e/c", "../../x"),
+        tarFileLine("x"),
+        line,
+      ])
+
+      expect(extractionSummary(run)).toStrictEqual({
+        error: expect.stringContaining(
+          `[archive.extract] ambiguous tar listing line (${detail}): ${JSON.stringify(line)}`
+        ),
+        markerWritten: false,
+        status: "failed",
+        tarExtractCalls: [],
+      })
+    })
+
+    it("still extracts a regular file whose name contains -> (f -> g)", async () => {
+      // Only link members are split at the separator; a plain file keeps it.
+      const run = await applyTarListing([tarFileLine("f -> g")])
+
+      expect(extractionSummary(run)).toStrictEqual(extractedThroughStaging)
+      expect(stagingMergeGuardPaths(run.mockSsh)).toContain(`${destination}/f -> g`)
+    })
+
+    it("rejects a member below an archive symlink", async () => {
+      const run = await applyTarListing([
+        tarDirectoryLine("x/"),
+        tarSymlinkLine("x/link", "y"),
+        tarDirectoryLine("x/y/"),
+        tarFileLine("x/link/f"),
+      ])
+
+      expect(extractionSummary(run)).toStrictEqual(
+        refusedBeforeExtraction('member "x/link/f" is below archive symlink "x/link"')
+      )
+    })
+
+    it("rejects a hardlink whose target passes through an archive symlink", async () => {
+      const run = await applyTarListing([
+        tarDirectoryLine("x/"),
+        tarSymlinkLine("x/link", "y"),
+        tarDirectoryLine("x/y/"),
+        tarFileLine("x/y/f"),
+        tarHardlinkLine("h", "x/link/f"),
+      ])
+
+      expect(extractionSummary(run)).toStrictEqual(
+        refusedBeforeExtraction('member "h" hardlinks to archive symlink "x/link"')
+      )
+    })
+
+    it("rejects a hardlink to an archive symlink member", async () => {
+      // `link(2)` does not follow symlinks: `h` would become a second name for
+      // the symlink and read `../../x` from the archive root instead of `a/b`.
+      const run = await applyTarListing([
+        tarDirectoryLine("a/"),
+        tarDirectoryLine("a/b/"),
+        tarSymlinkLine("a/b/s", "../../x"),
+        tarFileLine("x"),
+        tarHardlinkLine("h", "a/b/s"),
+      ])
+
+      expect(extractionSummary(run)).toStrictEqual(
+        refusedBeforeExtraction('member "h" hardlinks to archive symlink "a/b/s"')
+      )
+    })
+
+    it("rejects a path that occurs as both a directory and a symlink", async () => {
+      const run = await applyTarListing([
+        tarDirectoryLine("x/"),
+        tarDirectoryLine("y/"),
+        tarSymlinkLine("./x", "y"),
+      ])
+
+      expect(extractionSummary(run)).toStrictEqual(
+        refusedBeforeExtraction(
+          'member "x/" occurs more than once with conflicting link types or targets'
+        )
+      )
+    })
+
+    it("rejects duplicate symlink entries with different targets", async () => {
+      const run = await applyTarListing([
+        tarDirectoryLine("a/"),
+        tarFileLine("a/t"),
+        tarFileLine("a/u"),
+        tarSymlinkLine("a/l", "t"),
+        tarSymlinkLine("./a/l", "u"),
+      ])
+
+      expect(extractionSummary(run)).toStrictEqual(
+        refusedBeforeExtraction(
+          'member "a/l" occurs more than once with conflicting link types or targets'
+        )
+      )
+    })
+
+    it("accepts identical duplicate symlink entries", async () => {
+      const run = await applyTarListing([
+        tarDirectoryLine("a/"),
+        tarFileLine("a/t"),
+        tarSymlinkLine("a/l", "t"),
+        tarSymlinkLine("./a/l", "t"),
+      ])
+
+      expect(extractionSummary(run)).toStrictEqual(extractedThroughStaging)
+    })
+
+    it("probes the non-member prefixes of a link target and refuses a host symlink there", async () => {
+      const hostSymlink = `${destination}/a/lib`
+      const run = await applyTarListing(
+        [tarDirectoryLine("a/"), tarDirectoryLine("a/bin/"), tarSymlinkLine("a/bin/x", "../lib/y")],
+        { hostSymlinks: [hostSymlink] }
+      )
+
+      const probed = preStagingProbeEntries(run)
+      expect(probed).toContain(hostSymlink)
+      expect(probed).toContain(`${destination}/a/lib/y`)
+      expect(extractionSummary(run)).toStrictEqual(
+        refusedBeforeExtraction(
+          `link target of member "a/bin/x" passes through existing host symlink ${JSON.stringify(hostSymlink)}`
+        )
+      )
+    })
+
+    it("refuses a link that walks through a symlink an earlier archive left on the host", async () => {
+      // An earlier archive shipped `a/up -> ..`; on its own this archive is
+      // harmless, but on this host `a/esc -> up/..` resolves above `/opt/app`.
+      const hostSymlink = `${destination}/a/up`
+      const run = await applyTarListing(
+        [tarDirectoryLine("a/"), tarSymlinkLine("a/esc", "up/..")],
+        { hostSymlinks: [hostSymlink] }
+      )
+
+      expect(preStagingProbeEntries(run)).toContain(hostSymlink)
+      expect(extractionSummary(run)).toStrictEqual(
+        refusedBeforeExtraction(
+          `link target of member "a/esc" passes through existing host symlink ${JSON.stringify(hostSymlink)}`
+        )
+      )
+    })
+
+    it("keeps archive symlink leaves out of the pre-staging probe and the merge guard paths", async () => {
+      // Downward links only, so the listing already validates today: this case
+      // isolates the guard set, which used to include the link paths themselves
+      // and failed on every run where the archive's own links already existed.
+      const run = await applyTarListing([
+        tarDirectoryLine("a/"),
+        tarDirectoryLine("a/bin/"),
+        tarSymlinkLine("a/bin/x", "y"),
+        tarFileLine("a/bin/y"),
+        tarSymlinkLine("current", "a/bin"),
+        tarFileLine("README"),
+      ])
+
+      expect(extractionSummary(run)).toStrictEqual(extractedThroughStaging)
+      const symlinkLeaves = [`${destination}/a/bin/x`, `${destination}/current`]
+      const expectedGuards = [
+        `${destination}/a`,
+        `${destination}/a/bin`,
+        `${destination}/a/bin/y`,
+        `${destination}/README`,
+      ]
+      const probed = preStagingProbeEntries(run)
+      const guardPaths = stagingMergeGuardPaths(run.mockSsh)
+      expect(probed).toStrictEqual(expect.arrayContaining(expectedGuards))
+      expect(guardPaths).toStrictEqual(expect.arrayContaining(expectedGuards))
+      for (const leaf of symlinkLeaves) {
+        expect(probed).not.toContain(leaf)
+        expect(guardPaths).not.toContain(leaf)
+        // The pre-merge recheck reuses the same guard set.
+        expect(run.probes.flatMap((probe) => probe.entries)).not.toContain(leaf)
+      }
+    })
+
+    it("validates a ~10,000-member listing with many chained and sibling symlinks", async () => {
+      // Resolution is memoized per symlink, so the archive-level walk stays
+      // linear; the default test timeout is the bound, not a wall-clock check.
+      const lines = Array.from({ length: 1000 }, (_value, index) => {
+        const directory = `d${String(index)}`
+        // Each `up` points into the previous directory's chain (d0 into d999).
+        const previous = `../../d${String((index + 999) % 1000)}/bin/c0`
+        return [
+          tarDirectoryLine(`${directory}/`),
+          tarDirectoryLine(`${directory}/bin/`),
+          tarDirectoryLine(`${directory}/lib/`),
+          tarFileLine(`${directory}/lib/f`),
+          tarSymlinkLine(`${directory}/lib64`, "lib"),
+          tarSymlinkLine(`${directory}/bin/s`, "../lib/f"),
+          tarSymlinkLine(`${directory}/bin/c1`, "s"),
+          tarSymlinkLine(`${directory}/bin/c0`, "c1"),
+          tarSymlinkLine(`${directory}/bin/up`, previous),
+          tarSymlinkLine(`${directory}/bin/via64`, "../lib64/f"),
+        ]
+      }).flat()
+      expect(lines).toHaveLength(10_000)
+
+      const run = await applyTarListing(lines)
+
+      expect(extractionSummary(run)).toStrictEqual(extractedThroughStaging)
+    })
+  })
+
   it("rejects a tar archive that contains a block device member", async () => {
     const tarListing = `brw-r--r-- root/root 8,0 1970-01-01 00:00 app/device\n`
     const mockSsh = createMockSsh({
@@ -2179,8 +2761,11 @@ describe("archive.extract — apply", () => {
     // so the recheck-just-before-write guarantee holds. We require the
     // exact one-line shell sub-segment that runs the probe, prints the
     // rejection message, closes the `if` and then invokes `cp -aT`.
+    // Issue #219: the probe only refuses when the staged entry is not itself a
+    // symlink, so a top-level archive symlink from an earlier run is replaced
+    // by `cp --remove-destination` instead of failing every later run.
     expect(mergeCommand).toContain(
-      'if [ -L "$target_path" ]; then echo "[archive.extract] refusing staging merge: destination path $target_path is a symlink" >&2; exit 64; fi; cp -aT'
+      'if [ -L "$target_path" ] && [ ! -L "$source_path" ]; then echo "[archive.extract] refusing staging merge: destination path $target_path is a symlink" >&2; exit 64; fi; cp -aT'
     )
   })
 

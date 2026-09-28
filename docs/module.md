@@ -167,6 +167,12 @@ laufen nur mit `allowInsecureHttp: true`.
 | ----------------- | ------------------------------------------------------------------------------------------------- | ------------------------------------------------------ | ------- |
 | `archive.extract` | Entpackt ein Archiv (tar, zip, gz) auf dem Server. Optional mit vorherigem Upload vom Controller. | Pruefung ob Zielverzeichnis existiert und Inhalt passt | mittel  |
 
+Tar-Symlinks und -Hardlinks werden nur entpackt, wenn ihr Ziel – bei Symlinks vom eigenen
+Verzeichnis aus, bei Hardlinks vom Archiv-Stamm aus und auch über die Symlinks des Archivs hinweg
+aufgelöst – innerhalb von `destination` bleibt; absolute Ziele, ein Link anstelle des
+Zielverzeichnisses selbst, Einträge unterhalb eines Archiv-Symlinks und Zip-Symlinks werden
+abgelehnt.
+
 ---
 
 ## script — Skript-Ausfuehrung

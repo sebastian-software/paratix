@@ -195,6 +195,11 @@ export default server({
 | ----------------- | ----------------------------------------------------------------------------------------------- | ----------------- |
 | `archive.extract` | `(source: string, destination: string, options?: { owner?: string; upload?: boolean }): Module` | Yes (SHA256 flag) |
 
+`archive.extract` extracts a tar symlink or hardlink only if its target, resolved from the link's
+own directory (hardlinks: from the archive root) and through the archive's own symlinks, stays
+inside `destination`; absolute targets, a link in place of the destination root, members below an
+archive symlink, and zip symlinks are rejected.
+
 ### `command`
 
 | Method          | Signature                                                                                                  | Idempotent        |

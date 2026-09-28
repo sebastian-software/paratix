@@ -89,7 +89,12 @@ type ArchiveMemberParseResult =
  *     mode   user/group   size   date   time   name link to linktarget
  *
  * Blank lines are ignored. Non-empty lines that do not match this shape are
- * rejected so the safety guard fails closed before extraction.
+ * rejected so the safety guard fails closed before extraction. Link lines
+ * whose remainder contains the link separator (`->` for non-file members,
+ * `link to` for hardlinks) more than once are rejected as ambiguous, because
+ * the split between member name and link target cannot be recovered. For the
+ * same reason a hardlink line whose remainder contains both `->` and
+ * `link to` is rejected (Issue #219).
  *
  * @param line - A single line from `tar -tv…f` output.
  * @returns The parsed member, an ignored marker or an invalid-line reason.
@@ -113,6 +118,103 @@ function archiveMemberKindFromMode(mode: string): ArchiveMember["kind"] {
   return "file"
 }
 
+/**
+ * Issue #219: `tar -tv` prints `name -> target` (and `name link to target`)
+ * without escaping, so a member name or link target that itself contains the
+ * separator makes the split ambiguous. Splitting at the first occurrence lets
+ * a symlink named `d/a -> b` with target `../../../x` be validated as `d/a`
+ * pointing at `b -> ../../../x`, which stays inside the destination although
+ * the extracted link escapes it. Such lines therefore fail closed.
+ *
+ * @param line - The trimmed listing line, quoted in the failure reason.
+ * @param detail - Why the split is ambiguous, shown in parentheses.
+ * @returns The invalid-line result for the ambiguous listing line.
+ */
+function ambiguousTarLinkLine(line: string, detail: string): ArchiveMemberParseResult {
+  return {
+    failureReason: `ambiguous tar listing line (${detail}): ${JSON.stringify(line)}`,
+    status: "invalid",
+  }
+}
+
+/**
+ * Split a tar link listing remainder into member path and link target at the
+ * given separator.
+ *
+ * @param parts - The parsed listing line parts.
+ * @param parts.kind - The member kind inferred from the mode.
+ * @param parts.line - The trimmed listing line, quoted in failure reasons.
+ * @param parts.mode - The ten-character symbolic mode string.
+ * @param parts.rest - The listing remainder after the date/time columns.
+ * @param separator - The link separator (`->` or `link to`, space-padded).
+ * @returns The parsed link member, an ambiguous-line failure, or null when
+ *   the separator does not occur.
+ */
+function parseTarLinkMember(
+  parts: { kind: ArchiveMember["kind"]; line: string; mode: string; rest: string },
+  separator: string
+): ArchiveMemberParseResult | null {
+  const { kind, line, mode, rest } = parts
+  const separatorIndex = rest.indexOf(separator)
+  if (separatorIndex === -1) return null
+  // Issue #219: see ambiguousTarLinkLine — never guess the name/target split.
+  if (rest.includes(separator, separatorIndex + separator.length)) {
+    return ambiguousTarLinkLine(
+      line,
+      `link separator ${JSON.stringify(separator)} occurs more than once`
+    )
+  }
+  return {
+    member: {
+      format: "tar",
+      kind,
+      linkTarget: rest.slice(separatorIndex + separator.length),
+      mode,
+      path: rest.slice(0, separatorIndex),
+    },
+    status: "parsed",
+  }
+}
+
+/**
+ * Split the listing remainder of a link member according to its kind:
+ * symlinks and other non-file members at `->`, hardlinks at `->` or
+ * `link to`. Plain files never carry a link target.
+ *
+ * Issue #219: a hardlink remainder that contains both `->` and `link to` is
+ * ambiguous. GNU tar prints the hardlink `a -> b` to `d/e/c` as
+ * `a -> b link to d/e/c`; splitting at `->` first would validate it as `a`
+ * pointing at `b link to d/e/c` and so bypass the hardlink rules of
+ * `archiveLinkUnsafeReason` (hardlink to a symlink, link through an ancestor
+ * symlink) that the kind-aware symlink anchoring relies on. Such lines fail
+ * closed instead of guessing which separator is the real one.
+ *
+ * @param parts - The parsed listing line parts.
+ * @param parts.kind - The member kind inferred from the mode.
+ * @param parts.line - The trimmed listing line, quoted in failure reasons.
+ * @param parts.mode - The ten-character symbolic mode string.
+ * @param parts.rest - The listing remainder after the date/time columns.
+ * @returns The parsed link member, an ambiguous-line failure, or null when
+ *   the remainder carries no link target.
+ */
+function parseTarLinkRemainder(parts: {
+  kind: ArchiveMember["kind"]
+  line: string
+  mode: string
+  rest: string
+}): ArchiveMemberParseResult | null {
+  const { kind, line, rest } = parts
+  if (kind === "file") return null
+  if (kind !== "hardlink") return parseTarLinkMember(parts, TAR_LINK_ARROW)
+  if (rest.includes(TAR_LINK_ARROW) && rest.includes(TAR_HARDLINK_TARGET)) {
+    return ambiguousTarLinkLine(
+      line,
+      `hardlink contains both ${JSON.stringify(TAR_LINK_ARROW)} and ${JSON.stringify(TAR_HARDLINK_TARGET)}`
+    )
+  }
+  return parseTarLinkMember(parts, TAR_LINK_ARROW) ?? parseTarLinkMember(parts, TAR_HARDLINK_TARGET)
+}
+
 function parseTarVerboseLine(line: string): ArchiveMemberParseResult {
   const trimmed = line.replace(/\r$/v, "")
   if (trimmed.length === 0) return { status: "ignored" }
@@ -130,32 +232,8 @@ function parseTarVerboseLine(line: string): ArchiveMemberParseResult {
   const mode = match.groups.mode
   const kind = archiveMemberKindFromMode(mode)
   const rest = match.groups.rest
-  const arrowIndex = rest.indexOf(TAR_LINK_ARROW)
-  if (arrowIndex !== -1 && kind !== "file") {
-    return {
-      member: {
-        format: "tar",
-        kind,
-        linkTarget: rest.slice(arrowIndex + TAR_LINK_ARROW.length),
-        mode,
-        path: rest.slice(0, arrowIndex),
-      },
-      status: "parsed",
-    }
-  }
-  const hardlinkTargetIndex = rest.indexOf(TAR_HARDLINK_TARGET)
-  if (hardlinkTargetIndex !== -1 && kind === "hardlink") {
-    return {
-      member: {
-        format: "tar",
-        kind,
-        linkTarget: rest.slice(hardlinkTargetIndex + TAR_HARDLINK_TARGET.length),
-        mode,
-        path: rest.slice(0, hardlinkTargetIndex),
-      },
-      status: "parsed",
-    }
-  }
+  const linkMember = parseTarLinkRemainder({ kind, line: trimmed, mode, rest })
+  if (linkMember !== null) return linkMember
   return {
     member: {
       format: "tar",
@@ -255,6 +333,17 @@ const ARCHIVE_MEMBER_CONTROL_CHARACTER_PATTERN = /[\x00-\x1F]/v
  * Resolves consecutive slashes, drops `.` segments and applies `..`
  * segments without ever escaping above the start. The returned string is
  * the canonical relative form used by {@link memberEscapesDestination}.
+ * The destination root itself (`.`, `./`, the empty string) normalizes to
+ * the empty string, and a trailing slash is dropped, so `./x`, `x` and `x/`
+ * share one form.
+ *
+ * Issue #219: the normalization is purely lexical and knows nothing about
+ * where a path is anchored. Member paths and hardlink targets are relative to
+ * the archive root and can be passed in directly. A relative symlink target is
+ * relative to the directory that contains the link, so callers join it to
+ * {@link archiveMemberParentPath} of the normalized member path first; the
+ * lexical result says nothing about symlinks the path passes through, which
+ * `archiveLinkValidation.ts` resolves separately.
  *
  * Returns null when the path tries to escape the root via `..` segments at
  * the top level, or when the input contains control characters
@@ -285,6 +374,19 @@ export function normalizeArchiveMemberPath(input: string): null | string {
 }
 
 /**
+ * Issue #219: return the parent of a normalized archive path — its POSIX
+ * dirname, with the empty string standing for the destination root. A
+ * root-level member such as `x` therefore has the parent `""`.
+ *
+ * @param normalizedPath - A path already normalized by {@link normalizeArchiveMemberPath}.
+ * @returns The normalized parent path, `""` for a root-level path.
+ */
+export function archiveMemberParentPath(normalizedPath: string): string {
+  const separator = normalizedPath.lastIndexOf("/")
+  return separator === -1 ? "" : normalizedPath.slice(0, separator)
+}
+
+/**
  * Decide whether a single archive member would write outside the
  * destination directory. Treats absolute paths and any traversal escape as
  * unsafe and returns true.
@@ -293,17 +395,26 @@ export function normalizeArchiveMemberPath(input: string): null | string {
  * absolute target or a target that escapes the destination via `..` is
  * rejected to mirror typical zip-slip / tar-slip patterns.
  *
+ * Issue #219: the target is anchored by member kind. A hardlink target is a
+ * member name relative to the archive root, so it is normalized as is. A
+ * relative symlink target is read by the kernel from the directory that
+ * contains the link, so it is normalized after joining it to the link's
+ * parent: `a/bin/x -> ../lib/y` stays inside, `a/x -> ../../y` escapes. This
+ * check is lexical and per member; symlink chains through other archive
+ * members are resolved by `archiveLinkUnsafeReason` afterwards.
+ *
  * @param member - A single parsed archive member.
  * @returns True if the member is unsafe and must be rejected.
  */
 export function memberEscapesDestination(member: ArchiveMember): boolean {
   if (member.path.startsWith("/")) return true
-  if (normalizeArchiveMemberPath(member.path) === null) return true
-  if (member.linkTarget !== null) {
-    if (member.linkTarget.startsWith("/")) return true
-    if (normalizeArchiveMemberPath(member.linkTarget) === null) return true
-  }
-  return false
+  const memberPath = normalizeArchiveMemberPath(member.path)
+  if (memberPath === null) return true
+  if (member.linkTarget === null) return false
+  if (member.linkTarget.startsWith("/")) return true
+  const anchor = member.kind === "symlink" ? archiveMemberParentPath(memberPath) : ""
+  const anchoredTarget = anchor === "" ? member.linkTarget : `${anchor}/${member.linkTarget}`
+  return normalizeArchiveMemberPath(anchoredTarget) === null
 }
 
 /**

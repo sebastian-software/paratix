@@ -6,7 +6,8 @@ import { CAPTURE_TRUNCATION_MARKER } from "../sshHelpers.js"
 import { type Module, type ModuleResult, NEEDS_APPLY, type SshConnection } from "../types.js"
 import {
   archiveMemberDestinationPaths,
-  archiveMemberPathsWithAncestors,
+  archiveMemberGuardPaths,
+  archiveSymlinkTargetProbePaths,
   createExtractDestinationDirectory,
   destinationPathWithAncestors,
   validateExistingExtractDestination,
@@ -14,6 +15,7 @@ import {
   validateNoSymlinkPaths,
   validateResolvedDestinationPath,
 } from "./archiveDestinationValidation.js"
+import { archiveLinkUnsafeReason } from "./archiveLinkValidation.js"
 import {
   ARCHIVE_CAPTURE_LIMIT_BYTES,
   type ArchiveMember,
@@ -255,7 +257,13 @@ export function buildStagingMergeScript(): string {
     String.raw`exit 64; fi; `,
     String.raw`done || exit $?; `,
     `target_path="$destination/$\{source_path##*/}"; `,
-    String.raw`if [ -L "$target_path" ]; then `,
+    // Issue #219: a destination symlink may only be replaced by a staged
+    // symlink. Refusing it unconditionally failed every later run of an
+    // archive with a top-level symlink, because that link from the previous
+    // run was still in place. `cp -aT --no-dereference --remove-destination`
+    // removes the old link and never writes through it; a symlink where the
+    // archive has a directory or file is still refused.
+    String.raw`if [ -L "$target_path" ] && [ ! -L "$source_path" ]; then `,
     String.raw`echo "[archive.extract] refusing staging merge: destination path $target_path is a symlink" >&2; `,
     String.raw`exit 64; fi; `,
     String.raw`cp -aT --no-dereference --remove-destination "$source_path" "$target_path" || exit $?; `,
@@ -422,6 +430,9 @@ type ApplyParameters = {
  * destination. This is the runtime defense against the classic zip-slip /
  * tar-slip attack.
  *
+ * Issue #219: after the per-member checks, the archive-level link rules of
+ * `archiveLinkUnsafeReason` run over the whole listing.
+ *
  * @param conn - The SSH connection.
  * @param parameters - Listing inputs.
  * @param parameters.archivePath - The remote path to the archive.
@@ -439,8 +450,12 @@ async function validatedArchiveMembers(
   const unsafe = listing.members
     .map((member: ArchiveMember) => archiveMemberUnsafeReason(member))
     .find((reason): reason is string => reason !== null)
-  if (unsafe !== undefined) {
-    return failed(`[archive.extract] refusing to extract ${parameters.source}: ${unsafe}`)
+  // Issue #219: links are judged against the whole archive once every member
+  // passed on its own — whether a relative symlink stays inside depends on the
+  // other symlinks its target passes through.
+  const unsafeLinks = unsafe ?? archiveLinkUnsafeReason(listing.members)
+  if (unsafeLinks !== null) {
+    return failed(`[archive.extract] refusing to extract ${parameters.source}: ${unsafeLinks}`)
   }
   return listing.members
 }
@@ -612,7 +627,7 @@ async function validateTargetsForStagingMerge(
   return validateNoSymlinkPaths(conn, {
     paths: [
       ...destinationPathWithAncestors(parameters.destination),
-      ...archiveMemberPathsWithAncestors(parameters.destination, parameters.members),
+      ...archiveMemberGuardPaths(parameters.destination, parameters.members),
     ],
     source: parameters.source,
   })
@@ -678,7 +693,7 @@ async function extractViaStagingDirectory(
       destination,
       guardPaths: [
         ...destinationPathWithAncestors(destination),
-        ...archiveMemberPathsWithAncestors(destination, members),
+        ...archiveMemberGuardPaths(destination, members),
       ],
       staging,
     })
@@ -754,8 +769,11 @@ async function runExtraction(
   })
   if (destinationFailure !== null) return destinationFailure
 
+  // Issue #219: the same batched probe also covers the host paths that the
+  // archive's symlink targets pass through without the archive shipping them.
   const unsafeMemberPath = await validateNoSymlinkPaths(conn, {
-    paths: archiveMemberPathsWithAncestors(validatedDestination.destination, members),
+    linkTargets: archiveSymlinkTargetProbePaths(validatedDestination.destination, members),
+    paths: archiveMemberGuardPaths(validatedDestination.destination, members),
     source,
   })
   if (unsafeMemberPath !== null) return unsafeMemberPath
