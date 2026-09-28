@@ -232,6 +232,9 @@
     "diratime",
     "mountinfo",
     "setattr",
-    "symfollow"
+    "symfollow",
+    "multiarch",
+    "noninteractive",
+    "rpmsave"
   ]
 }

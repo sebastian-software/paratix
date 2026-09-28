@@ -8,16 +8,19 @@ import {
   type SshConnection,
 } from "../types.js"
 import { hasFlag, setFlag } from "./moduleHelpers.js"
+import { hasAnyDpkgRemnant, parseAbsentArguments, purgeAptPackages } from "./packageAbsent.js"
 import {
   describeAptUpgradeOutcome,
   UNKNOWN_UPGRADE_OUTCOME_DETAIL,
 } from "./packageUpgradeSummary.js"
 import {
+  type AbsentOptions,
   describePackages,
   getInstalledVersion,
   type NormalizedPackage,
   type PackageArgument,
   type PackageManager,
+  type PackageSpec,
   runVersionedInstall,
   splitPackagesAndOptions,
   type UpgradeOptions,
@@ -25,7 +28,7 @@ import {
   versionsEqual,
 } from "./packageVersion.js"
 
-export type { PackageSpec, UpgradeOptions } from "./packageVersion.js"
+export type { AbsentOptions, PackageSpec, UpgradeOptions } from "./packageVersion.js"
 
 const EXEC_OPTS = { ignoreExitCode: true, silent: true } as const
 
@@ -182,6 +185,35 @@ export async function isPackageInstalled(
   }
 }
 
+async function hasAnyInstalledPackage(
+  ssh: SshConnection,
+  pm: PackageManager,
+  names: readonly string[]
+): Promise<boolean> {
+  for (const p of names) {
+    // eslint-disable-next-line no-await-in-loop
+    if (await isPackageInstalled(ssh, pm, p)) return true
+  }
+  return false
+}
+
+async function removePackages(parameters: {
+  label: string
+  names: readonly string[]
+  options: AbsentOptions | undefined
+  pm: PackageManager
+  ssh: SshConnection
+}): Promise<ModuleResult> {
+  const { label, names, options, pm, ssh } = parameters
+  if (!(await hasAnyInstalledPackage(ssh, pm, names))) return { status: "ok" }
+  const quoted = names.map((p) => shellQuote(p)).join(" ")
+  const result = await ssh.exec(REMOVE_COMMANDS[pm](quoted), execOptions(options))
+  if (result.code !== 0) {
+    return failedCommand(`[package.absent: ${label}] package removal failed`, result)
+  }
+  return { status: "changed" }
+}
+
 /**
  * Determine whether a package satisfies its desired state on the target.
  *
@@ -300,62 +332,63 @@ export const pkg = {
    * The check phase queries the package database for each package individually;
    * the remove command is only executed when at least one package is present.
    *
-   * Pass an `UpgradeOptions` object as the last argument to override the SSH
-   * timeout for slow remove operations.
+   * Pass an `AbsentOptions` object as the last argument to override the SSH
+   * timeout for slow remove operations or to purge instead of remove.
+   *
+   * With `purge: true` on apt the packages are removed with
+   * `apt-get purge`, which also deletes their configuration files. A package
+   * then only counts as absent once dpkg no longer knows any remnant of it: an
+   * entry in the `rc` (config-files) state or a half-installed state is purged
+   * as well. Every name is queried with `dpkg-query` across all architectures
+   * and exactly the reported dpkg identifiers (bare `name` or `name:arch`) are
+   * passed to `apt-get purge`, so names dpkg does not know are skipped and a
+   * foreign-architecture remnant is purged too. Like `remove`, `apt-get purge`
+   * also removes packages that depend on the named ones and purges their
+   * configuration files, even when they are not named. No `autoremove` runs;
+   * dependencies that are no longer needed stay installed.
+   *
+   * On apk, dnf and yum `purge: true` maps to the normal remove (same command,
+   * same detection); rpm may still leave modified configuration files behind
+   * as `*.rpmsave`.
+   *
+   * Note that `when.packageAbsent` treats a package in the `rc` state as
+   * absent, so it skips steps even though un-purged remnants remain.
    *
    * @param packagesAndOptions - One or more package names (bare strings or
    *   `PackageSpec` objects without a `version`), optionally followed by an
-   *   `UpgradeOptions` object as the last argument.
-   * @returns A Module that removes the packages if any are present.
+   *   `AbsentOptions` object as the last argument.
+   * @returns A Module that removes (or purges) the packages if any are present.
+   * @throws {Error} When a package name is invalid, a version is pinned, or
+   *   `purge` is not a boolean.
    *
    * @example
    * pkg.absent("vim", "nano")
    * pkg.absent("vim", "nano", { timeout: 600_000 })
+   *
+   * @example
+   * pkg.absent("docker-ce", "containerd.io", { purge: true })
    */
-  absent(...packagesAndOptions: PackageArgument[]): Module {
-    const { options, packages } = splitPackagesAndOptions(packagesAndOptions)
-    validatePackages("package.absent", packages)
-    // `absent` is presence-based; a version pin has no meaning here and must
-    // not be silently ignored — reject it loudly.
-    for (const p of packages) {
-      if (p.version !== undefined) {
-        throw new Error(
-          `package.absent: version pinning is not supported (package ${JSON.stringify(p.name)})`
-        )
-      }
-    }
-    const names = packages.map((p) => p.name)
+  absent(...packagesAndOptions: Array<AbsentOptions | PackageSpec | string>): Module {
+    const { names, options, purge } = parseAbsentArguments(packagesAndOptions)
     const label = names.join(", ")
     return {
       async apply(ssh: null | SshConnection): Promise<ModuleResult> {
         if (!ssh) return failed(`[package.absent: ${label}] SSH connection is required`)
         const pm = await detectPackageManager(ssh)
         if (!pm) return missingPackageManager(`package.absent: ${label}`)
-        let anyInstalled = false
-        for (const packageName of names) {
-          // eslint-disable-next-line no-await-in-loop
-          if (await isPackageInstalled(ssh, pm, packageName)) {
-            anyInstalled = true
-            break
-          }
-        }
-        if (!anyInstalled) return { status: "ok" }
-        const quoted = names.map((p) => shellQuote(p)).join(" ")
-        const result = await ssh.exec(REMOVE_COMMANDS[pm](quoted), execOptions(options))
-        if (result.code !== 0) {
-          return failedCommand(`[package.absent: ${label}] package removal failed`, result)
-        }
-        return { status: "changed" }
+        if (purge && pm === "apt")
+          return purgeAptPackages({ execOpts: execOptions(options), label, names, ssh })
+        return removePackages({ label, names, options, pm, ssh })
       },
       async check(ssh: null | SshConnection): Promise<"needs-apply" | "ok"> {
         if (!ssh) return NEEDS_APPLY
         const pm = await detectPackageManager(ssh)
         if (!pm) return NEEDS_APPLY
-        for (const p of names) {
-          // eslint-disable-next-line no-await-in-loop
-          if (await isPackageInstalled(ssh, pm, p)) return NEEDS_APPLY
-        }
-        return "ok"
+        const present =
+          purge && pm === "apt"
+            ? await hasAnyDpkgRemnant(ssh, names)
+            : await hasAnyInstalledPackage(ssh, pm, names)
+        return present ? NEEDS_APPLY : "ok"
       },
       name: `package.absent: ${label}`,
     }

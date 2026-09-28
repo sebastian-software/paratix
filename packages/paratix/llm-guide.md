@@ -358,7 +358,7 @@ Import with renaming: `import { package as pkg } from "paratix/modules"`. The wo
 | Method              | Signature                                                                         | Idempotent       |
 | ------------------- | --------------------------------------------------------------------------------- | ---------------- |
 | `package.installed` | `(...packagesAndOptions: Array<string \| PackageSpec \| UpgradeOptions>): Module` | Yes              |
-| `package.absent`    | `(...packagesAndOptions: Array<string \| PackageSpec \| UpgradeOptions>): Module` | Yes              |
+| `package.absent`    | `(...packagesAndOptions: Array<string \| PackageSpec \| AbsentOptions>): Module`  | Yes              |
 | `package.update`    | `(date: string, options?: UpgradeOptions): Module`                                | Yes (dated flag) |
 | `package.upgrade`   | `(date: string, options?: UpgradeOptions): Module`                                | Yes (dated flag) |
 
@@ -381,6 +381,48 @@ pkg.upgrade("2026-05-01", { timeout: 900_000 })
 pkg.installed("texlive-full", { timeout: 900_000 })
 apt.distUpgrade("2026-05-01", { timeout: 1_200_000 })
 ```
+
+#### `AbsentOptions` — Purge
+
+```typescript
+type AbsentOptions = UpgradeOptions & {
+  purge?: boolean // apt: purge (remove incl. configuration files) instead of remove
+}
+```
+
+`package.absent` accepts `AbsentOptions` as its last argument; `purge` is not available on
+`package.installed`, `package.update` or `package.upgrade`.
+
+```typescript
+pkg.absent("docker-ce", "containerd.io", { purge: true })
+```
+
+With `purge: true`:
+
+- **apt** runs `DEBIAN_FRONTEND=noninteractive apt-get purge -y -- …`, which also deletes the
+  packages' configuration files. A package counts as absent only when dpkg knows no remnant of it:
+  `installed`, `rc` (`config-files`) and intermediate states such as `half-installed` or `unpacked`
+  are purged; `not-installed` entries and names dpkg does not know are absent. Every name is queried
+  across all architectures, and exactly the dpkg-reported identifiers (bare `name` or `name:arch`)
+  are passed to `apt-get purge`. Unknown names are skipped, so a package whose source was already
+  removed does not fail the run, and a foreign-architecture remnant is purged too.
+- **`check`** (and therefore `--dry-run`) uses the same detection: an `rc` package reports
+  `needs-apply`, and a second run after the purge reports `ok`.
+- **Reverse dependencies:** like `remove`, `apt-get purge` also removes packages that depend on the
+  named ones and purges their configuration files, even when they are not named. Purging
+  `containerd.io` removes `docker-ce`.
+- **No `autoremove`:** dependencies that are no longer needed stay installed.
+- **apk, dnf, yum:** `purge: true` maps to the normal remove (same command, same detection). rpm may
+  still leave modified configuration files behind as `*.rpmsave`.
+- **`timeout`** applies to the `apt-get purge` call only, not to the dpkg status queries.
+- **Guards:** `when.packageAbsent` (and `when.packageInstalled`) treat a package in the `rc` state
+  as absent, so a guard such as
+  `when.packageInstalled("docker-ce", pkg.absent("docker-ce", { purge: true }))` skips the purge
+  once only remnants are left. Run the purge unguarded; it is idempotent on its own.
+- A non-boolean `purge` (including `null`) throws at construction:
+  `package.absent: purge must be a boolean`.
+
+Without `purge` (or with `purge: false`) the command, detection and result are unchanged.
 
 #### `PackageSpec` — Version Pinning
 

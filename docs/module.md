@@ -15,12 +15,12 @@ idempotent, sofern nicht anders vermerkt.
 
 ## package — Paketverwaltung
 
-| Modul               | Beschreibung                                                                                                                                     | Check-Strategie                                        | Aufwand |
-| ------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------ | ------------------------------------------------------ | ------- |
-| `package.installed` | Stellt sicher, dass eines oder mehrere Pakete installiert sind. Akzeptiert Paketnamen als Argumente.                                             | Delegiert an den erkannten Paketmanager                | einfach |
-| `package.absent`    | Stellt sicher, dass Pakete nicht installiert sind. Entfernt sie bei Bedarf.                                                                      | Delegiert an den erkannten Paketmanager                | einfach |
-| `package.update`    | Aktualisiert Paketlisten einmal pro angegebenem Datum.                                                                                           | State-Flag: `/var/lib/paratix/flags/package-update-*`  | einfach |
-| `package.upgrade`   | Führt ein Paket-Upgrade einmal pro angegebenem Datum aus. Nutzt State-Flags, da die Operation teuer ist und nicht effizient geprüft werden kann. | State-Flag: `/var/lib/paratix/flags/package-upgrade-*` | einfach |
+| Modul               | Beschreibung                                                                                                                                                                                                                                               | Check-Strategie                                        | Aufwand |
+| ------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------ | ------- |
+| `package.installed` | Stellt sicher, dass eines oder mehrere Pakete installiert sind. Akzeptiert Paketnamen als Argumente.                                                                                                                                                       | Delegiert an den erkannten Paketmanager                | einfach |
+| `package.absent`    | Stellt sicher, dass Pakete nicht installiert sind. Entfernt sie bei Bedarf. Optional `{ purge: true }`: unter apt per `apt-get purge` inkl. Konfigurationsdateien bzw. `rc`-Resten (entfernt auch abhängige Pakete), unter apk/dnf/yum normales Entfernen. | Delegiert an den erkannten Paketmanager                | einfach |
+| `package.update`    | Aktualisiert Paketlisten einmal pro angegebenem Datum.                                                                                                                                                                                                     | State-Flag: `/var/lib/paratix/flags/package-update-*`  | einfach |
+| `package.upgrade`   | Führt ein Paket-Upgrade einmal pro angegebenem Datum aus. Nutzt State-Flags, da die Operation teuer ist und nicht effizient geprüft werden kann.                                                                                                           | State-Flag: `/var/lib/paratix/flags/package-upgrade-*` | einfach |
 
 ## apt — Debian/Ubuntu-Konfiguration
 
@@ -376,10 +376,10 @@ export default server({
 
 ## package — Generischer Paketmanager
 
-| Modul               | Beschreibung                                                                                                                                                                                   | Check-Strategie                         | Aufwand |
-| ------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------- | ------- |
-| `package.installed` | Abstrahiert ueber `apt`, `dnf` und andere Paketmanager. Erkennt automatisch das Betriebssystem und waehlt den passenden Paketmanager. Erfordert `system.facts` oder manuelle OS-Angabe im Env. | Delegiert an den erkannten Paketmanager | mittel  |
-| `package.absent`    | Gegenstueck zu `package.installed`. Entfernt Pakete unabhaengig vom Paketmanager.                                                                                                              | Delegiert an den erkannten Paketmanager | mittel  |
+| Modul               | Beschreibung                                                                                                                                                                                                                                   | Check-Strategie                         | Aufwand |
+| ------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------- | ------- |
+| `package.installed` | Abstrahiert ueber `apt`, `dnf` und andere Paketmanager. Erkennt automatisch das Betriebssystem und waehlt den passenden Paketmanager. Erfordert `system.facts` oder manuelle OS-Angabe im Env.                                                 | Delegiert an den erkannten Paketmanager | mittel  |
+| `package.absent`    | Gegenstueck zu `package.installed`. Entfernt Pakete unabhaengig vom Paketmanager. Mit `purge: true` unter apt per `apt-get purge` inkl. Konfigurationsdateien bzw. `rc`-Resten (auch abhaengige Pakete), unter apk/dnf/yum normales Entfernen. | Delegiert an den erkannten Paketmanager | mittel  |
 
 ---
 

@@ -18,6 +18,18 @@ export type UpgradeOptions = {
   timeout?: number
 }
 
+/** Per-call overrides accepted by `package.absent`. */
+export type AbsentOptions = {
+  /**
+   * Purge instead of remove. On apt the packages are removed with
+   * `apt-get purge`, including their configuration files, and a package only
+   * counts as absent once dpkg no longer knows any remnant of it (such as the
+   * `rc` config-files state). On apk, dnf and yum this maps to the normal
+   * remove. Defaults to `false`.
+   */
+  purge?: boolean
+} & UpgradeOptions
+
 /**
  * A package to install, optionally pinned to an exact version.
  *
@@ -42,23 +54,26 @@ export type PackageArgument = PackageSpec | string | UpgradeOptions
 
 const VERSION_EXEC_OPTS = { ignoreExitCode: true, silent: true } as const
 
-// A `PackageSpec` carries a `name` field; an `UpgradeOptions` object does not.
+// A `PackageSpec` carries a `name` field; an options object does not.
 // We disambiguate on the shape (presence of `name`), not the position, so a
 // `PackageSpec` may appear anywhere in the argument list — including last — and
 // a trailing options object is still recognized.
-function isPackageSpec(value: PackageSpec | UpgradeOptions): value is PackageSpec {
+function isPackageSpec(value: object): value is PackageSpec {
   return "name" in value && typeof value.name === "string"
 }
 
 // Split a variadic argument list into normalized packages plus an optional
-// trailing `UpgradeOptions` object (an object without a `name` field at the
-// final position).
-export function splitPackagesAndOptions(values: readonly PackageArgument[]): {
-  options: undefined | UpgradeOptions
+// trailing options object (an object without a `name` field at the final
+// position). Generic over the options type so `absent` can accept its wider
+// `AbsentOptions` while `installed` stays at `UpgradeOptions`.
+export function splitPackagesAndOptions<TOptions extends object = UpgradeOptions>(
+  values: ReadonlyArray<PackageSpec | string | TOptions>
+): {
+  options: TOptions | undefined
   packages: NormalizedPackage[]
 } {
   const packages: NormalizedPackage[] = []
-  let options: undefined | UpgradeOptions
+  let options: TOptions | undefined
   for (const [index, value] of values.entries()) {
     if (typeof value === "string") {
       packages.push({ name: value, version: undefined })
