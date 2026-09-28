@@ -13,7 +13,10 @@ export type LiveMount = {
   majMin: string
   /** All mount options (VFS flags plus superblock options, `OPTIONS` column). */
   options: string
-  /** Mount ID of the parent mount (`PARENT` column). */
+  /**
+   * Mount ID of the parent mount, read from `/proc/self/mountinfo` (findmnt's
+   * `PARENT` column needs util-linux 2.37); `""` when it could not be read.
+   */
   parent: string
   /** Mount source without the `[fsroot]` suffix (`SOURCE` column, `--nofsroot`). */
   source: string

@@ -230,6 +230,7 @@
     "subvolume",
     "unbindable",
     "diratime",
+    "mountinfo",
     "setattr",
     "symfollow"
   ]

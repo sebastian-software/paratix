@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest"
 
 import { mount } from "../../src/modules/mount.js"
-import { parseLiveMount } from "../../src/modules/mountProbe.js"
+import { buildLiveMountProbeCommand, parseLiveMount } from "../../src/modules/mountProbe.js"
 import { createMockSsh as createBaseMockSsh } from "../helpers/mockSsh.js"
 import { makeIsVerifiedReleaseCall } from "../helpers/mockSshFlagLock.js"
 
@@ -40,7 +40,7 @@ const expandedDefaultMountOpts = "rw,relatime"
 const fstabLine = `${mountSrc} ${mountPath} ${mountFstype} ${mountOpts} 0 0`
 
 // Shared live-mount probe command issued by mount.present and mount.absent.
-const findmntCheckCmd = `findmnt --noheadings --pairs --nofsroot --mountpoint '${mountPath}' --output ID,PARENT,MAJ:MIN,SOURCE,FSTYPE,OPTIONS,VFS-OPTIONS,FSROOT`
+const findmntCheckCmd = `findmnt --noheadings --pairs --nofsroot --mountpoint '${mountPath}' --output ID,MAJ:MIN,SOURCE,FSTYPE,OPTIONS,VFS-OPTIONS,FSROOT && { cut -d ' ' -f 1,2 /proc/self/mountinfo || true; }`
 const mountCmd = `mount -t '${mountFstype}' -o '${mountOpts}' -- '${mountSrc}' '${mountPath}'`
 const umountCmd = `umount '${mountPath}'`
 // R-0000755: mount.present now walks each path component with a
@@ -99,7 +99,6 @@ type LivePairsFields = {
   id?: number | string
   majMin?: string
   options: string
-  parent?: number | string
   source: string
   vfsOptions?: string
 }
@@ -126,7 +125,7 @@ function escapeFindmntValue(value: string): string {
 
 /**
  * Render one `findmnt --pairs` line as printed by the live-mount probe.
- * Defaults: ID 100, PARENT 1, MAJ:MIN 0:50, FSROOT `/`, and VFS-OPTIONS
+ * Defaults: ID 100, MAJ:MIN 0:50, FSROOT `/`, and VFS-OPTIONS
  * derived from the per-mount flags in `options` (with `rw` when neither
  * `ro` nor `rw` is listed).
  *
@@ -142,7 +141,6 @@ function livePairs(fields: LivePairsFields): string {
   }
   const columns: Array<[string, string]> = [
     ["ID", String(fields.id ?? 100)],
-    ["PARENT", String(fields.parent ?? 1)],
     ["MAJ:MIN", fields.majMin ?? "0:50"],
     ["SOURCE", fields.source],
     ["FSTYPE", fields.fstype],
@@ -151,6 +149,17 @@ function livePairs(fields: LivePairsFields): string {
     ["FSROOT", fields.fsroot ?? "/"],
   ]
   return columns.map(([key, value]) => `${key}="${escapeFindmntValue(value)}"`).join(" ")
+}
+
+/**
+ * Render the `/proc/self/mountinfo` part of the probe output: one
+ * `<mount ID> <parent ID>` line per mount.
+ *
+ * @param mounts - `[mount ID, parent ID]` pairs.
+ * @returns The mountinfo lines, newline-terminated.
+ */
+function mountinfoIds(...mounts: Array<[number, number]>): string {
+  return mounts.map(([id, parent]) => `${id} ${parent}\n`).join("")
 }
 
 // findmnt --pairs stdout for a live mount whose source/fstype/options
@@ -1860,15 +1869,11 @@ describe("mount.present — bind mount smoke", () => {
 
 describe("mount live probe parsing (smoke)", () => {
   it("decodes escapes and selects the top-most of stacked mounts", () => {
-    const lower = livePairs({ fstype: "ext4", id: 40, options: "rw", parent: 1, source: "/dev/a" })
-    const upper = livePairs({
-      fstype: "tmpfs",
-      id: 41,
-      options: "rw",
-      parent: 40,
-      source: 'we$ird"\u00E9',
-    })
-    const live = parseLiveMount(`${upper}\n${lower}\n`)
+    const lower = livePairs({ fstype: "ext4", id: 40, options: "rw", source: "/dev/a" })
+    const upper = livePairs({ fstype: "tmpfs", id: 41, options: "rw", source: 'we$ird"\u00E9' })
+    const live = parseLiveMount(
+      `${upper}\n${lower}\n${mountinfoIds([1, 0], [40, 1], [41, 40], [99, 1])}`
+    )
     expect(live?.id).toBe("41")
     expect(live?.source).toBe('we$ird"\u00E9')
   })
@@ -2525,14 +2530,13 @@ describe("mount.present — bind: probe (#218)", () => {
     expect(await mount.present(bindOptions("bind", { src })).check(ssh, emptyEnv)).toBe("ok")
   })
 
-  it("compares the top-most of stacked mounts, chosen via ID/PARENT and not by line order", async () => {
-    const lowerBind = boundLive({ id: 40, parent: 1 })
+  it("compares the top-most of stacked mounts, chosen via mount and parent IDs and not by line order", async () => {
+    const lowerBind = boundLive({ id: 40 })
     const upperTmpfs = livePairs({
       fstype: "tmpfs",
       id: 41,
       majMin: "0:60",
       options: "rw",
-      parent: 40,
       source: "tmpfs",
     })
     const options = bindOptions("bind")
@@ -2540,31 +2544,46 @@ describe("mount.present — bind: probe (#218)", () => {
     // The desired bind is buried under a tmpfs: not converged.
     const buried = createMockSsh({
       ...bindResolutionResponses(),
-      [findmntCheckCmd]: { code: 0, stdout: `${lowerBind}\n${upperTmpfs}\n` },
+      [findmntCheckCmd]: {
+        code: 0,
+        stdout: `${lowerBind}\n${upperTmpfs}\n${mountinfoIds([40, 1], [41, 40])}`,
+      },
     })
     expect(await mount.present(options).check(buried, emptyEnv)).toBe("needs-apply")
 
     // The desired bind is on top even though findmnt lists it first.
-    const upperBind = boundLive({ id: 43, parent: 42 })
+    const upperBind = boundLive({ id: 43 })
     const lowerTmpfs = livePairs({
       fstype: "tmpfs",
       id: 42,
       majMin: "0:60",
       options: "rw",
-      parent: 1,
       source: "tmpfs",
     })
     const onTop = createMockSsh({
       ...bindResolutionResponses(),
-      [findmntCheckCmd]: { code: 0, stdout: `${upperBind}\n${lowerTmpfs}\n` },
+      [findmntCheckCmd]: {
+        code: 0,
+        stdout: `${upperBind}\n${lowerTmpfs}\n${mountinfoIds([42, 1], [43, 42])}`,
+      },
     })
     expect(await mount.present(options).check(onTop, emptyEnv)).toBe("ok")
   })
 
-  it("falls back to the last line when the ID/PARENT top-most entry is not unique", () => {
-    const first = livePairs({ fstype: "ext4", id: 50, options: "rw", parent: 1, source: "/dev/a" })
-    const last = livePairs({ fstype: "tmpfs", id: 51, options: "rw", parent: 2, source: "tmpfs" })
-    expect(parseLiveMount(`${first}\n${last}\n`)?.id).toBe("51")
+  it("falls back to the last line when the top-most entry by mount and parent IDs is not unique", () => {
+    const first = livePairs({ fstype: "ext4", id: 50, options: "rw", source: "/dev/a" })
+    const last = livePairs({ fstype: "tmpfs", id: 51, options: "rw", source: "tmpfs" })
+    expect(parseLiveMount(`${first}\n${last}\n${mountinfoIds([50, 1], [51, 2])}`)?.id).toBe("51")
+    // Without the mountinfo part (its read failed), the last line is used too.
+    expect(parseLiveMount(`${last}\n${first}\n`)?.id).toBe("50")
+  })
+
+  it("does not request findmnt's PARENT column, which util-linux before 2.37 lacks", () => {
+    const command = buildLiveMountProbeCommand(mountPath)
+    expect(command).not.toContain("PARENT")
+    expect(command).toContain(
+      "--output ID,MAJ:MIN,SOURCE,FSTYPE,OPTIONS,VFS-OPTIONS,FSROOT && { cut -d ' ' -f 1,2 /proc/self/mountinfo || true; }"
+    )
   })
 })
 

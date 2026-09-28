@@ -11,11 +11,12 @@ export const LIVE_MOUNT_NOT_MOUNTED = "not-mounted"
 /**
  * Columns requested from `findmnt` for the live mount at a mountpoint. The
  * parser keys on these literal column names, including `MAJ:MIN` and
- * `VFS-OPTIONS`.
+ * `VFS-OPTIONS`. Every column exists since util-linux 2.33; the `PARENT`
+ * column (util-linux 2.37+) is deliberately not requested, because findmnt
+ * fails on an unknown column. Parent IDs come from `/proc/self/mountinfo`.
  */
 const LIVE_MOUNT_COLUMNS = [
   "ID",
-  "PARENT",
   "MAJ:MIN",
   "SOURCE",
   "FSTYPE",
@@ -37,6 +38,10 @@ const FINDMNT_PAIR_PATTERN = /(?<key>[A-Z0-9_:\-]+)="(?<value>[^"]*)"(?: +|$)/vy
 const FINDMNT_ESCAPE_PATTERN = /\\x(?<hex>[0-9A-Fa-f]{2})/gv
 const HEX_RADIX = 16
 
+// One `<mount ID> <parent ID>` line: the first two fields of
+// `/proc/self/mountinfo`, as printed by the probe's `cut`.
+const MOUNTINFO_IDS_PATTERN = /^(?<id>\d+) (?<parent>\d+)$/v
+
 export type LiveMountProbe =
   | { failure: ModuleResult; kind: "failed" }
   | { kind: "mounted"; live: LiveMount }
@@ -51,11 +56,20 @@ export type LiveMountProbe =
  * source or option cannot shift columns, and `--nofsroot` keeps SOURCE free of
  * the `[fsroot]` suffix because FSROOT is requested as its own column.
  *
+ * Only when findmnt found a mount, the mount ID and parent ID of every mount
+ * are appended from `/proc/self/mountinfo` (its first two fields), so a stack
+ * of mounts can be ordered without findmnt's `PARENT` column, which older
+ * util-linux lacks. A failing read of that file leaves the exit code of
+ * findmnt untouched; the parser then falls back to the last findmnt line.
+ *
  * @param path - The mountpoint to probe.
- * @returns The `findmnt` command string.
+ * @returns The read-only probe command string.
  */
 export function buildLiveMountProbeCommand(path: string): string {
-  return `findmnt --noheadings --pairs --nofsroot --mountpoint ${shellQuote(path)} --output ${LIVE_MOUNT_COLUMNS.join(",")}`
+  return (
+    `findmnt --noheadings --pairs --nofsroot --mountpoint ${shellQuote(path)} --output ${LIVE_MOUNT_COLUMNS.join(",")}` +
+    ` && { cut -d ' ' -f 1,2 /proc/self/mountinfo || true; }`
+  )
 }
 
 /**
@@ -125,8 +139,8 @@ export function parseFindmntPairs(
 }
 
 /**
- * Pick the top-most mount of a stack at one mountpoint: the entry whose `ID`
- * is not the `PARENT` of another entry in the list. When that is not unique
+ * Pick the top-most mount of a stack at one mountpoint: the entry whose mount
+ * ID is not the parent ID of another entry in the list. When that is not unique
  * (unexpected output), fall back to the last line, which is where findmnt
  * lists the most recently stacked mount.
  *
@@ -142,7 +156,10 @@ export function selectTopMostMount<T extends { id: string; parent: string }>(
   return entries.at(-1)
 }
 
-function toLiveMount(pairs: Map<string, string>): LiveMount | null {
+function toLiveMount(
+  pairs: Map<string, string>,
+  parentIds: ReadonlyMap<string, string>
+): LiveMount | null {
   const column = (name: (typeof LIVE_MOUNT_COLUMNS)[number]): string => pairs.get(name) ?? ""
   if (LIVE_MOUNT_NON_EMPTY_COLUMNS.some((name) => column(name).length === 0)) return null
   return {
@@ -151,24 +168,33 @@ function toLiveMount(pairs: Map<string, string>): LiveMount | null {
     id: column("ID"),
     majMin: column("MAJ:MIN"),
     options: column("OPTIONS"),
-    parent: column("PARENT"),
+    parent: parentIds.get(column("ID")) ?? "",
     source: column("SOURCE"),
     vfsOptions: column("VFS-OPTIONS"),
   }
 }
 
 /**
- * Parse the live mount probe output and select the top-most mount.
+ * Parse the live mount probe output and select the top-most mount. Lines of
+ * the form `<mount ID> <parent ID>` come from `/proc/self/mountinfo`; every
+ * other non-empty line must be a well-formed findmnt line.
  *
  * @param stdout - Output of {@link buildLiveMountProbeCommand}.
  * @returns The top-most live mount, or `null` when the output is malformed.
  */
 export function parseLiveMount(stdout: string): LiveMount | null {
-  const entries = parseFindmntPairs(stdout, LIVE_MOUNT_COLUMNS)
+  const parentIds = new Map<string, string>()
+  const findmntLines: string[] = []
+  for (const line of stdout.split("\n")) {
+    const ids = MOUNTINFO_IDS_PATTERN.exec(line.trim())?.groups
+    if (ids == null) findmntLines.push(line)
+    else parentIds.set(ids.id, ids.parent)
+  }
+  const entries = parseFindmntPairs(findmntLines.join("\n"), LIVE_MOUNT_COLUMNS)
   if (entries == null) return null
   const mounts: LiveMount[] = []
   for (const pairs of entries) {
-    const live = toLiveMount(pairs)
+    const live = toLiveMount(pairs, parentIds)
     if (live == null) return null
     mounts.push(live)
   }
