@@ -1,7 +1,7 @@
 /* eslint-disable max-lines -- mount.present and mount.absent share fstab helpers and the mutex-locked persistence flow; splitting them further would scatter behaviour across modules */
 import { posix } from "node:path"
 
-import type { LiveMount } from "./mountTypes.js"
+import type { BindSource, LiveMount, LiveMountChange } from "./mountTypes.js"
 
 import { failed, failedCommand } from "../moduleFailure.js"
 import { shellQuote } from "../ssh.js"
@@ -13,8 +13,15 @@ import {
   type SshConnection,
 } from "../types.js"
 import { withMutexLock } from "./moduleHelpers.js"
-import { applyMountConvergence } from "./mountConvergence.js"
-import { liveMountOptionsMatch } from "./mountOptions.js"
+import { liveMountIdentityMatches, resolveBindSource, validateBindSource } from "./mountBind.js"
+import { applyMountConvergence, buildMountCommand } from "./mountConvergence.js"
+import { bindVfsFlagsMatch, isBindMountOptions, liveMountOptionsMatch } from "./mountOptions.js"
+import { LIVE_MOUNT_NOT_MOUNTED, probeLiveMount } from "./mountProbe.js"
+import {
+  appendLiveRollbackFailure,
+  restoreLiveMountAfterFstabFailure,
+  rollbackLiveMountAfterFstabFailure,
+} from "./mountRollback.js"
 
 const EXEC_OPTS = { ignoreExitCode: true, silent: true } as const
 const FSTAB_PATH = "/etc/fstab"
@@ -24,7 +31,6 @@ const FSTAB_MODE = "0644"
 const FSTAB_FILE_MUTEX = "etc-fstab-mutex"
 const MOUNT_PRESENT = "mount.present"
 const MOUNT_ABSENT = "mount.absent"
-const LIVE_MOUNT_NOT_MOUNTED = "not-mounted"
 const WHITESPACE_PATTERN = /\s/v
 
 /**
@@ -359,6 +365,8 @@ async function removePersistedMountIfPresent(
 }
 
 type EnsureLiveMountParameters = {
+  /** The resolved bind source, or `null` for a non-bind mount. */
+  bindSource: BindSource | null
   fstype: string
   opts: string
   path: string
@@ -366,7 +374,7 @@ type EnsureLiveMountParameters = {
 }
 
 type EnsureLiveMountResult = {
-  changed: boolean
+  change: LiveMountChange
   previousLive: LiveMount | null
 }
 
@@ -375,102 +383,31 @@ type UnmountIfNeededResult = {
   previousLive: LiveMount | null
 }
 
-type LiveMountProbe =
-  | { failure: ModuleResult; kind: "failed" }
-  | { kind: "mounted"; live: LiveMount }
-  | { kind: typeof LIVE_MOUNT_NOT_MOUNTED }
-
-function buildMountCommand(parameters: {
-  fstype: string
-  opts: string
-  path: string
-  src: string
-}): string {
-  return `mount -t ${shellQuote(parameters.fstype)} -o ${shellQuote(parameters.opts)} -- ${shellQuote(parameters.src)} ${shellQuote(parameters.path)}`
-}
-
-function appendLiveRollbackFailure(
-  fstabFailure: ModuleResult,
-  rollbackFailure: ModuleResult | null
-): ModuleResult {
-  if (rollbackFailure == null) return fstabFailure
-  const fstabMessage = fstabFailure.error?.message ?? "failed to update /etc/fstab"
-  const rollbackMessage =
-    rollbackFailure.error?.message ?? "failed to roll back live mount after fstab update failure"
-  return failed(`${fstabMessage}\n${rollbackMessage}`)
-}
-
-async function rollbackLiveMountAfterFstabFailure(
-  ssh: SshConnection,
-  path: string,
-  previousLive: LiveMount | null
-): Promise<ModuleResult | null> {
-  const unmountResult = await ssh.exec(`umount ${shellQuote(path)}`, EXEC_OPTS)
-  if (unmountResult.code !== 0) {
-    return failedCommand(
-      `[${MOUNT_PRESENT}: ${path}] failed to roll back live mount after fstab update failure`,
-      unmountResult
-    )
-  }
-
-  if (previousLive == null) return null
-
-  const restoreResult = await ssh.exec(
-    buildMountCommand({
-      fstype: previousLive.fstype,
-      opts: previousLive.options,
-      path,
-      src: previousLive.source,
-    }),
-    EXEC_OPTS
-  )
-  return restoreResult.code === 0
-    ? null
-    : failedCommand(
-        `[${MOUNT_PRESENT}: ${path}] failed to restore previous live mount after fstab update failure`,
-        restoreResult
-      )
-}
-
-async function restoreLiveMountAfterFstabFailure(
-  ssh: SshConnection,
-  path: string,
-  previousLive: LiveMount
-): Promise<ModuleResult | null> {
-  const restoreResult = await ssh.exec(
-    buildMountCommand({
-      fstype: previousLive.fstype,
-      opts: previousLive.options,
-      path,
-      src: previousLive.source,
-    }),
-    EXEC_OPTS
-  )
-  return restoreResult.code === 0
-    ? null
-    : failedCommand(
-        `[${MOUNT_ABSENT}: ${path}] failed to restore live mount after fstab update failure`,
-        restoreResult
-      )
-}
-
 async function ensurePersistedMountAfterLiveChange(
   ssh: SshConnection,
   parameters: {
+    bindSource: BindSource | null
     desiredLine: string
     liveResult: EnsureLiveMountResult
+    opts: string
     path: string
+    src: string
   }
 ): Promise<boolean | ModuleResult> {
   const fstabResult = await ensureFstabEntry(ssh, parameters.path, parameters.desiredLine)
   if (typeof fstabResult === "boolean") return fstabResult
-  if (!parameters.liveResult.changed) return fstabResult
+  if (parameters.liveResult.change === "unchanged") return fstabResult
 
-  const rollbackFailure = await rollbackLiveMountAfterFstabFailure(
-    ssh,
-    parameters.path,
-    parameters.liveResult.previousLive
-  )
+  // The rollback depends on the kind of live change; see
+  // `rollbackLiveMountAfterFstabFailure` for the bind-specific branches.
+  const rollbackFailure = await rollbackLiveMountAfterFstabFailure(ssh, {
+    bindSource: parameters.bindSource,
+    change: parameters.liveResult.change,
+    opts: parameters.opts,
+    path: parameters.path,
+    previousLive: parameters.liveResult.previousLive,
+    src: parameters.src,
+  })
   return appendLiveRollbackFailure(fstabResult, rollbackFailure)
 }
 
@@ -492,18 +429,21 @@ async function removePersistedMountAfterLiveChange(
 /**
  * Ensure the live mount at `path` matches the desired source / fstype /
  * options. Mounts when nothing is mounted yet, remounts when only options
- * drifted, or unmounts and remounts when source / fstype drifted.
+ * drifted, or unmounts and remounts when source / fstype drifted. For a bind
+ * mount the identity is the resolved `MAJ:MIN` + FSROOT instead of source /
+ * fstype, and only the explicitly named VFS flags count as options.
  *
  * @param ssh - Active SSH connection.
  * @param parameters - Desired mount values.
- * @returns A failure `ModuleResult` when a command failed, `true` when a
- *   change was applied, or `false` when the live mount already matched.
+ * @returns A failure `ModuleResult` when a command failed, or the kind of
+ *   live change (`unchanged` when the live mount already matched) together
+ *   with the previous live mount.
  */
 async function ensureLiveMount(
   ssh: SshConnection,
   parameters: EnsureLiveMountParameters
 ): Promise<EnsureLiveMountResult | ModuleResult> {
-  const { fstype, opts, path, src } = parameters
+  const { bindSource, fstype, opts, path, src } = parameters
   const liveProbe = await probeLiveMount(ssh, MOUNT_PRESENT, path)
   if (liveProbe.kind === "failed") return liveProbe.failure
 
@@ -512,18 +452,18 @@ async function ensureLiveMount(
     if (mountResult.code !== 0) {
       return failedCommand(`[mount.present: ${path}] mount failed`, mountResult)
     }
-    return { changed: true, previousLive: null }
+    return { change: "fresh", previousLive: null }
   }
 
   const { live } = liveProbe
-  if (liveMountMatchesDesired(live, { fstype, opts, src })) {
-    return { changed: false, previousLive: live }
+  if (liveMountMatchesDesired(live, { bindSource, fstype, opts, src })) {
+    return { change: "unchanged", previousLive: live }
   }
 
   // R-0000049: live mount drifted — converge via remount or umount + mount.
-  const failure = await applyMountConvergence(ssh, { fstype, live, opts, path, src })
-  if (failure != null) return failure
-  return { changed: true, previousLive: live }
+  const outcome = await applyMountConvergence(ssh, { bindSource, fstype, live, opts, path, src })
+  if (outcome.failure != null) return outcome.failure
+  return { change: outcome.change, previousLive: live }
 }
 
 async function unmountIfNeeded(
@@ -585,82 +525,120 @@ async function ensureFstabEntry(
 }
 
 /**
- * Probe the live mount attributes for a mountpoint via
- * `findmnt --noheadings --output SOURCE,FSTYPE,OPTIONS`, distinguishing a
- * genuinely absent mount from a failed probe.
- *
- * @param ssh - Active SSH connection to the remote host.
- * @param path - The mountpoint to inspect.
- * @returns A structured probe result for mounted, not-mounted, or failed.
- */
-// findmnt --output SOURCE,FSTYPE,OPTIONS prints exactly three columns; the
-// helper below uses this constant when validating that the parsed output
-// has enough fields to populate every LiveMount property.
-const LIVE_MOUNT_FIELD_COUNT = 3
-
-function parseLiveMount(stdout: string): LiveMount | null {
-  const fields = stdout.trim().split(/\s+/v)
-  if (fields.length < LIVE_MOUNT_FIELD_COUNT) return null
-  return {
-    fstype: fields[1] ?? "",
-    options: fields[2] ?? "",
-    source: fields[0] ?? "",
-  }
-}
-
-async function probeLiveMount(
-  ssh: SshConnection,
-  moduleName: string,
-  path: string
-): Promise<LiveMountProbe> {
-  const findmntResult = await ssh.exec(
-    `findmnt --noheadings --output SOURCE,FSTYPE,OPTIONS ${shellQuote(path)}`,
-    EXEC_OPTS
-  )
-  if (findmntResult.code === 1) return { kind: LIVE_MOUNT_NOT_MOUNTED }
-  if (findmntResult.code !== 0) {
-    return {
-      failure: failedCommand(
-        `[${moduleName}: ${path}] findmnt failed while probing live mount state`,
-        findmntResult
-      ),
-      kind: "failed",
-    }
-  }
-
-  // findmnt prints SOURCE FSTYPE OPTIONS separated by whitespace.
-  const live = parseLiveMount(findmntResult.stdout)
-  if (live == null) {
-    return {
-      failure: failed(
-        `[${moduleName}: ${path}] findmnt returned malformed output while probing live mount state`
-      ),
-      kind: "failed",
-    }
-  }
-  return { kind: "mounted", live }
-}
-
-/**
  * Decide whether the live mount attributes match the desired source,
  * filesystem type, and options. The options string is compared as a
  * normalized comma-separated set so superficial ordering differences and
  * expanded defaults do not cause spurious drift.
  *
- * @param live - The live mount attributes parsed from findmnt.
+ * `live` is the top-most mount at the mountpoint. Two branches apply:
+ *
+ * - **Bind / rbind** (`desired.bindSource` set): the live `MAJ:MIN` and
+ *   FSROOT must equal the resolved source's values. SOURCE and fstype are
+ *   ignored (findmnt reports the backing device and fstype, and SOURCE does
+ *   not identify tmpfs/overlay instances). Only the VFS flags named
+ *   explicitly in `opts` are compared against the live VFS-OPTIONS; unnamed
+ *   flags are inherited from the source mount and are "don't care". `bind`,
+ *   `rbind`, fstab-only, propagation and superblock options are ignored.
+ * - **Any other mount**: SOURCE and fstype must match literally, the live
+ *   FSROOT must be `/` (a bind or subvolume at the path is never the desired
+ *   mount), and the full option set is compared as described above.
+ *
+ * Check and apply share this function, so both agree on what "converged"
+ * means.
+ *
+ * @param live - The live top-most mount parsed from findmnt.
  * @param desired - The desired source, fstype and opts.
+ * @param desired.bindSource - The resolved bind source, or `null` for a non-bind mount.
  * @param desired.fstype - Desired filesystem type.
  * @param desired.opts - Desired mount options string (comma-separated).
  * @param desired.src - Desired mount source.
- * @returns `true` when source, fstype and options all match.
+ * @returns `true` when identity and the compared options all match.
  */
 function liveMountMatchesDesired(
   live: LiveMount,
-  desired: { fstype: string; opts: string; src: string }
+  desired: { bindSource: BindSource | null; fstype: string; opts: string; src: string }
 ): boolean {
-  if (live.source !== desired.src) return false
-  if (live.fstype !== desired.fstype) return false
+  if (!liveMountIdentityMatches(live, desired)) return false
+  if (desired.bindSource != null) return bindVfsFlagsMatch(live.vfsOptions, desired.opts)
   return liveMountOptionsMatch(live.options, desired.opts)
+}
+
+/**
+ * Resolve the desired bind source for a bind/rbind mount with read-only
+ * commands (see `resolveBindSource`). Non-bind mounts need no resolution.
+ *
+ * @param ssh - Active SSH connection.
+ * @param parameters - The mount path, source and whether it is a bind mount.
+ * @param parameters.isBind - Whether the desired `opts` request a bind mount.
+ * @param parameters.path - The configured mountpoint path.
+ * @param parameters.src - The configured mount source.
+ * @returns The resolved bind source, `null` for a non-bind mount, or a
+ *   failure naming the source.
+ */
+async function resolveDesiredBindSource(
+  ssh: SshConnection,
+  parameters: { isBind: boolean; path: string; src: string }
+): Promise<BindSource | ModuleResult | null> {
+  if (!parameters.isBind) return null
+  const resolution = await resolveBindSource(ssh, MOUNT_PRESENT, parameters)
+  return resolution.kind === "resolved" ? resolution.source : resolution.failure
+}
+
+type PresentMountParameters = {
+  fstype: string
+  isBind: boolean
+  opts: string
+  path: string
+  src: string
+}
+
+/**
+ * Apply order for `mount.present`'s live mount: prepare the mountpoint,
+ * resolve and validate a bind source, then probe and mount, remount, or
+ * umount + mount. A missing or wrong bind source is reported before the live
+ * mount is probed or touched, so it can never leave `path` empty.
+ *
+ * @param ssh - Active SSH connection.
+ * @param parameters - Desired mount values.
+ * @returns A failure, or the resolved bind source plus the live change.
+ */
+async function convergePresentLiveMount(
+  ssh: SshConnection,
+  parameters: PresentMountParameters
+): Promise<{ bindSource: BindSource | null; liveResult: EnsureLiveMountResult } | ModuleResult> {
+  const { fstype, opts, path, src } = parameters
+  const preFailure = await preparePresentMountpoint(ssh, path)
+  if (preFailure != null) return preFailure
+
+  const bindSource = await resolveDesiredBindSource(ssh, parameters)
+  if (bindSource != null && "status" in bindSource) return bindSource
+
+  const liveResult = await ensureLiveMount(ssh, { bindSource, fstype, opts, path, src })
+  if ("status" in liveResult) return liveResult
+  return { bindSource, liveResult }
+}
+
+/**
+ * Read-only live-state check for `mount.present`: resolve a bind source (a
+ * missing or invalid source means needs-apply; apply then reports the precise
+ * failure), probe the top-most live mount, and compare it.
+ *
+ * @param ssh - Active SSH connection.
+ * @param parameters - Desired mount values.
+ * @returns `true` when the live mount matches the desired mount.
+ */
+async function presentLiveMountMatches(
+  ssh: SshConnection,
+  parameters: PresentMountParameters
+): Promise<boolean> {
+  const { fstype, opts, path, src } = parameters
+  const bindSource = await resolveDesiredBindSource(ssh, parameters)
+  if (bindSource != null && "status" in bindSource) return false
+  const liveProbe = await probeLiveMount(ssh, MOUNT_PRESENT, path)
+  if (liveProbe.kind !== "mounted") return false
+  // R-0000049: compare the live source / fstype / options against
+  // the desired values so a drifted mount triggers needs-apply.
+  return liveMountMatchesDesired(liveProbe.live, { bindSource, fstype, opts, src })
 }
 
 /**
@@ -735,7 +713,40 @@ export const mount = {
    * The check phase verifies that the mountpoint is active (via `findmnt`), that
    * its live source / filesystem type / normalized options match the desired
    * values, and, when `persist` is `true`, that the fstab entry matches the
-   * desired line exactly.
+   * desired line exactly. Only the top-most mount at `path` is compared, and a
+   * non-bind mount additionally requires the live FSROOT to be `/`.
+   *
+   * **Bind mounts.** When the comma-separated `opts` contain `bind` or `rbind`
+   * (case-insensitive), `src` must be an absolute, normalized directory path
+   * that does not lie below `path`; construction throws otherwise. Check and
+   * apply resolve `src` read-only (`readlink -f`, `test -d`, and a
+   * `findmnt --target` lookup of the containing mount) and treat the bind as
+   * converged when the live top-most mount has the resolved `MAJ:MIN` and
+   * FSROOT. `fstype` and the live SOURCE are ignored for bind mounts. Only the
+   * per-mount VFS flags written explicitly in `opts` (`ro`/`rw`,
+   * `nosuid`/`suid`, `nodev`/`dev`, `noexec`/`exec`, the atime state
+   * `noatime`/`relatime`/`strictatime`, `nodiratime`, `nosymfollow`) are
+   * enforced; flags not named are inherited from the source mount and not
+   * checked. Flag drift is fixed with
+   * `mount -o remount,bind,<flags> -- <src> <path>` without an unmount; the
+   * remount names the complete resulting VFS flag state (the live flags with
+   * the explicit ones overriding), so flags not named in `opts` keep their
+   * live value on old and new util-linux alike. Identity drift uses
+   * umount + mount. A missing source or a source
+   * that is not a directory makes check return needs-apply and apply fail
+   * before anything is unmounted. `rbind` submounts are not verified.
+   *
+   * A self-bind (`src` equal to `path`) is allowed, but its check is degraded:
+   * the source lookup resolves to the mount at `path` itself, so the check
+   * only confirms that a bind of this path is mounted with the explicit VFS
+   * flags.
+   *
+   * If writing `/etc/fstab` fails after a live change, a fresh mount is
+   * unmounted again, a bind flag remount is remounted back to the complete
+   * previous VFS flag state, and a replaced bind mount is kept (the failure notes that the
+   * previous mount was not restored). A previous mount whose FSROOT is not
+   * `/` is never recreated automatically; the new mount is then kept in place
+   * instead of being unmounted, so the path is never left empty.
    *
    * @param options - Configuration for the mount.
    * @param options.fstype - The filesystem type (e.g. `"ext4"`, `"tmpfs"`, `"nfs"`).
@@ -757,25 +768,33 @@ export const mount = {
     validateFstabField(MOUNT_PRESENT, "src", src)
     validateFstabField(MOUNT_PRESENT, "fstype", fstype)
     validateFstabField(MOUNT_PRESENT, "opts", opts)
+    const isBind = isBindMountOptions(opts)
+    if (isBind) validateBindSource(MOUNT_PRESENT, src, path)
 
     return {
       async apply(ssh: null | SshConnection): Promise<ModuleResult> {
         if (!ssh) return failed(`[mount.present: ${path}] SSH connection is required`)
 
-        const preFailure = await preparePresentMountpoint(ssh, path)
-        if (preFailure != null) return preFailure
-
-        let changed = false
-        const liveResult = await ensureLiveMount(ssh, { fstype, opts, path, src })
-        if ("status" in liveResult) return liveResult
-        if (liveResult.changed) changed = true
+        const converged = await convergePresentLiveMount(ssh, {
+          fstype,
+          isBind,
+          opts,
+          path,
+          src,
+        })
+        if ("status" in converged) return converged
+        const { bindSource, liveResult } = converged
+        let changed = liveResult.change !== "unchanged"
 
         if (persist) {
           const desiredLine = buildFstabLine({ fstype, opts, path, src })
           const fstabResult = await ensurePersistedMountAfterLiveChange(ssh, {
+            bindSource,
             desiredLine,
             liveResult,
+            opts,
             path,
+            src,
           })
           if (typeof fstabResult !== "boolean") {
             return fstabResult
@@ -790,12 +809,14 @@ export const mount = {
 
         const symlinkGuard = await ssh.exec(buildMountPathSymlinkGuard(path), EXEC_OPTS)
         if (symlinkGuard.code !== 0) return NEEDS_APPLY
-        const liveProbe = await probeLiveMount(ssh, MOUNT_PRESENT, path)
-        if (liveProbe.kind !== "mounted") return NEEDS_APPLY
-        // R-0000049: compare the live source / fstype / options against
-        // the desired values so a drifted mount triggers needs-apply.
-        const { live } = liveProbe
-        if (!liveMountMatchesDesired(live, { fstype, opts, src })) return NEEDS_APPLY
+        const liveMatches = await presentLiveMountMatches(ssh, {
+          fstype,
+          isBind,
+          opts,
+          path,
+          src,
+        })
+        if (!liveMatches) return NEEDS_APPLY
 
         if (persist) {
           const fstabContent = await readFstabForCheck(ssh)
