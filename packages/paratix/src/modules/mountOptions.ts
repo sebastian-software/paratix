@@ -250,19 +250,52 @@ export function bindVfsFlagsMatch(liveVfsOptions: string, desiredOpts: string): 
 }
 
 /**
- * Render the canonical tokens of the VFS flags `opts` names explicitly, in a
- * stable order (access, suid, dev, exec, atime, nodiratime, nosymfollow), for
- * the `mount -o remount,bind,<flags>` convergence command.
+ * Render a complete VFS flag state as canonical tokens in a stable order
+ * (access, suid, dev, exec, atime, nodiratime, nosymfollow), with an explicit
+ * token for every dimension, including the clearing tokens `rw`, `suid`,
+ * `dev`, `exec`, `diratime` and an atime state.
  *
- * @param opts - The desired bind mount options string.
- * @returns The comma-separated canonical flag tokens, or `""` when none.
+ * On the legacy mount API (util-linux < 2.39), `MS_REMOUNT | MS_BIND` sets the
+ * per-mount flags to exactly the given set, while `mount_setattr` (util-linux
+ * >= 2.39) changes only the named attributes. Naming every dimension makes
+ * both APIs produce the same state. The one exception is `symfollow`: it is
+ * omitted while neither the target nor the current state is `nosymfollow`,
+ * because both APIs then leave the flag cleared anyway, and `mount_setattr` on
+ * kernels without `MOUNT_ATTR_NOSYMFOLLOW` (before 5.14) rejects the token.
+ *
+ * @param target - The VFS flag state the remount must produce.
+ * @param current - The VFS flag state of the mount before the remount.
+ * @returns The comma-separated canonical flag tokens.
  */
-export function renderExplicitVfsFlags(opts: string): string {
-  const state = explicitVfsFlags(opts)
+function renderVfsFlagState(target: VfsFlagState, current: VfsFlagState): string {
   return VFS_FLAG_DIMENSIONS.flatMap((dimension) => {
-    const token = state.get(dimension)
-    return token == null ? [] : [token]
+    const flag = target.get(dimension)
+    if (flag == null) return []
+    if (flag === "symfollow" && current.get(dimension) === "symfollow") return []
+    return [flag]
   }).join(",")
+}
+
+function overrideVfsFlags(base: VfsFlagState, overrides: VfsFlagState): VfsFlagState {
+  const result: VfsFlagState = new Map(base)
+  for (const [dimension, flag] of overrides) result.set(dimension, flag)
+  return result
+}
+
+/**
+ * Render the flags for the `mount -o remount,bind,<flags>` convergence
+ * command: the complete resulting VFS flag state, i.e. the live flags with the
+ * flags that `opts` names explicitly overriding their dimension. Flags that
+ * `opts` does not name therefore keep their live value (e.g. an inherited
+ * `nosuid,nodev,noexec`) on every mount API; see {@link renderVfsFlagState}.
+ *
+ * @param liveVfsOptions - The live VFS-OPTIONS value of the top-most mount.
+ * @param desiredOpts - The desired bind mount options string.
+ * @returns The comma-separated canonical flag tokens.
+ */
+export function renderBindRemountVfsFlags(liveVfsOptions: string, desiredOpts: string): string {
+  const live = liveVfsFlags(liveVfsOptions)
+  return renderVfsFlagState(overrideVfsFlags(live, explicitVfsFlags(desiredOpts)), live)
 }
 
 /**

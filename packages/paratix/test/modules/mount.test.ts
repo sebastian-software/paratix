@@ -1801,7 +1801,7 @@ describe("mount.present — bind mount smoke", () => {
   })
 
   it("remounts explicit VFS flag drift without unmounting", async () => {
-    const remountCmd = `mount -o remount,bind,ro -- '${bindSrc}' '${mountPath}'`
+    const remountCmd = `mount -o remount,bind,ro,nosuid,nodev,exec,relatime,diratime -- '${bindSrc}' '${mountPath}'`
     const responses = {
       ...resolutionResponses,
       [findmntCheckCmd]: { code: 0, stdout: boundLiveStdout },
@@ -2135,11 +2135,11 @@ describe("mount.present — bind: drift (#218)", () => {
     ])
   })
 
-  // The exact `bind,ro` remount for a live `rw` bind is pinned by the smoke
-  // test "remounts explicit VFS flag drift without unmounting"; this covers
-  // the rbind spelling, which must remount with `bind`.
-  it("converges ro drift of an rbind with exactly `mount -o remount,bind,ro -- <src> <path>` and no umount", async () => {
-    const remountCmd = `mount -o remount,bind,ro -- '${bindSourcePath}' '${mountPath}'`
+  // The exact `bind,ro` remount for a live hardened bind is pinned by the
+  // smoke test "remounts explicit VFS flag drift without unmounting"; this
+  // covers the rbind spelling, which must remount with `bind`.
+  it("converges ro drift of an rbind with exactly `mount -o remount,bind,<full flag state> -- <src> <path>` and no umount", async () => {
+    const remountCmd = `mount -o remount,bind,ro,suid,dev,exec,relatime,diratime -- '${bindSourcePath}' '${mountPath}'`
     const responses = {
       ...bindResolutionResponses(),
       [findmntCheckCmd]: { code: 0, stdout: boundLive({ vfsOptions: "rw,relatime" }) },
@@ -2156,7 +2156,7 @@ describe("mount.present — bind: drift (#218)", () => {
     expect(mountMutations(applySsh.calls)).toStrictEqual([remountCmd])
   })
 
-  it("remounts with the explicit VFS flags only, in canonical order, ignoring fstab-only and propagation options", async () => {
+  it("remounts with every explicit VFS flag, in canonical order, ignoring fstab-only and propagation options", async () => {
     const opts =
       "nosymfollow,bind,noexec,_netdev,nofail,x-systemd.requires-mounts-for=/srv/data,private,nodiratime,noatime,nodev,nosuid,ro"
     const remountCmd = bindRemountCmd("ro,nosuid,nodev,noexec,noatime,nodiratime,nosymfollow")
@@ -2192,21 +2192,31 @@ describe("mount.present — bind: drift (#218)", () => {
       driftVfs: "rw,relatime",
       flag: "noatime",
       matchingVfs: "rw,noatime",
-      remountFlags: "noatime",
+      remountFlags: "rw,suid,dev,exec,noatime,diratime",
     },
-    { driftVfs: "rw", flag: "relatime", matchingVfs: "rw,relatime", remountFlags: "relatime" },
+    {
+      driftVfs: "rw",
+      flag: "relatime",
+      matchingVfs: "rw,relatime",
+      remountFlags: "rw,suid,dev,exec,relatime,diratime",
+    },
     {
       driftVfs: "rw,relatime",
       flag: "strictatime",
       matchingVfs: "rw",
-      remountFlags: "strictatime",
+      remountFlags: "rw,suid,dev,exec,strictatime,diratime",
     },
-    { driftVfs: "rw,noatime", flag: "norelatime", matchingVfs: "rw", remountFlags: "strictatime" },
+    {
+      driftVfs: "rw,noatime",
+      flag: "norelatime",
+      matchingVfs: "rw",
+      remountFlags: "rw,suid,dev,exec,strictatime,diratime",
+    },
     {
       driftVfs: "rw,relatime",
       flag: "nodiratime",
       matchingVfs: "rw,relatime,nodiratime",
-      remountFlags: "nodiratime",
+      remountFlags: "rw,suid,dev,exec,relatime,nodiratime",
     },
   ])(
     "atime state $flag: ok for live $matchingVfs, needs-apply and remount,bind,$remountFlags for live $driftVfs",
@@ -2229,6 +2239,55 @@ describe("mount.present — bind: drift (#218)", () => {
       )
       const applySsh = createMountApplyMockSsh(driftResponses)
       const result = await mount.present(options).apply(applySsh, emptyEnv)
+      expect(result.status).toBe("changed")
+      expect(mountMutations(applySsh.calls)).toStrictEqual([bindRemountCmd(remountFlags)])
+    }
+  )
+})
+
+describe("mount.present — bind: remount keeps unnamed live flags", () => {
+  // On util-linux < 2.39, `mount -o remount,bind,<flags>` sets the per-mount
+  // flags to exactly the given set, so every flag not in the command would be
+  // cleared. The remount must therefore name the complete resulting state.
+  it("keeps inherited nosuid,nodev,noexec when only ro is corrected", async () => {
+    const remountCmd = bindRemountCmd("ro,nosuid,nodev,noexec,relatime,diratime")
+    const responses = {
+      ...bindResolutionResponses(),
+      [findmntCheckCmd]: {
+        code: 0,
+        stdout: boundLive({ vfsOptions: "rw,nosuid,nodev,noexec,relatime" }),
+      },
+      [remountCmd]: { code: 0 },
+    }
+
+    const applySsh = createMountApplyMockSsh(responses)
+    const result = await mount.present(bindOptions("bind,ro")).apply(applySsh, emptyEnv)
+    expect(result.status).toBe("changed")
+    expect(mountMutations(applySsh.calls)).toStrictEqual([remountCmd])
+  })
+
+  it.each([
+    {
+      liveVfs: "rw,relatime,nosymfollow",
+      opts: "bind,ro",
+      remountFlags: "ro,suid,dev,exec,relatime,diratime,nosymfollow",
+    },
+    {
+      liveVfs: "rw,relatime,nosymfollow",
+      opts: "bind,symfollow",
+      remountFlags: "rw,suid,dev,exec,relatime,diratime,symfollow",
+    },
+  ])(
+    "names the symlink-follow state when it is or was nosymfollow ($opts over $liveVfs)",
+    async ({ liveVfs, opts, remountFlags }) => {
+      const responses = {
+        ...bindResolutionResponses(),
+        [bindRemountCmd(remountFlags)]: { code: 0 },
+        [findmntCheckCmd]: { code: 0, stdout: boundLive({ vfsOptions: liveVfs }) },
+      }
+
+      const applySsh = createMountApplyMockSsh(responses)
+      const result = await mount.present(bindOptions(opts)).apply(applySsh, emptyEnv)
       expect(result.status).toBe("changed")
       expect(mountMutations(applySsh.calls)).toStrictEqual([bindRemountCmd(remountFlags)])
     }
@@ -2300,7 +2359,7 @@ describe("mount.present — bind: source resolution (#218)", () => {
 
   it("keeps the configured symlinked src in the remount command and the fstab line", async () => {
     const linkSrc = "/srv/docker-link"
-    const remountCmd = bindRemountCmd("ro", linkSrc)
+    const remountCmd = bindRemountCmd("ro,nosuid,nodev,exec,relatime,diratime", linkSrc)
     const responses = {
       ...bindResolutionResponses({ resolved: bindSourcePath, src: linkSrc }),
       [findmntCheckCmd]: { code: 0, stdout: boundLive() },
@@ -2562,7 +2621,7 @@ describe("mount — rollback after an fstab write failure (#218)", () => {
   const fstabFailure = { [flagsDirectoryCreateCmd]: { code: 1, stderr: "read-only filesystem" } }
 
   it("bind remount-only change: remounts back to the previous known VFS flags without umount", async () => {
-    const remountRo = bindRemountCmd("ro")
+    const remountRo = bindRemountCmd("ro,nosuid,nodev,exec,relatime,diratime")
     const remountBack = bindRemountCmd("rw,relatime,nodev,nosuid")
     const applySsh = createMountApplyMockSsh({
       ...bindResolutionResponses(),
@@ -2580,7 +2639,7 @@ describe("mount — rollback after an fstab write failure (#218)", () => {
   })
 
   it("bind remount-only change: reports a failed remount back", async () => {
-    const remountRo = bindRemountCmd("ro")
+    const remountRo = bindRemountCmd("ro,nosuid,nodev,exec,relatime,diratime")
     const remountBack = bindRemountCmd("rw,nosuid,nodev,relatime")
     const applySsh = createMountApplyMockSsh({
       ...bindResolutionResponses(),

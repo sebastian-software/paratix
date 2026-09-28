@@ -5,7 +5,7 @@ import { failedCommand } from "../moduleFailure.js"
 import { shellQuote } from "../ssh.js"
 import { liveMountIdentityMatches } from "./mountBind.js"
 import { restorePreviousMountAfterFailure } from "./mountFailureHelpers.js"
-import { renderExplicitVfsFlags } from "./mountOptions.js"
+import { renderBindRemountVfsFlags } from "./mountOptions.js"
 
 const EXEC_OPTS = { ignoreExitCode: true, silent: true } as const
 const MOUNT_PRESENT = "mount.present"
@@ -82,11 +82,17 @@ export function buildBindRemountCommand(parameters: {
 }
 
 function buildRemountCommand(parameters: MountConvergenceParameters): string {
-  const { bindSource, opts, path, src } = parameters
+  const { bindSource, live, opts, path, src } = parameters
   if (bindSource != null) {
     // rbind is verified like bind on the top mount only, so the remount
-    // always uses `bind` and carries the explicitly named VFS flags only.
-    return buildBindRemountCommand({ flags: renderExplicitVfsFlags(opts), path, src })
+    // always uses `bind`. It carries the complete resulting VFS flag state
+    // (live flags overridden by the explicitly named ones), so a flag that
+    // `opts` does not name is never cleared by the legacy mount API.
+    return buildBindRemountCommand({
+      flags: renderBindRemountVfsFlags(live.vfsOptions, opts),
+      path,
+      src,
+    })
   }
   return `mount -o remount,${shellQuote(opts)} -- ${shellQuote(src)} ${shellQuote(path)}`
 }

@@ -612,7 +612,10 @@ mount.present({
   gehaerteten Daten-Mounts); sie werden nicht geprueft. Wer etwa `suid`
   erzwingen will, schreibt es explizit in `opts`.
 - **Konvergenz:** Weichen nur explizite Flags ab, korrigiert
-  `mount -o remount,bind,<flags> -- <src> <path>` sie ohne Unmount. Weicht die
+  `mount -o remount,bind,<flags> -- <src> <path>` sie ohne Unmount. Der
+  Remount nennt dabei den vollstaendigen VFS-Flag-Zustand (Live-Flags, von den
+  expliziten Flags ueberschrieben), damit nicht genannte Flags wie ein geerbtes
+  `nosuid` auch mit util-linux vor 2.39 erhalten bleiben. Weicht die
   Identitaet ab, folgen `umount` + `mount`.
 - **`rbind`:** Wird wie `bind` geprueft, aber nur am obersten Mount;
   Submounts werden nicht verifiziert.

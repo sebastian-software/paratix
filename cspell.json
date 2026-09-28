@@ -228,6 +228,9 @@
     "strictatime",
     "submounts",
     "subvolume",
-    "unbindable"
+    "unbindable",
+    "diratime",
+    "setattr",
+    "symfollow"
   ]
 }

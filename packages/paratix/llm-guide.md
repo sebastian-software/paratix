@@ -312,7 +312,8 @@ the VFS flags written explicitly in `opts` (`ro`/`rw`, `nosuid`/`suid`,
 `nodev`/`dev`, `noexec`/`exec`, `noatime`/`relatime`/`strictatime`,
 `nodiratime`, `nosymfollow`) are enforced; unnamed flags are inherited from the
 source mount. Flag drift is fixed with `mount -o remount,bind,<flags>` without an
-unmount. `rbind` submounts are not verified. When the bind source lives on a
+unmount; the remount names the complete resulting VFS flag state, so unnamed
+flags keep their live value. `rbind` submounts are not verified. When the bind source lives on a
 `_netdev` mount, add `_netdev` (and optionally `nofail`) to the bind's `opts`.
 
 ### `net`

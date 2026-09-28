@@ -726,8 +726,11 @@ export const mount = {
    * `noatime`/`relatime`/`strictatime`, `nodiratime`, `nosymfollow`) are
    * enforced; flags not named are inherited from the source mount and not
    * checked. Flag drift is fixed with
-   * `mount -o remount,bind,<explicit flags> -- <src> <path>` without an
-   * unmount; identity drift uses umount + mount. A missing source or a source
+   * `mount -o remount,bind,<flags> -- <src> <path>` without an unmount; the
+   * remount names the complete resulting VFS flag state (the live flags with
+   * the explicit ones overriding), so flags not named in `opts` keep their
+   * live value on old and new util-linux alike. Identity drift uses
+   * umount + mount. A missing source or a source
    * that is not a directory makes check return needs-apply and apply fail
    * before anything is unmounted. `rbind` submounts are not verified.
    *
