@@ -521,17 +521,17 @@ ein separater Reload-Schritt ist nicht noetig.
 
 ## mount — Dateisystem-Mounts
 
-| Modul           | Beschreibung                                                                                                                                                                                                                                                | Check-Strategie                                            | Aufwand |
-| --------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------- | ------- |
-| `mount.present` | Stellt sicher, dass ein Dateisystem gemountet ist. Unterstuetzt Block-Devices, tmpfs, NFS und andere Dateisysteme. Kann den Mount in `/etc/fstab` persistieren, sodass er Reboots ueberlebt. Erstellt den Mountpoint automatisch, falls er nicht existiert. | `findmnt <mountpoint>` pruefen + fstab-Eintrag vergleichen | mittel  |
-| `mount.absent`  | Stellt sicher, dass ein Mountpoint nicht gemountet ist. Entfernt optional den fstab-Eintrag und den Mountpoint-Ordner.                                                                                                                                      | `findmnt <mountpoint>` pruefen                             | einfach |
+| Modul           | Beschreibung                                                                                                                                                                                                                                                                                   | Check-Strategie                                                                                                                                                                     | Aufwand |
+| --------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------- |
+| `mount.present` | Stellt sicher, dass ein Dateisystem gemountet ist. Unterstuetzt Block-Devices, tmpfs, NFS und andere Dateisysteme sowie Bind-Mounts (`bind`/`rbind`). Kann den Mount in `/etc/fstab` persistieren, sodass er Reboots ueberlebt. Erstellt den Mountpoint automatisch, falls er nicht existiert. | Obersten Mount per `findmnt --mountpoint <mountpoint>` pruefen + fstab-Eintrag vergleichen; bei Bind-Mounts zusaetzlich die Quelle per `readlink -f` + `findmnt --target` aufloesen | mittel  |
+| `mount.absent`  | Stellt sicher, dass ein Mountpoint nicht gemountet ist. Entfernt optional den fstab-Eintrag und den Mountpoint-Ordner.                                                                                                                                                                         | `findmnt <mountpoint>` pruefen                                                                                                                                                      | einfach |
 
 **Parameter fuer `mount.present`:**
 
 ```typescript
 mount.present({
   path: "/tmp", // Mountpoint
-  src: "tmpfs", // Device oder "tmpfs", "none", NFS-Pfad, ...
+  src: "tmpfs", // Device oder "tmpfs", "none", NFS-Pfad, Bind-Quellverzeichnis, ...
   fstype: "tmpfs", // Dateisystemtyp
   opts: "noexec,nosuid,nodev,size=512m", // Mount-Optionen
   persist: true, // In /etc/fstab eintragen (Standard: true)
@@ -570,6 +570,68 @@ mount.present({
 Mountpoint (`path`). Existiert bereits ein Eintrag fuer denselben Mountpoint
 mit abweichenden Optionen, wird er aktualisiert. Bei `mount.absent` mit
 `persist: true` wird der fstab-Eintrag entfernt.
+
+**Bind-Mounts:** Enthaelt `opts` das Token `bind` oder `rbind`, haengt
+`mount.present` ein vorhandenes Verzeichnis an `path` ein. Beispiel: ein
+Daten-Volume, dessen Unterverzeichnisse per Bind an ihre Zielorte kommen.
+
+```typescript
+// Daten-Volume
+mount.present({
+  path: "/srv/data",
+  src: "/dev/mapper/data",
+  fstype: "ext4",
+  opts: "defaults,noatime",
+})
+
+// Unterverzeichnisse per Bind einhaengen
+mount.present({
+  path: "/var/lib/docker",
+  src: "/srv/data/docker",
+  fstype: "none",
+  opts: "bind",
+})
+
+mount.present({
+  path: "/opt/app",
+  src: "/srv/data/app",
+  fstype: "none",
+  opts: "bind,nosuid,nodev",
+})
+```
+
+- **Identitaet:** Ein Bind gilt als korrekt, wenn der oberste Mount an `path`
+  dieselbe `MAJ:MIN` und dasselbe FSROOT hat wie die aufgeloeste Quelle.
+  `fstype` und die von `findmnt` gemeldete SOURCE werden ignoriert. Korrekt
+  gebundene Ziele werden nie ausgehaengt, auch nicht, wenn sie gerade in
+  Benutzung sind.
+- **VFS-Flags:** Durchgesetzt werden nur die VFS-Flags, die explizit in `opts`
+  stehen: `ro`/`rw`, `nosuid`/`suid`, `nodev`/`dev`, `noexec`/`exec`,
+  `noatime`/`relatime`/`strictatime`, `nodiratime` und `nosymfollow`. Nicht
+  genannte Flags erbt der Bind vom Quell-Mount (z. B. `nosuid,nodev` eines
+  gehaerteten Daten-Mounts); sie werden nicht geprueft. Wer etwa `suid`
+  erzwingen will, schreibt es explizit in `opts`.
+- **Konvergenz:** Weichen nur explizite Flags ab, korrigiert
+  `mount -o remount,bind,<flags> -- <src> <path>` sie ohne Unmount. Weicht die
+  Identitaet ab, folgen `umount` + `mount`.
+- **`rbind`:** Wird wie `bind` geprueft, aber nur am obersten Mount;
+  Submounts werden nicht verifiziert.
+- **Quelle:** `src` muss ein absoluter, normalisierter Verzeichnispfad sein und
+  darf nicht unterhalb von `path` liegen; sonst schlaegt schon das Erzeugen des
+  Moduls fehl. Fehlt die Quelle oder ist sie eine regulaere Datei, meldet
+  `check` Handlungsbedarf und `apply` schlaegt fehl, bevor irgendetwas
+  ausgehaengt wird.
+- **Self-Bind** (`src` gleich `path`): Erlaubt, aber der Check ist
+  eingeschraenkt. Die Quelle loest sich auf den Mount an `path` selbst auf,
+  daher bestaetigt der Check nur, dass ein Bind dieses Pfads mit den
+  expliziten Flags gemountet ist.
+- **fstab:** Die Zeile wird exakt wie angegeben geschrieben, z. B.
+  `/srv/data/docker /var/lib/docker none bind 0 0`.
+- **Reihenfolge beim Boot:** systemd ergaenzt fuer die Quelle eines Bind-Mounts
+  bereits `RequiresMountsFor=`, `x-systemd.requires-mounts-for` ist daher
+  optional. Liegt die Quelle auf einem `_netdev`-Mount, gehoert `_netdev` (und
+  optional `nofail`) auch in die `opts` des Binds, z. B.
+  `opts: "bind,_netdev,nofail"`.
 
 ---
 

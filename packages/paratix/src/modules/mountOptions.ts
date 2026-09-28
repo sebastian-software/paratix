@@ -120,3 +120,161 @@ function normalizeSizeValue(value: string): null | string {
 
   return String(amount * 1024n ** BigInt(exponent))
 }
+
+// ─── bind mounts ─────────────────────────────────────────────────────────────
+
+const BIND_OPTIONS = new Set(["bind", "rbind"])
+
+/** Per-mount VFS flag dimensions compared for bind mounts, in canonical order. */
+const VFS_FLAG_DIMENSIONS = [
+  "access",
+  "suid",
+  "dev",
+  "exec",
+  "atime",
+  "nodiratime",
+  "nosymfollow",
+] as const
+
+type VfsFlagDimension = (typeof VFS_FLAG_DIMENSIONS)[number]
+
+type VfsFlagState = Map<VfsFlagDimension, string>
+
+/**
+ * Option token → [dimension, canonical token]. Only these tokens are per-mount
+ * VFS flags; every other option (`bind`/`rbind`, fstab-only options such as
+ * `_netdev`/`nofail`/`noauto`/`x-systemd.*`, propagation options such as
+ * `private`/`rshared`/`unbindable`, `defaults`, and all superblock or
+ * filesystem-specific options) is ignored by the bind comparison.
+ *
+ * The atime dimension models the kernel's three atime states: `noatime`,
+ * `relatime`, and `strictatime` (also spelled `norelatime`), where the last
+ * one shows up in findmnt's VFS-OPTIONS as neither `noatime` nor `relatime`.
+ */
+const VFS_FLAG_TOKENS = new Map<string, readonly [VfsFlagDimension, string]>([
+  ["dev", ["dev", "dev"]],
+  ["diratime", ["nodiratime", "diratime"]],
+  ["exec", ["exec", "exec"]],
+  ["noatime", ["atime", "noatime"]],
+  ["nodev", ["dev", "nodev"]],
+  ["nodiratime", ["nodiratime", "nodiratime"]],
+  ["noexec", ["exec", "noexec"]],
+  ["norelatime", ["atime", "strictatime"]],
+  ["nosuid", ["suid", "nosuid"]],
+  ["nosymfollow", ["nosymfollow", "nosymfollow"]],
+  ["relatime", ["atime", "relatime"]],
+  ["ro", ["access", "ro"]],
+  ["rw", ["access", "rw"]],
+  ["strictatime", ["atime", "strictatime"]],
+  ["suid", ["suid", "suid"]],
+  ["symfollow", ["nosymfollow", "symfollow"]],
+])
+
+function optionTokens(options: string): string[] {
+  return options
+    .split(",")
+    .map((option) => option.trim())
+    .filter((option) => option.length > 0)
+    .map((option) => normalizeOption(option))
+}
+
+/**
+ * Whether `opts` requests a bind mount: the comma-separated options contain
+ * the token `bind` or `rbind`, compared case-insensitively like every other
+ * option token.
+ *
+ * @param opts - The desired mount options string.
+ * @returns `true` for a bind or rbind mount.
+ */
+export function isBindMountOptions(opts: string): boolean {
+  return optionTokens(opts).some((option) => BIND_OPTIONS.has(option))
+}
+
+/**
+ * Collect the VFS flags that `opts` names explicitly. Later tokens override
+ * earlier ones in the same dimension, as with mount(8). Unnamed dimensions
+ * stay absent ("don't care").
+ *
+ * @param opts - The desired mount options string.
+ * @returns The explicitly requested VFS flag state.
+ */
+function explicitVfsFlags(opts: string): VfsFlagState {
+  const state: VfsFlagState = new Map()
+  for (const option of optionTokens(opts)) {
+    const flag = VFS_FLAG_TOKENS.get(option)
+    if (flag != null) state.set(flag[0], flag[1])
+  }
+  return state
+}
+
+/**
+ * Derive the full VFS flag state from findmnt's VFS-OPTIONS column, which
+ * always lists `ro` or `rw` and lists every other flag only when it is set.
+ *
+ * @param vfsOptions - The live VFS-OPTIONS value.
+ * @returns The live VFS flag state for every dimension.
+ */
+function liveVfsFlags(vfsOptions: string): VfsFlagState {
+  const live = new Set(optionTokens(vfsOptions))
+  const pick = (setToken: string, unsetToken: string): string =>
+    live.has(setToken) ? setToken : unsetToken
+  let atime = "strictatime"
+  if (live.has("noatime")) atime = "noatime"
+  else if (live.has("relatime")) atime = "relatime"
+  return new Map<VfsFlagDimension, string>([
+    ["access", pick("ro", "rw")],
+    ["atime", atime],
+    ["dev", pick("nodev", "dev")],
+    ["exec", pick("noexec", "exec")],
+    ["nodiratime", pick("nodiratime", "diratime")],
+    ["nosymfollow", pick("nosymfollow", "symfollow")],
+    ["suid", pick("nosuid", "suid")],
+  ])
+}
+
+/**
+ * Compare only the VFS flags that the desired bind `opts` names explicitly
+ * against the live VFS-OPTIONS. Flags not named in `opts` are inherited from
+ * the source mount by a new bind and are therefore "don't care".
+ *
+ * @param liveVfsOptions - The live VFS-OPTIONS value of the top-most mount.
+ * @param desiredOpts - The desired bind mount options string.
+ * @returns `true` when every explicitly named flag matches.
+ */
+export function bindVfsFlagsMatch(liveVfsOptions: string, desiredOpts: string): boolean {
+  const live = liveVfsFlags(liveVfsOptions)
+  for (const [dimension, desiredFlag] of explicitVfsFlags(desiredOpts)) {
+    if (live.get(dimension) !== desiredFlag) return false
+  }
+  return true
+}
+
+/**
+ * Render the canonical tokens of the VFS flags `opts` names explicitly, in a
+ * stable order (access, suid, dev, exec, atime, nodiratime, nosymfollow), for
+ * the `mount -o remount,bind,<flags>` convergence command.
+ *
+ * @param opts - The desired bind mount options string.
+ * @returns The comma-separated canonical flag tokens, or `""` when none.
+ */
+export function renderExplicitVfsFlags(opts: string): string {
+  const state = explicitVfsFlags(opts)
+  return VFS_FLAG_DIMENSIONS.flatMap((dimension) => {
+    const token = state.get(dimension)
+    return token == null ? [] : [token]
+  }).join(",")
+}
+
+/**
+ * Keep only the known VFS flag tokens of a live VFS-OPTIONS value, in their
+ * original order, so a rollback remount never passes unexpected tokens from
+ * remote output to mount(8).
+ *
+ * @param vfsOptions - The live VFS-OPTIONS value.
+ * @returns The comma-separated known VFS flag tokens.
+ */
+export function knownLiveVfsFlags(vfsOptions: string): string {
+  return optionTokens(vfsOptions)
+    .filter((option) => VFS_FLAG_TOKENS.has(option))
+    .join(",")
+}

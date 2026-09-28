@@ -298,10 +298,22 @@ reported by the host, so a numerically declared owner converges to `status: "ok"
 
 ### `mount`
 
-| Method          | Signature                                                                                           | Idempotent |
-| --------------- | --------------------------------------------------------------------------------------------------- | ---------- |
-| `mount.present` | `(options: { fstype: string; opts: string; path: string; persist?: boolean; src: string }): Module` | Yes        |
-| `mount.absent`  | `(options: { path: string; persist?: boolean }): Module`                                            | Yes        |
+| Method          | Signature                                                                                           | Idempotent             |
+| --------------- | --------------------------------------------------------------------------------------------------- | ---------------------- |
+| `mount.present` | `(options: { fstype: string; opts: string; path: string; persist?: boolean; src: string }): Module` | Yes (incl. bind/rbind) |
+| `mount.absent`  | `(options: { path: string; persist?: boolean }): Module`                                            | Yes                    |
+
+**Note on bind mounts:** `mount.present` is idempotent for bind mounts (`opts`
+contains `bind` or `rbind`; use `fstype: "none"`). `src` must be an absolute,
+normalized directory path that is not below `path`. A bind counts as converged
+when the top-most mount at `path` has the `MAJ:MIN` and FSROOT of the resolved
+source, so a correctly bound target is never unmounted, even while in use. Only
+the VFS flags written explicitly in `opts` (`ro`/`rw`, `nosuid`/`suid`,
+`nodev`/`dev`, `noexec`/`exec`, `noatime`/`relatime`/`strictatime`,
+`nodiratime`, `nosymfollow`) are enforced; unnamed flags are inherited from the
+source mount. Flag drift is fixed with `mount -o remount,bind,<flags>` without an
+unmount. `rbind` submounts are not verified. When the bind source lives on a
+`_netdev` mount, add `_netdev` (and optionally `nofail`) to the bind's `opts`.
 
 ### `net`
 

@@ -215,6 +215,19 @@
     "userlist",
     "usermod",
     "worktree",
-    "Xstugo"
+    "Xstugo",
+    "fsroot",
+    "noatime",
+    "noauto",
+    "nodiratime",
+    "nofsroot",
+    "norelatime",
+    "nosymfollow",
+    "rbind",
+    "rshared",
+    "strictatime",
+    "submounts",
+    "subvolume",
+    "unbindable"
   ]
 }
