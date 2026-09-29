@@ -84,6 +84,38 @@ export type ResolverScope = {
   written?: ReadonlySet<string>
 }
 
+/**
+ * Issue #219: the trail of one resolved link's own target, for the kernel
+ * cross-check: where the resolver places each point of the target path.
+ *
+ * `segments` are the target's segments without empty and `.` segments (the
+ * kernel ignores those), with `..` kept. `locations[j]` is the normalized
+ * destination-relative path the resolver reaches after applying the first `j`
+ * of them from `base`, following links exactly as the resolution does, so
+ * `locations[0]` is `base` and the last entry is the link's resolution
+ * (`""` stands for the destination root).
+ */
+export type SymlinkTrail = {
+  /**
+   * Where the walk starts, destination-relative: the link's parent, or `""`
+   * for a top-level link and for a `root` target.
+   */
+  base: string
+  /** One location per applied segment count, `segments.length + 1` in all. */
+  locations: readonly string[]
+  /** The kept target segments. */
+  segments: readonly string[]
+}
+
+/**
+ * Issue #219: computes the {@link SymlinkTrail} of a resolved link on demand,
+ * see `ArchiveSymlinkResolver.trail`.
+ */
+export type SymlinkTrailSource = (
+  key: string,
+  maxLength: number
+) => "oversized" | null | SymlinkTrail
+
 /** The state of one walk: hops spent, visited non-member prefixes, resolved segments. */
 type WalkState = { hops: number; prefixes: string[]; segments: readonly string[] }
 
@@ -93,6 +125,40 @@ const DEPTH: SymlinkFailure = { kind: "depth" }
 const EMPTY_SET: ReadonlySet<string> = new Set()
 
 /**
+ * Issue #219: characters with the Unicode property
+ * `Default_Ignorable_Code_Point` (zero-width joiners and non-joiners, the
+ * byte order mark, the soft hyphen and similar). Some case-folding
+ * implementations ignore them when they compare names.
+ */
+const DEFAULT_IGNORABLE_CODE_POINTS = /\p{Default_Ignorable_Code_Point}/gv
+
+/**
+ * Issue #219: how often {@link pathNameVariantKey} applies its folding round
+ * at most. One round is not idempotent for every input: U+1E9E (capital
+ * sharp s) lower-cases to `ß`, which only the next round upper-cases to `SS`.
+ * Every single code point reaches a fixpoint within two rounds (the unit
+ * tests check all of them); the bound only keeps a pathological string from
+ * looping.
+ */
+const VARIANT_KEY_ROUND_LIMIT = 4
+
+/**
+ * Issue #219: one folding round of {@link pathNameVariantKey}.
+ *
+ * @param path - The path, or the result of an earlier round.
+ * @returns The path without default-ignorable characters, NFKD-decomposed,
+ *   upper- and then lower-cased and decomposed again.
+ */
+function variantKeyRound(path: string): string {
+  return path
+    .replaceAll(DEFAULT_IGNORABLE_CODE_POINTS, "")
+    .normalize("NFKD")
+    .toUpperCase()
+    .toLowerCase()
+    .normalize("NFKD")
+}
+
+/**
  * Issue #219: the key under which two path spellings count as the same name.
  *
  * The resolver compares link paths byte for byte, but case-insensitive or
@@ -100,18 +166,29 @@ const EMPTY_SET: ReadonlySet<string> = new Set()
  * CIFS mounts) resolve a differently spelled name to an existing entry. Two
  * paths with the same key may therefore name the same entry on some host.
  *
- * The key is a conservative superset of those equivalences: NFKD
- * decomposition (covers NFC, NFD and compatibility forms), then upper- and
- * lower-casing (covers simple and full case folding, e.g. `ß` and `SS`), then
- * NFKD again because case mapping can produce characters that decompose. It
- * may group more spellings than any real filesystem does; that only makes the
- * containment checks refuse more, never less.
+ * The key is a conservative superset of those equivalences. One round drops
+ * every `Default_Ignorable_Code_Point` character, which some case-folding
+ * implementations ignore, then applies NFKD decomposition (covers NFC, NFD
+ * and compatibility forms), upper- and lower-casing (covers simple and full
+ * case folding, e.g. `ß` and `SS`) and NFKD again because case mapping can
+ * produce characters that decompose. Rounds repeat until the result no longer
+ * changes, so the key is a fixpoint: `pathNameVariantKey(key) === key`. This
+ * matters for U+1E9E, which one round only maps to `ß`, while APFS and Linux
+ * casefolding treat it like `ss`. The key may group more spellings than any
+ * real filesystem does (dropping default-ignorable characters included); that
+ * only makes the containment checks refuse more, never less.
  *
  * @param path - A normalized destination-relative path.
  * @returns The comparison key; equal keys mean the names may collide.
  */
 export function pathNameVariantKey(path: string): string {
-  return path.normalize("NFKD").toUpperCase().toLowerCase().normalize("NFKD")
+  let key = variantKeyRound(path)
+  for (let round = 1; round < VARIANT_KEY_ROUND_LIMIT; round += 1) {
+    const next = variantKeyRound(key)
+    if (next === key) return key
+    key = next
+  }
+  return key
 }
 
 /**
@@ -265,6 +342,45 @@ export class ArchiveSymlinkResolver {
   }
 
   /**
+   * Issue #219: the trail of a resolved link's own target, see
+   * {@link SymlinkTrail}.
+   *
+   * It is computed on demand, one link at a time, so no trail is kept for the
+   * links that are never cross-checked. The walk repeats the resolution's
+   * steps; every link it follows was memoized by that resolution, so it costs
+   * no more than one pass over the target. `maxLength` bounds the summed
+   * length of the locations, so an oversized trail is refused before it is
+   * built in full.
+   *
+   * @param key - Normalized path of a symlink.
+   * @param maxLength - The largest summed length (in UTF-16 code units) of the
+   *   locations that is still built.
+   * @returns The trail, `"oversized"` when the locations would exceed
+   *   `maxLength`, or null when the link does not resolve inside the
+   *   destination.
+   */
+  public trail(
+    key: string,
+    maxLength = Number.POSITIVE_INFINITY
+  ): "oversized" | null | SymlinkTrail {
+    const target = this.targets.get(key)
+    if (target === undefined || target.anchor === "outside") return null
+    if (this.resolve(key).kind !== "resolved") return null
+    const base = target.anchor === "root" ? "" : archiveMemberParentPath(key)
+    const segments = target.path.split("/").filter((segment) => segment !== "" && segment !== ".")
+    // The walk may mark a touch; give it a slot of its own so no tracked
+    // resolution is affected.
+    this.touches.push(false)
+    try {
+      const locations = this.trailLocations(base, segments, maxLength)
+      if (locations === null || locations === "oversized") return locations
+      return { base, locations, segments }
+    } finally {
+      this.touches.pop()
+    }
+  }
+
+  /**
    * Issue #219: check the ancestors the kernel walks to reach the link itself,
    * which the target walk below does not visit.
    *
@@ -338,6 +454,35 @@ export class ArchiveSymlinkResolver {
     const hops = state.hops + followed.hops
     if (hops > SYMLINK_RESOLUTION_LIMIT) return LIMIT
     return { hops, prefixes: state.prefixes, segments: [...followed.segments] }
+  }
+
+  /**
+   * Issue #219: the locations of a trail, see {@link SymlinkTrail}.
+   *
+   * @param base - Where the walk starts.
+   * @param segments - The kept target segments.
+   * @param maxLength - The largest summed length of the locations.
+   * @returns The locations, `"oversized"`, or null when a step fails, which
+   *   cannot happen for a link that resolved.
+   */
+  private trailLocations(
+    base: string,
+    segments: readonly string[],
+    maxLength: number
+  ): "oversized" | null | string[] {
+    let state: WalkState = { hops: 1, prefixes: [], segments: base === "" ? [] : base.split("/") }
+    const locations = [base]
+    let length = base.length
+    for (const segment of segments) {
+      const next = this.step(state, segment)
+      if ("kind" in next) return null
+      state = next
+      const location = state.segments.join("/")
+      length += location.length
+      if (length > maxLength) return "oversized"
+      locations.push(location)
+    }
+    return locations
   }
 
   /**

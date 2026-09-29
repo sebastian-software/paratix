@@ -230,7 +230,9 @@
     "rpmsave",
     "apfs",
     "casefold",
+    "casefolding",
     "cifs",
+    "fixpoint",
     "unmappable",
     "venv",
     "Þfoo"

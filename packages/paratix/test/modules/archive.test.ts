@@ -83,28 +83,52 @@ const kernelCrossCheckCommand = buildKernelCrossCheckScript()
 /**
  * Issue #219: the links a kernel cross-check exec carries, in order.
  *
- * @param input - The exec's NUL-terminated `<expected>//<link>` entries.
+ * @param input - The exec's NUL-terminated `<link>//<K_n>//<E_n>//...`
+ *   entries.
  * @returns The absolute link paths.
  */
 function crossCheckedLinks(input: string | undefined): string[] {
   return (input ?? "")
     .split("\u0000")
     .filter((entry) => entry !== "")
-    .map((entry) => entry.slice(entry.indexOf("//") + 2))
+    .map((entry) => entry.slice(0, entry.indexOf("//")))
 }
 
 /**
- * Issue #219: a kernel cross-check answer that confirms every carried link
- * with the given verdict.
+ * Issue #219: a kernel cross-check answer that confirms every carried link as
+ * `same`.
  *
  * @param input - The exec's stdin.
- * @param verdict - The verdict for every link.
- * @returns The NUL-framed `(link, verdict)` pairs.
+ * @returns The NUL-framed `(link, verdict, level)` triples.
  */
-function crossCheckStdout(input: string | undefined, verdict = "same"): string {
+function crossCheckStdout(input: string | undefined): string {
   return crossCheckedLinks(input)
-    .map((link) => `${link}\u0000${verdict}\u0000`)
+    .map((link) => `${link}\u0000same\u00000\u0000`)
     .join("")
+}
+
+/**
+ * Issue #219: the cross-check entry of a link whose target walks no symlink,
+ * as `[link, K_n, E_n, ..., K_0, E_0]`: each host path `K_j` keeps the
+ * target's `..` segments, each expected location `E_j` is normalized.
+ *
+ * @param link - The absolute link path.
+ * @param target - The stored target; an absolute one lies inside the destination.
+ * @returns The entry's paths, to be joined with `//`.
+ */
+function plainCrossCheckEntry(link: string, target: string): string[] {
+  const absolute = target.startsWith("/")
+  const base = absolute ? destination : posix.dirname(link)
+  const path = absolute ? target.slice(destination.length + 1) : target
+  const points = [[base, base]]
+  let host = base
+  let expected = base
+  for (const segment of path.split("/").filter((part) => part !== "" && part !== ".")) {
+    host = `${host}/${segment}`
+    expected = segment === ".." ? posix.dirname(expected) : `${expected}/${segment}`
+    points.push([host, expected])
+  }
+  return [link, ...points.toReversed().flat()]
 }
 
 /**
@@ -4615,15 +4639,14 @@ describe("archive.extract containment-failure flag (Issue #219)", () => {
 })
 
 /**
- * Issue #219: NUL-framed output of `(first, second)` field pairs, as the
- * listing probe (`(link, stored target)`) and the kernel cross-check
- * (`(link, verdict)`) print them.
+ * Issue #219: NUL-framed kernel cross-check output of
+ * `(link, verdict, level)` triples.
  *
- * @param pairs - The field pairs.
- * @returns The probe's stdout.
+ * @param reports - The triples.
+ * @returns The cross-check's stdout.
  */
-function nulPairs(...pairs: ReadonlyArray<readonly [string, string]>): string {
-  return pairs
+function crossCheckReports(...reports: ReadonlyArray<readonly [string, string, string]>): string {
+  return reports
     .flat()
     .map((field) => `${field}\u0000`)
     .join("")
@@ -4749,14 +4772,15 @@ describe("enforceSymlinkContainment (Issue #219)", () => {
    * Issue #219: the kernel cross-check exec for links the resolver judged
    * inside.
    *
-   * @param checks - `(link, expected location)` pairs, both absolute.
+   * @param entries - One `[link, K_n, E_n, ..., K_0, E_0]` list of absolute
+   *   paths per link (see {@link plainCrossCheckEntry}).
    * @returns The expected exec call.
    */
-  const crossCheckCall = (...checks: ReadonlyArray<readonly [string, string]>): ExecCall => ({
+  const crossCheckCall = (...entries: ReadonlyArray<readonly string[]>): ExecCall => ({
     command: kernelCrossCheckCommand,
     options: {
       ignoreExitCode: true,
-      input: checks.map(([link, expected]) => `${expected}//${link}\u0000`).join(""),
+      input: entries.map((paths) => `${paths.join("//")}\u0000`).join(""),
       maxOutputBytes: ARCHIVE_CAPTURE_LIMIT_BYTES,
       silent: true,
       strictUtf8Stdout: true,
@@ -4819,11 +4843,20 @@ describe("enforceSymlinkContainment (Issue #219)", () => {
     expect(execCalls).toStrictEqual([
       listingCall,
       crossCheckCall(
-        [`${destination}/a/lib64`, `${destination}/a/lib`],
-        [`${destination}/a/up`, destination],
-        [`${destination}/a/abs`, `${destination}/a/lib`],
-        [`${destination}/a/dangling`, `${destination}/a/missing/y/z`],
-        [`${destination}/a/esc`, `${destination}/a`]
+        plainCrossCheckEntry(`${destination}/a/lib64`, "lib"),
+        plainCrossCheckEntry(`${destination}/a/up`, ".."),
+        plainCrossCheckEntry(`${destination}/a/abs`, `${destination}/a/lib`),
+        plainCrossCheckEntry(`${destination}/a/dangling`, "missing/y/z"),
+        // `up` is a link, so the model's location after it is the root.
+        [
+          `${destination}/a/esc`,
+          `${destination}/a/up/a`,
+          `${destination}/a`,
+          `${destination}/a/up`,
+          destination,
+          `${destination}/a`,
+          `${destination}/a`,
+        ]
       ),
     ])
   })
@@ -4863,10 +4896,7 @@ describe("enforceSymlinkContainment (Issue #219)", () => {
     )
 
     expect(outcome).toBeNull()
-    expect(execCalls).toStrictEqual([
-      listingCall,
-      crossCheckCall([shipped[0], `${destination}/lib/node_modules/npm/bin/npm-cli.js`]),
-    ])
+    expect(execCalls).toStrictEqual([listingCall, crossCheckCall(plainCrossCheckEntry(...shipped))])
   })
 
   it("reports a host link that walks through an archive link and one that follows it", async () => {
@@ -5001,10 +5031,7 @@ describe("enforceSymlinkContainment (Issue #219)", () => {
 
     expect(outcome?.status).toBe("failed")
     expect(message).toBe(`${refusal}${escapesEtc}; ${reportTail}`)
-    expect(execCalls).toStrictEqual([
-      listingCall,
-      crossCheckCall([inside[0], `${destination}/a/f`]),
-    ])
+    expect(execCalls).toStrictEqual([listingCall, crossCheckCall(plainCrossCheckEntry(...inside))])
   })
 
   it("reports links beyond the resolution limit, cycles included, with the limit wording", async () => {
@@ -5095,7 +5122,7 @@ describe("enforceSymlinkContainment (Issue #219)", () => {
     const up = [`${destination}/d/up`, ".."] as const
     const esc = [`${destination}/d/esc`, "Up2/.."] as const
     const { execCalls, message } = await enforceShipped([up, esc], {
-      crossChecks: [{ stdout: nulPairs([up[0], "same"], [esc[0], "differ"]) }],
+      crossChecks: [{ stdout: crossCheckReports([up[0], "same", "0"], [esc[0], "differ", "0"]) }],
     })
 
     expect(message).toBe(
@@ -5103,9 +5130,38 @@ describe("enforceSymlinkContainment (Issue #219)", () => {
     )
     expect(execCalls).toStrictEqual([
       listingCall,
-      crossCheckCall([up[0], destination], [esc[0], `${destination}/d`]),
+      crossCheckCall(plainCrossCheckEntry(...up), plainCrossCheckEntry(...esc)),
     ])
   })
+
+  it.each([
+    {
+      level: "2",
+      reason:
+        'reaches nothing on the host, and the nearest existing point of its target path, "/opt/app/d/missing" on the host, is not the location the containment check computed for it ("/opt/app/d/missing")',
+    },
+    {
+      level: "4",
+      reason:
+        'reaches nothing on the host, and no point of its target path exists on the host or where the containment check computed it, so its location ("/opt/app/d/missing/n") cannot be confirmed',
+    },
+  ])(
+    "reports a link that reaches nothing where the kernel disagrees at level $level and removes nothing",
+    async ({ level, reason }) => {
+      const dangling = [`${destination}/d/l`, "missing/n"] as const
+      const { execCalls, message } = await enforceShipped([dangling], {
+        crossChecks: [{ stdout: crossCheckReports([dangling[0], "differ", level]) }],
+      })
+
+      expect(message).toBe(
+        `${refusal}symlink "/opt/app/d/l" -> "missing/n" ${reason}; ${reportTail}`
+      )
+      expect(execCalls).toStrictEqual([
+        listingCall,
+        crossCheckCall(plainCrossCheckEntry(...dangling)),
+      ])
+    }
+  )
 
   it("reports a link that passes through a case variant of another symlink and removes nothing", async () => {
     const up = [`${destination}/d/up`, ".."] as const
@@ -5115,12 +5171,19 @@ describe("enforceSymlinkContainment (Issue #219)", () => {
     expect(message).toBe(
       `${refusal}symlink "/opt/app/d/esc" -> "UP/.." passes through "d/UP", a name that differs from existing symlink "d/up" only by letter case or Unicode normalization; a case-insensitive or normalizing filesystem may follow that symlink instead; ${reportTail}`
     )
-    expect(execCalls).toStrictEqual([listingCall, crossCheckCall([up[0], destination])])
+    expect(execCalls).toStrictEqual([listingCall, crossCheckCall(plainCrossCheckEntry(...up))])
   })
 
   it.each([
     { name: "a non-zero exit", response: { code: 65, stderr: "test -ef is not supported" } },
-    { name: "an unknown verdict", response: { stdout: nulPairs([etc[0], "maybe"]) } },
+    {
+      name: "an unknown verdict",
+      response: { stdout: crossCheckReports([`${destination}/a/in`, "maybe", "0"]) },
+    },
+    {
+      name: "an invalid level",
+      response: { stdout: crossCheckReports([`${destination}/a/in`, "same", "1"]) },
+    },
     { name: "a missing link", response: { stdout: "" } },
     { name: "a rejected exec", response: new Error("channel closed") },
   ])(
@@ -5160,7 +5223,7 @@ describe("enforceSymlinkContainment (Issue #219)", () => {
     expect(outcome).toBeNull()
     expect(execCalls).toStrictEqual([
       listingCall,
-      crossCheckCall([replacement[0], `${destination}/a/f`]),
+      crossCheckCall(plainCrossCheckEntry(...replacement)),
     ])
   })
 })

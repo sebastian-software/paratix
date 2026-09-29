@@ -218,9 +218,12 @@ archive's: an archive symlink replaces an existing symlink at the same path and 
 targets inside `destination` are allowed, while any other type combination at a member path, a
 member below an existing symlink, a link resolving outside `destination`, or a link whose target
 passes through a path that differs from an existing symlink (of the archive or already on the host)
-only by letter case or Unicode normalization (NFC, NFD or compatibility forms) refuses the
-extraction, because a case-insensitive or normalizing filesystem may follow that symlink; an
-existing escaping link must then be removed or pointed inside.
+only by letter case (U+1E9E, the capital sharp s, counts as `ss`, like `ß`), Unicode normalization
+(NFC, NFD or compatibility forms) or default-ignorable characters such as U+200D, U+200C, U+FEFF or
+U+00AD refuses the extraction, because a case-insensitive or normalizing filesystem may follow that
+symlink; this comparison is purely lexical, so it refuses the same archives on case-sensitive hosts,
+and it may group more spellings than a given filesystem does, which only refuses more. An existing
+escaping link must then be removed or pointed inside.
 
 Only the links the archive can affect are judged: the archive's own symlinks and every existing
 symlink whose resolution passes through a path the archive writes (a member path or one of its
@@ -250,9 +253,17 @@ after a failed or stopped merge that may have copied entries: it resolves the li
 pre-merge check, without asking the host to resolve them, and counts name variants as violations
 too. It then asks the kernel in one batched command (`test -e` and `test -ef`, bounded by the
 kernel's symlink limit; never `realpath` or `readlink -f`) whether each judged link it placed inside
-really reaches the resolved path; a link the kernel resolves to a different object, or that
-resolves on one side only (for example a target through a missing directory), is a violation, and a
-cross-check that cannot be completed fails the run. A converged tree costs two commands when a
+really reaches the resolved path. A link that reaches an existing object must reach exactly that
+path. A link that reaches nothing is not trusted for that alone, because writing through it would
+create the missing name wherever the kernel resolves the rest of its target: the check walks the
+link's target path from its full length back towards the link's directory and compares the first
+point that exists on the host or in the model with the model's location of the same point, and both
+must exist and be the same object. A link the kernel resolves to a different object, whose nearest
+existing point differs or exists on one side only (for example a target that climbs with `..` out
+of a missing directory, even though nothing can be written through it yet), or of whose target path
+no point exists at all is a violation. A cross-check that cannot be completed fails the run,
+including a judged link whose cross-check entry would exceed 64 KiB (a target with very many
+segments). A converged tree costs two commands when a
 judged symlink is placed inside, one otherwise, and none for an archive without symlinks,
 independent of the number of members; a violation adds none. This check only reports: it removes,
 moves or changes nothing. Any violating link (resolving outside, not resolvable within the symlink

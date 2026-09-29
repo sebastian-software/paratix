@@ -193,10 +193,14 @@ am selben Pfad, vorhandene absolute Ziele innerhalb von `destination` sind erlau
 Typ-Kombination am Pfad eines Eintrags, ein Eintrag unterhalb eines vorhandenen Symlinks, ein Link,
 der außerhalb von `destination` auflöst, oder ein Link, dessen Ziel durch einen Pfad führt, der sich
 von einem vorhandenen Symlink (des Archivs oder bereits auf dem Host) nur in Groß- und
-Kleinschreibung oder Unicode-Normalisierung (NFC, NFD oder Kompatibilitätsformen) unterscheidet,
-verhindert das Entpacken, weil ein Dateisystem, das Groß- und Kleinschreibung nicht unterscheidet
-oder Namen normalisiert, diesem Symlink folgen kann – ein vorhandener Link, der nach außen zeigt,
-muss dann entfernt oder nach innen umgelenkt werden.
+Kleinschreibung (U+1E9E, das große ẞ, zählt wie `ß` als `ss`), Unicode-Normalisierung (NFC, NFD
+oder Kompatibilitätsformen) oder ignorierbaren Zeichen wie U+200D, U+200C, U+FEFF oder U+00AD
+unterscheidet, verhindert das Entpacken, weil ein Dateisystem, das Groß- und Kleinschreibung nicht
+unterscheidet oder Namen normalisiert, diesem Symlink folgen kann. Dieser Vergleich ist rein
+lexikalisch, verweigert also auf Hosts mit Unterscheidung von Groß- und Kleinschreibung dieselben
+Archive, und er fasst womöglich mehr Schreibweisen zusammen als ein bestimmtes Dateisystem – das
+verweigert nur mehr, nie weniger. Ein vorhandener Link, der nach außen zeigt, muss dann entfernt
+oder nach innen umgelenkt werden.
 
 Geprüft werden nur die Links, auf die das Archiv wirken kann: die Symlinks des Archivs selbst und
 jeder vorhandene Symlink, dessen Auflösung durch einen Pfad führt, den das Archiv schreibt (den Pfad
@@ -231,10 +235,19 @@ abgebrochenen Zusammenführen, das bereits Einträge kopiert haben kann: Sie lö
 Prüfung vor dem Zusammenführen auf, ohne den Host auflösen zu lassen, und wertet Namensvarianten
 ebenfalls als Verstoß. Danach fragt sie den Kernel in einem gebündelten Befehl (`test -e` und
 `test -ef`, begrenzt durch das Symlink-Limit des Kernels; nie `realpath` oder `readlink -f`), ob
-jeder geprüfte Link, den sie als innen liegend einstuft, tatsächlich den aufgelösten Pfad erreicht;
-löst der Kernel einen Link zu einem anderen Objekt auf oder nur auf einer Seite (etwa bei einem Ziel
-durch ein fehlendes Verzeichnis), gilt das als Verstoß, und lässt sich dieser Abgleich nicht
-vollständig durchführen, schlägt der Durchlauf fehl. Ein Baum ohne Verstoß kostet zwei Befehle, wenn
+jeder geprüfte Link, den sie als innen liegend einstuft, tatsächlich den aufgelösten Pfad erreicht.
+Ein Link, der ein vorhandenes Objekt erreicht, muss genau diesen Pfad erreichen. Ein Link, der
+nichts erreicht, gilt deshalb allein noch nicht als unbedenklich, denn wer durch ihn schreibt,
+legt den fehlenden Namen dort an, wohin der Kernel den Rest seines Ziels auflöst: Die Prüfung geht
+den Zielpfad des Links von seiner vollen Länge zurück bis zum Verzeichnis des Links und vergleicht
+den ersten Punkt, der auf dem Host oder im Modell existiert, mit der Stelle, an die das Modell
+denselben Punkt legt; beide müssen existieren und dasselbe Objekt sein. Löst der Kernel einen Link
+zu einem anderen Objekt auf, weicht der nächste vorhandene Punkt ab oder existiert er nur auf einer
+Seite (etwa bei einem Ziel, das mit `..` aus einem fehlenden Verzeichnis heraussteigt, auch wenn
+sich durch den Link noch nichts schreiben lässt), oder existiert kein Punkt seines Zielpfads, gilt
+das als Verstoß. Lässt sich dieser Abgleich nicht vollständig durchführen, schlägt der Durchlauf
+fehl – auch dann, wenn der Eintrag eines geprüften Links für den Abgleich größer als 64 KiB würde
+(ein Ziel mit sehr vielen Segmenten). Ein Baum ohne Verstoß kostet zwei Befehle, wenn
 ein geprüfter Symlink als innen liegend eingestuft wird, sonst einen und für ein Archiv ohne
 Symlinks keinen, unabhängig von der Zahl der Einträge; ein Verstoß kostet keinen weiteren. Diese
 Prüfung meldet nur: Sie entfernt, verschiebt oder ändert nichts. Jeder verstoßende Link – einer, der

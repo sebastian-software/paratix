@@ -46,12 +46,15 @@ import { type ArchiveMember, normalizeArchiveMemberPath } from "./archiveMemberV
 import {
   ArchiveSymlinkResolver,
   type SymlinkFailure,
+  type SymlinkTrailSource,
   type SymlinkWalkTarget,
   variantDescription,
 } from "./archiveSymlinkResolver.js"
 
 export {
   pathNameVariantKey,
+  type SymlinkTrail,
+  type SymlinkTrailSource,
   type SymlinkWalkTarget,
   variantDescription,
 } from "./archiveSymlinkResolver.js"
@@ -134,6 +137,11 @@ export type MergedSymlinkResolutions = {
    * destination root).
    */
   inside: Map<string, string>
+  /**
+   * Issue #219: the trail of a link's own target for the kernel cross-check,
+   * computed on demand by the same resolver (see `ArchiveSymlinkResolver.trail`).
+   */
+  trail: SymlinkTrailSource
   /** The relevant links that cannot be shown to stay inside, in iteration order. */
   violations: MergedSymlinkViolation[]
 }
@@ -514,8 +522,8 @@ function mergedViolation(key: string, failure: SymlinkFailure): MergedSymlinkVio
  * only by case or normalization, is or follows an unmappable link, or reaches
  * an unreadable directory is a violation: it cannot be proven to stay inside.
  * Every other link is reported with the destination-relative path it resolves
- * to, which the post-merge backstop hands to the host kernel as the expected
- * location of the link.
+ * to; the post-merge backstop asks the host kernel to confirm it, using the
+ * returned `trail` source for the points of the link's target path.
  *
  * Issue #219: with a `scope`, only the links the archive can affect are
  * judged: the archive's own symlinks present in `links`, and every link whose
@@ -556,7 +564,7 @@ export function mergedSymlinkResolutions(
     if (resolution.kind === "resolved") inside.set(key, resolution.segments.join("/"))
     else violations.push(mergedViolation(key, resolution))
   }
-  return { inside, violations }
+  return { inside, trail: (key, maxLength) => resolver.trail(key, maxLength), violations }
 }
 
 /**

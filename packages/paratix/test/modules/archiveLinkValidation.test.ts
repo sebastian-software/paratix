@@ -820,6 +820,49 @@ describe("mergedSymlinkViolations (Issue #219)", () => {
   })
 })
 
+/** Issue #219: the first code point outside the Basic Multilingual Plane. */
+const FIRST_ASTRAL_CODE_POINT = 0x1_00_00
+/** Issue #219: the step between the sampled astral code points. */
+const ASTRAL_SAMPLE_STEP = 0x3_f1
+/** Issue #219: astral letters with case mappings, sampled on top of the step. */
+const CASED_ASTRAL_CODE_POINTS = [0x1_04_00, 0x1_04_28, 0x1_d4_00, 0x1_e9_00, 0x1_e9_22]
+
+/**
+ * Issue #219: every BMP code point except the surrogates, and a sample of the
+ * astral ones.
+ *
+ * @returns The BMP code points in order, then the astral sample.
+ */
+function variantKeySampleCodePoints(): number[] {
+  const codePoints = [...CASED_ASTRAL_CODE_POINTS]
+  for (let codePoint = 0; codePoint < FIRST_ASTRAL_CODE_POINT; codePoint += 1) {
+    const surrogate = codePoint >= 0xd8_00 && codePoint <= 0xdf_ff
+    if (!surrogate) codePoints.push(codePoint)
+  }
+  for (
+    let codePoint = FIRST_ASTRAL_CODE_POINT;
+    codePoint <= 0x10_ff_ff;
+    codePoint += ASTRAL_SAMPLE_STEP
+  ) {
+    codePoints.push(codePoint)
+  }
+  return codePoints
+}
+
+/**
+ * Issue #219: the sampled code points whose variant key is not a fixpoint.
+ *
+ * @returns Their hexadecimal values.
+ */
+function nonFixpointCodePoints(): string[] {
+  return variantKeySampleCodePoints()
+    .filter((codePoint) => {
+      const key = pathNameVariantKey(String.fromCodePoint(codePoint))
+      return pathNameVariantKey(key) !== key
+    })
+    .map((codePoint) => codePoint.toString(16))
+}
+
 /** Issue #219: the wording every name-variant refusal shares. */
 const VARIANT_WORDING = "only by letter case or Unicode normalization"
 
@@ -836,6 +879,40 @@ describe("pathNameVariantKey (Issue #219)", () => {
 
   it("keeps names apart that differ by more than case or normalization", () => {
     expect(pathNameVariantKey("d/up")).not.toBe(pathNameVariantKey("d/uq"))
+  })
+
+  it("gives capital sharp s the key of sharp s and of every spelling of ss", () => {
+    const keys = ["\u1e9e", "\u00df", "ss", "SS", "Ss", "sS"].map((name) =>
+      pathNameVariantKey(name)
+    )
+
+    expect(new Set(keys)).toStrictEqual(new Set(["ss"]))
+    expect(pathNameVariantKey("x/\u1e9e")).toBe(pathNameVariantKey("x/ss"))
+  })
+
+  it.each([
+    ["zero width joiner", "\u200d"],
+    ["zero width non-joiner", "\u200c"],
+    ["byte order mark", "\ufeff"],
+    ["soft hyphen", "\u00ad"],
+  ])("ignores a %s", (_name, ignorable) => {
+    expect(pathNameVariantKey(`d/u${ignorable}p`)).toBe(pathNameVariantKey("d/up"))
+    expect(pathNameVariantKey(`${ignorable}d/UP${ignorable}`)).toBe(pathNameVariantKey("d/up"))
+  })
+
+  it("is a fixpoint for every BMP code point and a sample of astral ones", () => {
+    expect(nonFixpointCodePoints()).toStrictEqual([])
+  })
+
+  it.each([
+    "x/\u1e9e/\u03a3",
+    "\u039f\u0394\u039f\u03a3/\u1e9e\u1e9e",
+    "a\u200d\u1e9e.\u03a3\u00ad",
+    "\ufb03/\u212b\u0301",
+  ])("is a fixpoint for the composed name %j", (name) => {
+    const key = pathNameVariantKey(name)
+
+    expect(pathNameVariantKey(key)).toBe(key)
   })
 })
 
@@ -911,6 +988,19 @@ describe("name variants in the archive-level check (Issue #219)", () => {
     ).toBeNull()
   })
 
+  it("refuses a walk through ss next to a symlink named with capital sharp s, on any filesystem", () => {
+    // Issue #219: the rule is lexical, so it fires on case-sensitive hosts too.
+    const reason = archiveLinkUnsafeReason([
+      member("x/", "directory"),
+      member("x/\u1e9e", "symlink", ".."),
+      member("x/esc", "symlink", "ss/../../n"),
+    ])
+
+    expect(reason).toBe(
+      `member "x/esc" -> "ss/../../n" passes through "x/ss", a name that differs from existing symlink "x/\u1e9e" ${VARIANT_WORDING}; a case-insensitive or normalizing filesystem may follow that symlink instead`
+    )
+  })
+
   it("contributes no probe prefixes for a variant link", () => {
     expect(
       archiveSymlinkTargetPrefixes([
@@ -946,6 +1036,20 @@ describe("name variants in the merged link set (Issue #219)", () => {
     expect(verdict).toMatchObject({ kind: "violations", violations: [variant] })
   })
 
+  it("refuses a walk through ss next to a symlink named with capital sharp s in the merged model", () => {
+    const { inside, violations } = mergedSymlinkResolutions(
+      relativeLinks([
+        ["x/\u1e9e", ".."],
+        ["x/esc", "ss/../../n"],
+      ])
+    )
+
+    expect(violations).toStrictEqual([
+      { key: "x/esc", kind: "variant", link: "x/\u1e9e", prefix: "x/ss" },
+    ])
+    expect(inside).toStrictEqual(new Map([["x/\u1e9e", ""]]))
+  })
+
   it("reports the variant link as a violation and every other link with its resolved path", () => {
     const { inside, violations } = mergedSymlinkResolutions(
       relativeLinks([
@@ -962,5 +1066,79 @@ describe("name variants in the merged link set (Issue #219)", () => {
         ["d/up", ""],
       ])
     )
+  })
+})
+
+describe("symlink trails for the kernel cross-check (Issue #219)", () => {
+  it("lists the kept target segments and the resolver's location after each of them", () => {
+    const { trail } = mergedSymlinkResolutions(
+      relativeLinks([
+        ["a/up", ".."],
+        ["a/esc", "./up//a/../b/"],
+        ["top", "a/up"],
+      ])
+    )
+
+    expect(trail("a/esc", Number.POSITIVE_INFINITY)).toStrictEqual({
+      base: "a",
+      locations: ["a", "", "a", "", "b"],
+      segments: ["up", "a", "..", "b"],
+    })
+    // A top-level link walks from the destination root, and a link as the
+    // final component is followed like any other.
+    expect(trail("top", Number.POSITIVE_INFINITY)).toStrictEqual({
+      base: "",
+      locations: ["", "a", ""],
+      segments: ["a", "up"],
+    })
+  })
+
+  it("follows a final component that is itself a dangling link to its resolution", () => {
+    const { trail } = mergedSymlinkResolutions(
+      relativeLinks([
+        ["a/l", "b"],
+        ["a/b", "missing/q"],
+      ])
+    )
+
+    expect(trail("a/l", Number.POSITIVE_INFINITY)).toStrictEqual({
+      base: "a",
+      locations: ["a", "a/missing/q"],
+      segments: ["b"],
+    })
+  })
+
+  it("starts an absolute target inside the destination at the destination root", () => {
+    const links = new Map([["a/abs", hostLink("/opt/app/lib", { anchor: "root", path: "lib" })]])
+
+    expect(mergedSymlinkResolutions(links).trail("a/abs", 100)).toStrictEqual({
+      base: "",
+      locations: ["", "lib"],
+      segments: ["lib"],
+    })
+  })
+
+  it("refuses a trail whose locations exceed the given length", () => {
+    const { trail } = mergedSymlinkResolutions(relativeLinks([["a/l", "bb/cc"]]))
+
+    expect(trail("a/l", 12)).toStrictEqual({
+      base: "a",
+      locations: ["a", "a/bb", "a/bb/cc"],
+      segments: ["bb", "cc"],
+    })
+    expect(trail("a/l", 11)).toBe("oversized")
+  })
+
+  it("has no trail for a link that does not resolve inside or is unknown", () => {
+    const { trail } = mergedSymlinkResolutions(
+      relativeLinks([
+        ["x", "../y"],
+        ["b", "b/.."],
+      ])
+    )
+
+    expect(trail("x", Number.POSITIVE_INFINITY)).toBeNull()
+    expect(trail("b", Number.POSITIVE_INFINITY)).toBeNull()
+    expect(trail("unknown", Number.POSITIVE_INFINITY)).toBeNull()
   })
 })

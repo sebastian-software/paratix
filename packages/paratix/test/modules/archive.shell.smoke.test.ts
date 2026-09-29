@@ -33,7 +33,10 @@ import { tmpdir } from "node:os"
 import { dirname, join } from "node:path"
 import { describe, expect, it } from "vitest"
 
-import type { MergedSymlinkViolation } from "../../src/modules/archiveLinkValidation.js"
+import type {
+  MergedSymlink,
+  MergedSymlinkViolation,
+} from "../../src/modules/archiveLinkValidation.js"
 import type { ArchiveMember } from "../../src/modules/archiveMemberValidation.js"
 
 import {
@@ -57,6 +60,8 @@ import {
 import {
   buildKernelCrossCheckScript,
   kernelCrossCheckEntry,
+  type KernelCrossCheckPoint,
+  runKernelCrossCheck,
 } from "../../src/modules/archiveKernelCrossCheck.js"
 import { mergedSymlinkResolutions } from "../../src/modules/archiveLinkValidation.js"
 import {
@@ -2466,27 +2471,114 @@ function workspaceAcceptsNonUtf8Names(): boolean {
   }
 }
 
+/**
+ * Issue #219: whether the filesystem of the test workspaces resolves `ss` to
+ * an entry named with U+1E9E (capital sharp s), as APFS and Linux casefolding
+ * do.
+ *
+ * @returns True when `ss` names the U+1E9E entry.
+ */
+function workspaceFoldsCapitalSharpS(): boolean {
+  const scratch = realpathSync(mkdtempSync(join(tmpdir(), "paratix-sharp-s-probe-")))
+  try {
+    writeFileSync(join(scratch, "\u1e9e"), "")
+    return existsSync(join(scratch, "ss"))
+  } finally {
+    rmSync(scratch, { force: true, recursive: true })
+  }
+}
+
 const FOLDS_LETTER_CASE = !SKIP_PLATFORM && workspaceFoldsLetterCase()
+const FOLDS_CAPITAL_SHARP_S = !SKIP_PLATFORM && workspaceFoldsCapitalSharpS()
 const ACCEPTS_NON_UTF8_NAMES = !SKIP_PLATFORM && workspaceAcceptsNonUtf8Names()
 
 /**
- * Issue #219: run the real kernel cross-check script for `(link, expected)`
- * pairs and return its `(link, verdict)` pairs.
+ * Issue #219: the trail points of a link whose target walks no symlink, as the
+ * resolver would compute them: each host path `K_j` keeps the target's `..`
+ * segments, each expected location `E_j` is normalized.
  *
- * @param checks - Absolute link paths with the location they should resolve to.
- * @returns The exit code and the verdict per link, in output order.
+ * @param link - The absolute link path.
+ * @param target - The relative target.
+ * @returns The points `j = 0..n`.
  */
-function runKernelCrossCheckScript(checks: ReadonlyArray<readonly [string, string]>): {
-  code: number
-  verdicts: Array<[string, string]>
-} {
-  const entries = checks.map(([link, expected]) => kernelCrossCheckEntry(expected, link) ?? "")
+function plainTrailPoints(link: string, target: string): KernelCrossCheckPoint[] {
+  let host = dirname(link)
+  let expected = host
+  const points = [{ expected, host }]
+  for (const segment of target.split("/").filter((part) => part !== "" && part !== ".")) {
+    host = `${host}/${segment}`
+    expected = segment === ".." ? dirname(expected) : `${expected}/${segment}`
+    points.push({ expected, host })
+  }
+  return points
+}
+
+/**
+ * Issue #219: run the real kernel cross-check script for links with their
+ * trail points and return its `(link, verdict, level)` triples.
+ *
+ * @param checks - Absolute link paths with their trail points `j = 0..n`.
+ * @returns The exit code and the report per link, in output order.
+ */
+function runKernelCrossCheckScript(
+  checks: ReadonlyArray<readonly [string, readonly KernelCrossCheckPoint[]]>
+): { code: number; verdicts: Array<[string, string, string]> } {
+  const entries = checks.map(([link, points]) => {
+    const encoded = kernelCrossCheckEntry(link, points)
+    if (encoded.kind !== "entry") throw new Error(`cannot encode ${link}: ${encoded.kind}`)
+    return encoded.entry
+  })
   const { code, fields } = runProbeScript(buildKernelCrossCheckScript(), entries)
-  const verdicts: Array<[string, string]> = []
-  for (let index = 0; index < fields.length; index += 2) {
-    verdicts.push([fields[index] ?? "", fields[index + 1] ?? "<missing>"])
+  const verdicts: Array<[string, string, string]> = []
+  for (let index = 0; index < fields.length; index += 3) {
+    verdicts.push([
+      fields[index] ?? "",
+      fields[index + 1] ?? "<missing>",
+      fields[index + 2] ?? "<missing>",
+    ])
   }
   return { code, verdicts }
+}
+
+/**
+ * Issue #219: trail points from explicit `(host, expected)` pairs.
+ *
+ * @param pairs - `(K_j, E_j)` for `j = 0..n`.
+ * @returns One point per pair, in the same order.
+ */
+function trailPoints(...pairs: ReadonlyArray<readonly [string, string]>): KernelCrossCheckPoint[] {
+  return pairs.map(([host, expected]) => ({ expected, host }))
+}
+
+/**
+ * Issue #219: a workspace whose destination is `<root>/w/app`, with an empty
+ * directory `<root>/outside` beside the destination's parent.
+ *
+ * @returns The workspace root, the destination and the outside directory.
+ */
+function makeSharpSWorkspace(): { destination: string; outside: string; root: string } {
+  const root = realpathSync(mkdtempSync(join(tmpdir(), "paratix-archive-sharp-s-smoke-")))
+  const destination = join(root, "w/app")
+  const outside = join(root, "outside")
+  mkdirSync(destination, { recursive: true })
+  mkdirSync(outside)
+  return { destination, outside, root }
+}
+
+/**
+ * Issue #219: every link below `destination` as the backstop's model sees it,
+ * read with the real listing probe.
+ *
+ * @param destination - The canonical destination directory.
+ * @returns The listed links.
+ */
+function hostLinksOf(destination: string): ReadonlyMap<string, MergedSymlink> {
+  const { fields } = runProbeScript(buildSymlinkListingProbeScript(), [
+    encodeSymlinkListingEntry("r", destination),
+  ])
+  const host = hostStateFromListing(destination, fields, new Map())
+  if (typeof host === "string") throw new Error(`unexpected listing: ${host}`)
+  return host.links
 }
 
 describe.skipIf(SKIP_PLATFORM)(
@@ -2503,19 +2595,22 @@ describe.skipIf(SKIP_PLATFORM)(
         symlinkSync("gone", join(destination, "d/half"))
         const link = (name: string): string => join(destination, "d", name)
 
+        const d = join(destination, "d")
+
         const { code, verdicts } = runKernelCrossCheckScript([
-          [link("right"), link("f")],
-          [link("wrong"), join(destination, "d")],
-          [link("dangling"), join(destination, "d/missing/x")],
-          [link("half"), link("f")],
+          [link("right"), plainTrailPoints(link("right"), "f")],
+          [link("wrong"), trailPoints([d, d], [link("f"), d])],
+          [link("dangling"), plainTrailPoints(link("dangling"), "missing/x")],
+          [link("half"), trailPoints([d, d], [link("gone"), link("f")])],
         ])
 
         expect(code).toBe(0)
         expect(verdicts).toStrictEqual([
-          [link("right"), "same"],
-          [link("wrong"), "differ"],
-          [link("dangling"), "dangling"],
-          [link("half"), "differ"],
+          [link("right"), "same", "0"],
+          [link("wrong"), "differ", "0"],
+          // `d/missing/x` and `d/missing` exist on neither side; `d` does on both.
+          [link("dangling"), "dangling", "3"],
+          [link("half"), "differ", "1"],
         ])
       } finally {
         rmSync(root, { force: true, recursive: true })
@@ -2560,10 +2655,199 @@ describe.skipIf(SKIP_PLATFORM)(
 
           // The kernel follows `d/up` for `d/UP`, so the cross-check alone
           // already disagrees with the plain lexical expectation `d`.
-          expect(runKernelCrossCheckScript([[esc, join(destination, "d")]]).verdicts).toStrictEqual(
-            [[esc, "differ"]]
-          )
+          expect(
+            runKernelCrossCheckScript([[esc, plainTrailPoints(esc, "UP/..")]]).verdicts
+          ).toStrictEqual([[esc, "differ", "0"]])
           expect(realpathSync.native(esc)).toBe(root)
+        } finally {
+          rmSync(root, { force: true, recursive: true })
+        }
+      }
+    )
+
+    it("compares the nearest existing point of a dangling link's target path with the model", () => {
+      const { destination, root } = makeAppWorkspace()
+      try {
+        mkdirSync(join(destination, "d/sub"), { recursive: true })
+        const d = join(destination, "d")
+        const link = (name: string, target: string): string => {
+          symlinkSync(target, join(d, name))
+          return join(d, name)
+        }
+        const inside = link("inside", "sub/n")
+        const afterMissing = link("after-missing", "missing/../sub/n")
+        // Hand-made: the model claims `outside` below the destination, while
+        // the kernel walks out of it to the existing `<root>/other`.
+        const claimed = link("claimed", "../../other/n")
+
+        const { code, verdicts } = runKernelCrossCheckScript([
+          [inside, plainTrailPoints(inside, "sub/n")],
+          [afterMissing, plainTrailPoints(afterMissing, "missing/../sub/n")],
+          [
+            claimed,
+            trailPoints(
+              [d, d],
+              [`${d}/..`, destination],
+              [`${d}/../..`, destination],
+              [`${d}/../../other`, `${destination}/other`],
+              [`${d}/../../other/n`, `${destination}/other/n`]
+            ),
+          ],
+        ])
+
+        expect(code).toBe(0)
+        expect(verdicts).toStrictEqual([
+          // `d/sub` is the nearest existing point on both sides.
+          [inside, "dangling", "2"],
+          // The kernel cannot walk `..` out of the missing `d/missing`, while
+          // the model's `d/sub` exists: refused, although nothing can be
+          // written through the link today (a deliberate false positive).
+          [afterMissing, "differ", "2"],
+          // `<root>/other` exists on the host, `<destination>/other` does not.
+          [claimed, "differ", "2"],
+        ])
+      } finally {
+        rmSync(root, { force: true, recursive: true })
+      }
+    })
+
+    it("does not report a link whose final component is a dangling link resolving elsewhere inside", async () => {
+      const { destination, root } = makeAppWorkspace()
+      try {
+        mkdirSync(join(destination, "d"))
+        mkdirSync(join(destination, "sub"))
+        symlinkSync("b", join(destination, "d/l"))
+        symlinkSync("../sub/q", join(destination, "d/b"))
+        symlinkSync("c", join(destination, "d/m"))
+        symlinkSync("missing/q", join(destination, "d/c"))
+        const { commands, conn } = localShellConnection()
+        const resolutions = mergedSymlinkResolutions(hostLinksOf(destination))
+
+        const result = await runKernelCrossCheck(conn, {
+          destination,
+          links: resolutions.inside.keys(),
+          trail: resolutions.trail,
+        })
+
+        expect([...resolutions.inside.keys()].toSorted()).toStrictEqual([
+          "d/b",
+          "d/c",
+          "d/l",
+          "d/m",
+        ])
+        expect(result).toStrictEqual({ kind: "ok", mismatches: [] })
+        expect(commands).toStrictEqual([buildKernelCrossCheckScript()])
+      } finally {
+        rmSync(root, { force: true, recursive: true })
+      }
+    })
+
+    it("names the trail point where the kernel and a hand-made model disagree for a dangling link", async () => {
+      const { destination, root } = makeAppWorkspace()
+      try {
+        mkdirSync(join(destination, "d"))
+        mkdirSync(join(destination, "sub"))
+        symlinkSync("missing/n", join(destination, "d/l"))
+        const { conn } = localShellConnection()
+        // Hand-made trail source: the model claims `d/missing` is the existing
+        // `sub`, while the kernel finds no `d/missing`.
+        const d = join(destination, "d")
+
+        const result = await runKernelCrossCheck(conn, {
+          destination,
+          links: ["d/l"],
+          trail: () => ({
+            base: "d",
+            locations: ["d", "sub", "sub/n"],
+            segments: ["missing", "n"],
+          }),
+        })
+
+        expect(result).toStrictEqual({
+          kind: "ok",
+          mismatches: [
+            {
+              at: { host: `${d}/missing`, kind: "point", location: `${destination}/sub` },
+              expected: `${destination}/sub/n`,
+              key: "d/l",
+            },
+          ],
+        })
+      } finally {
+        rmSync(root, { force: true, recursive: true })
+      }
+    })
+
+    it("reports x/esc -> ss/../../outside/n next to x/\u1e9e -> .. lexically on every filesystem", async () => {
+      const { destination, outside, root } = makeSharpSWorkspace()
+      try {
+        mkdirSync(join(destination, "x"))
+        symlinkSync("..", join(destination, "x/\u1e9e"))
+        symlinkSync("ss/../../outside/n", join(destination, "x/esc"))
+        expect(backstopViolations(destination)).toStrictEqual([["x/esc", "variant"]])
+        const { commands, conn } = localShellConnection()
+
+        const failure = await enforceSymlinkContainment(conn, {
+          destination,
+          members: treeLinksAsMembers(destination),
+          source: "sharp.tar",
+        })
+
+        expect(failure?.error?.message).toContain(
+          'passes through "x/ss", a name that differs from existing symlink "x/\u1e9e" only by letter case or Unicode normalization'
+        )
+        expect(reportedLinks(failure?.error?.message)).toStrictEqual([join(destination, "x/esc")])
+        expect(commands).toStrictEqual([
+          buildSymlinkListingProbeScript(),
+          buildKernelCrossCheckScript(),
+        ])
+        expect(readdirSync(outside)).toStrictEqual([])
+      } finally {
+        rmSync(root, { force: true, recursive: true })
+      }
+    })
+
+    it.skipIf(!FOLDS_CAPITAL_SHARP_S)(
+      "sees the kernel disagree with the former inside expectation of x/esc -> ss/../../outside/n on a folding filesystem",
+      async () => {
+        const { destination, outside, root } = makeSharpSWorkspace()
+        try {
+          mkdirSync(join(destination, "x"))
+          symlinkSync("..", join(destination, "x/\u1e9e"))
+          symlinkSync("ss/../../outside/n", join(destination, "x/esc"))
+          const { conn } = localShellConnection()
+          const x = join(destination, "x")
+
+          // The trail the model computed before `x/ss` counted as a name
+          // variant of `x/\u1e9e`: a plain walk that stays inside.
+          const result = await runKernelCrossCheck(conn, {
+            destination,
+            links: ["x/esc"],
+            trail: () => ({
+              base: "x",
+              locations: ["x", "x/ss", "x", "", "outside", "outside/n"],
+              segments: ["ss", "..", "..", "outside", "n"],
+            }),
+          })
+
+          // Neither the link nor `<destination>/outside/n` exists, which the
+          // former check accepted as dangling; the nearest existing point of
+          // the kernel's walk is the `outside` directory beside the tree.
+          expect(result).toStrictEqual({
+            kind: "ok",
+            mismatches: [
+              {
+                at: {
+                  host: `${x}/ss/../../outside`,
+                  kind: "point",
+                  location: `${destination}/outside`,
+                },
+                expected: `${destination}/outside/n`,
+                key: "x/esc",
+              },
+            ],
+          })
+          expect(realpathSync.native(`${x}/ss/../../outside`)).toBe(outside)
         } finally {
           rmSync(root, { force: true, recursive: true })
         }

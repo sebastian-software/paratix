@@ -20,7 +20,7 @@ import {
   unreadableDirectoryAt,
   unreadableDirectoryIndex,
 } from "./archiveContainmentScope.js"
-import { runKernelCrossCheck } from "./archiveKernelCrossCheck.js"
+import { type KernelMismatchPoint, runKernelCrossCheck } from "./archiveKernelCrossCheck.js"
 import {
   type MergedSymlink,
   mergedSymlinkResolutions,
@@ -57,13 +57,14 @@ export const POST_MERGE_VIOLATION_REPORT_LIMIT = 10
 /**
  * Issue #219: a link the backstop cannot show to stay inside: a violation of
  * the lexical resolver, a `kernel-mismatch` where the host kernel does not
- * confirm the location the resolver computed (`expected`, absolute), or an
+ * confirm the location the resolver computed (`expected`, absolute; `at`
+ * says where the two disagree, see `KernelMismatchPoint`), or an
  * `unreadable-member`: an archive member path (`key`) at or below a host
  * directory the listing could not read, whose links the backstop cannot see.
  */
 export type PostMergeViolation =
+  | { at: KernelMismatchPoint; expected: string; key: string; kind: "kernel-mismatch" }
   | { directory: string; key: string; kind: "unreadable-member" }
-  | { expected: string; key: string; kind: "kernel-mismatch" }
   | MergedSymlinkViolation
 
 /**
@@ -127,10 +128,12 @@ function unreadableMemberViolations(
  * Issue #219: the resolver alone is lexical. Every judged link it places
  * inside is then handed to {@link runKernelCrossCheck} in one more batched
  * exec, which compares the link with the location the resolver computed by
- * device and inode. A link the kernel resolves elsewhere is a
- * `kernel-mismatch` violation; a cross-check that cannot be completed fails
- * the reading like a failed listing. Without judged links inside, no
- * cross-check runs.
+ * device and inode, and, for a link that reaches nothing, the nearest
+ * existing point of its target path with the resolver's location of that
+ * point. A link the kernel resolves elsewhere, or whose nearest existing
+ * point differs, is a `kernel-mismatch` violation; a cross-check that cannot
+ * be completed fails the reading like a failed listing. Without judged links
+ * inside, no cross-check runs.
  *
  * @param conn - The SSH connection.
  * @param parameters - Reading inputs.
@@ -158,16 +161,48 @@ async function readPostMergeSymlinks(
     ...resolutions.violations,
   ]
   if (inside.size === 0) return { kind: "ok", links: host.links, violations }
-  const kernel = await runKernelCrossCheck(conn, { destination, inside })
+  const kernel = await runKernelCrossCheck(conn, {
+    destination,
+    links: inside.keys(),
+    trail: resolutions.trail,
+  })
   if (kernel.kind === "failed") {
     return { detail: `kernel cross-check could not be completed: ${kernel.detail}`, kind: "failed" }
   }
-  const mismatches = kernel.mismatches.map(({ expected, key }): PostMergeViolation => ({
+  const mismatches = kernel.mismatches.map(({ at, expected, key }): PostMergeViolation => ({
+    at,
     expected,
     key,
     kind: "kernel-mismatch",
   }))
   return { kind: "ok", links: host.links, violations: [...violations, ...mismatches] }
+}
+
+/**
+ * Issue #219: describe where the host kernel disagrees with the containment
+ * check for one link.
+ *
+ * @param mismatch - A `kernel-mismatch` violation.
+ * @param mismatch.at - Where the kernel and the check disagree.
+ * @param mismatch.expected - The absolute location the check computed.
+ * @returns The description, starting after the link it is about.
+ */
+function kernelMismatchDescription(mismatch: {
+  at: KernelMismatchPoint
+  expected: string
+}): string {
+  const { at, expected } = mismatch
+  switch (at.kind) {
+    case "link": {
+      return `resolves on the host to a different location than the containment check computed (${JSON.stringify(expected)})`
+    }
+    case "none": {
+      return `reaches nothing on the host, and no point of its target path exists on the host or where the containment check computed it, so its location (${JSON.stringify(expected)}) cannot be confirmed`
+    }
+    case "point": {
+      return `reaches nothing on the host, and the nearest existing point of its target path, ${JSON.stringify(at.host)} on the host, is not the location the containment check computed for it (${JSON.stringify(at.location)})`
+    }
+  }
 }
 
 /**
@@ -194,7 +229,7 @@ function postMergeViolationDescription(
       return `${link} resolves outside destination ${JSON.stringify(destination)}`
     }
     case "kernel-mismatch": {
-      return `${link} resolves on the host to a different location than the containment check computed (${JSON.stringify(violation.expected)})`
+      return `${link} ${kernelMismatchDescription(violation)}`
     }
     case "limit": {
       return `${link} cannot be resolved within the symlink resolution limit`
