@@ -227,23 +227,18 @@ in one batched command (`test -e` and `test -ef`, bounded by the kernel's symlin
 `realpath` or `readlink -f`) whether each link it judged inside really reaches the resolved path; a
 link the kernel resolves to a different object, or that resolves on one side only (for example a
 target through a missing directory), is a violation, and a cross-check that cannot be completed
-fails the run. With symlinks under `destination` this check costs two commands, without any one,
-independent of the number of members. Each violating link (resolving outside, not resolvable within
-the symlink limit such as a loop, a name variant, or a kernel mismatch) is renamed into a fresh
-private quarantine directory (`.paratix-quarantine.XXXXXXXX`, created with `mktemp -d` next to the
-link, inside its verified parent directory, a real directory inside `destination`) and inspected
-there: a symlink is deleted and the quarantine directory removed; anything else, because the entry
-was replaced meanwhile, is moved back without overwriting where `mv -n -T` is available (for example
-GNU coreutils or BusyBox) and otherwise left in the quarantine directory. Without a working `mv -n`
-nothing is removed. The removal never follows links, never recurses and deletes nothing but
-symlinks. The check re-checks and repeats while removal makes progress, and still fails the run,
-reporting per link whether it was removed, restored, or left in quarantine (naming its path there),
-and naming any link it could not remove or that still escapes. On failure no extraction marker is
-written and no `owner` is applied. The flag is removed only after an apply succeeds completely,
-including `owner` and the marker files; a refusal while the destination is created or validated, by
-the checks before staging, by the pre-merge check, by the merge, or by the post-merge check leaves
-it set, and while it exists, `check` reports `needs-apply` for every archive extracting into that
-destination.
+fails the run. A converged tree costs two commands when a symlink under `destination` is judged
+inside and one otherwise, independent of the number of members; a violation adds none. This check
+only reports: it removes, moves or changes nothing. Any violating link (resolving outside, not
+resolvable within the symlink limit such as a loop, a name variant, or a kernel mismatch) fails the
+run with a message that names the first 10 offending links by path, stored target and reason, adds
+`(and N more)` for the rest, and states that nothing was removed or changed. The offending links
+must be removed or pointed inside manually; the flag stays set until an apply then succeeds. On
+failure no extraction marker is written and no `owner` is applied. The flag is removed only after an
+apply succeeds completely, including `owner` and the marker files; a refusal while the destination
+is created or validated, by the checks before staging, by the pre-merge check, by the merge, or by
+the post-merge check leaves it set, and while it exists, `check` reports `needs-apply` for every
+archive extracting into that destination.
 
 ### `command`
 

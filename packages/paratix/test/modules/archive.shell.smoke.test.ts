@@ -249,6 +249,13 @@ const SKIP_NO_TRAILING_NEWLINE_READLINK = SKIP_PLATFORM || !readlinkAlwaysAppend
 // A privileged user reads directories regardless of their mode.
 const SKIP_AS_ROOT = process.getuid?.() === 0
 
+/**
+ * Issue #219: the message tail of every post-merge violation: the backstop
+ * only reports and says so.
+ */
+const BACKSTOP_REPORT_TAIL =
+  "every symlink under the destination is checked after the merge, including links this archive did not ship; nothing was removed or changed; remove the offending symlinks under the destination or point them inside it manually before the next run, the containment flag keeps check at needs-apply until an apply succeeds"
+
 describe.skipIf(SKIP_PLATFORM)("archive.extract staging merge shell smoke tests", () => {
   it("refuses a staging entry whose name contains a literal newline", () => {
     const { destination, root, staging } = makeWorkspace()
@@ -1001,7 +1008,7 @@ describe.skipIf(SKIP_PLATFORM)(
 describe.skipIf(SKIP_PLATFORM || SKIP_NO_GNU_CP)(
   "archive.extract two-run directory conflict after a real merge (Issue #219, requires GNU cp)",
   () => {
-    it("shows the escape the refusal prevents, and the backstop removes only the escaping link", async () => {
+    it("shows the escape the refusal prevents, and the backstop reports the escaping link without removing it", async () => {
       const { destination, root, staging } = makeWorkspace()
       try {
         const firstStaging = join(root, "staging-1")
@@ -1035,19 +1042,23 @@ describe.skipIf(SKIP_PLATFORM || SKIP_NO_GNU_CP)(
 
         expect(failure?.status).toBe("failed")
         expect(failure?.error?.message).toBe(
-          `[archive.extract] refusing to complete extraction of run-2.tar: symlink ${JSON.stringify(join(destination, "a/c/l"))} -> "../b/hl/.." resolves outside destination ${JSON.stringify(destination)}; every symlink under the destination is checked after the merge, including links this archive did not ship; removed escaping symlinks: ${JSON.stringify(join(destination, "a/c/l"))}; re-check found no escaping symlinks`
+          `[archive.extract] refusing to complete extraction of run-2.tar: symlink ${JSON.stringify(join(destination, "a/c/l"))} -> "../b/hl/.." resolves outside destination ${JSON.stringify(destination)}; ${BACKSTOP_REPORT_TAIL}`
         )
-        // Issue #219: one listing and the kernel cross-check of `a/b/hl`, one
-        // batched removal, then the same listing and cross-check again.
-        expect(commands).toHaveLength(5)
+        // Issue #219: one listing and the kernel cross-check of `a/b/hl`, and
+        // nothing else: the backstop only reports.
+        expect(commands).toStrictEqual([
+          buildSymlinkListingProbeScript(),
+          buildKernelCrossCheckScript(),
+        ])
         expect(describeTree(destination)).toStrictEqual([
           "d a",
           "d a/b",
           "l a/b/hl -> ../..",
           "d a/c",
+          "l a/c/l -> ../b/hl/..",
         ])
         expect(readdirSync(root).toSorted()).toStrictEqual(outsideBefore)
-        expect(escapingLinks(destination)).toStrictEqual([])
+        expect(physicallyEscapingLinks(destination)).toStrictEqual(["a/c/l"])
       } finally {
         rmSync(root, { force: true, recursive: true })
       }
@@ -1354,16 +1365,16 @@ function makeAppWorkspace(): { destination: string; root: string } {
 }
 
 /**
- * Issue #219: the links a backstop failure message names after
- * `removed escaping symlinks:`.
+ * Issue #219: the links a backstop failure message names, each as
+ * `symlink "<absolute link path>" -> "<stored target>"`.
  *
  * @param message - The failure message of `enforceSymlinkContainment`.
- * @returns The removed links, sorted.
+ * @returns The reported link paths, sorted.
  */
-function removedLinks(message: string | undefined): string[] {
-  const links = /; removed escaping symlinks: (?<links>.*?); re-check /sv.exec(message ?? "")
-    ?.groups?.links
-  return links === undefined ? [] : (JSON.parse(`[${links}]`) as string[]).toSorted()
+function reportedLinks(message: string | undefined): string[] {
+  return [...(message ?? "").matchAll(/symlink (?<link>"(?:[^"\\]|\\.)*") -> /gv)]
+    .map((match) => JSON.parse(match.groups?.link ?? '""') as string)
+    .toSorted()
 }
 
 describe.skipIf(SKIP_PLATFORM)(
@@ -1453,7 +1464,7 @@ describe.skipIf(SKIP_PLATFORM)(
       }
     }, 10_000)
 
-    it("removes those links with the real removal script in exactly five execs", async () => {
+    it("reports those links and changes nothing, in exactly two execs", async () => {
       const { destination, root } = makeWorkspace()
       try {
         writeFileSync(join(destination, "w"), "w\n")
@@ -1469,25 +1480,40 @@ describe.skipIf(SKIP_PLATFORM)(
         })
 
         const message = failure?.error?.message
-        expect(message).toMatch(
-          /^\[archive\.extract\] refusing to complete extraction of loop\.tar: symlink "[^"]+" -> "[^"]+" cannot be resolved within the symlink resolution limit; every symlink under the destination is checked after the merge, including links this archive did not ship \(and 2 more\); removed escaping symlinks: .+; re-check found no escaping symlinks$/sv
-        )
-        expect(removedLinks(message)).toStrictEqual(
+        expect(
+          message?.startsWith(
+            "[archive.extract] refusing to complete extraction of loop.tar: symlink "
+          )
+        ).toBe(true)
+        expect(
+          message?.match(/cannot be resolved within the symlink resolution limit; /gv)
+        ).toHaveLength(3)
+        expect(message?.endsWith(`; ${BACKSTOP_REPORT_TAIL}`)).toBe(true)
+        expect(reportedLinks(message)).toStrictEqual(
           ["b", "x", "y"].map((key) => join(destination, key))
         )
-        // Issue #219: one listing and one kernel cross-check of `in`, one
-        // batched removal, then the same listing and cross-check again.
-        expect(commands).toHaveLength(5)
-        expect(describeTree(destination)).toStrictEqual(["l in -> w", "f w w\n"])
+        // Issue #219: one listing and one kernel cross-check of `in`, and
+        // nothing else: every link is still in place.
+        expect(commands).toStrictEqual([
+          buildSymlinkListingProbeScript(),
+          buildKernelCrossCheckScript(),
+        ])
+        expect(describeTree(destination)).toStrictEqual([
+          "l b -> b/..",
+          "l in -> w",
+          "f w w\n",
+          "l x -> y/..",
+          "l y -> x",
+        ])
       } finally {
         rmSync(root, { force: true, recursive: true })
       }
     }, 10_000)
 
-    it("removes a link that stays inside only through an escaping link, together with that link", async () => {
+    it("reports a link that stays inside only through an escaping link, together with that link", async () => {
       // `x` leaves the destination; `z` walks through `x` and comes back into
       // it. Physically `z` lands inside, but only because `x` points outside,
-      // so the backstop removes both.
+      // so the backstop reports both and removes neither.
       const { destination, root } = makeAppWorkspace()
       try {
         writeFileSync(join(destination, "w"), "w\n")
@@ -1504,16 +1530,19 @@ describe.skipIf(SKIP_PLATFORM)(
         const failure = await enforceSymlinkContainment(conn, { destination, source: "q2.tar" })
 
         const message = failure?.error?.message
-        expect(message).toMatch(
-          / \(and 1 more\); removed escaping symlinks: .+; re-check found no escaping symlinks$/sv
-        )
-        expect(removedLinks(message)).toStrictEqual([
+        expect(message?.endsWith(`; ${BACKSTOP_REPORT_TAIL}`)).toBe(true)
+        expect(message).not.toContain("more)")
+        expect(reportedLinks(message)).toStrictEqual([
           join(destination, "x"),
           join(destination, "z"),
         ])
-        expect(commands).toHaveLength(3)
-        expect(describeTree(destination)).toStrictEqual(["f w w\n"])
-        expect(backstopViolations(destination)).toStrictEqual([])
+        // No link is judged inside, so the listing is the only exec.
+        expect(commands).toStrictEqual([buildSymlinkListingProbeScript()])
+        expect(describeTree(destination)).toStrictEqual([
+          "f w w\n",
+          "l x -> ../other/q/r",
+          "l z -> x/../../../app/w",
+        ])
         expect(readdirSync(join(root, "other/q/r"))).toStrictEqual([])
       } finally {
         rmSync(root, { force: true, recursive: true })
@@ -1867,7 +1896,7 @@ describe.skipIf(SKIP_PLATFORM)(
       }
     )
 
-    it("reports and removes d/esc -> UP/.. next to d/up -> .. on every filesystem", async () => {
+    it("reports d/esc -> UP/.. next to d/up -> .. on every filesystem and removes nothing", async () => {
       const { destination, root } = makeAppWorkspace()
       try {
         mkdirSync(join(destination, "d"))
@@ -1884,8 +1913,9 @@ describe.skipIf(SKIP_PLATFORM)(
         expect(failure?.error?.message).toContain(
           'passes through "d/UP", a name that differs from existing symlink "d/up" only by letter case or Unicode normalization'
         )
-        expect(removedLinks(failure?.error?.message)).toStrictEqual([esc])
-        expect(describeTree(destination)).toStrictEqual(["d d", "l d/up -> .."])
+        expect(reportedLinks(failure?.error?.message)).toStrictEqual([esc])
+        expect(failure?.error?.message.endsWith(`; ${BACKSTOP_REPORT_TAIL}`)).toBe(true)
+        expect(describeTree(destination)).toStrictEqual(["d d", "l d/esc -> UP/..", "l d/up -> .."])
         expect(readdirSync(root).toSorted()).toStrictEqual(["app", "other"])
       } finally {
         rmSync(root, { force: true, recursive: true })

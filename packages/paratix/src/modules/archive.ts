@@ -1087,7 +1087,9 @@ async function extractAndValidateSymlinkContainment(
   // enforcement over the whole tree after the merge is the backstop for host
   // changes that landed between that listing and the merge, and for a merge
   // that failed half-way after copying some entries: it runs whenever the
-  // merge started, removes every escaping link it finds and fails the run.
+  // merge started, reports every escaping link it finds and fails the run.
+  // It removes and changes nothing; the offending links stay until they are
+  // cleaned up manually and an apply succeeds.
   // The caller runs it before `finalizeExtraction`, so a refused extraction
   // performs no chown and writes no marker file, and the flag stays set.
   // Staging has already been cleaned up here; a leftover staging directory

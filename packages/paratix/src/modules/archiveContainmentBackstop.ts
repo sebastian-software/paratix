@@ -3,10 +3,10 @@
  *
  * Issue #219: after the staging merge, {@link enforceSymlinkContainment} lists
  * every link below the destination as it actually is, judges the set with the
- * resolver the pre-merge check uses, lets the host kernel confirm the
- * resolver's location of every link judged inside, removes each violating
- * link without following it, re-checks and repeats while the removal makes
- * progress, and fails the run.
+ * resolver the pre-merge check uses and lets the host kernel confirm the
+ * resolver's location of every link judged inside. It only detects and
+ * reports: on a violation it names the offending links and fails the run, and
+ * it never removes, moves or changes anything on the host.
  */
 import type { ModuleResult, SshConnection } from "../types.js"
 
@@ -22,14 +22,27 @@ import { ARCHIVE_CAPTURE_LIMIT_BYTES } from "./archiveMemberValidation.js"
 import {
   buildSymlinkListingProbeScript,
   encodeSymlinkListingEntry,
-  removeEscapingSymlinks,
   runBatchedProbe,
-  type SymlinkRemovalReport,
 } from "./archiveProbe.js"
 import { hostStateFromListing } from "./archiveSymlinkListing.js"
 
 const CHECKED_AFTER_MERGE =
   "every symlink under the destination is checked after the merge, including links this archive did not ship"
+
+/**
+ * Issue #219: what an operator has to do after a post-merge violation. The
+ * backstop only reports, so the offending links stay in place until someone
+ * removes them or points them inside the destination.
+ */
+const NOTHING_CHANGED_AFTER_MERGE =
+  "nothing was removed or changed; remove the offending symlinks under the destination or point them inside it manually before the next run, the containment flag keeps check at needs-apply until an apply succeeds"
+
+/**
+ * Issue #219: how many violations the failure message names before it
+ * summarizes the rest as `(and N more)`, so a tree with many offending links
+ * cannot inflate the message without bound.
+ */
+export const POST_MERGE_VIOLATION_REPORT_LIMIT = 10
 
 /**
  * Issue #219: a link the backstop cannot show to stay inside: a violation of
@@ -138,145 +151,29 @@ function postMergeViolationDescription(
 }
 
 /**
- * Describe the first violation the post-merge check found.
+ * Issue #219: describe the violations the post-merge check found, at most
+ * {@link POST_MERGE_VIOLATION_REPORT_LIMIT} of them, and say that nothing was
+ * changed.
  *
  * @param destination - The validated, canonical destination directory.
- * @param reading - The first post-merge listing, with at least one violation.
+ * @param reading - The post-merge listing, with at least one violation.
  * @returns The violation text without the `[archive.extract]` prefix, with the
- *   `(and N more)` suffix when there are more.
+ *   `(and N more)` suffix after the listed links when there are more.
  */
 function containmentViolationMessage(destination: string, reading: PostMergeSymlinks): string {
-  const [first] = reading.violations
-  const more = reading.violations.length - 1
+  const listed = reading.violations
+    .slice(0, POST_MERGE_VIOLATION_REPORT_LIMIT)
+    .map((violation) => postMergeViolationDescription(destination, reading, violation))
+  const more = reading.violations.length - listed.length
   const suffix = more > 0 ? ` (and ${String(more)} more)` : ""
-  return `${postMergeViolationDescription(destination, reading, first)}; ${CHECKED_AFTER_MERGE}${suffix}`
-}
-
-/**
- * Issue #219: what the removal rounds of {@link enforceSymlinkContainment}
- * did in total, and the last re-check.
- */
-type RemovalRounds = {
-  /** Links still in place after the rounds, with the latest reason. */
-  kept: ReadonlyMap<string, string>
-  /** Notes on removed links, e.g. a quarantine directory left behind. */
-  notes: ReadonlyMap<string, string>
-  /** The listing taken after the last round. */
-  recheck: PostMergeSymlinkReading
-  /** Every link removed in any round, in removal order, without duplicates. */
-  removed: readonly string[]
-}
-
-/** Issue #219: the running totals of the removal rounds. */
-type RemovalTotals = {
-  kept: Map<string, string>
-  notes: Map<string, string>
-  removed: Set<string>
-}
-
-/**
- * Fold one removal report into the totals across rounds: a removed link is no
- * longer reported as kept, a kept link carries its latest reason.
- *
- * @param totals - The accumulated totals, updated in place.
- * @param report - The report of the latest removal round.
- */
-function recordRemovalRound(totals: RemovalTotals, report: SymlinkRemovalReport): void {
-  for (const link of report.removed) {
-    totals.removed.add(link)
-    totals.kept.delete(link)
-  }
-  for (const [link, reason] of report.kept) totals.kept.set(link, reason)
-  for (const [link, note] of report.notes) totals.notes.set(link, note)
-}
-
-/**
- * Issue #219: remove the violating links, re-list and repeat while the
- * removal makes progress.
- *
- * Removing a link changes how every link whose target passes through its path
- * resolves: the walk then continues lexically through the missing path. The
- * resolver already reports a link that follows a violating link as a
- * violation itself, so on an unchanged tree one round removes them together.
- * The tree can still change while the rounds run — the host may create or
- * redirect links, and a link the removal script refused stays in place — so
- * each round removes whatever the latest listing reports, then re-lists. The
- * rounds stop when the re-check is clean, when it failed, or when a round
- * removed nothing. There are at most as many rounds as the first listing had
- * links (at least one), which caps the work even when the host keeps creating
- * new links. Each round costs one removal exec and one re-check, which is one
- * listing exec plus one kernel cross-check exec when the listing has a link
- * judged inside.
- *
- * @param conn - The SSH connection.
- * @param destination - The validated, canonical destination directory.
- * @param first - The first post-merge listing, with at least one violation.
- * @returns The accumulated removal outcome and the last re-check.
- */
-async function removeViolatingSymlinks(
-  conn: SshConnection,
-  destination: string,
-  first: PostMergeSymlinks
-): Promise<RemovalRounds> {
-  const totals: RemovalTotals = { kept: new Map(), notes: new Map(), removed: new Set() }
-  const maxRounds = Math.max(1, first.links.size)
-  let current = first
-  let recheck: PostMergeSymlinkReading = first
-  for (let round = 0; round < maxRounds; round += 1) {
-    const links = current.violations.map(({ key }) => `${destination}/${key}`)
-    // Rounds depend on each other: each one removes what the previous
-    // re-check reported, so they cannot run concurrently.
-    // eslint-disable-next-line no-await-in-loop -- sequential by design
-    const report = await removeEscapingSymlinks(conn, destination, links)
-    recordRemovalRound(totals, report)
-    // eslint-disable-next-line no-await-in-loop -- sequential by design
-    recheck = await readPostMergeSymlinks(conn, destination)
-    if (recheck.kind === "failed" || recheck.violations.length === 0) break
-    if (report.removed.length === 0) break
-    current = recheck
-  }
-  return { kept: totals.kept, notes: totals.notes, recheck, removed: [...totals.removed] }
-}
-
-/**
- * Describe what the removal rounds did and what the last re-check found.
- *
- * @param destination - The validated, canonical destination directory.
- * @param rounds - The accumulated outcome of {@link removeViolatingSymlinks}.
- * @returns The message tail, starting with `; `.
- */
-function enforcementSummary(destination: string, rounds: RemovalRounds): string {
-  const { kept, notes, recheck, removed } = rounds
-  const parts: string[] = []
-  if (removed.length > 0) {
-    parts.push(
-      `removed escaping symlinks: ${removed.map((link) => JSON.stringify(link)).join(", ")}`
-    )
-  }
-  if (notes.size > 0) {
-    const details = [...notes].map(([link, note]) => `${JSON.stringify(link)} (${note})`)
-    parts.push(`removal notes: ${details.join(", ")}`)
-  }
-  if (kept.size > 0) {
-    const reasons = [...kept].map(([link, reason]) => `${JSON.stringify(link)} (${reason})`)
-    parts.push(`could not remove: ${reasons.join(", ")}`)
-  }
-  if (recheck.kind === "failed") parts.push(`re-check failed: ${recheck.detail}`)
-  else if (recheck.violations.length === 0) parts.push("re-check found no escaping symlinks")
-  else {
-    const remaining = recheck.violations.map((violation) =>
-      postMergeViolationDescription(destination, recheck, violation)
-    )
-    parts.push(`re-check still reports ${remaining.join(", ")}`)
-  }
-  return parts.map((part) => `; ${part}`).join("")
+  return `${listed.join("; ")}${suffix}; ${CHECKED_AFTER_MERGE}; ${NOTHING_CHANGED_AFTER_MERGE}`
 }
 
 /**
  * Issue #219: the post-merge backstop. List every symlink below the
  * destination as it actually is, judge the set with the resolver the pre-merge
- * model uses, let the host kernel confirm every link judged inside, remove
- * each violating link and fail the run.
+ * model uses, let the host kernel confirm every link judged inside, and fail
+ * the run on any violation.
  *
  * This runs after every merge that started, even a failed one, because a
  * merge that failed half-way may already have published links. It covers
@@ -291,35 +188,35 @@ function enforcementSummary(destination: string, rounds: RemovalRounds): string 
  * the client's timeout.
  *
  * Decision: a link the resolver reports as `limit` (hop limit or cycle) is
- * treated like an escaping link and removed. It cannot be shown to stay
- * inside, the pre-merge model counts it as a violation as well, and the
- * previous backstop removed links it could not resolve; the run fails and
- * names it either way. The same holds for a `variant` link and for a
- * `kernel-mismatch`.
+ * treated like an escaping link. It cannot be shown to stay inside, and the
+ * pre-merge model counts it as a violation as well; the run fails and names
+ * it. The same holds for a `variant` link and for a `kernel-mismatch`.
  *
- * On a violation it removes the reported links, re-lists and repeats while a
- * round makes progress (see {@link removeViolatingSymlinks}). The run still
- * fails after a removal, so the containment flag the caller wrote before the
- * merge stays set. The message names the first violation, every link removed
- * in any round, every link that could not be removed with its reason, and the
- * last re-check: every link it still reports, or why it failed.
+ * Issue #219: the backstop only detects and reports. It never removes, moves
+ * or rewrites a link, because another writer can change the tree between any
+ * check and any change the backstop could make. On a violation the run fails,
+ * so the containment flag the caller wrote before the merge stays set and
+ * `check` keeps reporting needs-apply until an apply succeeds. The message
+ * names the first {@link POST_MERGE_VIOLATION_REPORT_LIMIT} violations by
+ * absolute link path, stored target and reason, adds `(and N more)` for the
+ * rest, and states that nothing was removed or changed, so the offending links
+ * must be removed or pointed inside manually before the next run.
  *
  * Cost: a converged tree costs one listing exec plus one kernel cross-check
- * exec when the destination holds at least one symlink (one exec when it holds
- * none), regardless of member or link count; each removal round adds one
- * removal exec and one re-check of the same shape.
+ * exec when the destination holds a symlink judged inside, one exec otherwise,
+ * regardless of member or link count. A violation adds no further exec.
  *
  * A listing that failed (including a missing or unusable `readlink`, a `find`
  * traversal error, a truncated capture and output that is not valid UTF-8),
  * returned broken framing or a duplicate link, or whose kernel cross-check
- * could not be completed removes nothing and fails the run.
+ * could not be completed fails the run as well.
  *
  * @param conn - The SSH connection.
- * @param parameters - Enforcement inputs.
+ * @param parameters - Backstop inputs.
  * @param parameters.destination - The validated, canonical destination directory.
  * @param parameters.source - The archive source, for the failure message.
  * @returns Null when every symlink stays inside, otherwise a failure naming the
- *   violation, the removal outcome and the re-check result.
+ *   offending links, or why the check could not run.
  */
 export async function enforceSymlinkContainment(
   conn: SshConnection,
@@ -332,7 +229,5 @@ export async function enforceSymlinkContainment(
     return failed(`${prefix}: symlink containment check failed: ${reading.detail}`)
   }
   if (reading.violations.length === 0) return null
-  const rounds = await removeViolatingSymlinks(conn, destination, reading)
-  const violation = containmentViolationMessage(destination, reading)
-  return failed(`${prefix}: ${violation}${enforcementSummary(destination, rounds)}`)
+  return failed(`${prefix}: ${containmentViolationMessage(destination, reading)}`)
 }

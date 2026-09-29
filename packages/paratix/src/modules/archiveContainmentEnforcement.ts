@@ -13,9 +13,8 @@
  * - after it, `enforceSymlinkContainment` (in `archiveContainmentBackstop.ts`)
  *   lists every link below the destination as it actually is with the same
  *   probe, judges the set with the same resolver, lets the host kernel confirm
- *   every link judged inside, removes each violating link without following
- *   it, re-checks and repeats while the removal makes progress, and fails the
- *   run.
+ *   every link judged inside and, on a violation, only reports the offending
+ *   links and fails the run; it removes and changes nothing on the host.
  *
  * Neither check asks the host to resolve a link in user space; the host only
  * reports stored targets, and the resolver in `archiveSymlinkResolver.ts`
@@ -42,7 +41,6 @@ import { buildSymlinkListingProbeScript, runBatchedProbe } from "./archiveProbe.
 import { hostStateFromListing, symlinkListingEntries } from "./archiveSymlinkListing.js"
 
 export { enforceSymlinkContainment } from "./archiveContainmentBackstop.js"
-export { removeEscapingSymlinks } from "./archiveProbe.js"
 export { symlinkListingEntries } from "./archiveSymlinkListing.js"
 
 /**

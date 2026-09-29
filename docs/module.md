@@ -206,25 +206,21 @@ durch das Symlink-Limit des Kernels; nie `realpath` oder `readlink -f`), ob jede
 innen liegend einstuft, tatsächlich den aufgelösten Pfad erreicht; löst der Kernel einen Link zu
 einem anderen Objekt auf oder nur auf einer Seite (etwa bei einem Ziel durch ein fehlendes
 Verzeichnis), gilt das als Verstoß, und lässt sich dieser Abgleich nicht vollständig durchführen,
-schlägt der Durchlauf fehl. Enthält `destination` Symlinks, kostet diese Prüfung zwei Befehle, sonst
-einen, unabhängig von der Zahl der Einträge. Jeden verstoßenden Link – einen, der außerhalb auflöst,
-einen, der sich innerhalb des Symlink-Limits nicht auflösen lässt, etwa bei einer Schleife, eine
-Namensvariante oder eine Abweichung des Kernels – benennt sie in ein frisches, privates
-Quarantäne-Verzeichnis um (`.paratix-quarantine.XXXXXXXX`, per `mktemp -d` neben dem Link in seinem
-geprüften Elternverzeichnis angelegt, einem echten Verzeichnis in `destination`) und untersucht ihn
-dort: Ein Symlink wird gelöscht und das Quarantäne-Verzeichnis entfernt; alles andere – der Eintrag
-wurde inzwischen ersetzt – wird ohne Überschreiben zurückverschoben, wo `mv -n -T` verfügbar ist
-(etwa bei GNU coreutils oder BusyBox), und bleibt sonst im Quarantäne-Verzeichnis. Ohne
-funktionierendes `mv -n` wird nichts entfernt. Dabei folgt sie keinem Link, arbeitet nie rekursiv
-und löscht ausschließlich Symlinks. Sie prüft erneut und wiederholt das, solange das Entfernen
-vorankommt, und lässt den Durchlauf trotzdem fehlschlagen; dabei meldet sie je Link, ob er entfernt,
-wiederhergestellt oder in Quarantäne belassen wurde (samt Pfad dort), und nennt die nicht
-entfernbaren und die weiterhin nach außen zeigenden Links. Bei einem Fehlschlag wird weder die
-Marker-Datei geschrieben noch `owner` angewendet. Das Flag wird erst entfernt, wenn ein Durchlauf
-einschließlich `owner` und Marker-Dateien vollständig gelingt; eine Ablehnung beim Anlegen oder
-Prüfen des Zielverzeichnisses, durch die Prüfungen vor dem Entpacken, durch die Prüfung vor dem
-Zusammenführen, beim Zusammenführen oder durch die Prüfung danach lässt es stehen, und solange es
-besteht, meldet `check` für jedes Archiv mit diesem Zielverzeichnis `needs-apply`.
+schlägt der Durchlauf fehl. Ein Baum ohne Verstoß kostet zwei Befehle, wenn ein Symlink unter
+`destination` als innen liegend eingestuft wird, sonst einen, unabhängig von der Zahl der Einträge;
+ein Verstoß kostet keinen weiteren. Diese Prüfung meldet nur: Sie entfernt, verschiebt oder ändert
+nichts. Jeder verstoßende Link – einer, der außerhalb auflöst, einer, der sich innerhalb des
+Symlink-Limits nicht auflösen lässt, etwa bei einer Schleife, eine Namensvariante oder eine
+Abweichung des Kernels – lässt den Durchlauf fehlschlagen. Die Meldung nennt die ersten 10
+betroffenen Links mit Pfad, gespeichertem Ziel und Grund, fasst den Rest als `(and N more)` zusammen
+und hält fest, dass nichts entfernt oder geändert wurde. Die betroffenen Links müssen von Hand
+entfernt oder nach innen umgelenkt werden; das Flag bleibt stehen, bis danach ein Durchlauf gelingt.
+Bei einem Fehlschlag wird weder die Marker-Datei geschrieben noch `owner` angewendet. Das Flag wird
+erst entfernt, wenn ein Durchlauf einschließlich `owner` und Marker-Dateien vollständig gelingt;
+eine Ablehnung beim Anlegen oder Prüfen des Zielverzeichnisses, durch die Prüfungen vor dem
+Entpacken, durch die Prüfung vor dem Zusammenführen, beim Zusammenführen oder durch die Prüfung
+danach lässt es stehen, und solange es besteht, meldet `check` für jedes Archiv mit diesem
+Zielverzeichnis `needs-apply`.
 
 ---
 
