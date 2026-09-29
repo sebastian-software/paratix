@@ -10,9 +10,13 @@
  *   exec, models the post-merge link set and refuses an escaping combination
  *   or a merge whose outcome the model cannot predict, before anything is
  *   copied;
- * - after it, {@link enforceSymlinkContainment} resolves every link below the
- *   destination as it actually is, removes each escaping link it reports
- *   without following it, re-checks once and fails the run.
+ * - after it, {@link enforceSymlinkContainment} lists every link below the
+ *   destination as it actually is with the same probe, judges the set with the
+ *   same resolver, removes each violating link without following it, re-checks
+ *   and repeats while the removal makes progress, and fails the run.
+ *
+ * Neither check asks the host to resolve a link; the host only reports stored
+ * targets, and the resolver in `archiveLinkValidation.ts` bounds every walk.
  */
 import type { ModuleResult, SshConnection } from "../types.js"
 
@@ -32,15 +36,14 @@ import {
 } from "./archiveLinkValidation.js"
 import { ARCHIVE_CAPTURE_LIMIT_BYTES, type ArchiveMember } from "./archiveMemberValidation.js"
 import {
-  buildSymlinkContainmentProbeScript,
   buildSymlinkListingProbeScript,
-  buildSymlinkRemovalScript,
   encodeSymlinkListingEntry,
-  escapingSymlinkRemovalRefusal,
+  removeEscapingSymlinks,
   runBatchedProbe,
   type SymlinkRemovalReport,
-  symlinkRemovalReport,
 } from "./archiveProbe.js"
+
+export { removeEscapingSymlinks } from "./archiveProbe.js"
 
 const CHECKED_AFTER_MERGE =
   "every symlink under the destination is checked after the merge, including links this archive did not ship"
@@ -67,16 +70,28 @@ export type PreMergeContainmentVerdict =
     }
   | Extract<MergedArchiveSymlinks, { kind: "conflict" }>
 
-type EscapingSymlinkReading =
-  { detail: string; kind: "failed" } | { kind: "ok"; pairs: Array<readonly [string, string]> }
+/**
+ * Issue #219: every symlink below the destination after the merge, keyed by
+ * destination-relative path, with the links the resolver cannot show to stay
+ * inside.
+ */
+type PostMergeSymlinks = {
+  kind: "ok"
+  links: ReadonlyMap<string, MergedSymlink>
+  violations: MergedSymlinkViolation[]
+}
+
+/** Issue #219: a post-merge listing, or why it cannot be trusted. */
+type PostMergeSymlinkReading = { detail: string; kind: "failed" } | PostMergeSymlinks
 
 /**
  * Classify a raw host symlink target for the resolver.
  *
  * A relative target is walked from the link's parent. An absolute target equal
  * to or below the canonical destination restarts at the destination root; any
- * other absolute target counts as escaping, consistent with the post-merge
- * check's fail-closed stance on pre-existing links that point outside. The
+ * other absolute target counts as escaping, a fail-closed stance on
+ * pre-existing links that point outside that both the pre-merge and the
+ * post-merge check share. The
  * prefix comparison is literal, so an absolute target that reaches the
  * destination through a non-canonical spelling is judged conservatively as
  * outside.
@@ -148,6 +163,13 @@ function addListingPair(
   if (!first.startsWith(prefix) || first.length === prefix.length) {
     return `probe reported ${JSON.stringify(first)}, which is not below the destination`
   }
+  // Issue #219: Linux cannot store an empty symlink target, so an empty one
+  // means `readlink` succeeded without printing the target. The resolver would
+  // walk it as the link's parent directory, i.e. as contained, so an unusable
+  // `readlink` fails the listing instead.
+  if (second === "") {
+    return `probe reported an empty target for symlink ${JSON.stringify(first)}; readlink output is unusable`
+  }
   state.links.set(first.slice(prefix.length), {
     stored: second,
     target: hostSymlinkWalkTarget(state.destination, second),
@@ -158,6 +180,9 @@ function addListingPair(
 /**
  * Turn the decoded listing fields into the host state the link model needs,
  * or explain why the output cannot be trusted.
+ *
+ * Issue #219: the post-merge backstop passes an empty `requested` map, because
+ * it sends no `n` entries; any directory hit is then broken framing.
  *
  * @param destination - The validated, canonical destination directory.
  * @param fields - The decoded probe fields.
@@ -335,190 +360,226 @@ export async function validateMergedSymlinkContainment(
 }
 
 /**
- * Run the post-merge containment probe once and decode its `(link, resolved)`
- * pairs.
+ * Issue #219: read every symlink below the destination as it is now and judge
+ * the whole set with the pre-merge resolver.
+ *
+ * One batched exec of {@link buildSymlinkListingProbeScript} with the
+ * destination as its only `r` entry lists each link with its stored target;
+ * nothing on the host resolves a link, so a self-extending loop such as
+ * `b -> b/..` cannot hang the probe. The pairs are decoded by the same
+ * {@link hostStateFromListing} the pre-merge check uses, with no requested
+ * member paths, so any directory hit counts as broken framing. The listing
+ * grows with the number of links on the host, not with violations, so it gets
+ * the archive capture cap; truncation still fails closed.
  *
  * @param conn - The SSH connection.
  * @param destination - The validated, canonical destination directory.
- * @returns The escaping links with their resolved paths, or why the probe failed.
+ * @returns The listed links with their violations (see
+ *   {@link mergedSymlinkViolations}), or why the listing cannot be trusted.
  */
-async function readEscapingSymlinks(
+async function readPostMergeSymlinks(
   conn: SshConnection,
   destination: string
-): Promise<EscapingSymlinkReading> {
+): Promise<PostMergeSymlinkReading> {
   const outcome = await runBatchedProbe(conn, {
-    entries: [destination],
-    script: buildSymlinkContainmentProbeScript(),
+    entries: [encodeSymlinkListingEntry("r", destination)],
+    maxOutputBytes: ARCHIVE_CAPTURE_LIMIT_BYTES,
+    script: buildSymlinkListingProbeScript(),
   })
   if (outcome.kind === "failed") return outcome
-  const { fields } = outcome
-  // An odd field count means the pair framing broke somewhere; pairing the
-  // rest anyway could attach a resolved path to the wrong link.
-  if (fields.length % 2 !== 0) {
-    return {
-      detail: `probe returned ${String(fields.length)} fields, expected (link, resolved) pairs`,
-      kind: "failed",
-    }
-  }
-  const pairs: Array<readonly [string, string]> = []
-  for (let index = 0; index < fields.length; index += 2) {
-    pairs.push([fields[index], fields[index + 1]])
-  }
-  return { kind: "ok", pairs }
+  const host = hostStateFromListing(destination, outcome.fields, new Map())
+  if (typeof host === "string") return { detail: host, kind: "failed" }
+  return { kind: "ok", links: host.links, violations: mergedSymlinkViolations(host.links) }
 }
 
 /**
- * Describe one escaping link and how many more there are.
+ * Describe one violation of the post-merge link set by absolute link path and
+ * stored target.
  *
  * @param destination - The validated, canonical destination directory.
- * @param pairs - The non-empty `(link, resolved)` pairs; an empty resolved path
- *   means the link could not be resolved.
- * @returns The description of the first pair with the `(and N more)` suffix.
+ * @param reading - The listing the violation comes from.
+ * @param violation - The violation to describe.
+ * @returns The description, without a trailing count.
  */
-function escapingSymlinkDescription(
+function postMergeViolationDescription(
   destination: string,
-  pairs: ReadonlyArray<readonly [string, string]>
+  reading: PostMergeSymlinks,
+  violation: MergedSymlinkViolation
 ): string {
-  const [[link, resolved]] = pairs
-  const more = pairs.length - 1
-  const suffix = more > 0 ? ` (and ${String(more)} more)` : ""
-  const violation =
-    resolved === ""
-      ? `symlink ${JSON.stringify(link)} could not be resolved`
-      : `symlink ${JSON.stringify(link)} resolves to ${JSON.stringify(resolved)}, outside destination ${JSON.stringify(destination)}`
-  return `${violation}${suffix}`
+  const { key, kind } = violation
+  const stored = reading.links.get(key)?.stored ?? ""
+  const linkPath = `${destination}/${key}`
+  const link = `symlink ${JSON.stringify(linkPath)} -> ${JSON.stringify(stored)}`
+  return kind === "escape"
+    ? `${link} resolves outside destination ${JSON.stringify(destination)}`
+    : `${link} cannot be resolved within the symlink resolution limit`
 }
 
 /**
- * Describe the first escaping link the post-merge probe reported.
+ * Describe the first violation the post-merge check found.
  *
  * @param destination - The validated, canonical destination directory.
- * @param pairs - The non-empty `(link, resolved)` pairs.
- * @returns The violation text without the `[archive.extract]` prefix.
+ * @param reading - The first post-merge listing, with at least one violation.
+ * @returns The violation text without the `[archive.extract]` prefix, with the
+ *   `(and N more)` suffix when there are more.
  */
-function containmentViolationMessage(
-  destination: string,
-  pairs: ReadonlyArray<readonly [string, string]>
-): string {
-  const [first] = pairs
-  const more = pairs.length - 1
+function containmentViolationMessage(destination: string, reading: PostMergeSymlinks): string {
+  const [first] = reading.violations
+  const more = reading.violations.length - 1
   const suffix = more > 0 ? ` (and ${String(more)} more)` : ""
-  return `${escapingSymlinkDescription(destination, [first])}; ${CHECKED_AFTER_MERGE}${suffix}`
+  return `${postMergeViolationDescription(destination, reading, first)}; ${CHECKED_AFTER_MERGE}${suffix}`
 }
 
 /**
- * Refuse to complete an extraction when any symlink below the destination
- * resolves outside it, with one batched probe over the whole tree.
+ * Issue #219: what the removal rounds of {@link enforceSymlinkContainment}
+ * did in total, and the last re-check.
+ */
+type RemovalRounds = {
+  /** Links still in place after the rounds, with the latest reason. */
+  kept: ReadonlyMap<string, string>
+  /** The listing taken after the last round. */
+  recheck: PostMergeSymlinkReading
+  /** Every link removed in any round, in removal order, without duplicates. */
+  removed: readonly string[]
+}
+
+/**
+ * Fold one removal report into the totals across rounds: a removed link is no
+ * longer reported as kept, a kept link carries its latest reason.
  *
- * Issue #219: this is the check-only form of {@link enforceSymlinkContainment}:
- * it reports, but never removes. A probe failure, an output that is not made
- * of `(link, resolved)` pairs, or a link that could not be resolved all fail
- * closed.
+ * @param totals - The accumulated totals, updated in place.
+ * @param totals.kept - Links still in place, with the latest reason.
+ * @param totals.removed - Links removed in any round, in removal order.
+ * @param report - The report of the latest removal round.
+ */
+function recordRemovalRound(
+  totals: { kept: Map<string, string>; removed: Set<string> },
+  report: SymlinkRemovalReport
+): void {
+  for (const link of report.removed) {
+    totals.removed.add(link)
+    totals.kept.delete(link)
+  }
+  for (const [link, reason] of report.kept) totals.kept.set(link, reason)
+}
+
+/**
+ * Issue #219: remove the violating links, re-list and repeat while the
+ * removal makes progress.
+ *
+ * Removing a link changes how every link whose target passes through its path
+ * resolves: the walk then continues lexically through the missing path. The
+ * resolver already reports a link that follows a violating link as a
+ * violation itself, so on an unchanged tree one round removes them together.
+ * The tree can still change while the rounds run — the host may create or
+ * redirect links, and a link the removal script refused stays in place — so
+ * each round removes whatever the latest listing reports, then re-lists. The
+ * rounds stop when the re-check is clean, when it failed, or when a round
+ * removed nothing. There are at most as many rounds as the first listing had
+ * links (at least one), which caps the work even when the host keeps creating
+ * new links. Each round costs one removal exec and one listing exec.
  *
  * @param conn - The SSH connection.
- * @param parameters - Probe inputs.
- * @param parameters.destination - The validated, canonical destination directory.
- * @param parameters.source - The archive source, for the failure message.
- * @returns A failure when a symlink escapes the destination or the check could not run, otherwise null.
- */
-export async function validateSymlinkContainment(
-  conn: SshConnection,
-  parameters: { destination: string; source: string }
-): Promise<ModuleResult | null> {
-  const { destination, source } = parameters
-  const prefix = `[archive.extract] refusing to complete extraction of ${source}`
-  const reading = await readEscapingSymlinks(conn, destination)
-  if (reading.kind === "failed") {
-    return failed(`${prefix}: symlink containment check failed: ${reading.detail}`)
-  }
-  if (reading.pairs.length === 0) return null
-  return failed(`${prefix}: ${containmentViolationMessage(destination, reading.pairs)}`)
-}
-
-/**
- * Issue #219: remove the given escaping links with one batched exec, never
- * following them.
- *
- * Each link is first vetted by {@link escapingSymlinkRemovalRefusal}; only the
- * vetted ones reach {@link buildSymlinkRemovalScript}, which re-checks every
- * ancestor and the link itself on the host before a no-follow `rm -f`.
- *
- * @param conn - The SSH connection.
  * @param destination - The validated, canonical destination directory.
- * @param links - The link paths the containment probe reported.
- * @returns Which links were removed and which were kept, with reasons.
+ * @param first - The first post-merge listing, with at least one violation.
+ * @returns The accumulated removal outcome and the last re-check.
  */
-export async function removeEscapingSymlinks(
+async function removeViolatingSymlinks(
   conn: SshConnection,
   destination: string,
-  links: readonly string[]
-): Promise<SymlinkRemovalReport> {
-  const refused: Array<readonly [string, string]> = []
-  const vetted: string[] = []
-  for (const link of new Set(links)) {
-    const refusal = escapingSymlinkRemovalRefusal(destination, link)
-    if (refusal === null) vetted.push(link)
-    else refused.push([link, refusal])
+  first: PostMergeSymlinks
+): Promise<RemovalRounds> {
+  const totals = { kept: new Map<string, string>(), removed: new Set<string>() }
+  const maxRounds = Math.max(1, first.links.size)
+  let current = first
+  let recheck: PostMergeSymlinkReading = first
+  for (let round = 0; round < maxRounds; round += 1) {
+    const links = current.violations.map(({ key }) => `${destination}/${key}`)
+    // Rounds depend on each other: each one removes what the previous
+    // re-check reported, so they cannot run concurrently.
+    // eslint-disable-next-line no-await-in-loop -- sequential by design
+    const report = await removeEscapingSymlinks(conn, destination, links)
+    recordRemovalRound(totals, report)
+    // eslint-disable-next-line no-await-in-loop -- sequential by design
+    recheck = await readPostMergeSymlinks(conn, destination)
+    if (recheck.kind === "failed" || recheck.violations.length === 0) break
+    if (report.removed.length === 0) break
+    current = recheck
   }
-  const outcome = await runBatchedProbe(conn, {
-    entries: vetted,
-    script: buildSymlinkRemovalScript(destination),
-  })
-  const report = symlinkRemovalReport(vetted, outcome)
-  return { kept: [...refused, ...report.kept], removed: report.removed }
+  return { kept: totals.kept, recheck, removed: [...totals.removed] }
 }
 
 /**
- * Describe what the removal did and what the re-check found.
+ * Describe what the removal rounds did and what the last re-check found.
  *
  * @param destination - The validated, canonical destination directory.
- * @param report - The removal report.
- * @param recheck - The containment probe run after the removal.
+ * @param rounds - The accumulated outcome of {@link removeViolatingSymlinks}.
  * @returns The message tail, starting with `; `.
  */
-function enforcementSummary(
-  destination: string,
-  report: SymlinkRemovalReport,
-  recheck: EscapingSymlinkReading
-): string {
+function enforcementSummary(destination: string, rounds: RemovalRounds): string {
+  const { kept, recheck, removed } = rounds
   const parts: string[] = []
-  if (report.removed.length > 0) {
+  if (removed.length > 0) {
     parts.push(
-      `removed escaping symlinks: ${report.removed.map((link) => JSON.stringify(link)).join(", ")}`
+      `removed escaping symlinks: ${removed.map((link) => JSON.stringify(link)).join(", ")}`
     )
   }
-  if (report.kept.length > 0) {
-    const kept = report.kept.map(([link, reason]) => `${JSON.stringify(link)} (${reason})`)
-    parts.push(`could not remove: ${kept.join(", ")}`)
+  if (kept.size > 0) {
+    const reasons = [...kept].map(([link, reason]) => `${JSON.stringify(link)} (${reason})`)
+    parts.push(`could not remove: ${reasons.join(", ")}`)
   }
   if (recheck.kind === "failed") parts.push(`re-check failed: ${recheck.detail}`)
-  else if (recheck.pairs.length === 0) parts.push("re-check found no escaping symlinks")
-  else
-    parts.push(`re-check still reports ${escapingSymlinkDescription(destination, recheck.pairs)}`)
+  else if (recheck.violations.length === 0) parts.push("re-check found no escaping symlinks")
+  else {
+    const remaining = recheck.violations.map((violation) =>
+      postMergeViolationDescription(destination, recheck, violation)
+    )
+    parts.push(`re-check still reports ${remaining.join(", ")}`)
+  }
   return parts.map((part) => `; ${part}`).join("")
 }
 
 /**
- * Issue #219: the post-merge backstop. Resolve every symlink below the
- * destination as it actually is, remove each one that escapes, re-check once
- * and fail the run.
+ * Issue #219: the post-merge backstop. List every symlink below the
+ * destination as it actually is, judge the set with the resolver the pre-merge
+ * model uses, remove each violating link and fail the run.
  *
  * This runs after every merge that started, even a failed one, because a
  * merge that failed half-way may already have published links. It covers
  * links this archive did not ship and host changes between the pre-merge
- * listing and the merge. The links the containment probe reports — including
- * links it could not resolve — are the only candidates for removal; see
- * {@link removeEscapingSymlinks}. The run still fails after a removal, so the
- * containment flag the caller wrote before the merge stays set.
+ * listing and the merge. It never asks the host to resolve a link: the host
+ * only lists links with their stored targets (see
+ * {@link buildSymlinkListingProbeScript}), and {@link mergedSymlinkViolations}
+ * resolves them in TypeScript with its hop limit and cycle detection. GNU
+ * `realpath`, which the backstop used before, never terminates on a
+ * self-extending loop such as `b -> b/..` or `x -> y/..` with `y -> x`, and the
+ * remote process outlived the client's timeout.
  *
- * A probe that failed or returned broken framing removes nothing and fails the
- * run as {@link validateSymlinkContainment} does.
+ * Decision: a link the resolver reports as `limit` (hop limit or cycle) is
+ * treated like an escaping link and removed. It cannot be shown to stay
+ * inside, the pre-merge model counts it as a violation as well, and the
+ * previous backstop removed links it could not resolve; the run fails and
+ * names it either way.
+ *
+ * On a violation it removes the reported links, re-lists and repeats while a
+ * round makes progress (see {@link removeViolatingSymlinks}). The run still
+ * fails after a removal, so the containment flag the caller wrote before the
+ * merge stays set. The message names the first violation, every link removed
+ * in any round, every link that could not be removed with its reason, and the
+ * last re-check: every link it still reports, or why it failed.
+ *
+ * Cost: a converged tree costs exactly one listing exec regardless of member
+ * count; each removal round adds one removal exec and one listing exec.
+ *
+ * A listing that failed (including a missing or unusable `readlink`, a `find`
+ * traversal error and a truncated capture) or returned broken framing removes
+ * nothing and fails the run.
  *
  * @param conn - The SSH connection.
  * @param parameters - Enforcement inputs.
  * @param parameters.destination - The validated, canonical destination directory.
  * @param parameters.source - The archive source, for the failure message.
- * @returns Null when no symlink escapes, otherwise a failure naming the
+ * @returns Null when every symlink stays inside, otherwise a failure naming the
  *   violation, the removal outcome and the re-check result.
  */
 export async function enforceSymlinkContainment(
@@ -527,14 +588,12 @@ export async function enforceSymlinkContainment(
 ): Promise<ModuleResult | null> {
   const { destination, source } = parameters
   const prefix = `[archive.extract] refusing to complete extraction of ${source}`
-  const reading = await readEscapingSymlinks(conn, destination)
+  const reading = await readPostMergeSymlinks(conn, destination)
   if (reading.kind === "failed") {
     return failed(`${prefix}: symlink containment check failed: ${reading.detail}`)
   }
-  if (reading.pairs.length === 0) return null
-  const links = reading.pairs.map(([link]) => link)
-  const report = await removeEscapingSymlinks(conn, destination, links)
-  const recheck = await readEscapingSymlinks(conn, destination)
-  const violation = containmentViolationMessage(destination, reading.pairs)
-  return failed(`${prefix}: ${violation}${enforcementSummary(destination, report, recheck)}`)
+  if (reading.violations.length === 0) return null
+  const rounds = await removeViolatingSymlinks(conn, destination, reading)
+  const violation = containmentViolationMessage(destination, reading)
+  return failed(`${prefix}: ${violation}${enforcementSummary(destination, rounds)}`)
 }

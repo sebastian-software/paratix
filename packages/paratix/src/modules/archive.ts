@@ -313,6 +313,85 @@ export function buildStagingMergeScript(): string {
 }
 
 /**
+ * Issue #219: time limits of the staging merge exec.
+ *
+ * Invariant: `(timeoutSeconds + killAfterSeconds) * 1000 < clientTimeoutMs`.
+ * The client gives up after `clientTimeoutMs` and closes the channel, but
+ * closing the channel does not stop the remote processes: a merge that was
+ * still copying kept running on the host after the run had already reported
+ * a failure, and could publish links after the post-merge backstop looked.
+ * With the remote bound strictly below the client timeout, GNU `timeout` has
+ * stopped the whole merge (with `SIGTERM`, then `SIGKILL`) before the client
+ * stops waiting.
+ */
+export type StagingMergeTimeLimits = {
+  /** Client-side timeout of the merge exec in milliseconds. */
+  clientTimeoutMs: number
+  /** Seconds GNU `timeout` waits after `SIGTERM` before it sends `SIGKILL`. */
+  killAfterSeconds: number
+  /** Seconds after which GNU `timeout` sends `SIGTERM` to the merge. */
+  timeoutSeconds: number
+}
+
+/**
+ * Issue #219: the limits the staging merge runs with. The client timeout is
+ * the SSH default of 120 s, passed explicitly so the invariant documented on
+ * {@link StagingMergeTimeLimits} does not silently depend on it; 100 s + 10 s
+ * leaves 10 s for the exit status to travel back.
+ */
+export const STAGING_MERGE_TIME_LIMITS: Readonly<StagingMergeTimeLimits> = {
+  clientTimeoutMs: 120_000,
+  killAfterSeconds: 10,
+  timeoutSeconds: 100,
+}
+
+/** GNU `timeout` exits 124 when it stopped the command with `SIGTERM`. */
+const TIMEOUT_EXIT_CODE = 124
+/**
+ * When the `-k` `SIGKILL` was needed, `timeout` signals its own process group
+ * and dies with it, so the shell reports 128 + 9.
+ */
+const TIMEOUT_KILLED_EXIT_CODE = 137
+
+/**
+ * Issue #219: bound a staging merge command on the host with GNU `timeout`.
+ *
+ * The merge already requires GNU coreutils (`cp -aT --no-dereference
+ * --remove-destination`), which ships `timeout`. `command -p` looks it up on
+ * the default system PATH, like `readlink` in the symlink listing. Without
+ * `--foreground`, `timeout` puts itself and the command into their own
+ * process group and signals the whole group, so the `sh -c` batches `find`
+ * spawns and their `cp` children receive the `SIGTERM` too. Neither the merge
+ * script nor `cp` ignores it. The `-k` `SIGKILL` follows only while `find`
+ * itself is still running: a descendant that ignored `SIGTERM` after `find`
+ * exited would not be killed, and a process blocked in uninterruptible I/O
+ * cannot be stopped by any signal.
+ *
+ * The trailing `; exit $?` keeps the remote shell from replacing itself with
+ * `timeout` (shells `exec` the last simple command of `sh -c`). When the
+ * `SIGKILL` stage is needed, `timeout` dies with its own process group; the
+ * surviving shell then reports exit status 137 instead of the whole channel
+ * ending with a signal, which the SSH layer would turn into a thrown error.
+ *
+ * Failure mode: fail closed. When `timeout` is unavailable the shell exits 127
+ * before `find` runs, so nothing is copied and the merge is reported as
+ * failed. A stopped merge exits 124 (`SIGTERM`) or 137 (`SIGKILL` after the
+ * kill-after grace period), which the caller reports as stopped on the host.
+ *
+ * @param mergeCommand - The complete merge command, starting with the program
+ *   to run (e.g. `find …`); it must not be a shell compound command.
+ * @param limits - The time limits; defaults to {@link STAGING_MERGE_TIME_LIMITS}.
+ * @returns The command as `command -p timeout -k <K> <S> <mergeCommand>; exit $?`.
+ */
+export function boundedStagingMergeCommand(
+  mergeCommand: string,
+  limits: Readonly<StagingMergeTimeLimits> = STAGING_MERGE_TIME_LIMITS
+): string {
+  const { killAfterSeconds, timeoutSeconds } = limits
+  return `command -p timeout -k ${String(killAfterSeconds)} ${String(timeoutSeconds)} ${mergeCommand}; exit $?`
+}
+
+/**
  * Move the extracted archive contents from the paratix-controlled staging
  * directory into the destination using per-entry `cp -aT` so existing
  * destination directories are merged conflict-free. R-0000221: per-entry
@@ -322,6 +401,11 @@ export function buildStagingMergeScript(): string {
  * existing entries, replacing regular files in place while preserving
  * owner/group/mode/timestamps. The staging directory itself is removed by
  * {@link cleanupStagingDirectory} after this helper returns successfully.
+ *
+ * Issue #219: the merge is bounded on the host by
+ * {@link boundedStagingMergeCommand} and on the client by
+ * {@link STAGING_MERGE_TIME_LIMITS}; a merge the host stopped is reported with
+ * that reason.
  *
  * @param conn - The SSH connection.
  * @param parameters - Staging merge inputs.
@@ -355,10 +439,17 @@ async function moveExtractedContentsIntoDestination(
     shellQuote(guardPaths),
     "{} +",
   ].join(" ")
-  const copyResult = await conn.exec(copyCommand, EXEC_OPTS)
+  const copyResult = await conn.exec(boundedStagingMergeCommand(copyCommand), {
+    ...EXEC_OPTS,
+    timeout: STAGING_MERGE_TIME_LIMITS.clientTimeoutMs,
+  })
   if (copyResult.code !== 0) {
+    const stopped =
+      copyResult.code === TIMEOUT_EXIT_CODE || copyResult.code === TIMEOUT_KILLED_EXIT_CODE
+        ? `: the merge was stopped on the host after ${String(STAGING_MERGE_TIME_LIMITS.timeoutSeconds)} seconds`
+        : ""
     return failedCommand(
-      `[archive.extract] failed to copy extracted files into ${destination}`,
+      `[archive.extract] failed to copy extracted files into ${destination}${stopped}`,
       copyResult
     )
   }
@@ -925,6 +1016,32 @@ function combineMergeFailures(
 }
 
 /**
+ * Issue #219: run the post-merge backstop and turn a thrown error into a
+ * failure result, so the caller can still join it with the merge failure and
+ * neither message is lost.
+ *
+ * @param conn - The SSH connection.
+ * @param parameters - Backstop inputs.
+ * @param parameters.destination - The validated destination directory.
+ * @param parameters.source - The source archive path, for the failure message.
+ * @returns The backstop failure, or null when every symlink stays inside.
+ */
+async function runContainmentBackstop(
+  conn: SshConnection,
+  parameters: { destination: string; source: string }
+): Promise<ModuleResult | null> {
+  const { destination, source } = parameters
+  try {
+    return await enforceSymlinkContainment(conn, { destination, source })
+  } catch (error) {
+    const reason = error instanceof Error ? error.message : String(error)
+    return failed(
+      `[archive.extract] refusing to complete extraction of ${source}: symlink containment check failed: ${reason}`
+    )
+  }
+}
+
+/**
  * Establish the containment flag, check the combined host and archive links,
  * run the staged extraction and then enforce that no symlink under the
  * destination resolves outside it.
@@ -986,10 +1103,7 @@ async function extractAndValidateSymlinkContainment(
   // Staging has already been cleaned up here; a leftover staging directory
   // lies inside the destination, so its links resolve inside as well and need
   // no pruning.
-  const backstopFailure = await enforceSymlinkContainment(conn, {
-    destination: parameters.destination,
-    source: parameters.source,
-  })
+  const backstopFailure = await runContainmentBackstop(conn, parameters)
   return combineMergeFailures(staged.failure, backstopFailure)
 }
 

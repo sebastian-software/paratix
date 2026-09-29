@@ -35,7 +35,11 @@ import { describe, expect, it } from "vitest"
 import type { ArchiveMember } from "../../src/modules/archiveMemberValidation.js"
 import type { ExecOptions, ExecResult, SshConnection } from "../../src/types.js"
 
-import { buildStagingMergeScript } from "../../src/modules/archive.js"
+import {
+  boundedStagingMergeCommand,
+  buildStagingMergeScript,
+  type StagingMergeTimeLimits,
+} from "../../src/modules/archive.js"
 import {
   enforceSymlinkContainment,
   type PreMergeContainmentVerdict,
@@ -49,7 +53,6 @@ import {
 } from "../../src/modules/archiveDestinationValidation.js"
 import {
   buildPreStagingProbeScript,
-  buildSymlinkContainmentProbeScript,
   buildSymlinkListingProbeScript,
   encodeNulPayload,
   encodeSymlinkListingEntry,
@@ -167,45 +170,7 @@ function describeTree(root: string, prefix = ""): string[] {
   return lines
 }
 
-/**
- * Issue #219: whether `command -p realpath -m` works, which the containment
- * probe relies on. GNU coreutils has it; the BSD `realpath` on macOS rejects
- * `-m`, so the probe cases are skipped there and run on Linux.
- *
- * @returns True when the system `realpath` resolves missing components.
- */
-function hasRealpathMissingMode(): boolean {
-  const result = spawnSync("/bin/sh", ["-c", "command -p realpath -m -- /nonexistent/a/b"], {
-    encoding: "utf8",
-    timeout: 2000,
-  })
-  return result.status === 0
-}
-
-type ContainmentProbeResult = { code: number; pairs: Array<[string, string]>; stderr: string }
-
-/**
- * Issue #219: run the production containment probe the way `runBatchedProbe`
- * does, with the destination NUL-terminated on stdin.
- *
- * @param destination - The canonical destination directory.
- * @returns Exit code, the reported `(link, resolved)` pairs sorted by link, and stderr.
- */
-function runContainmentProbe(destination: string): ContainmentProbeResult {
-  const result = spawnSync("/bin/sh", ["-c", buildSymlinkContainmentProbeScript()], {
-    encoding: "utf8",
-    input: encodeNulPayload([destination]),
-    timeout: 10_000,
-  })
-  const fields = result.stdout.split("\0")
-  if (fields.at(-1) === "") fields.pop()
-  const pairs: Array<[string, string]> = []
-  for (let index = 0; index < fields.length; index += 2) {
-    pairs.push([fields[index] ?? "", fields[index + 1] ?? "<missing>"])
-  }
-  pairs.sort(([left], [right]) => left.localeCompare(right))
-  return { code: result.status ?? -1, pairs, stderr: result.stderr }
-}
+type ListingProbeResult = { code: number; pairs: Array<[string, string]>; stderr: string }
 
 /**
  * Issue #219: run the production listing probe the way `runBatchedProbe`
@@ -214,7 +179,7 @@ function runContainmentProbe(destination: string): ContainmentProbeResult {
  * @param destination - The canonical destination directory.
  * @returns Exit code, the reported `(link, target)` pairs sorted by link, and stderr.
  */
-function runListingProbe(destination: string): ContainmentProbeResult {
+function runListingProbe(destination: string): ListingProbeResult {
   const result = spawnSync("/bin/sh", ["-c", buildSymlinkListingProbeScript()], {
     encoding: "utf8",
     input: encodeNulPayload([encodeSymlinkListingEntry("r", destination)]),
@@ -254,9 +219,26 @@ function readlinkAlwaysAppendsNewline(): boolean {
   }
 }
 
+/**
+ * Issue #219: whether `command -p timeout` runs, which
+ * `boundedStagingMergeCommand` relies on. Linux hosts ship it with GNU
+ * coreutils on the default system PATH; macOS has no `timeout` there (only
+ * Homebrew's, which `command -p` does not see), so the bounded merge cases are
+ * skipped on such a host.
+ *
+ * @returns True when `command -p timeout --version` succeeds.
+ */
+function hasCommandPTimeout(): boolean {
+  const result = spawnSync("/bin/sh", ["-c", "command -p timeout --version"], {
+    encoding: "utf8",
+    timeout: 2000,
+  })
+  return result.status === 0
+}
+
 const SKIP_PLATFORM = process.platform === "win32"
 const SKIP_NO_GNU_CP = !hasGnuCp()
-const SKIP_NO_REALPATH_MISSING_MODE = !hasRealpathMissingMode()
+const HAS_COMMAND_P_TIMEOUT = !SKIP_PLATFORM && hasCommandPTimeout()
 const SKIP_NO_TRAILING_NEWLINE_READLINK = SKIP_PLATFORM || !readlinkAlwaysAppendsNewline()
 // A privileged user reads directories regardless of their mode.
 const SKIP_AS_ROOT = process.getuid?.() === 0
@@ -545,126 +527,6 @@ describe.skipIf(SKIP_PLATFORM)("archive.extract staging merge shell smoke tests"
   })
 })
 
-describe.skipIf(SKIP_PLATFORM || SKIP_NO_REALPATH_MISSING_MODE)(
-  "archive.extract symlink containment probe shell smoke tests (Issue #219)",
-  () => {
-    it("reports nothing for contained, dangling-inside, looping and self links", () => {
-      const { destination, root } = makeWorkspace()
-      try {
-        mkdirSync(join(destination, "a/lib"), { recursive: true })
-        writeFileSync(join(destination, "a/lib/f"), "f\n")
-        symlinkSync("lib/f", join(destination, "a/inside"))
-        symlinkSync("..", join(destination, "a/up"))
-        symlinkSync("missing/y/z", join(destination, "a/dangling"))
-        symlinkSync("loop-b", join(destination, "loop-a"))
-        symlinkSync("loop-a", join(destination, "loop-b"))
-        symlinkSync(".", join(destination, "self"))
-        symlinkSync(join(destination, "a/lib"), join(destination, "absolute-inside"))
-
-        const result = runContainmentProbe(destination)
-
-        expect(result).toStrictEqual({ code: 0, pairs: [], stderr: "" })
-      } finally {
-        rmSync(root, { force: true, recursive: true })
-      }
-    })
-
-    it("reports an absolute link outside and a relative link into a prefix sibling", () => {
-      const { destination, root } = makeWorkspace()
-      try {
-        mkdirSync(join(destination, "a"))
-        symlinkSync("/etc", join(destination, "a/etc"))
-        // `<root>/destination-sibling` shares the destination's string prefix
-        // but is a sibling, so a bare prefix comparison would accept it.
-        symlinkSync("../destination-sibling", join(destination, "sibling"))
-
-        const result = runContainmentProbe(destination)
-
-        expect(result).toStrictEqual({
-          code: 0,
-          pairs: [
-            [join(destination, "a/etc"), "/etc"],
-            [join(destination, "sibling"), `${destination}-sibling`],
-          ],
-          stderr: "",
-        })
-      } finally {
-        rmSync(root, { force: true, recursive: true })
-      }
-    })
-
-    it("reports a link whose name contains a newline with its exact name", () => {
-      const { destination, root } = makeWorkspace()
-      try {
-        const link = join(destination, "two\nlines")
-        symlinkSync("..", link)
-
-        const result = runContainmentProbe(destination)
-
-        expect(result).toStrictEqual({ code: 0, pairs: [[link, root]], stderr: "" })
-      } finally {
-        rmSync(root, { force: true, recursive: true })
-      }
-    })
-
-    it("fails closed with a non-zero exit when find cannot walk the destination", () => {
-      const { destination, root } = makeWorkspace()
-      try {
-        const result = runContainmentProbe(join(destination, "missing"))
-
-        expect(result.code).not.toBe(0)
-        expect(result.pairs).toStrictEqual([])
-      } finally {
-        rmSync(root, { force: true, recursive: true })
-      }
-    })
-
-    describe.skipIf(SKIP_NO_GNU_CP)("after real merges (requires GNU cp)", () => {
-      it("reports the earlier run's link once a later run ships the link it walks through", () => {
-        // Run 1 ships `a/esc -> up/..`, run 2 ships `a/up -> ..`. Each merge
-        // succeeds with the product guard set and each tree is contained on its
-        // own; after run 2, `a/esc` resolves via `a/up/..` to the destination's
-        // parent.
-        const { destination, root, staging } = makeWorkspace()
-        try {
-          const secondStaging = join(root, "staging-2")
-          mkdirSync(join(staging, "a"))
-          symlinkSync("up/..", join(staging, "a/esc"))
-          mkdirSync(join(secondStaging, "a"), { recursive: true })
-          symlinkSync("..", join(secondStaging, "a/up"))
-          const mergeRun = (stagingRoot: string, link: [string, string]): ShellResult =>
-            runMergeScript({
-              destination,
-              guardPaths: productGuardPaths(destination, [tarMember(...link)]),
-              sourcePaths: [join(stagingRoot, "a")],
-            })
-
-          const first = mergeRun(staging, ["a/esc", "up/.."])
-          expect(first).toMatchObject({ code: 0, stderr: "" })
-          expect(runContainmentProbe(destination)).toStrictEqual({
-            code: 0,
-            pairs: [],
-            stderr: "",
-          })
-
-          const second = mergeRun(secondStaging, ["a/up", ".."])
-          expect(second).toMatchObject({ code: 0, stderr: "" })
-
-          expect(readlinkSync(join(destination, "a/esc"))).toBe("up/..")
-          expect(readlinkSync(join(destination, "a/up"))).toBe("..")
-          expect(runContainmentProbe(destination)).toStrictEqual({
-            code: 0,
-            pairs: [[join(destination, "a/esc"), root]],
-            stderr: "",
-          })
-        } finally {
-          rmSync(root, { force: true, recursive: true })
-        }
-      })
-    })
-  }
-)
-
 describe.skipIf(SKIP_PLATFORM)(
   "archive.extract symlink listing probe shell smoke tests (Issue #219)",
   () => {
@@ -946,7 +808,11 @@ function modelVerdict(destination: string, members: ArchiveMember[]): PreMergeCo
 /**
  * Issue #219: run the staging merge exactly as `archive.extract` issues it:
  * `find <staging> -mindepth 1 -maxdepth 1 -exec sh -c <merge script> sh
- * <destination> <destination> <guard paths> {} +`, with the product guard set.
+ * <destination> <destination> <guard paths> {} +`, with the product guard set,
+ * bounded by `boundedStagingMergeCommand` where `command -p timeout` exists.
+ * Without it (e.g. macOS with GNU `cp` from Homebrew on PATH) the bare merge
+ * runs; the wrapper only passes the exit status through, so the merge outcome
+ * is the same.
  *
  * @param parameters - Merge inputs.
  * @param parameters.destination - The canonical destination directory.
@@ -969,7 +835,8 @@ function runProductionMerge(parameters: {
     shellQuote(productGuardPaths(destination, members).join("\n")),
     "{} +",
   ].join(" ")
-  const result = spawnSync("/bin/sh", ["-c", command], { encoding: "utf8", timeout: 10_000 })
+  const bounded = HAS_COMMAND_P_TIMEOUT ? boundedStagingMergeCommand(command) : command
+  const result = spawnSync("/bin/sh", ["-c", bounded], { encoding: "utf8", timeout: 10_000 })
   return { code: result.status ?? -1, stderr: result.stderr, stdout: result.stdout }
 }
 
@@ -997,17 +864,106 @@ function localShellConnection(): { commands: string[]; conn: SshConnection } {
   return { commands, conn }
 }
 
+/** Issue #219: one violation of the post-merge backstop: the link's key and why. */
+type BackstopViolation = readonly [key: string, kind: "escape" | "limit"]
+
 /**
- * Issue #219: the destination-relative paths of the links the real
- * containment probe reports as escaping.
+ * Issue #219: the post-merge backstop's verdict on the real tree, computed the
+ * production way: the real listing probe with the destination as its only `r`
+ * entry, decoded and resolved by `preMergeContainmentVerdict` with no archive
+ * members. That is the decoding (`hostStateFromListing` without requested
+ * member paths) and the resolver (`mergedSymlinkViolations`) that
+ * `enforceSymlinkContainment` uses; nothing on the host resolves a link.
  *
  * @param destination - The canonical destination directory.
- * @returns The escaping links, sorted, relative to the destination.
+ * @returns The violations, sorted by key.
+ */
+function backstopViolations(destination: string): BackstopViolation[] {
+  const { code, fields, stderr } = runProbeScript(buildSymlinkListingProbeScript(), [
+    encodeSymlinkListingEntry("r", destination),
+  ])
+  expect({ code, stderr }).toStrictEqual({ code: 0, stderr: "" })
+  const verdict = preMergeContainmentVerdict(destination, fields, [])
+  if (verdict.kind === "ok") return []
+  if (verdict.kind !== "violations") {
+    throw new Error(`unexpected post-merge verdict ${JSON.stringify(verdict)}`)
+  }
+  return verdict.violations
+    .map(({ key, kind }): BackstopViolation => [key, kind])
+    .toSorted(([left], [right]) => left.localeCompare(right))
+}
+
+/**
+ * Issue #219: the destination-relative paths of the links the backstop
+ * reports, escaping or beyond the resolution limit.
+ *
+ * @param destination - The canonical destination directory.
+ * @returns The violating links, sorted.
  */
 function escapingLinks(destination: string): string[] {
-  const probe = runContainmentProbe(destination)
-  expect({ code: probe.code, stderr: probe.stderr }).toStrictEqual({ code: 0, stderr: "" })
-  return probe.pairs.map(([link]) => link.slice(destination.length + 1))
+  return backstopViolations(destination).map(([key]) => key)
+}
+
+/**
+ * Issue #219: every symlink below `destination` that the kernel resolves to a
+ * path outside it, found with `realpathSync.native` (the OS `realpath(3)`) —
+ * independent of the listing probe and the TypeScript resolver. The plain
+ * `realpathSync` is no oracle here: it joins a link target onto the link's
+ * directory with `path.resolve`, which folds `x/..` lexically instead of
+ * walking through `x`. A link that does not resolve
+ * (ENOENT for a dangling link, ELOOP for a loop) is not provably contained and
+ * is left out; the backstop may report it or not.
+ *
+ * @param destination - The canonical destination directory.
+ * @param prefix - Path prefix for the recursion.
+ * @returns The destination-relative paths of the physically escaping links.
+ */
+function physicallyEscapingLinks(destination: string, prefix = ""): string[] {
+  const escaping: string[] = []
+  for (const name of readdirSync(join(destination, prefix)).toSorted()) {
+    const relative = prefix === "" ? name : `${prefix}/${name}`
+    const absolute = join(destination, relative)
+    const stat = lstatSync(absolute)
+    if (stat.isDirectory()) escaping.push(...physicallyEscapingLinks(destination, relative))
+    else if (stat.isSymbolicLink() && physicalTargetIsOutside(destination, absolute)) {
+      escaping.push(relative)
+    }
+  }
+  return escaping
+}
+
+/**
+ * Issue #219: whether the kernel resolves a link to a path outside the
+ * destination.
+ *
+ * @param destination - The canonical destination directory.
+ * @param link - The absolute link path.
+ * @returns True when the link resolves and lands outside; false when it lands
+ *   inside or does not resolve at all.
+ */
+function physicalTargetIsOutside(destination: string, link: string): boolean {
+  let resolved: string
+  try {
+    resolved = realpathSync.native(link)
+  } catch {
+    return false
+  }
+  return resolved !== destination && !resolved.startsWith(`${destination}/`)
+}
+
+/**
+ * Issue #219: whether the kernel fails to resolve a path with ELOOP.
+ *
+ * @param path - The path to resolve.
+ * @returns True when `realpathSync.native` throws ELOOP.
+ */
+function physicallyLoops(path: string): boolean {
+  try {
+    realpathSync.native(path)
+    return false
+  } catch (error) {
+    return (error as NodeJS.ErrnoException).code === "ELOOP"
+  }
 }
 
 /**
@@ -1060,8 +1016,8 @@ describe.skipIf(SKIP_PLATFORM)(
   }
 )
 
-describe.skipIf(SKIP_PLATFORM || SKIP_NO_GNU_CP || SKIP_NO_REALPATH_MISSING_MODE)(
-  "archive.extract two-run directory conflict after a real merge (Issue #219, requires GNU cp and realpath -m)",
+describe.skipIf(SKIP_PLATFORM || SKIP_NO_GNU_CP)(
+  "archive.extract two-run directory conflict after a real merge (Issue #219, requires GNU cp)",
   () => {
     it("shows the escape the refusal prevents, and the backstop removes only the escaping link", async () => {
       const { destination, root, staging } = makeWorkspace()
@@ -1087,18 +1043,19 @@ describe.skipIf(SKIP_PLATFORM || SKIP_NO_GNU_CP || SKIP_NO_REALPATH_MISSING_MODE
         expect(second.code).not.toBe(0)
         expect(lstatSync(join(destination, "a/b")).isDirectory()).toBe(true)
         expect(readlinkSync(join(destination, "a/c/l"))).toBe("../b/hl/..")
-        expect(runContainmentProbe(destination).pairs).toStrictEqual([
-          [join(destination, "a/c/l"), root],
-        ])
+        expect(backstopViolations(destination)).toStrictEqual([["a/c/l", "escape"]])
+        // The kernel agrees: `a/c/l` really resolves to the destination's parent.
+        expect(realpathSync.native(join(destination, "a/c/l"))).toBe(root)
+        expect(physicallyEscapingLinks(destination)).toStrictEqual(["a/c/l"])
 
         const { commands, conn } = localShellConnection()
         const failure = await enforceSymlinkContainment(conn, { destination, source: "run-2.tar" })
 
         expect(failure?.status).toBe("failed")
         expect(failure?.error?.message).toBe(
-          `[archive.extract] refusing to complete extraction of run-2.tar: symlink ${JSON.stringify(join(destination, "a/c/l"))} resolves to ${JSON.stringify(root)}, outside destination ${JSON.stringify(destination)}; every symlink under the destination is checked after the merge, including links this archive did not ship; removed escaping symlinks: ${JSON.stringify(join(destination, "a/c/l"))}; re-check found no escaping symlinks`
+          `[archive.extract] refusing to complete extraction of run-2.tar: symlink ${JSON.stringify(join(destination, "a/c/l"))} -> "../b/hl/.." resolves outside destination ${JSON.stringify(destination)}; every symlink under the destination is checked after the merge, including links this archive did not ship; removed escaping symlinks: ${JSON.stringify(join(destination, "a/c/l"))}; re-check found no escaping symlinks`
         )
-        // One probe, one batched removal, one re-probe.
+        // One listing, one batched removal, one re-listing.
         expect(commands).toHaveLength(3)
         expect(describeTree(destination)).toStrictEqual([
           "d a",
@@ -1118,7 +1075,10 @@ describe.skipIf(SKIP_PLATFORM || SKIP_NO_GNU_CP || SKIP_NO_REALPATH_MISSING_MODE
 type DifferentialCase = {
   /** The archive as extracted into staging, in listing order. */
   archive: string[]
-  /** Destination-relative links the real backstop reports after the real merge. */
+  /**
+   * Destination-relative links the backstop reports after the real merge: the
+   * TypeScript resolver's verdict on the real post-merge listing.
+   */
   escapes: string[]
   /** The host tree below the destination before the merge. */
   host: string[]
@@ -1357,8 +1317,8 @@ function differentialInvariants(
   }
 }
 
-describe.skipIf(SKIP_PLATFORM || SKIP_NO_GNU_CP || SKIP_NO_REALPATH_MISSING_MODE)(
-  "archive.extract pre-merge model versus real merge (Issue #219, requires GNU cp and realpath -m)",
+describe.skipIf(SKIP_PLATFORM || SKIP_NO_GNU_CP)(
+  "archive.extract pre-merge model versus real merge (Issue #219, requires GNU cp)",
   () => {
     it.each(differentialCases)("$name", (testCase) => {
       const { destination, root, staging } = makeWorkspace()
@@ -1371,6 +1331,9 @@ describe.skipIf(SKIP_PLATFORM || SKIP_NO_GNU_CP || SKIP_NO_REALPATH_MISSING_MODE
         const verdict = modelVerdict(destination, members)
         const merge = runProductionMerge({ destination, members, staging })
         const escapes = escapingLinks(destination)
+        // Independent of the listing and the resolver: every link the kernel
+        // resolves outside the destination is one the backstop reports.
+        expect(escapes).toStrictEqual(expect.arrayContaining(physicallyEscapingLinks(destination)))
 
         const observed = differentialObservation({ escapes, merge, preStaging, verdict })
         expect(observed).toStrictEqual({
@@ -1389,5 +1352,398 @@ describe.skipIf(SKIP_PLATFORM || SKIP_NO_GNU_CP || SKIP_NO_REALPATH_MISSING_MODE
         rmSync(root, { force: true, recursive: true })
       }
     })
+  }
+)
+
+/**
+ * Issue #219: a workspace whose destination is `<root>/app`, next to an
+ * `<root>/other/q/r` directory outside it, for links that leave the
+ * destination and come back into it.
+ *
+ * @returns The workspace root and the destination.
+ */
+function makeAppWorkspace(): { destination: string; root: string } {
+  const root = realpathSync(mkdtempSync(join(tmpdir(), "paratix-archive-backstop-smoke-")))
+  const destination = join(root, "app")
+  mkdirSync(destination)
+  mkdirSync(join(root, "other/q/r"), { recursive: true })
+  return { destination, root }
+}
+
+/**
+ * Issue #219: the links a backstop failure message names after
+ * `removed escaping symlinks:`.
+ *
+ * @param message - The failure message of `enforceSymlinkContainment`.
+ * @returns The removed links, sorted.
+ */
+function removedLinks(message: string | undefined): string[] {
+  const links = /; removed escaping symlinks: (?<links>.*?); re-check /sv.exec(message ?? "")
+    ?.groups?.links
+  return links === undefined ? [] : (JSON.parse(`[${links}]`) as string[]).toSorted()
+}
+
+describe.skipIf(SKIP_PLATFORM)(
+  "archive.extract post-merge backstop shell smoke tests (Issue #219)",
+  () => {
+    it("judges contained, dangling-inside, absolute-inside and self links as contained", () => {
+      const { destination, root } = makeWorkspace()
+      try {
+        mkdirSync(join(destination, "a/lib"), { recursive: true })
+        writeFileSync(join(destination, "a/lib/f"), "f\n")
+        symlinkSync("lib/f", join(destination, "a/inside"))
+        symlinkSync("..", join(destination, "a/up"))
+        symlinkSync("up/a/lib", join(destination, "a/via-up"))
+        symlinkSync("missing/y/z", join(destination, "a/dangling"))
+        symlinkSync(".", join(destination, "self"))
+        symlinkSync(join(destination, "a/lib"), join(destination, "absolute-inside"))
+
+        expect(backstopViolations(destination)).toStrictEqual([])
+        expect(physicallyEscapingLinks(destination)).toStrictEqual([])
+      } finally {
+        rmSync(root, { force: true, recursive: true })
+      }
+    })
+
+    it("reports an absolute link outside and a relative link into a prefix sibling", () => {
+      const { destination, root } = makeWorkspace()
+      try {
+        mkdirSync(join(destination, "a"))
+        mkdirSync(`${destination}-sibling`)
+        symlinkSync("/etc", join(destination, "a/etc"))
+        // `<root>/destination-sibling` shares the destination's string prefix
+        // but is a sibling, so a bare prefix comparison would accept it.
+        symlinkSync("../destination-sibling", join(destination, "sibling"))
+
+        expect(backstopViolations(destination)).toStrictEqual([
+          ["a/etc", "escape"],
+          ["sibling", "escape"],
+        ])
+        expect(physicallyEscapingLinks(destination)).toStrictEqual(["a/etc", "sibling"])
+      } finally {
+        rmSync(root, { force: true, recursive: true })
+      }
+    })
+
+    it("reports a link whose name contains a newline under its exact key", () => {
+      const { destination, root } = makeWorkspace()
+      try {
+        symlinkSync("..", join(destination, "two\nlines"))
+
+        expect(backstopViolations(destination)).toStrictEqual([["two\nlines", "escape"]])
+        expect(physicallyEscapingLinks(destination)).toStrictEqual(["two\nlines"])
+      } finally {
+        rmSync(root, { force: true, recursive: true })
+      }
+    })
+
+    it("reports cycles and self-extending links as beyond the resolution limit, and finishes quickly", () => {
+      // GNU `realpath` never returns on `b -> b/..` or on `x -> y/..` with
+      // `y -> x`; the listing only reads stored targets and the TypeScript
+      // resolver stops at its hop limit or on the cycle.
+      const { destination, root } = makeWorkspace()
+      try {
+        symlinkSync("loop-b", join(destination, "loop-a"))
+        symlinkSync("loop-a", join(destination, "loop-b"))
+        symlinkSync("b/..", join(destination, "b"))
+        symlinkSync("y/..", join(destination, "x"))
+        symlinkSync("x", join(destination, "y"))
+        symlinkSync(".", join(destination, "self"))
+        const started = Date.now()
+
+        const violations = backstopViolations(destination)
+
+        expect(Date.now() - started).toBeLessThan(5000)
+        expect(violations).toStrictEqual([
+          ["b", "limit"],
+          ["loop-a", "limit"],
+          ["loop-b", "limit"],
+          ["x", "limit"],
+          ["y", "limit"],
+        ])
+        // The kernel cannot resolve them either.
+        const loops = violations.map(([key]) => physicallyLoops(join(destination, key)))
+        expect(loops).toStrictEqual([true, true, true, true, true])
+        expect(physicallyEscapingLinks(destination)).toStrictEqual([])
+      } finally {
+        rmSync(root, { force: true, recursive: true })
+      }
+    }, 10_000)
+
+    it("removes those links with the real removal script in exactly three execs", async () => {
+      const { destination, root } = makeWorkspace()
+      try {
+        writeFileSync(join(destination, "w"), "w\n")
+        symlinkSync("w", join(destination, "in"))
+        symlinkSync("b/..", join(destination, "b"))
+        symlinkSync("y/..", join(destination, "x"))
+        symlinkSync("x", join(destination, "y"))
+        const { commands, conn } = localShellConnection()
+
+        const failure = await enforceSymlinkContainment(conn, {
+          destination,
+          source: "loop.tar",
+        })
+
+        const message = failure?.error?.message
+        expect(message).toMatch(
+          /^\[archive\.extract\] refusing to complete extraction of loop\.tar: symlink "[^"]+" -> "[^"]+" cannot be resolved within the symlink resolution limit; every symlink under the destination is checked after the merge, including links this archive did not ship \(and 2 more\); removed escaping symlinks: .+; re-check found no escaping symlinks$/sv
+        )
+        expect(removedLinks(message)).toStrictEqual(
+          ["b", "x", "y"].map((key) => join(destination, key))
+        )
+        // One listing, one batched removal, one re-listing.
+        expect(commands).toHaveLength(3)
+        expect(describeTree(destination)).toStrictEqual(["l in -> w", "f w w\n"])
+      } finally {
+        rmSync(root, { force: true, recursive: true })
+      }
+    }, 10_000)
+
+    it("removes a link that stays inside only through an escaping link, together with that link", async () => {
+      // `x` leaves the destination; `z` walks through `x` and comes back into
+      // it. Physically `z` lands inside, but only because `x` points outside,
+      // so the backstop removes both.
+      const { destination, root } = makeAppWorkspace()
+      try {
+        writeFileSync(join(destination, "w"), "w\n")
+        symlinkSync("../other/q/r", join(destination, "x"))
+        symlinkSync("x/../../../app/w", join(destination, "z"))
+        expect(realpathSync.native(join(destination, "x"))).toBe(join(root, "other/q/r"))
+        expect(realpathSync.native(join(destination, "z"))).toBe(join(destination, "w"))
+        expect(backstopViolations(destination)).toStrictEqual([
+          ["x", "escape"],
+          ["z", "escape"],
+        ])
+        const { commands, conn } = localShellConnection()
+
+        const failure = await enforceSymlinkContainment(conn, { destination, source: "q2.tar" })
+
+        const message = failure?.error?.message
+        expect(message).toMatch(
+          / \(and 1 more\); removed escaping symlinks: .+; re-check found no escaping symlinks$/sv
+        )
+        expect(removedLinks(message)).toStrictEqual([
+          join(destination, "x"),
+          join(destination, "z"),
+        ])
+        expect(commands).toHaveLength(3)
+        expect(describeTree(destination)).toStrictEqual(["f w w\n"])
+        expect(backstopViolations(destination)).toStrictEqual([])
+        expect(readdirSync(join(root, "other/q/r"))).toStrictEqual([])
+      } finally {
+        rmSync(root, { force: true, recursive: true })
+      }
+    })
+
+    it("fails closed in one exec when find cannot walk the destination", async () => {
+      const { destination, root } = makeWorkspace()
+      try {
+        const { commands, conn } = localShellConnection()
+
+        const failure = await enforceSymlinkContainment(conn, {
+          destination: join(destination, "missing"),
+          source: "gone.tar",
+        })
+
+        expect(failure?.error?.message).toMatch(
+          /^\[archive\.extract\] refusing to complete extraction of gone\.tar: symlink containment check failed: .+/sv
+        )
+        expect(commands).toStrictEqual([buildSymlinkListingProbeScript()])
+      } finally {
+        rmSync(root, { force: true, recursive: true })
+      }
+    })
+
+    it.skipIf(SKIP_AS_ROOT)(
+      "fails closed and removes nothing, not even a visible escaping link, when a subdirectory is unreadable",
+      async () => {
+        const { destination, root } = makeWorkspace()
+        const locked = join(destination, "locked")
+        try {
+          symlinkSync("..", join(destination, "visible"))
+          mkdirSync(locked)
+          symlinkSync("../..", join(locked, "hidden"))
+          chmodSync(locked, 0o000)
+          const { commands, conn } = localShellConnection()
+
+          const failure = await enforceSymlinkContainment(conn, {
+            destination,
+            source: "locked.tar",
+          })
+
+          expect(failure?.error?.message).toContain("symlink containment check failed: ")
+          expect(commands).toStrictEqual([buildSymlinkListingProbeScript()])
+          expect(readlinkSync(join(destination, "visible"))).toBe("..")
+        } finally {
+          chmodSync(locked, 0o755)
+          rmSync(root, { force: true, recursive: true })
+        }
+      }
+    )
+
+    describe.skipIf(SKIP_NO_GNU_CP)("after real merges (requires GNU cp)", () => {
+      it("reports the earlier run's link once a later run ships the link it walks through", () => {
+        // Run 1 ships `a/esc -> up/..`, run 2 ships `a/up -> ..`. Each merge
+        // succeeds with the product guard set and each tree is contained on its
+        // own; after run 2, `a/esc` resolves via `a/up/..` to the destination's
+        // parent.
+        const { destination, root, staging } = makeWorkspace()
+        try {
+          const secondStaging = join(root, "staging-2")
+          buildTree(staging, ["a/", "a/esc -> up/.."], destination)
+          buildTree(secondStaging, ["a/", "a/up -> .."], destination)
+          const mergeRun = (stagingRoot: string, spec: string[]): ShellResult =>
+            runProductionMerge({
+              destination,
+              members: spec.map((entry) => specMember(entry)),
+              staging: stagingRoot,
+            })
+
+          expect(mergeRun(staging, ["a/", "a/esc -> up/.."])).toMatchObject({
+            code: 0,
+            stderr: "",
+          })
+          expect(backstopViolations(destination)).toStrictEqual([])
+
+          expect(mergeRun(secondStaging, ["a/", "a/up -> .."])).toMatchObject({
+            code: 0,
+            stderr: "",
+          })
+
+          expect(readlinkSync(join(destination, "a/esc"))).toBe("up/..")
+          expect(readlinkSync(join(destination, "a/up"))).toBe("..")
+          expect(backstopViolations(destination)).toStrictEqual([["a/esc", "escape"]])
+          expect(realpathSync.native(join(destination, "a/esc"))).toBe(root)
+          expect(physicallyEscapingLinks(destination)).toStrictEqual(["a/esc"])
+        } finally {
+          rmSync(root, { force: true, recursive: true })
+        }
+      })
+    })
+  }
+)
+
+/**
+ * Issue #219: small limits for the bounded merge cases, so a stopped merge
+ * shows within seconds.
+ */
+const smallMergeLimits: StagingMergeTimeLimits = {
+  clientTimeoutMs: 10_000,
+  killAfterSeconds: 1,
+  timeoutSeconds: 1,
+}
+
+/**
+ * Issue #219: run a merge command bounded by `boundedStagingMergeCommand`
+ * under a real `/bin/sh`, with a client-side timeout as a safety net.
+ *
+ * @param command - The merge command to bound.
+ * @param limits - The time limits; the production defaults when omitted.
+ * @returns Exit code, elapsed wall-clock time and stderr.
+ */
+function runBoundedMerge(
+  command: string,
+  limits?: StagingMergeTimeLimits
+): { code: number; elapsedMs: number; stderr: string } {
+  const started = Date.now()
+  const result = spawnSync("/bin/sh", ["-c", boundedStagingMergeCommand(command, limits)], {
+    encoding: "utf8",
+    timeout: 10_000,
+  })
+  return { code: result.status ?? -1, elapsedMs: Date.now() - started, stderr: result.stderr }
+}
+
+/**
+ * Issue #219: the processes whose command line contains a marker.
+ *
+ * @param marker - A string unique to the processes of one case.
+ * @returns `pid args` lines of the matching processes.
+ */
+function processesMatching(marker: string): string[] {
+  const result = spawnSync("ps", ["-A", "-o", "pid=,args="], { encoding: "utf8", timeout: 2000 })
+  return result.stdout
+    .split("\n")
+    .filter((line) => line.includes(marker) && !line.includes("ps -A"))
+}
+
+/**
+ * Issue #219: wait until no process with the marker is left, or give up.
+ *
+ * @param marker - A string unique to the processes of one case.
+ * @returns The processes still running after the wait.
+ */
+async function survivorsAfterWait(marker: string): Promise<string[]> {
+  for (let attempt = 0; attempt < 20; attempt += 1) {
+    if (processesMatching(marker).length === 0) return []
+    // eslint-disable-next-line no-await-in-loop -- polling with a delay by design
+    await new Promise((resolve) => {
+      setTimeout(resolve, 100)
+    })
+  }
+  return processesMatching(marker)
+}
+
+/**
+ * Issue #219: kill every process with the marker, so a failing case leaves
+ * nothing behind.
+ *
+ * @param marker - A string unique to the processes of one case.
+ */
+function killMatching(marker: string): void {
+  for (const line of processesMatching(marker)) {
+    const pid = Number.parseInt(line.trim(), 10)
+    try {
+      process.kill(pid, "SIGKILL")
+    } catch {
+      // Already gone.
+    }
+  }
+}
+
+describe.skipIf(SKIP_PLATFORM || !HAS_COMMAND_P_TIMEOUT)(
+  "archive.extract bounded staging merge shell smoke tests (Issue #219, requires command -p timeout)",
+  () => {
+    it("passes the exit status of a merge that finishes in time through", () => {
+      expect(runBoundedMerge("true").code).toBe(0)
+      expect(runBoundedMerge("false").code).toBe(1)
+      expect(runBoundedMerge("sh -c 'exit 3'").code).toBe(3)
+    })
+
+    it("stops a merge that runs too long with SIGTERM to its whole process group: exit 124", async () => {
+      // The production shape: `find … -exec sh -c … {} +`, whose batches
+      // are grandchildren of `timeout`.
+      const marker = `29.${String(process.pid)}1`
+      const batch = ["sleep", marker].join(" ")
+      const { root } = makeWorkspace()
+      try {
+        const result = runBoundedMerge(
+          `find ${shellQuote(root)} -maxdepth 0 -exec sh -c ${shellQuote(batch)} sh {} +`,
+          smallMergeLimits
+        )
+
+        expect(result.code).toBe(124)
+        expect(result.elapsedMs).toBeLessThan(5000)
+        await expect(survivorsAfterWait(marker)).resolves.toStrictEqual([])
+      } finally {
+        killMatching(marker)
+        rmSync(root, { force: true, recursive: true })
+      }
+    }, 15_000)
+
+    it("kills a merge that ignores SIGTERM after the grace period: exit 137, nothing left", async () => {
+      const marker = `29.${String(process.pid)}2`
+      const ignoresTerm = ['trap "" TERM;', "sleep", marker].join(" ")
+      try {
+        const result = runBoundedMerge(`sh -c ${shellQuote(ignoresTerm)}`, smallMergeLimits)
+
+        expect(result.code).toBe(137)
+        expect(result.elapsedMs).toBeGreaterThanOrEqual(1500)
+        expect(result.elapsedMs).toBeLessThan(6000)
+        await expect(survivorsAfterWait(marker)).resolves.toStrictEqual([])
+      } finally {
+        killMatching(marker)
+      }
+    }, 15_000)
   }
 )

@@ -475,6 +475,26 @@ describe("mergedSymlinkViolations (Issue #219)", () => {
     ])
   })
 
+  it("reports self-extending links that GNU realpath never finishes as exceeding the limit", () => {
+    // Issue #219: the post-merge backstop judges host links with this
+    // resolver instead of `realpath`, which loops forever on these; a link
+    // that walks through one of them cannot be shown to stay inside either.
+    const links = relativeLinks([
+      ["b", "b/.."],
+      ["x", "y/.."],
+      ["y", "x"],
+      ["via", "b/f"],
+      ["plain", "f"],
+    ])
+
+    expect(mergedSymlinkViolations(links)).toStrictEqual([
+      { key: "b", kind: "limit" },
+      { key: "x", kind: "limit" },
+      { key: "y", kind: "limit" },
+      { key: "via", kind: "limit" },
+    ])
+  })
+
   it("reports a chain of more than 40 hops as exceeding the resolution limit", () => {
     expect(mergedSymlinkViolations(chain(40))).toStrictEqual([])
     expect(mergedSymlinkViolations(chain(41))).toStrictEqual([{ key: "l0", kind: "limit" }])

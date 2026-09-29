@@ -181,14 +181,21 @@ schreiben, endet der Durchlauf dort – und löst, weiterhin vor jeder Kopie, di
 einen vorhandenen Symlink am selben Pfad, vorhandene absolute Ziele innerhalb von `destination` sind
 erlaubt; jede andere Typ-Kombination am Pfad eines Eintrags, ein Eintrag unterhalb eines vorhandenen
 Symlinks oder ein Link, der außerhalb von `destination` auflöst, verhindert das Entpacken – ein
-vorhandener Link, der nach außen zeigt, muss dann entfernt oder nach innen umgelenkt werden. Hat das
-Zusammenführen begonnen, läuft immer eine Prüfung aller Symlinks unter `destination`, auch nach
-einem fehlgeschlagenen Zusammenführen, das bereits Einträge kopiert haben kann: Sie entfernt jeden
-Link, der außerhalb auflöst (nur den Link, nie sein Ziel), prüft erneut und lässt den Durchlauf
-trotzdem fehlschlagen, wobei sie die entfernten und die nicht entfernbaren Links nennt. Bei einem
-Fehlschlag wird weder die Marker-Datei geschrieben noch `owner` angewendet. Das Flag wird erst
-entfernt, wenn ein Durchlauf einschließlich `owner` und Marker-Dateien vollständig gelingt; solange
-es besteht, meldet `check` für jedes Archiv mit diesem Zielverzeichnis `needs-apply`.
+vorhandener Link, der nach außen zeigt, muss dann entfernt oder nach innen umgelenkt werden. Der
+Host bricht das Zusammenführen per GNU `timeout` nach 100 Sekunden ab (10 Sekunden später
+erzwungen), also vor dem Befehls-Timeout von 120 Sekunden; fehlt `timeout`, scheitert das
+Zusammenführen, bevor etwas kopiert wird. Hat das Zusammenführen begonnen, läuft immer eine Prüfung
+aller Symlinks unter `destination`, auch nach einem fehlgeschlagenen oder abgebrochenen
+Zusammenführen, das bereits Einträge kopiert haben kann: Sie löst die Links wie die Prüfung vor dem
+Zusammenführen auf, ohne den Host auflösen zu lassen, entfernt jeden Link, der außerhalb auflöst
+oder sich innerhalb des Symlink-Limits nicht auflösen lässt, etwa bei einer Schleife (nur den Link,
+nie sein Ziel, und nur unterhalb eines geprüften echten Verzeichnisses in `destination`), prüft
+erneut und wiederholt das, solange das Entfernen vorankommt, und lässt den Durchlauf trotzdem
+fehlschlagen, wobei sie die entfernten, die nicht entfernbaren und die weiterhin nach außen
+zeigenden Links nennt. Bei einem Fehlschlag wird weder die Marker-Datei geschrieben noch `owner`
+angewendet. Das Flag wird erst entfernt, wenn ein Durchlauf einschließlich `owner` und
+Marker-Dateien vollständig gelingt; solange es besteht, meldet `check` für jedes Archiv mit diesem
+Zielverzeichnis `needs-apply`.
 
 ---
 

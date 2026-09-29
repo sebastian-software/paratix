@@ -132,85 +132,6 @@ export function buildSymlinkProbeScript(): string {
 }
 
 /**
- * Per-batch body of {@link buildSymlinkContainmentProbeScript}: `$1` is the
- * destination, the remaining arguments are the symlinks `find` found.
- *
- * - `command -p realpath -m` is the hardened resolver already used in `ssh.ts`
- *   and `aptKeyStaging.ts` (R-0000693): `command -p` looks `realpath` up on the
- *   default system PATH, so a hijacked PATH on the target cannot substitute it.
- * - `-m` resolves dangling links and missing intermediate components. GNU
- *   `readlink -f` fails on a dangling link with a missing non-final component,
- *   so a dangling link whose resolved path stays inside the destination passes
- *   here instead of being reported. Symlink loops also resolve under `-m`
- *   without an error.
- * - The `printf x` sentinel keeps a resolved path that ends in newlines intact.
- *   Command substitution strips every trailing newline, which could make a
- *   sibling such as `/opt/app<newline>` compare equal to `/opt/app`; only the
- *   single newline `realpath` itself appends is removed.
- * - A link that cannot be resolved at all is reported with an empty resolved
- *   field, so the caller fails closed instead of skipping it.
- * - The quoted `"$d"` in the `case` pattern is matched literally, not as a
- *   glob. The destination is already canonical (validated `readlink -f` equal
- *   to itself, and `/` is rejected by `validateExtractDestination`), so a plain
- *   prefix comparison is correct.
- */
-const SYMLINK_CONTAINMENT_INNER_SCRIPT = [
-  // `nl` holds one newline; the trailing `x` survives command substitution.
-  "nl=$(printf '\\nx'); ",
-  // `$\{` keeps the shell parameter expansion literal; a bare `${` would be
-  // read as JavaScript interpolation.
-  `nl=$\{nl%x}; `,
-  "d=$1; shift; ",
-  "for l do ",
-  'r=$(command -p realpath -m -- "$l" && printf x) || { printf \'%s\\0\\0\' "$l"; continue; }; ',
-  `r=$\{r%x}; r=$\{r%"$nl"}; `,
-  'case $r in "$d"|"$d"/*) ;; *) printf \'%s\\0%s\\0\' "$l" "$r";; esac; done; exit 0',
-].join("")
-
-/**
- * Outer body of {@link buildSymlinkContainmentProbeScript}: `$1` is the inner
- * script, the remaining arguments are the destinations from stdin.
- *
- * `find` without `-L` never follows a symlink, so the walk stays inside the
- * destination tree. A traversal error makes `find` exit non-zero, which the
- * `|| exit $?` turns into a failed probe (fail closed) rather than a partial
- * result read as clean.
- */
-const SYMLINK_CONTAINMENT_OUTER_SCRIPT =
-  'inner=$1; shift; for d do find "$d" -type l -exec sh -c "$inner" sh "$d" {} + || exit $?; done; exit 0'
-
-/**
- * Probe script reporting every symlink below a destination whose fully
- * resolved target lies outside that destination.
- *
- * Issue #219: this checks the whole tree after the merge, including links that
- * earlier runs or the host left there, because a link that was contained when
- * it was written can be redirected by a link a later archive places on its
- * path. It is the backstop behind the pre-merge check built on
- * {@link buildSymlinkListingProbeScript}: that check refuses such a combination
- * before anything is copied, and this one still catches a host change that
- * lands between the pre-merge listing and the merge, or links a merge that
- * failed half-way already published. The links it reports are the only ones
- * {@link buildSymlinkRemovalScript} may remove. It is meant for
- * {@link runBatchedProbe} with the destination as the single entry, so it
- * costs exactly one `exec` regardless of member count.
- *
- * The composed command is `xargs -0 sh -c <outer> sh <inner>`: `xargs` appends
- * the NUL-delimited stdin entries after `<inner>`, so the outer script receives
- * the inner script as `$1` and the destinations after it. Both bodies contain
- * single quotes and are therefore composed with `shellQuote` instead of the
- * literal `XARGS_PREFIX`. Link paths travel as arguments and results come back
- * NUL-framed, so newlines in link names are safe.
- *
- * @returns The remote script. Its output is a flat list of `(link, resolved)`
- *   field pairs, one pair per violation; an empty `resolved` field means the
- *   link could not be resolved. A converged tree produces no output.
- */
-export function buildSymlinkContainmentProbeScript(): string {
-  return `xargs -0 sh -c ${shellQuote(SYMLINK_CONTAINMENT_OUTER_SCRIPT)} sh ${shellQuote(SYMLINK_CONTAINMENT_INNER_SCRIPT)}`
-}
-
-/**
  * Per-batch body of {@link buildSymlinkListingProbeScript}: the arguments are
  * the symlinks `find` found.
  *
@@ -222,6 +143,10 @@ export function buildSymlinkContainmentProbeScript(): string {
  * - A link whose target cannot be read (it vanished, or `readlink` failed)
  *   makes the batch exit 1. `find` then exits non-zero, so the listing fails
  *   closed instead of silently omitting that link.
+ * - Issue #219: a missing or unusable `readlink` takes the same path: `command
+ *   -p` exits 127 when it finds no `readlink`, the substitution fails and the
+ *   batch exits 1. The post-merge backstop relies on this, because a link it
+ *   never saw is a link it can neither judge nor remove.
  */
 const SYMLINK_LISTING_INNER_SCRIPT = [
   // `nl` holds one newline; the trailing `x` survives command substitution.
@@ -295,8 +220,16 @@ const SYMLINK_LISTING_OUTER_SCRIPT = [
  * redirect one of them (or the other way round). With this listing the
  * combined post-merge link set is resolved before anything is copied, so an
  * escaping combination is refused instead of being published and detected
- * only afterwards. The directory hits let the model refuse a member that the
- * merge could not put in place: `cp -aT --remove-destination` cannot replace
+ * only afterwards. The post-merge backstop reads the tree with the same
+ * listing, with a single `r` entry, and judges it with the same resolver, so
+ * both checks share one set of resolution semantics and neither ever asks the
+ * host to resolve a link. That matters because GNU `realpath` (in every mode,
+ * `readlink -f` included) never terminates on a self-extending loop such as
+ * `b -> b/..`, and a merge that failed half-way can leave one behind;
+ * `readlink` without `-f` only reads the stored target.
+ *
+ * The directory hits let the model refuse a member that the merge could not
+ * put in place: `cp -aT --remove-destination` cannot replace
  * a directory with a non-directory, still copies the rest of that top-level
  * entry and exits non-zero, so modelling such a member as a replacement would
  * resolve paths through a link that never lands. It is meant for
@@ -304,10 +237,13 @@ const SYMLINK_LISTING_OUTER_SCRIPT = [
  * entry per non-directory member (see {@link encodeSymlinkListingEntry}), so it
  * costs exactly one `exec` regardless of member count.
  *
- * The composed command is `xargs -0 sh -c <outer> sh <inner>`, built exactly
- * like {@link buildSymlinkContainmentProbeScript}. Link paths travel as
- * arguments and results come back NUL-framed, so spaces and newlines in link
- * names and targets are transported faithfully.
+ * The composed command is `xargs -0 sh -c <outer> sh <inner>`: `xargs`
+ * appends the NUL-delimited stdin entries after `<inner>`, so the outer script
+ * receives the inner script as `$1` and the entries after it. Both bodies
+ * contain single quotes and are therefore composed with `shellQuote` instead
+ * of the literal `XARGS_PREFIX`. Link paths travel as arguments and results
+ * come back NUL-framed, so spaces and newlines in link names and targets are
+ * transported faithfully.
  *
  * Failure mode: fail closed. A traversal error, an unreadable link target, an
  * unknown entry kind or a failing `sh`/`xargs` makes the exec exit non-zero;
@@ -477,8 +413,20 @@ export const SYMLINK_REMOVED_OUTCOME = "removed"
 /**
  * Per-link body of {@link buildSymlinkRemovalScript}. `$1` is the destination,
  * the remaining arguments are the links from stdin.
+ *
+ * Issue #219: `unset CDPATH` comes first. A `CDPATH` from the target's
+ * environment would let `cd` pick a directory outside the destination for a
+ * relative operand and makes `cd` print that directory to stdout, which would
+ * corrupt the NUL framing. The `./` prefix on the relative `cd` below keeps
+ * `CDPATH` out of play as well.
  */
 const SYMLINK_REMOVAL_SCRIPT = [
+  "unset CDPATH; ",
+  // `nl` holds one newline; the trailing `x` survives command substitution.
+  "nl=$(printf '\\nx'); ",
+  // `$\{` keeps the shell parameter expansion literal; a bare `${` would be
+  // read as JavaScript interpolation.
+  `nl=$\{nl%x}; `,
   "d=$1; shift; ",
   "for l do ",
   'case $l in "$d"/?*) ;; *) printf "%s\\0%s\\0" "$l" "not below the destination"; continue;; esac; ',
@@ -487,25 +435,30 @@ const SYMLINK_REMOVAL_SCRIPT = [
   // `..` segment (including a trailing `/`) before anything else looks at it.
   `case $\{l#"$d"/} in /*|*/|*//*|.|..|./*|../*|*/.|*/..|*/./*|*/../*) `,
   'printf "%s\\0%s\\0" "$l" "not normalized"; continue;; esac; ',
-  // Walk from the link's parent up to and including the destination: every
-  // directory on the way must be a real directory, never a symlink, so the
-  // `rm` below cannot be redirected to a path outside the destination.
-  `p=$\{l%/*}; bad=; `,
-  "while :; do ",
-  'if [ -L "$p" ] || [ ! -d "$p" ]; then bad="an ancestor directory is missing or a symlink"; break; fi; ',
-  '[ "$p" = "$d" ] && break; ',
-  'case $p in "$d"/?*) ;; *) bad="the ancestor walk left the destination"; break;; esac; ',
-  `p=$\{p%/*}; `,
-  "done; ",
-  'if [ -n "$bad" ]; then printf "%s\\0%s\\0" "$l" "$bad"; continue; fi; ',
-  'if [ ! -L "$l" ]; then printf "%s\\0%s\\0" "$l" "no longer a symlink"; continue; fi; ',
-  'if ! rm -f -- "$l"; then printf "%s\\0%s\\0" "$l" "rm failed"; continue; fi; ',
-  'if [ -L "$l" ]; then printf "%s\\0%s\\0" "$l" "still a symlink after rm"; continue; fi; ',
-  `printf "%s\\0%s\\0" "$l" ${SYMLINK_REMOVED_OUTCOME}; done; exit 0`,
+  // Issue #219: everything below runs in a subshell per link, so the `cd`
+  // never leaks into the next link. `r` is the destination-relative path, `n`
+  // the link's own name, `p` its parent below the destination (empty for a
+  // top-level link) and `e` the canonical parent path `pwd -P` must report.
+  `( r=$\{l#"$d"/}; n=$\{r##*/}; `,
+  `case $r in */*) p=$\{r%/*}; e=$d/$p;; *) p=; e=$d;; esac; `,
+  'a="an ancestor directory is missing or a symlink"; ',
+  'cd -P -- "$d" 2>/dev/null || { printf "%s\\0%s\\0" "$l" "$a"; exit 0; }; ',
+  'if [ -n "$p" ]; then cd -P -- "./$p" 2>/dev/null || { printf "%s\\0%s\\0" "$l" "$a"; exit 0; }; fi; ',
+  // Same sentinel as `nl`: only the single newline `pwd` appends is removed,
+  // so a directory name that ends in a newline still compares faithfully.
+  'w=$(pwd -P && printf x) || { printf "%s\\0%s\\0" "$l" "$a"; exit 0; }; ',
+  `w=$\{w%x}; w=$\{w%"$nl"}; `,
+  '[ "$w" = "$e" ] || { printf "%s\\0%s\\0" "$l" "$a"; exit 0; }; ',
+  // From here on every operation is relative to the verified working
+  // directory and names only the link itself, never a path through an ancestor.
+  '[ -L "$n" ] || { printf "%s\\0%s\\0" "$l" "no longer a symlink"; exit 0; }; ',
+  'rm -f -- "$n" || { printf "%s\\0%s\\0" "$l" "rm failed"; exit 0; }; ',
+  'if [ -L "$n" ]; then printf "%s\\0%s\\0" "$l" "still a symlink after rm"; exit 0; fi; ',
+  `printf "%s\\0%s\\0" "$l" ${SYMLINK_REMOVED_OUTCOME} ); done; exit 0`,
 ].join("")
 
 /**
- * Script that removes escaping symlinks the post-merge containment probe
+ * Script that removes escaping symlinks the post-merge containment check
  * reported, without ever following them.
  *
  * Issue #219: the post-merge backstop used to only record a flag, which left
@@ -514,16 +467,36 @@ const SYMLINK_REMOVAL_SCRIPT = [
  * {@link runBatchedProbe}); the destination is a fixed argument and never
  * travels on stdin. Per link it requires the path to lie strictly below the
  * destination with no empty, `.` or `..` segment below it (a lexical prefix
- * match alone would accept `<destination>/../x`), every directory from the
- * link's parent up to the destination to be a real directory and not a
- * symlink, and the path itself to still be a symlink. A path that is not
- * normalized is reported as `not normalized` and never removed. It then runs `rm -f --` on the link: `rm` unlinks a symlink operand
- * itself, never its target, and without `-r` it never recurses. Afterwards it
- * confirms that no symlink is left at the path.
+ * match alone would accept `<destination>/../x`); a path that is not
+ * normalized is reported as `not normalized` and never removed.
+ *
+ * It then never names the link by its absolute path. In a subshell per link it
+ * changes into the destination and from there into the link's parent with
+ * `cd -P`, which resolves every symlink on the way, and compares `pwd -P` with
+ * the canonical parent path `<destination>/<parent>` (the destination itself
+ * for a top-level link). The destination is canonical, and `pwd -P` reports
+ * the physical path of the directory the shell is now in, so a match proves
+ * that every component from the destination down to the parent was a real
+ * directory when `cd` walked it: an ancestor that was a symlink would have
+ * landed the shell somewhere whose physical path differs. A failed `cd` or a
+ * mismatch is reported as `an ancestor directory is missing or a symlink` and
+ * removes nothing. The previous form checked the ancestors with `[ -L ]` and
+ * then ran `rm` on the absolute path, so an ancestor swapped for a symlink
+ * between check and `rm` redirected the `rm` outside the destination; now the
+ * working directory is pinned before the check and the `rm` names only the
+ * final component relative to it, so no path operation ever follows an
+ * ancestor.
+ *
+ * In that verified directory it requires the name to still be a symlink, runs
+ * `rm -f -- <name>` (`rm` unlinks a symlink operand itself, never its target,
+ * and without `-r` it never recurses) and confirms that no symlink is left.
+ * The window between `[ -L ]` and `rm` on the final component remains; `rm`
+ * never follows that component either way.
  *
  * @param destination - The validated, canonical destination directory.
  * @returns The remote command. Its output is a flat list of `(link, outcome)`
- *   field pairs, NUL-framed, one per received link: the outcome is
+ *   field pairs, NUL-framed, one per received link, each naming the link by the
+ *   absolute path it was received as: the outcome is
  *   {@link SYMLINK_REMOVED_OUTCOME} or the reason the link was left in place.
  */
 export function buildSymlinkRemovalScript(destination: string): string {
@@ -541,7 +514,7 @@ export type SymlinkRemovalReport = {
 }
 
 /**
- * Issue #219: decide in TypeScript whether a link path the containment probe
+ * Issue #219: decide in TypeScript whether a link path the containment check
  * reported may be handed to the removal script at all.
  *
  * Only a path strictly below the destination that is already normalized — no
@@ -607,4 +580,39 @@ export function symlinkRemovalReport(
     .filter((link) => outcomes.get(link) !== SYMLINK_REMOVED_OUTCOME)
     .map((link) => [link, outcomes.get(link) ?? "no outcome reported"] as const)
   return { kept, removed }
+}
+
+/**
+ * Issue #219: remove the given escaping links with one batched exec, never
+ * following them. `archiveContainmentEnforcement.ts` re-exports it next to
+ * the backstop that calls it.
+ *
+ * Each link is first vetted by {@link escapingSymlinkRemovalRefusal}; only the
+ * vetted ones reach {@link buildSymlinkRemovalScript}, which pins its working
+ * directory to the link's verified parent and unlinks only the final
+ * component relative to it.
+ *
+ * @param conn - The SSH connection.
+ * @param destination - The validated, canonical destination directory.
+ * @param links - The absolute link paths the containment check reported.
+ * @returns Which links were removed and which were kept, with reasons.
+ */
+export async function removeEscapingSymlinks(
+  conn: SshConnection,
+  destination: string,
+  links: readonly string[]
+): Promise<SymlinkRemovalReport> {
+  const refused: Array<readonly [string, string]> = []
+  const vetted: string[] = []
+  for (const link of new Set(links)) {
+    const refusal = escapingSymlinkRemovalRefusal(destination, link)
+    if (refusal === null) vetted.push(link)
+    else refused.push([link, refusal])
+  }
+  const outcome = await runBatchedProbe(conn, {
+    entries: vetted,
+    script: buildSymlinkRemovalScript(destination),
+  })
+  const report = symlinkRemovalReport(vetted, outcome)
+  return { kept: [...refused, ...report.kept], removed: report.removed }
 }

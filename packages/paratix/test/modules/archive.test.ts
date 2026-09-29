@@ -2,10 +2,14 @@ import { createHash } from "node:crypto"
 import { posix } from "node:path"
 import { describe, expect, it, vi } from "vitest"
 
-import type { ExecResult, ModuleResult } from "../../src/types.js"
+import type { ExecOptions, ExecResult, ModuleResult, SshConnection } from "../../src/types.js"
 
-import { archive } from "../../src/modules/archive.js"
-import { validateSymlinkContainment } from "../../src/modules/archiveContainmentEnforcement.js"
+import {
+  archive,
+  boundedStagingMergeCommand,
+  STAGING_MERGE_TIME_LIMITS,
+} from "../../src/modules/archive.js"
+import { enforceSymlinkContainment } from "../../src/modules/archiveContainmentEnforcement.js"
 import {
   ARCHIVE_CAPTURE_LIMIT_BYTES,
   listArchiveMembers,
@@ -14,13 +18,13 @@ import {
   buildMemberTypeProbeScript,
   buildOwnershipProbeScript,
   buildPreStagingProbeScript,
-  buildSymlinkContainmentProbeScript,
   buildSymlinkListingProbeScript,
   buildSymlinkProbeScript,
   buildSymlinkRemovalScript,
+  SYMLINK_REMOVED_OUTCOME,
 } from "../../src/modules/archiveProbe.js"
-import { CAPTURE_TRUNCATION_MARKER, DEFAULT_MAX_OUTPUT_BYTES } from "../../src/sshHelpers.js"
-import { createMockSsh as createBaseMockSsh } from "../helpers/mockSsh.js"
+import { CAPTURE_TRUNCATION_MARKER } from "../../src/sshHelpers.js"
+import { createMockSsh as createBaseMockSsh, type ExecCall } from "../helpers/mockSsh.js"
 
 const emptyEnv = {}
 
@@ -40,8 +44,18 @@ const membersMarker = `${marker}.members`
 const archiveSha = "abc123def456"
 const extractedFileMember = { kind: "file", path: `${destination}/app/file` } as const
 const symlinkProbeCommand = buildSymlinkProbeScript()
-const symlinkContainmentProbeCommand = buildSymlinkContainmentProbeScript()
+/**
+ * Issue #219: the listing of host symlinks. The pre-merge check and the
+ * post-merge backstop issue the identical command; only the stdin tells them
+ * apart (see {@link postMergeListingInput}).
+ */
 const symlinkListingProbeCommand = buildSymlinkListingProbeScript()
+/**
+ * Issue #219: the stdin of the post-merge backstop listing: the destination as
+ * its only `r` entry. The pre-merge listing adds one `n` entry per
+ * non-directory member.
+ */
+const postMergeListingInput = `r:${destination}\u0000`
 /** Issue #219: the pre-staging probe: symlink guards plus member type checks. */
 const preStagingProbeCommand = buildPreStagingProbeScript()
 /** Issue #219: the post-merge removal of escaping symlinks for the destination. */
@@ -105,12 +119,14 @@ function ownershipReport(path: string, stat: string): { code: number; stdout: st
 // expectations.
 const archiveStageDirectory = "/opt/app/.paratix-stage.AbCdEfGh"
 const archiveStageMktempPattern = /^mktemp -d '\/opt\/app\/\.paratix-stage\.X{8}'$/v
+// Issue #219: the merge runs under `command -p timeout -k 10 100 … ; exit $?`
+// (see `boundedStagingMergeCommand`).
 const archiveStageMovePattern =
-  /^find '\/opt\/app\/\.paratix-stage\.[^']+' -mindepth 1 -maxdepth 1 -exec sh -c '.*cp -aT --no-dereference --remove-destination "\$source_path" "\$target_path" \|\| exit \$\?; done' sh '\/opt\/app' '\/opt\/app' '[^']*' \{\} \+$/sv
+  /^command -p timeout -k 10 100 find '\/opt\/app\/\.paratix-stage\.[^']+' -mindepth 1 -maxdepth 1 -exec sh -c '.*cp -aT --no-dereference --remove-destination "\$source_path" "\$target_path" \|\| exit \$\?; done' sh '\/opt\/app' '\/opt\/app' '[^']*' \{\} \+; exit \$\?$/sv
 const archiveStageCleanupPattern = /^rm -rf -- '\/opt\/app\/\.paratix-stage\.[^']+'$/v
 const archiveAlternateStageMktempPattern = /^mktemp -d '\/opt\/app-alt\/\.paratix-stage\.X{8}'$/v
 const archiveAlternateStageMovePattern =
-  /^find '\/opt\/app-alt\/\.paratix-stage\.[^']+' -mindepth 1 -maxdepth 1 -exec sh -c '.*cp -aT --no-dereference --remove-destination "\$source_path" "\$target_path" \|\| exit \$\?; done' sh '\/opt\/app-alt' '\/opt\/app-alt' '[^']*' \{\} \+$/sv
+  /^command -p timeout -k 10 100 find '\/opt\/app-alt\/\.paratix-stage\.[^']+' -mindepth 1 -maxdepth 1 -exec sh -c '.*cp -aT --no-dereference --remove-destination "\$source_path" "\$target_path" \|\| exit \$\?; done' sh '\/opt\/app-alt' '\/opt\/app-alt' '[^']*' \{\} \+; exit \$\?$/sv
 const archiveAlternateStageCleanupPattern = /^rm -rf -- '\/opt\/app-alt\/\.paratix-stage\.[^']+'$/v
 const archiveMembersMarkerPattern =
   /^cat '\/var\/lib\/paratix\/flags\/archive-[a-f0-9]+\.sha256\.members'$/v
@@ -184,9 +200,8 @@ const archiveApplyResponseStubs: NonNullable<
   { command: preStagingProbeCommand, result: { code: 0, stdout: "" } },
   // Issue #219: the removal of escaping symlinks after a backstop violation.
   { command: symlinkRemovalCommand, result: { code: 0, stdout: "" } },
-  // Issue #219: the post-merge containment check; a converged tree reports nothing.
-  { command: symlinkContainmentProbeCommand, result: { code: 0, stdout: "" } },
-  // Issue #219: the pre-merge listing of host symlinks; by default the host has none.
+  // Issue #219: the pre-merge listing of host symlinks and the post-merge
+  // backstop listing; by default the host has none.
   { command: symlinkListingProbeCommand, result: { code: 0, stdout: "" } },
   // Issue #219: a successful apply clears the containment-failure flag.
   ...[destination, alternateDestination].map((path) => ({
@@ -365,7 +380,7 @@ function stagedTarExtractCommandFor(source: string): string {
 
 const stagedTarExtractCommand = stagedTarExtractCommandFor(src)
 const archiveStageMergeGuardPathsPattern =
-  / sh '\/opt\/app' '\/opt\/app' '(?<guards>[^']*)' \{\} \+$/v
+  / sh '\/opt\/app' '\/opt\/app' '(?<guards>[^']*)' \{\} \+; exit \$\?$/v
 
 function tarFileLine(path: string): string {
   return `-rw-r--r-- ${tarListingLineFields} ${path}`
@@ -389,7 +404,7 @@ type SymlinkProbeRecord = { callIndex: number; entries: string[] }
  * Issue #219: the symlinks a host keeps below the destination across runs,
  * keyed by absolute link path. Each run's successful staging merge adds (or
  * replaces) the links it ships, and both the pre-merge listing probe and the
- * post-merge containment probe are answered from the whole map, so a test can
+ * post-merge backstop listing are answered from the whole map, so a test can
  * span several runs on one host.
  */
 type HostLinkTree = Map<string, string>
@@ -428,67 +443,6 @@ function shippedSymlinks(lines: readonly string[]): Array<readonly [string, stri
       const [path = "", target = ""] = line.slice(tarSymlinkLinePrefix.length).split(" -> ")
       return [posix.join(destination, path), target] as const
     })
-}
-
-function pathComponents(path: string): string[] {
-  return path.split("/").filter((component) => component !== "")
-}
-
-/**
- * Resolve a host path the way `realpath -m` does: follow every symlink of the
- * tree component by component and treat a missing component as a directory.
- *
- * @param tree - The host symlinks.
- * @param path - The absolute path to resolve.
- * @returns The resolved absolute path.
- */
-function resolveOnHost(tree: ReadonlyMap<string, string>, path: string): string {
-  let resolved: string[] = []
-  const pending = pathComponents(path)
-  let hops = 0
-  while (pending.length > 0) {
-    const component = pending.shift() ?? "."
-    const target = tree.get(`/${[...resolved, component].join("/")}`)
-    if (target === undefined) {
-      resolved = appendPathComponent(resolved, component)
-    } else {
-      hops += 1
-      if (hops > 40) throw new Error(`test host model: symlink loop resolving ${path}`)
-      if (target.startsWith("/")) resolved = []
-      pending.unshift(...pathComponents(target))
-    }
-  }
-  return `/${resolved.join("/")}`
-}
-
-function appendPathComponent(resolved: string[], component: string): string[] {
-  if (component === "..") return resolved.slice(0, -1)
-  return component === "." ? resolved : [...resolved, component]
-}
-
-function isInsideDirectory(root: string, path: string): boolean {
-  return path === root || path.startsWith(`${root}/`)
-}
-
-/**
- * Answer the containment probe from the host model: one `(link, resolved)`
- * pair for every link below a transported destination that resolves outside it.
- *
- * @param tree - The host symlinks.
- * @param input - The probe's NUL-terminated destinations.
- * @returns The NUL-framed probe output.
- */
-function containmentProbeStdout(tree: ReadonlyMap<string, string>, input: string): string {
-  return pathsFromNulPayload(input)
-    .flatMap((root) =>
-      [...tree.keys()]
-        .filter((link) => link.startsWith(`${root}/`))
-        .map((link) => [link, resolveOnHost(tree, link)] as const)
-        .filter(([, resolved]) => !isInsideDirectory(root, resolved))
-    )
-    .flat()
-    .map((field) => `${field}\u0000`)
-    .join("")
 }
 
 function pathsFromNulPayload(input: string | undefined): string[] {
@@ -550,9 +504,10 @@ function removalStdout(tree: Map<string, string>, input: string | undefined): st
 
 /**
  * Issue #219: an exec that rejects instead of returning a result, e.g. a
- * dropped connection.
+ * dropped connection. With `input`, only the exec with exactly that stdin
+ * rejects, which tells the post-merge listing from the pre-merge one.
  */
-type ThrowingExec = { command: RegExp | string; error: Error }
+type ThrowingExec = { command: RegExp | string; error: Error; input?: string }
 
 /**
  * Issue #219: reject the exec when it is the one the harness should fail,
@@ -561,21 +516,24 @@ type ThrowingExec = { command: RegExp | string; error: Error }
  * the copy.
  *
  * @param mockSsh - The mock connection whose calls are recorded.
- * @param command - The command being executed.
+ * @param exchange - The command being executed and its stdin.
+ * @param exchange.command - The command being executed.
+ * @param exchange.input - The exec's stdin.
  * @param harness - The optional host link model and the exec to reject.
  * @param harness.host - Host link model whose injected links the merge places.
  * @param harness.throwOn - The exec to reject; nothing is rejected when unset.
  */
 function rejectMatchingExec(
   mockSsh: MockSsh,
-  command: string,
+  exchange: { command: string; input: string | undefined },
   harness: { host?: HostLinkRun; throwOn?: ThrowingExec }
 ): void {
   const { host, throwOn } = harness
   if (throwOn === undefined) return
-  const { command: expected, error } = throwOn
+  const { command } = exchange
+  const { command: expected, error, input } = throwOn
   const matches = typeof expected === "string" ? expected === command : expected.test(command)
-  if (!matches) return
+  if (!matches || (input !== undefined && input !== exchange.input)) return
   mockSsh.calls.push(command)
   if (host !== undefined && archiveStageMovePattern.test(command)) publishInjectedLinks(host)
   throw error
@@ -613,8 +571,106 @@ function answerFromHostLinks(
   if (command === symlinkRemovalCommand && result.code === 0) {
     return { ...result, stdout: removalStdout(host.tree, input) }
   }
-  if (command !== symlinkContainmentProbeCommand) return result
-  return { ...result, stdout: containmentProbeStdout(host.tree, input ?? "") }
+  return result
+}
+
+/**
+ * Issue #219: scripted answers for the post-merge backstop, consumed in call
+ * order. The last answer repeats once the others are used up, so a test only
+ * spells out the rounds that differ.
+ */
+type BackstopScript = {
+  /** Answers of the post-merge listings: the first check, then each re-check. */
+  listings: Array<Partial<ExecResult>>
+  /** Answers of the removal execs, one per round. */
+  removals: Array<Partial<ExecResult>>
+}
+
+/**
+ * Issue #219: take the next scripted answer from a queue, keeping the last one.
+ *
+ * @param queue - The remaining answers, updated in place.
+ * @returns The answer, or undefined when nothing is scripted.
+ */
+function nextScriptedAnswer(queue: Array<Partial<ExecResult>>): ExecResult | undefined {
+  const next = queue.length > 1 ? queue.shift() : queue[0]
+  return next === undefined ? undefined : { code: 0, stderr: "", stdout: "", ...next }
+}
+
+/**
+ * Issue #219: whether an exec is the post-merge backstop listing: the listing
+ * command with the destination as its only entry.
+ *
+ * @param command - The executed command.
+ * @param input - The exec's stdin.
+ * @returns True for the post-merge listing, false for the pre-merge one.
+ */
+function isPostMergeListing(command: string, input: string | undefined): boolean {
+  return command === symlinkListingProbeCommand && input === postMergeListingInput
+}
+
+/**
+ * Issue #219: the scripted backstop answer for an exec, if any.
+ *
+ * @param script - The scripted backstop answers, consumed in place.
+ * @param command - The executed command.
+ * @param input - The exec's stdin.
+ * @returns The scripted result, or undefined to keep the mock's answer.
+ */
+function scriptedBackstopAnswer(
+  script: BackstopScript | undefined,
+  command: string,
+  input: string | undefined
+): ExecResult | undefined {
+  if (script === undefined) return undefined
+  if (isPostMergeListing(command, input)) return nextScriptedAnswer(script.listings)
+  if (command === symlinkRemovalCommand) return nextScriptedAnswer(script.removals)
+  return undefined
+}
+
+/**
+ * Issue #219: the host model, scripted backstop answers and failure injection
+ * the apply harness adds to the mock connection.
+ */
+type ExecHarness = {
+  backstop?: BackstopScript
+  host?: HostLinkRun
+  postMergeListings?: number[]
+  throwOn?: ThrowingExec
+}
+
+/**
+ * Issue #219: run one exec through the harness: record a post-merge listing,
+ * reject the exec the harness should fail, then answer from the mock, the host
+ * model and the scripted backstop answers, in increasing priority.
+ *
+ * @param mockSsh - The mock connection whose calls are recorded.
+ * @param exchange - The exec to run.
+ * @param exchange.command - The command being executed.
+ * @param exchange.options - Stdin and flags passed to exec.
+ * @param exchange.originalExec - The mock's own exec, before the spy.
+ * @param harness - The additions to apply (see {@link recordSymlinkProbes}).
+ * @returns The answer the module sees.
+ */
+async function harnessedExec(
+  mockSsh: MockSsh,
+  exchange: {
+    command: string
+    options: ExecOptions | undefined
+    originalExec: SshConnection["exec"]
+  },
+  harness: ExecHarness
+): Promise<ExecResult> {
+  const { command, options, originalExec } = exchange
+  const { backstop, host } = harness
+  const input = options?.input
+  // Recorded before the exec, so a listing that throws is counted as well.
+  if (isPostMergeListing(command, input)) harness.postMergeListings?.push(mockSsh.calls.length)
+  rejectMatchingExec(mockSsh, { command, input }, harness)
+  const executed = await originalExec(command, options)
+  const modelled =
+    host === undefined ? executed : answerFromHostLinks(host, command, { input, result: executed })
+  return scriptedBackstopAnswer(backstop, command, input) ?? modelled
 }
 
 /**
@@ -624,25 +680,22 @@ function answerFromHostLinks(
  * @param mockSsh - The mock connection to patch.
  * @param hostSymlinks - Absolute host paths the probe reports as symlinks.
  * @param harness - Optional host link model and exec to reject.
- * @param harness.host - Host link model that the merge updates and the containment probe reads.
+ * @param harness.backstop - Issue #219: scripted post-merge listing and removal answers.
+ * @param harness.host - Host link model that the merge updates and both listings read.
+ * @param harness.postMergeListings - Issue #219: collects the position in
+ *   `mockSsh.calls` of every post-merge backstop listing.
  * @param harness.throwOn - Issue #219: an exec that rejects after being recorded.
  * @returns The recorded probes, in call order, with their position in `mockSsh.calls`.
  */
 function recordSymlinkProbes(
   mockSsh: MockSsh,
   hostSymlinks: readonly string[] = [],
-  harness: { host?: HostLinkRun; throwOn?: ThrowingExec } = {}
+  harness: ExecHarness = {}
 ): SymlinkProbeRecord[] {
-  const { host } = harness
   const originalExec = mockSsh.exec.bind(mockSsh)
   const probes: SymlinkProbeRecord[] = []
   vi.spyOn(mockSsh, "exec").mockImplementation(async (command, options) => {
-    rejectMatchingExec(mockSsh, command, harness)
-    const executed = await originalExec(command, options)
-    const result =
-      host === undefined
-        ? executed
-        : answerFromHostLinks(host, command, { input: options?.input, result: executed })
+    const result = await harnessedExec(mockSsh, { command, options, originalExec }, harness)
     if (command !== symlinkProbeCommand && command !== preStagingProbeCommand) return result
     // Issue #219: the pre-staging probe carries its symlink checks as `l:`
     // entries and reports `(check, path)` pairs.
@@ -662,6 +715,11 @@ function recordSymlinkProbes(
 type TarListingApplyRun = {
   markerWrites: () => number
   mockSsh: MockSsh
+  /**
+   * Issue #219: the position in `mockSsh.calls` of every post-merge backstop
+   * listing, in call order: the first check, then each re-check.
+   */
+  postMergeListings: number[]
   probes: SymlinkProbeRecord[]
   result: ModuleResult
   /** Issue #219: what `apply` rejected with; undefined when it returned a result. */
@@ -694,6 +752,13 @@ function markerFor(source: string): string {
 }
 
 type TarListingApplyOptions = {
+  /**
+   * Issue #219: scripted answers of the post-merge listings (first check, then
+   * each re-check); the last one repeats. The pre-merge listing is unaffected.
+   */
+  backstopListings?: ReadonlyArray<Partial<ExecResult>>
+  /** Issue #219: scripted answers of the removal execs, one per round; the last one repeats. */
+  backstopRemovals?: ReadonlyArray<Partial<ExecResult>>
   /** `writeFile` rejects this path, e.g. to fail the containment-flag write. */
   failWrite?: string
   /** Host marker and flag files (see {@link HostLinkRun}); requires `hostLinks`. */
@@ -743,7 +808,17 @@ async function applyTarListing(
           shipped: shippedSymlinks(lines),
           tree: hostLinks,
         }
-  const probes = recordSymlinkProbes(mockSsh, hostSymlinks, { host, throwOn: options.throwOn })
+  const postMergeListings: number[] = []
+  const backstop = {
+    listings: [...(options.backstopListings ?? [])],
+    removals: [...(options.backstopRemovals ?? [])],
+  }
+  const probes = recordSymlinkProbes(mockSsh, hostSymlinks, {
+    backstop,
+    host,
+    postMergeListings,
+    throwOn: options.throwOn,
+  })
   const moduleOptions = options.owner === undefined ? {} : { owner: options.owner }
   let thrown: unknown
   const result = await archive
@@ -753,7 +828,15 @@ async function applyTarListing(
       thrown = error
       return { status: "failed" }
     })
-  return { markerWrites: () => writes.length, mockSsh, probes, result, thrown, writes }
+  return {
+    markerWrites: () => writes.length,
+    mockSsh,
+    postMergeListings,
+    probes,
+    result,
+    thrown,
+    writes,
+  }
 }
 
 /**
@@ -1628,7 +1711,11 @@ describe("archive.extract — apply", () => {
     // what makes the assertion worth having.
     const runWith = async (
       memberCount: number
-    ): Promise<{ containmentProbes: number; listingProbes: number; symlinkProbes: number }> => {
+    ): Promise<{
+      listingProbes: number
+      postMergeListings: number
+      symlinkProbes: number
+    }> => {
       const memberPaths = Array.from(
         { length: memberCount },
         (_value, index) => `app/file-${String(index)}`
@@ -1646,9 +1733,13 @@ describe("archive.extract — apply", () => {
       expect(result.status).toBe("changed")
       const count = (probe: string): number =>
         mockSsh.calls.filter((command) => command === probe).length
+      const listings = mockSsh.execCalls.filter(
+        ({ command }) => command === symlinkListingProbeCommand
+      )
+      const postMerge = listings.filter(({ options }) => options?.input === postMergeListingInput)
       return {
-        containmentProbes: count(symlinkContainmentProbeCommand),
-        listingProbes: count(symlinkListingProbeCommand),
+        listingProbes: listings.length - postMerge.length,
+        postMergeListings: postMerge.length,
         symlinkProbes: count(symlinkProbeCommand),
       }
     }
@@ -1658,10 +1749,11 @@ describe("archive.extract — apply", () => {
 
     expect(many.symlinkProbes).toBe(few.symlinkProbes)
     expect(many.symlinkProbes).toBeLessThanOrEqual(4)
-    // Issue #219: the post-merge containment check walks the whole tree in one
-    // exec, so it adds exactly one round trip regardless of member count.
-    expect(few.containmentProbes).toBe(1)
-    expect(many.containmentProbes).toBe(1)
+    // Issue #219: the post-merge backstop lists the whole tree in one exec and
+    // resolves it in TypeScript, so a converged tree adds exactly one round
+    // trip regardless of member count.
+    expect(few.postMergeListings).toBe(1)
+    expect(many.postMergeListings).toBe(1)
     // Issue #219: the pre-merge listing of host symlinks is one exec as well.
     expect(few.listingProbes).toBe(1)
     expect(many.listingProbes).toBe(1)
@@ -2692,7 +2784,9 @@ describe("archive.extract — apply", () => {
 
       expect(extractionSummary(first)).toStrictEqual(extractedThroughStaging)
       const firstCalls = first.mockSsh.calls
-      const firstContainment = firstCalls.indexOf(symlinkContainmentProbeCommand)
+      // Issue #219: one post-merge listing on a converged tree.
+      expect(first.postMergeListings).toHaveLength(1)
+      const [firstContainment] = first.postMergeListings
       const firstCleanup = firstCalls.findIndex((command) =>
         archiveStageCleanupPattern.test(command)
       )
@@ -2732,7 +2826,7 @@ describe("archive.extract — apply", () => {
       expect(secondCalls).toContain(symlinkListingProbeCommand)
       expect(secondCalls.some((command) => archiveStageMktempPattern.test(command))).toBe(false)
       expect(secondCalls.some((command) => archiveStageMovePattern.test(command))).toBe(false)
-      expect(secondCalls).not.toContain(symlinkContainmentProbeCommand)
+      expect(second.postMergeListings).toStrictEqual([])
       expect(secondCalls).not.toContain(batchedChownCommand)
       expect(second.writes.map(({ remotePath }) => remotePath)).toStrictEqual([containmentFlag])
       // Issue #219: the flag is established before the pre-merge listing.
@@ -2781,7 +2875,7 @@ describe("archive.extract — apply", () => {
       const secondCalls = second.mockSsh.calls
       expect(secondCalls.some((command) => archiveStageMktempPattern.test(command))).toBe(false)
       expect(secondCalls.some((command) => archiveStageMovePattern.test(command))).toBe(false)
-      expect(secondCalls).not.toContain(symlinkContainmentProbeCommand)
+      expect(second.postMergeListings).toStrictEqual([])
       expect(secondCalls).not.toContain(batchedChownCommand)
       expect([...hostLinks]).toStrictEqual([[upLink, ".."]])
       expect(files.has(containmentFlag)).toBe(false)
@@ -2986,7 +3080,7 @@ describe("archive.extract — apply", () => {
 
       expect(extractionSummary(run)).toStrictEqual({
         error: expect.stringContaining(
-          `[archive.extract] refusing to complete extraction of ${src}: symlink ${JSON.stringify(escapingLink)} resolves to "/opt", outside destination ${JSON.stringify(destination)}`
+          `[archive.extract] refusing to complete extraction of ${src}: symlink ${JSON.stringify(escapingLink)} -> "up/.." resolves outside destination ${JSON.stringify(destination)}; every symlink under the destination is checked after the merge, including links this archive did not ship; removed escaping symlinks: ${JSON.stringify(escapingLink)}; re-check found no escaping symlinks`
         ),
         markerWritten: true,
         status: "failed",
@@ -2995,8 +3089,11 @@ describe("archive.extract — apply", () => {
       const { calls } = run.mockSsh
       const listing = calls.indexOf(symlinkListingProbeCommand)
       const merge = calls.findIndex((command) => archiveStageMovePattern.test(command))
-      const containment = calls.indexOf(symlinkContainmentProbeCommand)
+      // Issue #219: the backstop lists, removes, and lists again.
+      expect(run.postMergeListings).toHaveLength(2)
+      const [containment] = run.postMergeListings
       expect(listing).toBeGreaterThanOrEqual(0)
+      expect(listing).toBeLessThan(containment)
       expect(merge).toBeGreaterThan(listing)
       expect(containment).toBeGreaterThan(merge)
       expect(calls).not.toContain(batchedChownCommand)
@@ -4042,73 +4139,362 @@ describe("archive.extract containment-failure flag (Issue #219)", () => {
     expect(run.result.status).toBe("failed")
     expect(run.result.error?.message).toContain("failed to write containment-failure flag")
     expect(run.mockSsh.calls.some((command) => archiveStageMovePattern.test(command))).toBe(false)
-    expect(run.mockSsh.calls).not.toContain(symlinkContainmentProbeCommand)
+    expect(run.mockSsh.calls).not.toContain(symlinkListingProbeCommand)
+    expect(run.postMergeListings).toStrictEqual([])
     expect([...hostLinks]).toStrictEqual([])
   })
 })
 
-describe("validateSymlinkContainment (Issue #219)", () => {
+/**
+ * Issue #219: NUL-framed output of `(first, second)` field pairs, as the
+ * listing probe (`(link, stored target)`) and the removal script
+ * (`(link, outcome)`) print them.
+ *
+ * @param pairs - The field pairs.
+ * @returns The probe's stdout.
+ */
+function nulPairs(...pairs: ReadonlyArray<readonly [string, string]>): string {
+  return pairs
+    .flat()
+    .map((field) => `${field}\u0000`)
+    .join("")
+}
+
+/**
+ * Issue #219: a connection that answers the backstop's listing and removal
+ * execs from scripted queues and records every exec. The last answer of a
+ * queue repeats; an `Error` answer makes that exec reject.
+ *
+ * @param script - The scripted answers.
+ * @param script.listings - Answers of the listings: the first check, then each re-check.
+ * @param script.removals - Answers of the removal execs, one per round.
+ * @returns The connection and its recorded execs.
+ */
+function scriptedBackstopConnection(script: {
+  listings: Array<Error | Partial<ExecResult>>
+  removals?: Array<Error | Partial<ExecResult>>
+}): { conn: SshConnection; execCalls: ExecCall[] } {
+  const execCalls: ExecCall[] = []
+  const queues = new Map([
+    [symlinkListingProbeCommand, [...script.listings]],
+    [symlinkRemovalCommand, [...(script.removals ?? [])]],
+  ])
+  const conn = {
+    async exec(command: string, options?: ExecOptions): Promise<ExecResult> {
+      await Promise.resolve()
+      execCalls.push({ command, options })
+      const queue = queues.get(command) ?? []
+      const next = queue.length > 1 ? queue.shift() : queue[0]
+      if (next === undefined) throw new Error(`unscripted exec: ${command}`)
+      if (next instanceof Error) throw next
+      return { code: 0, stderr: "", stdout: "", ...next }
+    },
+  } as unknown as SshConnection
+  return { conn, execCalls }
+}
+
+describe("enforceSymlinkContainment (Issue #219)", () => {
   const refusal = `[archive.extract] refusing to complete extraction of ${src}: `
   const checkedAfterMerge =
     "every symlink under the destination is checked after the merge, including links this archive did not ship"
+  const listingCall: ExecCall = {
+    command: symlinkListingProbeCommand,
+    options: {
+      ignoreExitCode: true,
+      input: postMergeListingInput,
+      maxOutputBytes: ARCHIVE_CAPTURE_LIMIT_BYTES,
+      silent: true,
+    },
+  }
+  const removalCall = (...links: string[]): ExecCall => ({
+    command: symlinkRemovalCommand,
+    options: {
+      ignoreExitCode: true,
+      input: links.map((link) => `${link}\u0000`).join(""),
+      silent: true,
+    },
+  })
+  const etc = [`${destination}/a/etc`, "/etc"] as const
+  const escapesEtc = `symlink "/opt/app/a/etc" -> "/etc" resolves outside destination "/opt/app"`
 
-  async function validateWith(
-    result: Partial<ExecResult>
-  ): Promise<{ mockSsh: MockSsh; outcome: ModuleResult | null }> {
-    const mockSsh = createMockSsh(
-      {},
-      { responseStubs: [{ command: symlinkContainmentProbeCommand, result }] }
-    )
-    const outcome = await validateSymlinkContainment(mockSsh, { destination, source: src })
-    return { mockSsh, outcome }
+  async function enforce(
+    script: Parameters<typeof scriptedBackstopConnection>[0]
+  ): Promise<{ execCalls: ExecCall[]; message: string | undefined; outcome: ModuleResult | null }> {
+    const { conn, execCalls } = scriptedBackstopConnection(script)
+    const outcome = await enforceSymlinkContainment(conn, { destination, source: src })
+    return { execCalls, message: outcome?.error?.message, outcome }
   }
 
-  it("probes the destination in one exec and accepts a tree that reports nothing", async () => {
-    const { mockSsh, outcome } = await validateWith({ code: 0, stdout: "" })
+  it("lists the destination in one exec and accepts a tree whose links all stay inside", async () => {
+    const { execCalls, outcome } = await enforce({
+      listings: [
+        {
+          stdout: nulPairs(
+            [`${destination}/a/lib64`, "lib"],
+            [`${destination}/a/up`, ".."],
+            [`${destination}/a/abs`, `${destination}/a/lib`],
+            [`${destination}/a/dangling`, "missing/y/z"],
+            [`${destination}/a/esc`, "up/a"]
+          ),
+        },
+      ],
+    })
 
     expect(outcome).toBeNull()
-    expect(mockSsh.execCalls).toStrictEqual([
-      {
-        command: symlinkContainmentProbeCommand,
-        options: { ignoreExitCode: true, input: `${destination}\u0000`, silent: true },
-      },
-    ])
+    expect(execCalls).toStrictEqual([listingCall])
+  })
+
+  it("keeps the success path at exactly one exec however many links the tree holds", async () => {
+    const execCounts = await Promise.all(
+      [1, 2000].map(async (count) => {
+        const links = Array.from(
+          { length: count },
+          (_value, index) => [`${destination}/d${String(index)}/l`, "../f"] as const
+        )
+        const { execCalls, outcome } = await enforce({
+          listings: [{ stdout: nulPairs(...links) }],
+        })
+        expect(outcome).toBeNull()
+        return execCalls.length
+      })
+    )
+
+    expect(execCounts).toStrictEqual([1, 1])
   })
 
   it.each([
     {
-      message: `symlink containment check failed: find: '/opt/app/x': Permission denied`,
-      name: "a probe that exits non-zero",
-      result: { code: 1, stderr: "find: '/opt/app/x': Permission denied\n" },
+      detail: "sh: 1: readlink: not found",
+      name: "a non-zero exit, e.g. a missing readlink",
+      response: { code: 1, stderr: "sh: 1: readlink: not found\n" },
     },
     {
-      message: `symlink containment check failed: probe output exceeded the captured-output cap of ${String(DEFAULT_MAX_OUTPUT_BYTES)} bytes; refusing to evaluate a truncated result`,
-      name: "truncated output",
-      result: {
-        code: 0,
-        stdout: `/opt/app/l\u0000/etc\u0000/opt/app/m${CAPTURE_TRUNCATION_MARKER}`,
+      detail: "exit code 1",
+      name: "a non-zero exit without output",
+      response: { code: 1 },
+    },
+    {
+      detail: `probe output exceeded the captured-output cap of ${String(ARCHIVE_CAPTURE_LIMIT_BYTES)} bytes; refusing to evaluate a truncated result`,
+      name: "a truncated capture",
+      response: {
+        stdout: `${destination}/a/etc\u0000/etc\u0000${destination}/a/e${CAPTURE_TRUNCATION_MARKER}`,
       },
     },
     {
-      message:
-        "symlink containment check failed: probe returned 3 fields, expected (link, resolved) pairs",
+      detail: 'probe returned 3 fields, expected (link, target) or ("", directory) pairs',
       name: "an odd field count",
-      result: { code: 0, stdout: "/opt/app/l\u0000/etc\u0000/opt/app/m\u0000" },
+      response: { stdout: `${destination}/a/etc\u0000/etc\u0000${destination}/b\u0000` },
     },
     {
-      message: `symlink "/opt/app/l" could not be resolved; ${checkedAfterMerge}`,
-      name: "a link that could not be resolved",
-      result: { code: 0, stdout: "/opt/app/l\u0000\u0000" },
+      detail: `probe reported directory "${destination}/a", which is not a requested member path below the destination`,
+      name: "a directory hit, which the backstop never requests",
+      response: { stdout: nulPairs(["", `${destination}/a`]) },
     },
     {
-      message: `symlink "/opt/app/l" resolves to "/etc", outside destination "/opt/app"; ${checkedAfterMerge} (and 1 more)`,
-      name: "several escaping links",
-      result: { code: 0, stdout: "/opt/app/l\u0000/etc\u0000/opt/app/m\u0000/root\u0000" },
+      detail: 'probe reported "/opt/other/l", which is not below the destination',
+      name: "a link outside the destination",
+      response: { stdout: nulPairs(["/opt/other/l", "x"]) },
     },
-  ])("fails closed on $name", async ({ message, result }) => {
-    const { outcome } = await validateWith(result)
+    {
+      detail: `probe reported "${alternateDestination}/l", which is not below the destination`,
+      name: "a link in a sibling sharing the destination's prefix",
+      response: { stdout: nulPairs([`${alternateDestination}/l`, "/etc"]) },
+    },
+    {
+      detail: `probe reported an empty target for symlink "${destination}/l"; readlink output is unusable`,
+      name: "an empty stored target",
+      response: { stdout: nulPairs([`${destination}/l`, ""], etc) },
+    },
+  ])("fails closed and removes nothing on a listing with $name", async ({ detail, response }) => {
+    const { execCalls, message } = await enforce({ listings: [response] })
 
-    expect(outcome).toStrictEqual({ error: new Error(`${refusal}${message}`), status: "failed" })
+    expect(message).toBe(`${refusal}symlink containment check failed: ${detail}`)
+    expect(execCalls).toStrictEqual([listingCall])
+  })
+
+  it("removes an escaping link in one exec and re-lists once: listing, removal, listing", async () => {
+    const inside = [`${destination}/a/in`, "f"] as const
+    const { execCalls, message } = await enforce({
+      listings: [{ stdout: nulPairs(etc, inside) }, { stdout: nulPairs(inside) }],
+      removals: [{ stdout: nulPairs([etc[0], SYMLINK_REMOVED_OUTCOME]) }],
+    })
+
+    expect(message).toBe(
+      `${refusal}${escapesEtc}; ${checkedAfterMerge}; removed escaping symlinks: "/opt/app/a/etc"; re-check found no escaping symlinks`
+    )
+    expect(execCalls).toStrictEqual([listingCall, removalCall(etc[0]), listingCall])
+  })
+
+  it("removes links beyond the resolution limit, cycles included, and names them with the limit wording", async () => {
+    // `x -> y`, `y -> x` is a cycle and `b -> b/..` extends itself on every
+    // hop; GNU `realpath` never returns on the latter. The resolver stops both.
+    const links = [
+      [`${destination}/x`, "y"],
+      [`${destination}/y`, "x"],
+      [`${destination}/b`, "b/.."],
+    ] as const
+    const { execCalls, message } = await enforce({
+      listings: [{ stdout: nulPairs(...links) }, { stdout: "" }],
+      removals: [
+        { stdout: nulPairs(...links.map(([link]) => [link, SYMLINK_REMOVED_OUTCOME] as const)) },
+      ],
+    })
+
+    expect(message).toBe(
+      `${refusal}symlink "/opt/app/x" -> "y" cannot be resolved within the symlink resolution limit; ${checkedAfterMerge} (and 2 more); removed escaping symlinks: "/opt/app/x", "/opt/app/y", "/opt/app/b"; re-check found no escaping symlinks`
+    )
+    expect(execCalls).toStrictEqual([
+      listingCall,
+      removalCall(`${destination}/x`, `${destination}/y`, `${destination}/b`),
+      listingCall,
+    ])
+  })
+
+  it("names every remaining violation when the re-check still reports some", async () => {
+    const root = [`${destination}/a/root`, "../.."] as const
+    const loop = [`${destination}/loop`, "loop"] as const
+    const { execCalls, message } = await enforce({
+      listings: [{ stdout: nulPairs(etc, root, loop) }],
+      removals: [{ code: 1, stderr: "xargs: sh: not found" }],
+    })
+
+    const unknown = "removal outcome unknown: xargs: sh: not found"
+    expect(message).toBe(
+      `${refusal}${escapesEtc}; ${checkedAfterMerge} (and 2 more); could not remove: "/opt/app/a/etc" (${unknown}), "/opt/app/a/root" (${unknown}), "/opt/app/loop" (${unknown}); re-check still reports ${escapesEtc}, symlink "/opt/app/a/root" -> "../.." resolves outside destination "/opt/app", symlink "/opt/app/loop" -> "loop" cannot be resolved within the symlink resolution limit`
+    )
+    // A round that removed nothing ends the rounds.
+    expect(execCalls).toHaveLength(3)
+  })
+
+  it("runs a second round when the re-check reveals a new escaping link, then stops once clean", async () => {
+    // The host gains `a/new -> ../..` while the first round runs.
+    const inside = [`${destination}/a/f`, "g"] as const
+    const created = [`${destination}/a/new`, "../.."] as const
+    const { execCalls, message } = await enforce({
+      listings: [
+        { stdout: nulPairs(etc, inside) },
+        { stdout: nulPairs(inside, created) },
+        { stdout: nulPairs(inside) },
+      ],
+      removals: [
+        { stdout: nulPairs([etc[0], SYMLINK_REMOVED_OUTCOME]) },
+        { stdout: nulPairs([created[0], SYMLINK_REMOVED_OUTCOME]) },
+      ],
+    })
+
+    expect(message).toBe(
+      `${refusal}${escapesEtc}; ${checkedAfterMerge}; removed escaping symlinks: "/opt/app/a/etc", "/opt/app/a/new"; re-check found no escaping symlinks`
+    )
+    expect(execCalls).toStrictEqual([
+      listingCall,
+      removalCall(etc[0]),
+      listingCall,
+      removalCall(created[0]),
+      listingCall,
+    ])
+  })
+
+  it("drops a link from 'could not remove' once a later round removed it", async () => {
+    const other = [`${destination}/a/other`, "/root"] as const
+    const { message } = await enforce({
+      listings: [{ stdout: nulPairs(etc, other) }, { stdout: nulPairs(other) }, {}],
+      removals: [
+        {
+          stdout: nulPairs([etc[0], SYMLINK_REMOVED_OUTCOME], [other[0], "rm failed"]),
+        },
+        { stdout: nulPairs([other[0], SYMLINK_REMOVED_OUTCOME]) },
+      ],
+    })
+
+    expect(message).toBe(
+      `${refusal}${escapesEtc}; ${checkedAfterMerge} (and 1 more); removed escaping symlinks: "/opt/app/a/etc", "/opt/app/a/other"; re-check found no escaping symlinks`
+    )
+  })
+
+  it("stops after a round that removed nothing and reports the latest reason", async () => {
+    const inside = [
+      [`${destination}/a/x`, "f"],
+      [`${destination}/a/y`, "f"],
+    ] as const
+    const { execCalls, message } = await enforce({
+      listings: [{ stdout: nulPairs(etc, ...inside) }],
+      removals: [{ stdout: nulPairs([etc[0], "still a symlink after rm"]) }],
+    })
+
+    expect(message).toBe(
+      `${refusal}${escapesEtc}; ${checkedAfterMerge}; could not remove: "/opt/app/a/etc" (still a symlink after rm); re-check still reports ${escapesEtc}`
+    )
+    // Three links would allow three rounds; no progress stops after one.
+    expect(execCalls).toStrictEqual([listingCall, removalCall(etc[0]), listingCall])
+  })
+
+  it("stops when a re-check fails and reports why", async () => {
+    const inside = [
+      [`${destination}/a/x`, "f"],
+      [`${destination}/a/y`, "f"],
+    ] as const
+    const { execCalls, message } = await enforce({
+      listings: [
+        { stdout: nulPairs(etc, ...inside) },
+        { code: 1, stderr: "find: '/opt/app/a': Permission denied" },
+      ],
+      removals: [{ stdout: nulPairs([etc[0], SYMLINK_REMOVED_OUTCOME]) }],
+    })
+
+    expect(message).toBe(
+      `${refusal}${escapesEtc}; ${checkedAfterMerge}; removed escaping symlinks: "/opt/app/a/etc"; re-check failed: find: '/opt/app/a': Permission denied`
+    )
+    expect(execCalls).toStrictEqual([listingCall, removalCall(etc[0]), listingCall])
+  })
+
+  it.each([
+    { linkCount: 1, rounds: 1 },
+    { linkCount: 3, rounds: 3 },
+  ])(
+    "stops after $rounds round(s) when the first listing had $linkCount link(s) and the host keeps adding escaping links",
+    async ({ linkCount, rounds }) => {
+      const escaping = (round: number): readonly [string, string] => [
+        `${destination}/e${String(round)}`,
+        "/etc",
+      ]
+      const inside = Array.from(
+        { length: linkCount - 1 },
+        (_value, index) => [`${destination}/in${String(index)}`, "f"] as const
+      )
+      const script = Array.from({ length: rounds + 1 }, (_value, round) => ({
+        listing: { stdout: nulPairs(escaping(round), ...inside) },
+        removal: { stdout: nulPairs([escaping(round)[0], SYMLINK_REMOVED_OUTCOME]) },
+      }))
+
+      const { execCalls, message } = await enforce({
+        listings: script.map(({ listing }) => listing),
+        removals: script.map(({ removal }) => removal),
+      })
+
+      expect(execCalls).toHaveLength(1 + 2 * rounds)
+      expect(execCalls.filter(({ command }) => command === symlinkRemovalCommand)).toStrictEqual(
+        script.slice(0, rounds).map((_entry, round) => removalCall(escaping(round)[0]))
+      )
+      const removed = script
+        .slice(0, rounds)
+        .map((_entry, round) => JSON.stringify(escaping(round)[0]))
+        .join(", ")
+      const last = escaping(rounds)[0]
+      expect(message).toBe(
+        `${refusal}symlink "/opt/app/e0" -> "/etc" resolves outside destination "/opt/app"; ${checkedAfterMerge}; removed escaping symlinks: ${removed}; re-check still reports symlink ${JSON.stringify(last)} -> "/etc" resolves outside destination "/opt/app"`
+      )
+    }
+  )
+
+  it("rejects when the listing exec throws, so the caller can report it", async () => {
+    const { conn, execCalls } = scriptedBackstopConnection({
+      listings: [new Error("channel closed")],
+    })
+
+    await expect(enforceSymlinkContainment(conn, { destination, source: src })).rejects.toThrow(
+      "channel closed"
+    )
+    expect(execCalls).toStrictEqual([listingCall])
   })
 })
 
@@ -4129,12 +4515,16 @@ describe("archive.extract containment flag lifecycle (Issue #219)", () => {
     const { calls } = run.mockSsh
     const [flagWrite, ...markerWrites] = run.writes
     expect(flagWrite.remotePath).toBe(containmentFlag)
+    // Issue #219: the pre-merge and the post-merge listing issue the same
+    // command; exactly one of each runs on a converged tree.
+    expect(run.postMergeListings).toHaveLength(1)
+    expect(calls.filter((command) => command === symlinkListingProbeCommand)).toHaveLength(2)
     const [listing, mktemp, extract, merge, containment, chown] = [
       calls.indexOf(symlinkListingProbeCommand),
       calls.findIndex((command) => archiveStageMktempPattern.test(command)),
       calls.indexOf(stagedTarExtractCommand),
       calls.findIndex((command) => archiveStageMovePattern.test(command)),
-      calls.indexOf(symlinkContainmentProbeCommand),
+      run.postMergeListings[0],
       calls.indexOf(batchedChownCommand),
     ]
     expect(listing).toBeGreaterThanOrEqual(0)
@@ -4256,11 +4646,14 @@ function countCalls(run: TarListingApplyRun, command: string): number {
 
 describe("archive.extract post-merge backstop (Issue #219)", () => {
   const escapingLink = `${destination}/a/etc`
+  const rootLink = `${destination}/a/root`
   const lines = [tarDirectoryLine("a/"), tarFileLine("a/f")]
   const backstopRefusal = `[archive.extract] refusing to complete extraction of ${src}: `
   const checkedAfterMerge =
     "every symlink under the destination is checked after the merge, including links this archive did not ship"
-  const removedEtc = `${backstopRefusal}symlink ${JSON.stringify(escapingLink)} resolves to "/etc", outside destination ${JSON.stringify(destination)}; ${checkedAfterMerge}; removed escaping symlinks: ${JSON.stringify(escapingLink)}; re-check found no escaping symlinks`
+  const escapesEtc = `symlink ${JSON.stringify(escapingLink)} -> "/etc" resolves outside destination ${JSON.stringify(destination)}`
+  const escapesRoot = `symlink ${JSON.stringify(rootLink)} -> "../.." resolves outside destination ${JSON.stringify(destination)}`
+  const removedEtc = `${backstopRefusal}${escapesEtc}; ${checkedAfterMerge}; removed escaping symlinks: ${JSON.stringify(escapingLink)}; re-check found no escaping symlinks`
   const cpFailure = "cp: cannot overwrite directory '/opt/app/a/b' with non-directory"
 
   it("runs after a failed merge, removes the escaping link and joins both messages", async () => {
@@ -4279,8 +4672,9 @@ describe("archive.extract post-merge backstop (Issue #219)", () => {
     )
     const { calls } = run.mockSsh
     const merge = calls.findIndex((command) => archiveStageMovePattern.test(command))
-    expect(calls.indexOf(symlinkContainmentProbeCommand)).toBeGreaterThan(merge)
-    expect(countCalls(run, symlinkContainmentProbeCommand)).toBe(2)
+    // Listing, removal, re-listing.
+    expect(run.postMergeListings).toHaveLength(2)
+    expect(run.postMergeListings[0]).toBeGreaterThan(merge)
     expect(countCalls(run, symlinkRemovalCommand)).toBe(1)
     expect(calls).not.toContain(batchedChownCommand)
     expect(run.writes.map(({ remotePath }) => remotePath)).toStrictEqual([containmentFlag])
@@ -4306,7 +4700,7 @@ describe("archive.extract post-merge backstop (Issue #219)", () => {
     expect(cleanup).toBeGreaterThan(
       calls.findIndex((command) => archiveStageMovePattern.test(command))
     )
-    expect(calls.indexOf(symlinkContainmentProbeCommand)).toBeGreaterThan(cleanup)
+    expect(run.postMergeListings[0]).toBeGreaterThan(cleanup)
     expect([...hostLinks]).toStrictEqual([])
   })
 
@@ -4319,12 +4713,11 @@ describe("archive.extract post-merge backstop (Issue #219)", () => {
     expect(run.result.error?.message).toBe(
       `[archive.extract] failed to copy extracted files into ${destination} (exit code 1)\n${cpFailure}`
     )
-    expect(countCalls(run, symlinkContainmentProbeCommand)).toBe(1)
+    expect(run.postMergeListings).toHaveLength(1)
     expect(countCalls(run, symlinkRemovalCommand)).toBe(0)
   })
 
-  it("removes only the reported links in one exec and re-probes exactly once", async () => {
-    const rootLink = `${destination}/a/root`
+  it("removes only the violating links in one exec and re-lists exactly once", async () => {
     const insideLink = `${destination}/a/inside`
     const hostLinks: HostLinkTree = new Map([[`${destination}/a/old`, "f"]])
 
@@ -4338,7 +4731,7 @@ describe("archive.extract post-merge backstop (Issue #219)", () => {
     })
 
     expect(run.result.error?.message).toBe(
-      `${backstopRefusal}symlink ${JSON.stringify(escapingLink)} resolves to "/etc", outside destination ${JSON.stringify(destination)}; ${checkedAfterMerge} (and 1 more); removed escaping symlinks: ${JSON.stringify(escapingLink)}, ${JSON.stringify(rootLink)}; re-check found no escaping symlinks`
+      `${backstopRefusal}${escapesEtc}; ${checkedAfterMerge} (and 1 more); removed escaping symlinks: ${JSON.stringify(escapingLink)}, ${JSON.stringify(rootLink)}; re-check found no escaping symlinks`
     )
     const removals = run.mockSsh.execCalls.filter(
       ({ command }) => command === symlinkRemovalCommand
@@ -4353,72 +4746,209 @@ describe("archive.extract post-merge backstop (Issue #219)", () => {
         },
       },
     ])
-    const { calls } = run.mockSsh
-    const removal = calls.indexOf(symlinkRemovalCommand)
-    expect(countCalls(run, symlinkContainmentProbeCommand)).toBe(2)
-    expect(calls.indexOf(symlinkContainmentProbeCommand)).toBeLessThan(removal)
-    expect(calls.lastIndexOf(symlinkContainmentProbeCommand)).toBeGreaterThan(removal)
+    const removal = run.mockSsh.calls.indexOf(symlinkRemovalCommand)
+    expect(run.postMergeListings).toHaveLength(2)
+    expect(run.postMergeListings[0]).toBeLessThan(removal)
+    expect(run.postMergeListings[1]).toBeGreaterThan(removal)
     expect([...hostLinks.keys()].toSorted()).toStrictEqual([insideLink, `${destination}/a/old`])
-    expect(calls).not.toContain(`rm -f -- '${containmentFlag}'`)
-  })
-
-  const twoEscapes = `${escapingLink}\u0000/etc\u0000${destination}/a/root\u0000/root\u0000`
-  const stillReports = `re-check still reports symlink ${JSON.stringify(escapingLink)} resolves to "/etc", outside destination ${JSON.stringify(destination)} (and 1 more)`
-
-  it.each([
-    {
-      name: "a failed removal exec",
-      removal: { code: 1, stderr: "xargs: sh: not found" },
-      summary: `could not remove: ${JSON.stringify(escapingLink)} (removal outcome unknown: xargs: sh: not found), "/opt/app/a/root" (removal outcome unknown: xargs: sh: not found)`,
-    },
-    {
-      name: "a partial removal",
-      removal: {
-        code: 0,
-        stdout: `${escapingLink}\u0000removed\u0000/opt/app/a/root\u0000rm failed\u0000`,
-      },
-      summary: `removed escaping symlinks: ${JSON.stringify(escapingLink)}; could not remove: "/opt/app/a/root" (rm failed)`,
-    },
-    {
-      name: "removal output with broken framing",
-      removal: { code: 0, stdout: `${escapingLink}\u0000removed\u0000/opt/app/a/root\u0000` },
-      summary: `could not remove: ${JSON.stringify(escapingLink)} (removal outcome unknown: removal returned 3 fields, expected (link, outcome) pairs), "/opt/app/a/root" (removal outcome unknown: removal returned 3 fields, expected (link, outcome) pairs)`,
-    },
-  ])("fails and reports $name in the message", async ({ removal, summary }) => {
-    const run = await applyTarListing(lines, {
-      responses: {
-        [symlinkContainmentProbeCommand]: { code: 0, stdout: twoEscapes },
-        [symlinkRemovalCommand]: removal,
-      },
-    })
-
-    expect(run.result.status).toBe("failed")
-    expect(run.result.error?.message).toBe(
-      `${backstopRefusal}symlink ${JSON.stringify(escapingLink)} resolves to "/etc", outside destination ${JSON.stringify(destination)}; ${checkedAfterMerge} (and 1 more); ${summary}; ${stillReports}`
-    )
-    expect(countCalls(run, symlinkRemovalCommand)).toBe(1)
-    expect(countCalls(run, symlinkContainmentProbeCommand)).toBe(2)
     expect(run.mockSsh.calls).not.toContain(`rm -f -- '${containmentFlag}'`)
   })
 
-  it("never hands a non-normalized or outside link to the removal exec", async () => {
+  const twoEscapes = { stdout: `${escapingLink}\u0000/etc\u0000${rootLink}\u0000../..\u0000` }
+  const rootOnly = { stdout: `${rootLink}\u0000../..\u0000` }
+  const unknownOutcome = (reason: string): string =>
+    `could not remove: ${JSON.stringify(escapingLink)} (removal outcome unknown: ${reason}), ${JSON.stringify(rootLink)} (removal outcome unknown: ${reason})`
+
+  it.each([
+    {
+      listings: [twoEscapes],
+      name: "a failed removal exec",
+      removalCount: 1,
+      removals: [{ code: 1, stderr: "xargs: sh: not found" }],
+      summary: `${unknownOutcome("xargs: sh: not found")}; re-check still reports ${escapesEtc}, ${escapesRoot}`,
+    },
+    {
+      // Round 1 removes `a/etc`; round 2 retries `a/root` and fails again.
+      listings: [twoEscapes, rootOnly],
+      name: "a partial removal",
+      removalCount: 2,
+      removals: [
+        { stdout: `${escapingLink}\u0000removed\u0000${rootLink}\u0000rm failed\u0000` },
+        { stdout: `${rootLink}\u0000rm failed\u0000` },
+      ],
+      summary: `removed escaping symlinks: ${JSON.stringify(escapingLink)}; could not remove: ${JSON.stringify(rootLink)} (rm failed); re-check still reports ${escapesRoot}`,
+    },
+    {
+      listings: [twoEscapes],
+      name: "removal output with broken framing",
+      removalCount: 1,
+      removals: [{ stdout: `${escapingLink}\u0000removed\u0000${rootLink}\u0000` }],
+      summary: `${unknownOutcome("removal returned 3 fields, expected (link, outcome) pairs")}; re-check still reports ${escapesEtc}, ${escapesRoot}`,
+    },
+  ])(
+    "fails and reports $name in the message",
+    async ({ listings, removalCount, removals, summary }) => {
+      const run = await applyTarListing(lines, {
+        backstopListings: listings,
+        backstopRemovals: removals,
+      })
+
+      expect(run.result.status).toBe("failed")
+      expect(run.result.error?.message).toBe(
+        `${backstopRefusal}${escapesEtc}; ${checkedAfterMerge} (and 1 more); ${summary}`
+      )
+      expect(countCalls(run, symlinkRemovalCommand)).toBe(removalCount)
+      expect(run.postMergeListings).toHaveLength(removalCount + 1)
+      expect(run.mockSsh.calls).not.toContain(`rm -f -- '${containmentFlag}'`)
+    }
+  )
+
+  it("never hands a non-normalized link to the removal exec", async () => {
+    // A listed path below the destination whose key is not normalized is
+    // still judged, but the TypeScript vetting keeps it from the removal exec.
     const dotted = `${destination}/../etc-link`
-    const sibling = `${alternateDestination}/l`
+    const doubled = `${destination}//l`
 
     const run = await applyTarListing(lines, {
-      responses: {
-        [symlinkContainmentProbeCommand]: {
-          code: 0,
-          stdout: `${dotted}\u0000/etc-link\u0000${sibling}\u0000/etc\u0000`,
-        },
-      },
+      backstopListings: [{ stdout: `${dotted}\u0000/etc-link\u0000${doubled}\u0000/etc\u0000` }],
     })
 
     expect(run.result.error?.message).toContain(
-      `; could not remove: ${JSON.stringify(dotted)} (path is not normalized), ${JSON.stringify(sibling)} (path is not strictly below the destination); re-check still reports`
+      `; could not remove: ${JSON.stringify(dotted)} (path is not normalized), ${JSON.stringify(doubled)} (path is not normalized); re-check still reports`
     )
     expect(countCalls(run, symlinkRemovalCommand)).toBe(0)
+    expect(run.postMergeListings).toHaveLength(2)
   })
+
+  const channelClosed = `${backstopRefusal}symlink containment check failed: channel closed`
+
+  it.each([
+    {
+      expected: `[archive.extract] failed to copy extracted files into ${destination} (exit code 1)\n${cpFailure}; ${channelClosed}`,
+      name: "the listing after a failed merge",
+      options: (): TarListingApplyOptions => ({
+        responseStubs: [
+          { command: archiveStageMovePattern, result: { code: 1, stderr: cpFailure } },
+        ],
+        throwOn: {
+          command: symlinkListingProbeCommand,
+          error: new Error("channel closed"),
+          input: postMergeListingInput,
+        },
+      }),
+    },
+    {
+      expected: channelClosed,
+      name: "the listing after a successful merge",
+      options: (): TarListingApplyOptions => ({
+        throwOn: {
+          command: symlinkListingProbeCommand,
+          error: new Error("channel closed"),
+          input: postMergeListingInput,
+        },
+      }),
+    },
+    {
+      expected: channelClosed,
+      name: "the removal exec",
+      options: (): TarListingApplyOptions => ({
+        injectedOnMerge: [[escapingLink, "/etc"]],
+        throwOn: { command: symlinkRemovalCommand, error: new Error("channel closed") },
+      }),
+    },
+  ])(
+    "fails with the containment check reason and keeps the flag when $name throws",
+    async ({ expected, options }) => {
+      const files = new Map<string, string>()
+      const hostLinks: HostLinkTree = new Map()
+
+      const run = await applyTarListing(lines, {
+        ...options(),
+        files,
+        hostLinks,
+        owner: "www-data:www-data",
+      })
+
+      expect(run.thrown).toBeUndefined()
+      expect(run.result.status).toBe("failed")
+      expect(run.result.error?.message).toBe(expected)
+      expect(run.postMergeListings).toHaveLength(1)
+      expect(run.mockSsh.calls).not.toContain(batchedChownCommand)
+      expect(run.mockSsh.calls).not.toContain(`rm -f -- '${containmentFlag}'`)
+      expect(run.writes.map(({ remotePath }) => remotePath)).toStrictEqual([containmentFlag])
+      expect(files.has(containmentFlag)).toBe(true)
+    }
+  )
+})
+
+describe("archive.extract bounded staging merge (Issue #219)", () => {
+  it("keeps the remote bound strictly below the client timeout", () => {
+    const { clientTimeoutMs, killAfterSeconds, timeoutSeconds } = STAGING_MERGE_TIME_LIMITS
+
+    expect(STAGING_MERGE_TIME_LIMITS).toStrictEqual({
+      clientTimeoutMs: 120_000,
+      killAfterSeconds: 10,
+      timeoutSeconds: 100,
+    })
+    expect((timeoutSeconds + killAfterSeconds) * 1000).toBeLessThan(clientTimeoutMs)
+  })
+
+  it("wraps the merge command in command -p timeout and passes its exit status through", () => {
+    expect(boundedStagingMergeCommand("find '/s' -exec sh -c 'x' sh {} +")).toBe(
+      "command -p timeout -k 10 100 find '/s' -exec sh -c 'x' sh {} +; exit $?"
+    )
+    expect(
+      boundedStagingMergeCommand("find /s", {
+        clientTimeoutMs: 5000,
+        killAfterSeconds: 1,
+        timeoutSeconds: 2,
+      })
+    ).toBe("command -p timeout -k 1 2 find /s; exit $?")
+  })
+
+  it("issues the merge bounded on the host and with the client timeout", async () => {
+    const run = await applyTarListing([tarDirectoryLine("a/"), tarFileLine("a/f")])
+
+    expect(extractionSummary(run)).toStrictEqual(extractedThroughStaging)
+    const merges = run.mockSsh.execCalls.filter(({ command }) =>
+      archiveStageMovePattern.test(command)
+    )
+    expect(merges).toHaveLength(1)
+    const [merge] = merges
+    expect(
+      merge.command.startsWith("command -p timeout -k 10 100 find '/opt/app/.paratix-stage.")
+    ).toBe(true)
+    expect(merge.command.endsWith(" {} +; exit $?")).toBe(true)
+    expect(merge.options).toStrictEqual({ ignoreExitCode: true, silent: true, timeout: 120_000 })
+  })
+
+  const stopped = `: the merge was stopped on the host after 100 seconds`
+
+  it.each([
+    { code: 124, reason: stopped },
+    { code: 137, reason: stopped },
+    { code: 127, reason: "" },
+  ])(
+    "reports exit $code of the merge with the right reason and still runs the backstop",
+    async ({ code, reason }) => {
+      const escapingLink = `${destination}/a/etc`
+      const hostLinks: HostLinkTree = new Map()
+
+      const run = await applyTarListing([tarDirectoryLine("a/"), tarFileLine("a/f")], {
+        hostLinks,
+        injectedOnMerge: [[escapingLink, "/etc"]],
+        responseStubs: [
+          { command: archiveStageMovePattern, result: { code, stderr: "Terminated" } },
+        ],
+      })
+
+      expect(run.result.error?.message).toBe(
+        `[archive.extract] failed to copy extracted files into ${destination}${reason} (exit code ${String(code)})\nTerminated; [archive.extract] refusing to complete extraction of ${src}: symlink ${JSON.stringify(escapingLink)} -> "/etc" resolves outside destination ${JSON.stringify(destination)}; every symlink under the destination is checked after the merge, including links this archive did not ship; removed escaping symlinks: ${JSON.stringify(escapingLink)}; re-check found no escaping symlinks`
+      )
+      expect(run.postMergeListings).toHaveLength(2)
+      expect([...hostLinks]).toStrictEqual([])
+    }
+  )
 })
 
 describe("archive.extract pre-staging type conflicts (Issue #219)", () => {

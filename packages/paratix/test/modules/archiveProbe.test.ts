@@ -2,13 +2,16 @@ import { describe, expect, it, vi } from "vitest"
 
 import type { ExecOptions, ExecResult, SshConnection } from "../../src/types.js"
 
+import { removeEscapingSymlinks as reexportedRemoveEscapingSymlinks } from "../../src/modules/archiveContainmentEnforcement.js"
 import {
   buildSymlinkListingProbeScript,
   buildSymlinkProbeScript,
+  buildSymlinkRemovalScript,
   encodeNulPayload,
   encodePreStagingEntry,
   encodeSymlinkListingEntry,
   escapingSymlinkRemovalRefusal,
+  removeEscapingSymlinks,
   runBatchedProbe,
   SYMLINK_REMOVED_OUTCOME,
   symlinkRemovalReport,
@@ -309,5 +312,56 @@ describe("symlinkRemovalReport (Issue #219)", () => {
 
   it("reports nothing for nothing requested", () => {
     expect(symlinkRemovalReport([], reported())).toStrictEqual({ kept: [], removed: [] })
+  })
+})
+
+describe("removeEscapingSymlinks (Issue #219)", () => {
+  const destination = "/opt/app"
+
+  it("is the function the containment enforcement module re-exports", () => {
+    expect(reexportedRemoveEscapingSymlinks).toBe(removeEscapingSymlinks)
+  })
+
+  it("vets every link and sends only the normalized ones below the destination, once each, in one exec", async () => {
+    const escaping = "/opt/app/a/esc"
+    const { conn, execCalls } = connectionReturning({
+      stdout: `${escaping}\u0000${SYMLINK_REMOVED_OUTCOME}\u0000`,
+    })
+
+    const report = await removeEscapingSymlinks(conn, destination, [
+      "/opt/app/../etc",
+      escaping,
+      "/opt/app-alt/l",
+      escaping,
+    ])
+
+    expect(report).toStrictEqual({
+      kept: [
+        ["/opt/app/../etc", "path is not normalized"],
+        ["/opt/app-alt/l", "path is not strictly below the destination"],
+      ],
+      removed: [escaping],
+    })
+    expect(execCalls).toStrictEqual([
+      {
+        command: buildSymlinkRemovalScript(destination),
+        options: { ignoreExitCode: true, input: `${escaping}\u0000`, silent: true },
+      },
+    ])
+  })
+
+  it("runs no exec when every link is refused", async () => {
+    const { conn, execCalls } = connectionReturning({})
+
+    const report = await removeEscapingSymlinks(conn, destination, ["/opt/app//l", "/etc/l"])
+
+    expect(report).toStrictEqual({
+      kept: [
+        ["/opt/app//l", "path is not normalized"],
+        ["/etc/l", "path is not strictly below the destination"],
+      ],
+      removed: [],
+    })
+    expect(execCalls).toStrictEqual([])
   })
 })

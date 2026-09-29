@@ -207,10 +207,15 @@ anything, resolves the symlinks already under `destination` together with the ar
 symlink replaces an existing symlink at the same path and existing absolute targets inside
 `destination` are allowed, while any other type combination at a member path, a member below an
 existing symlink, or any link resolving outside `destination` refuses the extraction; an existing
-escaping link must then be removed or pointed inside. Once the merge has started, a check of every
-symlink under `destination` always runs, also after a failed merge that may have copied entries: it
-removes each link resolving outside (only the link, never its target), re-checks, and still fails
-the run, naming the removed links and any it could not remove. On failure no extraction marker is
+escaping link must then be removed or pointed inside. The host stops the merge with GNU `timeout`
+after 100 seconds (killing it 10 seconds later), before the 120-second command timeout; without
+`timeout` the merge fails before copying anything. Once the merge has started, a check of every
+symlink under `destination` always runs, also after a failed or stopped merge that may have copied
+entries: it resolves the links like the pre-merge check, without asking the host to resolve them,
+removes each link resolving outside or not resolvable within the symlink limit, such as a loop
+(only the link, never its target, and only below a verified real directory inside `destination`),
+re-checks and repeats while removal makes progress, and still fails the run, naming the removed
+links and any it could not remove or that still escape. On failure no extraction marker is
 written and no `owner` is applied. The flag is removed only after an apply succeeds completely,
 including `owner` and the marker files; while it exists, `check` reports `needs-apply` for every
 archive extracting into that destination.

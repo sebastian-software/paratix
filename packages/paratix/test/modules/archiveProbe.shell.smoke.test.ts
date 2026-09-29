@@ -49,11 +49,14 @@ type ProbeResult = { code: number; fields: string[]; stderr: string }
  *
  * @param script - The probe script under test.
  * @param entries - The entries to transport.
+ * @param env - Issue #219: the environment of the remote shell; the test
+ *   runner's environment when omitted.
  * @returns Exit code, decoded output fields and stderr.
  */
-function runProbe(script: string, entries: string[]): ProbeResult {
+function runProbe(script: string, entries: string[], env?: NodeJS.ProcessEnv): ProbeResult {
   const result = spawnSync("/bin/sh", ["-c", script], {
     encoding: "utf8",
+    env,
     input: encodeNulPayload(entries),
     timeout: 10_000,
   })
@@ -666,6 +669,156 @@ describe.skipIf(SKIP_PLATFORM)("archive.extract batched probes", () => {
           [throughLink, "an ancestor directory is missing or a symlink"],
         ])
         expect(readlinkSync(join(outsideDirectory, "l"))).toBe("keep.txt")
+      } finally {
+        rmSync(root, { force: true, recursive: true })
+      }
+    })
+
+    it("refuses a link whose parent is a symlink to a directory inside the destination", () => {
+      // Issue #219: the parent `a -> c` stays inside, yet `rm` would still act
+      // on `c/l` through it. `pwd -P` after `cd -P ./a` reports `<d>/c`, not
+      // `<d>/a`, so the link is refused before any path operation on it.
+      const { destination, root } = makeRemovalWorkspace()
+      try {
+        mkdirSync(join(destination, "c"))
+        symlinkSync("..", join(destination, "c/l"))
+        symlinkSync("c", join(destination, "a"))
+        const throughLink = join(destination, "a/l")
+
+        const result = runProbe(buildSymlinkRemovalScript(destination), [throughLink])
+
+        expect(result).toStrictEqual({
+          code: 0,
+          fields: [throughLink, "an ancestor directory is missing or a symlink"],
+          stderr: "",
+        })
+        expect(readlinkSync(join(destination, "c/l"))).toBe("..")
+      } finally {
+        rmSync(root, { force: true, recursive: true })
+      }
+    })
+
+    it("refuses a link below a deeper ancestor that is a symlink and leaves the outside link", () => {
+      const { destination, outsideDirectory, root } = makeRemovalWorkspace()
+      try {
+        mkdirSync(join(destination, "a"))
+        symlinkSync(outsideDirectory, join(destination, "a/b"))
+        symlinkSync("keep.txt", join(outsideDirectory, "l"))
+        const throughLink = join(destination, "a/b/l")
+
+        const result = runProbe(buildSymlinkRemovalScript(destination), [throughLink])
+
+        expect(fieldPairs(result.fields)).toStrictEqual([
+          [throughLink, "an ancestor directory is missing or a symlink"],
+        ])
+        expect(readlinkSync(join(outsideDirectory, "l"))).toBe("keep.txt")
+        expect(readlinkSync(join(destination, "a/b"))).toBe(outsideDirectory)
+      } finally {
+        rmSync(root, { force: true, recursive: true })
+      }
+    })
+
+    it("is neither redirected nor corrupted by a hostile CDPATH", () => {
+      // Issue #219: with `CDPATH` set, `cd a` may pick `<outside>/a` and print
+      // it to stdout. The script unsets `CDPATH` and only ever changes into
+      // absolute or `./`-prefixed paths.
+      const { destination, outsideDirectory, root } = makeRemovalWorkspace()
+      try {
+        mkdirSync(join(outsideDirectory, "a"))
+        symlinkSync("../keep.txt", join(outsideDirectory, "a/l"))
+        mkdirSync(join(destination, "a"))
+        const link = join(destination, "a/l")
+        symlinkSync("../..", link)
+
+        const result = runProbe(buildSymlinkRemovalScript(destination), [link], {
+          ...process.env,
+          CDPATH: outsideDirectory,
+        })
+
+        expect(result).toStrictEqual({
+          code: 0,
+          fields: [link, SYMLINK_REMOVED_OUTCOME],
+          stderr: "",
+        })
+        expect(isSymlink(link)).toBe(false)
+        expect(readlinkSync(join(outsideDirectory, "a/l"))).toBe("../keep.txt")
+      } finally {
+        rmSync(root, { force: true, recursive: true })
+      }
+    })
+
+    it("unlinks nested and top-level links in their own directory and leaves same-named links elsewhere", () => {
+      const { destination, root } = makeRemovalWorkspace()
+      try {
+        mkdirSync(join(destination, "a/b/c"), { recursive: true })
+        const topLevel = join(destination, "l")
+        const nested = join(destination, "a/b/c/l")
+        const untouched = join(destination, "a/l")
+        for (const link of [topLevel, nested, untouched]) symlinkSync("/etc", link)
+
+        const result = runProbe(buildSymlinkRemovalScript(destination), [nested, topLevel])
+
+        expect(result).toStrictEqual({
+          code: 0,
+          fields: [nested, SYMLINK_REMOVED_OUTCOME, topLevel, SYMLINK_REMOVED_OUTCOME],
+          stderr: "",
+        })
+        expect([isSymlink(topLevel), isSymlink(nested), isSymlink(untouched)]).toStrictEqual([
+          false,
+          false,
+          true,
+        ])
+      } finally {
+        rmSync(root, { force: true, recursive: true })
+      }
+    })
+
+    it("removes a link below a directory whose name ends in a newline, not its namesake without one", () => {
+      // Issue #219: command substitution strips trailing newlines; the
+      // sentinel keeps `pwd -P` equal to `<d>/dir<newline>`.
+      const { destination, root } = makeRemovalWorkspace()
+      try {
+        mkdirSync(join(destination, "dir\n"))
+        mkdirSync(join(destination, "dir"))
+        const link = join(destination, "dir\n/l")
+        const namesake = join(destination, "dir/l")
+        symlinkSync("../..", link)
+        symlinkSync("../..", namesake)
+
+        const result = runProbe(buildSymlinkRemovalScript(destination), [link])
+
+        expect(result).toStrictEqual({
+          code: 0,
+          fields: [link, SYMLINK_REMOVED_OUTCOME],
+          stderr: "",
+        })
+        expect(isSymlink(link)).toBe(false)
+        expect(readlinkSync(namesake)).toBe("../..")
+      } finally {
+        rmSync(root, { force: true, recursive: true })
+      }
+    })
+
+    it("removes links whose names and parent names start with a dash", () => {
+      const { destination, root } = makeRemovalWorkspace()
+      try {
+        mkdirSync(join(destination, "-a"))
+        writeFileSync(join(destination, "-f"), "file\n")
+        const topLevel = join(destination, "-rf")
+        const nested = join(destination, "-a/-l")
+        symlinkSync("..", topLevel)
+        symlinkSync("../..", nested)
+
+        const result = runProbe(buildSymlinkRemovalScript(destination), [topLevel, nested])
+
+        expect(result).toStrictEqual({
+          code: 0,
+          fields: [topLevel, SYMLINK_REMOVED_OUTCOME, nested, SYMLINK_REMOVED_OUTCOME],
+          stderr: "",
+        })
+        expect(readdirSync(destination).toSorted()).toStrictEqual(["-a", "-f"])
+        expect(readdirSync(join(destination, "-a"))).toStrictEqual([])
+        expect(readFileSync(join(destination, "-f"), "utf8")).toBe("file\n")
       } finally {
         rmSync(root, { force: true, recursive: true })
       }
