@@ -171,11 +171,16 @@ Tar-Symlinks und -Hardlinks werden nur entpackt, wenn ihr Ziel – bei Symlinks 
 Verzeichnis aus, bei Hardlinks vom Archiv-Stamm aus und auch über die Symlinks des Archivs hinweg
 aufgelöst – innerhalb von `destination` bleibt; absolute Ziele, ein Link anstelle des
 Zielverzeichnisses selbst, Einträge unterhalb eines Archiv-Symlinks und Zip-Symlinks werden
-abgelehnt. Die Archivliste wird als striktes UTF-8 gelesen, nie mit Ersatzzeichen. Ein Eintrag,
-dessen Pfad oder Link-Ziel einen Backslash oder U+FFFD enthält, wird abgelehnt, weil `tar` nicht
-druckbare Bytes (und außerhalb einer UTF-8-Locale jedes Nicht-ASCII-Byte) als Escape-Sequenz ausgibt
-und sich solche Namen daher nicht zuverlässig den entpackten Namen zuordnen lassen; eine
-UTF-8-Locale auf dem Host vermeidet maskierte Nicht-ASCII-Namen. Ist die Archivliste geprüft,
+abgelehnt. Die Archivliste wird als striktes UTF-8 gelesen, nie mit Ersatzzeichen. `tar` listet das
+Archiv unter einer UTF-8-C-Locale (`C.UTF-8` oder `C.utf8`), wenn der Host eine hat, sonst unter
+`LC_ALL=C` (bsdtar immer unter `LC_ALL=C`); bei GNU tar und bsdtar werden die Escape-Sequenzen der
+Liste (`\NNN`, `\\` und die Ein-Buchstaben-Escapes für Steuerzeichen) in die gespeicherten Bytes
+zurückübersetzt, sodass Nicht-ASCII-Namen unabhängig von der Locale der SSH-Sitzung akzeptiert
+werden. Ein Eintrag, dessen zurückübersetzter Name kein gültiges UTF-8 ist oder der eine andere
+Escape-Sequenz enthält, wird abgelehnt, weil er sich nicht dem entpackten Namen zuordnen lässt. Ein
+Eintrag, dessen Pfad oder Link-Ziel einen Backslash oder U+FFFD enthält, wird in jeder Liste
+abgelehnt – auch nach dem Zurückübersetzen –, weil ein anderes `tar` (etwa BusyBox) und `unzip`
+Escape-Sequenzen und echte Backslashes gleich ausgeben. Ist die Archivliste geprüft,
 schreibt `archive.extract` ein Flag je Zielverzeichnis, noch bevor das Zielverzeichnis angelegt oder
 geprüft wird – lässt es sich nicht schreiben, endet der Durchlauf, bevor das Zielverzeichnis berührt
 wird. Noch bevor etwas entpackt wird, lehnt es dann einen Eintrag ab, dessen Pfad oder übergeordnete

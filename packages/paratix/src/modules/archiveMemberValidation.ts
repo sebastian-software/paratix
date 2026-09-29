@@ -2,6 +2,13 @@ import type { ExecResult, SshConnection } from "../types.js"
 
 import { shellQuote } from "../ssh.js"
 import { CAPTURE_TRUNCATION_MARKER, InvalidUtf8OutputError } from "../sshHelpers.js"
+import { tarListingScript } from "./archiveTarListing.js"
+import {
+  type ArchiveListing,
+  archiveMemberKindFromMode,
+  type ArchiveMemberParseResult,
+  parseTarListing,
+} from "./archiveTarListingParser.js"
 
 /** Maximum captured bytes for archive listings and persisted member metadata. */
 export const ARCHIVE_CAPTURE_LIMIT_BYTES = 16_777_216
@@ -36,6 +43,11 @@ function isZipSource(lowerSource: string): boolean {
 /**
  * Build the shell command that lists the archive members for validation.
  *
+ * Issue #219: a tar archive is listed by {@link tarListingScript}, which runs
+ * `tar` under a UTF-8 C locale when the host has one (`LC_ALL=C` otherwise,
+ * and always for bsdtar) and prints a listing mode line first, so the listed names do not depend on
+ * the locale of the exec session.
+ *
  * @param source - The original archive path used for format detection.
  * @param archivePath - The actual archive path on the remote host.
  * @returns The shell command to list members, or null when unsupported.
@@ -44,7 +56,7 @@ export function listArchiveMembersCommand(source: string, archivePath: string): 
   const lower = source.toLowerCase()
   const tarFlags = tarListFlags(lower)
   if (tarFlags !== null) {
-    return `tar ${tarFlags} ${shellQuote(archivePath)}`
+    return tarListingScript(tarFlags, archivePath)
   }
   if (isZipSource(lower)) {
     // `unzip -Zs` includes Unix-style mode metadata, which lets us reject
@@ -74,193 +86,12 @@ export type ArchiveMember = {
   path: string
 }
 
-type ArchiveListing = { failureReason: string } | { members: ArchiveMember[] }
-type ArchiveMemberParseResult =
-  | { failureReason: string; status: "invalid" }
-  | { member: ArchiveMember; status: "parsed" }
-  | { status: "ignored" }
-
-/**
- * Parse a `tar -tv…f` listing line into an {@link ArchiveMember}.
- *
- * The expected line shape is:
- *
- *     mode   user/group   size   date   time   name [-> linktarget]
- *     mode   user/group   size   date   time   name link to linktarget
- *
- * Blank lines are ignored. Non-empty lines that do not match this shape are
- * rejected so the safety guard fails closed before extraction. Link lines
- * whose remainder contains the link separator (`->` for non-file members,
- * `link to` for hardlinks) more than once are rejected as ambiguous, because
- * the split between member name and link target cannot be recovered. For the
- * same reason a hardlink line whose remainder contains both `->` and
- * `link to` is rejected (Issue #219).
- *
- * @param line - A single line from `tar -tv…f` output.
- * @returns The parsed member, an ignored marker or an invalid-line reason.
- */
-const TAR_LINK_ARROW = " -> "
-const TAR_HARDLINK_TARGET = " link to "
-const TAR_VERBOSE_LINE_PATTERN =
-  /^(?<mode>[\-bcdhlps][\-rwxStTs]{9})\s+\S+\s+\S+\s+\S+\s+\S+\s+(?<rest>\S.*)$/v
 const ZIP_INFO_LINE_PATTERN =
   // eslint-disable-next-line security/detect-unsafe-regex -- Anchored Info-ZIP listing parser with fixed-width mode and bounded column count.
   /^(?<mode>[\-bcdlps][\-rwxStTs]{9})\s+(?:\S+\s+){7}(?<path>\S.*)$/v
 const ZIP_INFO_SIZE_LINE_PATTERN = /^Zip file size:\s+\d+\s+bytes,\s+number of entries:\s+\d+$/v
 const ZIP_INFO_SUMMARY_LINE_PATTERN =
   /^\d+\s+files?,\s+\d+\s+bytes uncompressed,\s+\d+\s+bytes compressed:\s+[\d.]+%$/v
-
-function archiveMemberKindFromMode(mode: string): ArchiveMember["kind"] {
-  if (mode.startsWith("d")) return "directory"
-  if (mode.startsWith("l")) return "symlink"
-  if (mode.startsWith("h")) return "hardlink"
-  if (!mode.startsWith("-")) return "special"
-  return "file"
-}
-
-/**
- * Issue #219: `tar -tv` prints `name -> target` (and `name link to target`)
- * without escaping, so a member name or link target that itself contains the
- * separator makes the split ambiguous. Splitting at the first occurrence lets
- * a symlink named `d/a -> b` with target `../../../x` be validated as `d/a`
- * pointing at `b -> ../../../x`, which stays inside the destination although
- * the extracted link escapes it. Such lines therefore fail closed.
- *
- * @param line - The trimmed listing line, quoted in the failure reason.
- * @param detail - Why the split is ambiguous, shown in parentheses.
- * @returns The invalid-line result for the ambiguous listing line.
- */
-function ambiguousTarLinkLine(line: string, detail: string): ArchiveMemberParseResult {
-  return {
-    failureReason: `ambiguous tar listing line (${detail}): ${JSON.stringify(line)}`,
-    status: "invalid",
-  }
-}
-
-/**
- * Split a tar link listing remainder into member path and link target at the
- * given separator.
- *
- * @param parts - The parsed listing line parts.
- * @param parts.kind - The member kind inferred from the mode.
- * @param parts.line - The trimmed listing line, quoted in failure reasons.
- * @param parts.mode - The ten-character symbolic mode string.
- * @param parts.rest - The listing remainder after the date/time columns.
- * @param separator - The link separator (`->` or `link to`, space-padded).
- * @returns The parsed link member, an ambiguous-line failure, or null when
- *   the separator does not occur.
- */
-function parseTarLinkMember(
-  parts: { kind: ArchiveMember["kind"]; line: string; mode: string; rest: string },
-  separator: string
-): ArchiveMemberParseResult | null {
-  const { kind, line, mode, rest } = parts
-  const separatorIndex = rest.indexOf(separator)
-  if (separatorIndex === -1) return null
-  // Issue #219: see ambiguousTarLinkLine — never guess the name/target split.
-  if (rest.includes(separator, separatorIndex + separator.length)) {
-    return ambiguousTarLinkLine(
-      line,
-      `link separator ${JSON.stringify(separator)} occurs more than once`
-    )
-  }
-  return {
-    member: {
-      format: "tar",
-      kind,
-      linkTarget: rest.slice(separatorIndex + separator.length),
-      mode,
-      path: rest.slice(0, separatorIndex),
-    },
-    status: "parsed",
-  }
-}
-
-/**
- * Split the listing remainder of a link member according to its kind:
- * symlinks and other non-file members at `->`, hardlinks at `->` or
- * `link to`. Plain files never carry a link target.
- *
- * Issue #219: a hardlink remainder that contains both `->` and `link to` is
- * ambiguous. GNU tar prints the hardlink `a -> b` to `d/e/c` as
- * `a -> b link to d/e/c`; splitting at `->` first would validate it as `a`
- * pointing at `b link to d/e/c` and so bypass the hardlink rules of
- * `archiveLinkUnsafeReason` (hardlink to a symlink, link through an ancestor
- * symlink) that the kind-aware symlink anchoring relies on. Such lines fail
- * closed instead of guessing which separator is the real one.
- *
- * @param parts - The parsed listing line parts.
- * @param parts.kind - The member kind inferred from the mode.
- * @param parts.line - The trimmed listing line, quoted in failure reasons.
- * @param parts.mode - The ten-character symbolic mode string.
- * @param parts.rest - The listing remainder after the date/time columns.
- * @returns The parsed link member, an ambiguous-line failure, or null when
- *   the remainder carries no link target.
- */
-function parseTarLinkRemainder(parts: {
-  kind: ArchiveMember["kind"]
-  line: string
-  mode: string
-  rest: string
-}): ArchiveMemberParseResult | null {
-  const { kind, line, rest } = parts
-  if (kind === "file") return null
-  if (kind !== "hardlink") return parseTarLinkMember(parts, TAR_LINK_ARROW)
-  if (rest.includes(TAR_LINK_ARROW) && rest.includes(TAR_HARDLINK_TARGET)) {
-    return ambiguousTarLinkLine(
-      line,
-      `hardlink contains both ${JSON.stringify(TAR_LINK_ARROW)} and ${JSON.stringify(TAR_HARDLINK_TARGET)}`
-    )
-  }
-  return parseTarLinkMember(parts, TAR_LINK_ARROW) ?? parseTarLinkMember(parts, TAR_HARDLINK_TARGET)
-}
-
-function parseTarVerboseLine(line: string): ArchiveMemberParseResult {
-  const trimmed = line.replace(/\r$/v, "")
-  if (trimmed.length === 0) return { status: "ignored" }
-  // mode owner/group size date time path[ -> link]
-  // The trailing capture starts with a non-whitespace character so the
-  // greedy `\s+` separators cannot exchange characters with the path
-  // capture (avoids polynomial backtracking).
-  const match = TAR_VERBOSE_LINE_PATTERN.exec(trimmed) ?? null
-  if (!match?.groups) {
-    return {
-      failureReason: `could not parse tar listing line: ${JSON.stringify(trimmed)}`,
-      status: "invalid",
-    }
-  }
-  const mode = match.groups.mode
-  const kind = archiveMemberKindFromMode(mode)
-  const rest = match.groups.rest
-  const linkMember = parseTarLinkRemainder({ kind, line: trimmed, mode, rest })
-  if (linkMember !== null) return linkMember
-  return {
-    member: {
-      format: "tar",
-      kind,
-      linkTarget: null,
-      mode,
-      path: rest,
-    },
-    status: "parsed",
-  }
-}
-
-/**
- * Parse the full listing of a tar archive into {@link ArchiveMember}s.
- *
- * @param stdout - The combined stdout of `tar -tv…f`.
- * @returns The parsed members, or a failure reason for unparsed member lines.
- */
-function parseTarListing(stdout: string): ArchiveListing {
-  const members: ArchiveMember[] = []
-  for (const line of stdout.split("\n")) {
-    const parsed = parseTarVerboseLine(line)
-    if (parsed.status === "invalid") return { failureReason: parsed.failureReason }
-    if (parsed.status === "parsed") members.push(parsed.member)
-  }
-  return { members }
-}
 
 /**
  * Parse one Info-ZIP `unzip -Zs` listing line into an {@link ArchiveMember}.
@@ -473,12 +304,20 @@ function controlCharacterReason(member: ArchiveMember): null | string {
  * in the path and in the link target keeps archive names and host names one
  * to one.
  *
+ * Issue #219: for GNU tar and bsdtar the tar listing is decoded before this
+ * check (`decodeTarListingName`), so an escaped non-ASCII name arrives here
+ * as its real characters in any host locale. A `\\` decodes to a real
+ * backslash, which is still refused: a listing that is not decoded (another
+ * tar, `unzip -Zs`) cannot tell a real backslash from an escape, and one rule
+ * for every listing keeps the verdict for an archive independent of the
+ * `tar` on the host.
+ *
  * @param member - A single parsed archive member.
  * @returns The refusal reason, or null.
  */
 function ambiguousNameReason(member: ArchiveMember): null | string {
   const hint =
-    "the listed name cannot be mapped reliably to the extracted name (a UTF-8 locale on the host avoids escaped non-ASCII names)"
+    "member names with a backslash are refused in every listing, because a listing that Paratix does not decode (a tar other than GNU tar or bsdtar, or unzip) cannot tell a real backslash from an escape sequence, and a U+FFFD may stand for bytes a listing tool replaced"
   if (/[\\\uFFFD]/v.test(member.path)) {
     return `member ${JSON.stringify(member.path)} contains a backslash or a U+FFFD replacement character; ${hint}`
   }
@@ -542,7 +381,9 @@ export async function listArchiveMembers(
   // Issue #219: the listing is decoded as strict UTF-8, so every member name
   // maps back to exactly the bytes the listing printed; a lossy decode could
   // turn two different names into the same string. A listing that is not
-  // valid UTF-8 is refused.
+  // valid UTF-8 is refused. GNU tar and bsdtar escape every byte of a name
+  // that is not valid UTF-8 in the locale the listing script picks for them;
+  // another tar may print such bytes raw, which lands here.
   let result: ExecResult
   try {
     result = await conn.exec(command, {
@@ -554,7 +395,7 @@ export async function listArchiveMembers(
   } catch (error) {
     if (!(error instanceof InvalidUtf8OutputError)) throw error
     return {
-      failureReason: `archive listing for ${parameters.source} is not valid UTF-8; refusing to validate member names that cannot be mapped to the extracted names reliably (a UTF-8 locale on the host avoids this for non-ASCII names)`,
+      failureReason: `archive listing for ${parameters.source} is not valid UTF-8; refusing to validate member names that cannot be mapped to the extracted names reliably (a member name whose bytes are not valid UTF-8 cannot be mapped)`,
     }
   }
   if (

@@ -32,6 +32,7 @@ import {
   encodeNulPayload,
 } from "../../src/modules/archiveProbe.js"
 import { SYMLINK_LISTING_CAPTURE_LIMIT_BYTES } from "../../src/modules/archiveSymlinkListing.js"
+import { tarListingScript } from "../../src/modules/archiveTarListing.js"
 import { shellQuote } from "../../src/ssh.js"
 import {
   CAPTURE_TRUNCATION_MARKER,
@@ -206,6 +207,34 @@ const archiveCleanupPaths = [
   "/tmp/paratix-upload.FIRST111",
   "/tmp/paratix-upload.SECOND22",
 ]
+
+/**
+ * Issue #219: the listing command `archive.extract` runs for a tar archive.
+ *
+ * @param path - The archive path on the host.
+ * @param flags - The `tar` list flags, `-tvzf` for a `.tar.gz`.
+ * @returns The listing script.
+ */
+function tarListCommand(path: string, flags = "-tvzf"): string {
+  return tarListingScript(flags, path)
+}
+
+/** Issue #219: the mode line the listing script prints for GNU tar in C.UTF-8. */
+const gnuTarListingModeLine = "paratix-tar-listing gnu C.UTF-8\n"
+
+/** Issue #219: the mode line for a tar whose names are used as listed. */
+const otherTarListingModeLine = "paratix-tar-listing other C.UTF-8\n"
+
+/**
+ * Issue #219: mock stdout of the listing script on a host with GNU tar and a
+ * UTF-8 C locale: the mode line, then the `tar -tv` output.
+ *
+ * @param listing - The `tar -tv` output.
+ * @returns The complete stdout of the listing script.
+ */
+function gnuTarListing(listing: string): string {
+  return `${gnuTarListingModeLine}${listing}`
+}
 
 function tarListingForMemberPaths(memberPaths: string[]): string {
   return memberPaths
@@ -863,8 +892,8 @@ async function applyTarListing(
   const { failWrite, files, hostLinks, source = src } = options
   const mockSsh = createMockSsh(
     {
-      [`tar -tvzf '${source}'`]: { code: 0, stdout: `${lines.join("\n")}\n` },
       [stagedTarExtractCommandFor(source)]: { code: 0 },
+      [tarListCommand(source)]: { code: 0, stdout: gnuTarListing(`${lines.join("\n")}\n`) },
       ...options.responses,
     },
     { responseStubs: options.responseStubs }
@@ -1016,7 +1045,7 @@ function expectContainmentFlagKept(run: TarListingApplyRun): void {
  * @returns The probed host paths.
  */
 function preStagingProbeEntries(run: TarListingApplyRun): string[] {
-  const listingIndex = run.mockSsh.calls.indexOf(`tar -tvzf '${src}'`)
+  const listingIndex = run.mockSsh.calls.indexOf(tarListCommand(src))
   const extractIndex = run.mockSsh.calls.indexOf(stagedTarExtractCommand)
   const endIndex = extractIndex === -1 ? Number.POSITIVE_INFINITY : extractIndex
   return run.probes
@@ -1411,7 +1440,7 @@ describe("archive.extract — check", () => {
     expect(result).toBe("needs-apply")
     expect(mockSsh.calls).toContain(`cat '${ownerPathsMarker}'`)
     expectArchiveCaptureExecCall(mockSsh, `cat '${ownerPathsMarker}'`, { pinCLocale: true })
-    expect(mockSsh.calls).not.toContain(`tar -tvzf '${src}'`)
+    expect(mockSsh.calls).not.toContain(tarListCommand(src))
     expect(mockSsh.calls).not.toContain(ownershipProbeCommand("www-data:www-data"))
   })
 
@@ -1540,7 +1569,7 @@ describe("archive.extract — apply", () => {
       [`tar --no-same-owner --no-overwrite-dir -xzf '${src}' -C '${archiveStageDirectory}'`]: {
         code: 0,
       },
-      [`tar -tvzf '${src}'`]: { code: 0, stdout: safeTarListing },
+      [tarListCommand(src)]: { code: 0, stdout: gnuTarListing(safeTarListing) },
     })
     vi.spyOn(mockSsh, "sha256").mockResolvedValue(archiveSha)
     vi.spyOn(mockSsh, "writeFile").mockResolvedValue()
@@ -1574,7 +1603,7 @@ describe("archive.extract — apply", () => {
       [`tar --no-same-owner --no-overwrite-dir -xf '${tarSrc}' -C '${archiveStageDirectory}'`]: {
         code: 0,
       },
-      [`tar -tvf '${tarSrc}'`]: { code: 0, stdout: safeTarListing },
+      [tarListCommand(tarSrc, "-tvf")]: { code: 0, stdout: gnuTarListing(safeTarListing) },
     })
     vi.spyOn(mockSsh, "sha256").mockResolvedValue(archiveSha)
     vi.spyOn(mockSsh, "writeFile").mockResolvedValue()
@@ -1594,7 +1623,7 @@ describe("archive.extract — apply", () => {
       [`tar --no-same-owner --no-overwrite-dir -xjf '${bz2Src}' -C '${archiveStageDirectory}'`]: {
         code: 0,
       },
-      [`tar -tvjf '${bz2Src}'`]: { code: 0, stdout: safeTarListing },
+      [tarListCommand(bz2Src, "-tvjf")]: { code: 0, stdout: gnuTarListing(safeTarListing) },
     })
     vi.spyOn(mockSsh, "sha256").mockResolvedValue(archiveSha)
     vi.spyOn(mockSsh, "writeFile").mockResolvedValue()
@@ -1614,7 +1643,7 @@ describe("archive.extract — apply", () => {
       [`tar --no-same-owner --no-overwrite-dir -xJf '${xzSrc}' -C '${archiveStageDirectory}'`]: {
         code: 0,
       },
-      [`tar -tvJf '${xzSrc}'`]: { code: 0, stdout: safeTarListing },
+      [tarListCommand(xzSrc, "-tvJf")]: { code: 0, stdout: gnuTarListing(safeTarListing) },
     })
     vi.spyOn(mockSsh, "sha256").mockResolvedValue(archiveSha)
     vi.spyOn(mockSsh, "writeFile").mockResolvedValue()
@@ -1654,7 +1683,7 @@ describe("archive.extract — apply", () => {
       [`tar --no-same-owner --no-overwrite-dir -xzf '${tgzSrc}' -C '${archiveStageDirectory}'`]: {
         code: 0,
       },
-      [`tar -tvzf '${tgzSrc}'`]: { code: 0, stdout: safeTarListing },
+      [tarListCommand(tgzSrc)]: { code: 0, stdout: gnuTarListing(safeTarListing) },
     })
     vi.spyOn(mockSsh, "sha256").mockResolvedValue(archiveSha)
     vi.spyOn(mockSsh, "writeFile").mockResolvedValue()
@@ -1676,7 +1705,8 @@ describe("archive.extract — apply", () => {
     {
       extractCommand: `tar --no-same-owner --no-overwrite-dir -xzf '${src}' -C '${archiveStageDirectory}'`,
       format: "tar",
-      listingCommand: `tar -tvzf '${src}'`,
+      listingCommand: tarListCommand(src),
+      listingPrefix: gnuTarListingModeLine,
       memberLine: safeTarListing,
       source: src,
     },
@@ -1684,11 +1714,12 @@ describe("archive.extract — apply", () => {
       extractCommand: `unzip -o '/tmp/app.zip' -d '${archiveStageDirectory}'`,
       format: "zip",
       listingCommand: "unzip -Zs '/tmp/app.zip'",
+      listingPrefix: "",
       memberLine: "-rw-r--r--  2.0 unx        0 b- defN 26-May-04 00:00 app/file",
       source: "/tmp/app.zip",
     },
   ])("accepts a safe $format listing above the legacy capture limit", async (testCase) => {
-    const listing = listingLargerThanLegacyCaptureLimit(testCase.memberLine)
+    const listing = `${testCase.listingPrefix}${listingLargerThanLegacyCaptureLimit(testCase.memberLine)}`
     expect(listing.length).toBeGreaterThan(legacyCaptureLimitBytes)
     const mockSsh = createMockSsh({
       [testCase.extractCommand]: { code: 0 },
@@ -1705,25 +1736,31 @@ describe("archive.extract — apply", () => {
   })
 
   it("accepts a complete archive listing at the exact capture limit", async () => {
-    const listing = singleMemberTarListingOfUtf8Size(archiveListingMaxOutputBytes)
+    const listing = gnuTarListing(
+      singleMemberTarListingOfUtf8Size(
+        archiveListingMaxOutputBytes - Buffer.byteLength(gnuTarListingModeLine, "utf8")
+      )
+    )
     const mockSsh = createMockSsh({
-      [`tar -tvzf '${src}'`]: { code: 0, stdout: listing },
+      [tarListCommand(src)]: { code: 0, stdout: listing },
     })
 
     const result = await listArchiveMembers(mockSsh, { archivePath: src, source: src })
 
     expect(Buffer.byteLength(listing, "utf8")).toBe(archiveListingMaxOutputBytes)
     expect(result).toMatchObject({ members: [{ format: "tar", kind: "file" }] })
-    expectArchiveCaptureExecCall(mockSsh, `tar -tvzf '${src}'`, { strictUtf8: true })
+    expectArchiveCaptureExecCall(mockSsh, tarListCommand(src), { strictUtf8: true })
   })
 
   it("treats the truncation marker as authoritative at the capture boundary", async () => {
-    const listing = singleMemberTarListingOfUtf8Size(
-      archiveListingMaxOutputBytes,
-      CAPTURE_TRUNCATION_MARKER
+    const listing = gnuTarListing(
+      singleMemberTarListingOfUtf8Size(
+        archiveListingMaxOutputBytes - Buffer.byteLength(gnuTarListingModeLine, "utf8"),
+        CAPTURE_TRUNCATION_MARKER
+      )
     )
     const mockSsh = createMockSsh({
-      [`tar -tvzf '${src}'`]: { code: 0, stdout: listing },
+      [tarListCommand(src)]: { code: 0, stdout: listing },
     })
 
     const result = await listArchiveMembers(mockSsh, { archivePath: src, source: src })
@@ -1732,14 +1769,14 @@ describe("archive.extract — apply", () => {
     expect(result).toStrictEqual({
       failureReason: expect.stringMatching(/truncat/iv),
     })
-    expectArchiveCaptureExecCall(mockSsh, `tar -tvzf '${src}'`, { strictUtf8: true })
+    expectArchiveCaptureExecCall(mockSsh, tarListCommand(src), { strictUtf8: true })
   })
 
   it("reports an actionable failure when the archive listing is truncated", async () => {
     const mockSsh = createMockSsh({
-      [`tar -tvzf '${src}'`]: {
+      [tarListCommand(src)]: {
         code: 0,
-        stdout: `${safeTarListing}${CAPTURE_TRUNCATION_MARKER}`,
+        stdout: gnuTarListing(`${safeTarListing}${CAPTURE_TRUNCATION_MARKER}`),
       },
     })
 
@@ -1763,7 +1800,7 @@ describe("archive.extract — apply", () => {
       { kind: "file", path: `${destination}/${unicodeMemberPath}` },
     ])
     const mockSsh = createMockSsh({
-      [`tar -tvzf '${src}'`]: { code: 0, stdout: listing },
+      [tarListCommand(src)]: { code: 0, stdout: gnuTarListing(listing) },
     })
 
     const result = await archive.extract(src, destination).apply(mockSsh, emptyEnv)
@@ -1783,8 +1820,8 @@ describe("archive.extract — apply", () => {
       [`tar --no-same-owner --no-overwrite-dir -xzf '${src}' -C '${archiveStageDirectory}'`]: {
         code: 0,
       },
-      [`tar -tvzf '${src}'`]: { code: 0, stdout: safeTarListing },
       [batchedChownCommand]: { code: 0 },
+      [tarListCommand(src)]: { code: 0, stdout: gnuTarListing(safeTarListing) },
     })
     vi.spyOn(mockSsh, "sha256").mockResolvedValue(archiveSha)
     vi.spyOn(mockSsh, "writeFile").mockResolvedValue()
@@ -1803,7 +1840,10 @@ describe("archive.extract — apply", () => {
       [`tar --no-same-owner --no-overwrite-dir -xzf '${src}' -C '${archiveStageDirectory}'`]: {
         code: 0,
       },
-      [`tar -tvzf '${src}'`]: { code: 0, stdout: tarListingForMemberPaths(memberPaths) },
+      [tarListCommand(src)]: {
+        code: 0,
+        stdout: gnuTarListing(tarListingForMemberPaths(memberPaths)),
+      },
     })
     vi.spyOn(mockSsh, "sha256").mockResolvedValue(archiveSha)
     vi.spyOn(mockSsh, "writeFile").mockResolvedValue()
@@ -1836,9 +1876,9 @@ describe("archive.extract — apply", () => {
         [`tar --no-same-owner --no-overwrite-dir -xzf '${src}' -C '${archiveStageDirectory}'`]: {
           code: 0,
         },
-        [`tar -tvzf '${src}'`]: {
+        [tarListCommand(src)]: {
           code: 0,
-          stdout: [tarListingForMemberPaths(memberPaths), ...extraLines].join("\n"),
+          stdout: gnuTarListing([tarListingForMemberPaths(memberPaths), ...extraLines].join("\n")),
         },
       })
       vi.spyOn(mockSsh, "sha256").mockResolvedValue(archiveSha)
@@ -1901,11 +1941,11 @@ describe("archive.extract — apply", () => {
       [`tar --no-same-owner --no-overwrite-dir -xzf '${src}' -C '${archiveStageDirectory}'`]: {
         code: 0,
       },
-      [`tar -tvzf '${src}'`]: { code: 0, stdout: safeTarListing },
       [batchedChownCommand]: {
         code: 1,
         stderr: "chown: changing ownership of '/opt/app/app/file': Operation not permitted",
       },
+      [tarListCommand(src)]: { code: 0, stdout: gnuTarListing(safeTarListing) },
     })
     vi.spyOn(mockSsh, "sha256").mockResolvedValue(archiveSha)
     vi.spyOn(mockSsh, "writeFile").mockResolvedValue()
@@ -1929,7 +1969,7 @@ describe("archive.extract — apply", () => {
       [`tar --no-same-owner --no-overwrite-dir -xzf '${src}' -C '${archiveStageDirectory}'`]: {
         code: 0,
       },
-      [`tar -tvzf '${src}'`]: { code: 0, stdout: safeTarListing },
+      [tarListCommand(src)]: { code: 0, stdout: gnuTarListing(safeTarListing) },
     })
     vi.spyOn(mockSsh, "sha256").mockResolvedValue(archiveSha)
     vi.spyOn(mockSsh, "writeFile").mockResolvedValue()
@@ -1992,8 +2032,8 @@ describe("archive.extract — apply", () => {
         {
           code: 0,
         },
-      [`tar -tvzf '${remoteTmp}'`]: { code: 0, stdout: safeTarListing },
       "mktemp /tmp/paratix-upload.XXXXXXXX": { code: 0, stdout: remoteTmp },
+      [tarListCommand(remoteTmp)]: { code: 0, stdout: gnuTarListing(safeTarListing) },
     })
     vi.spyOn(mockSsh, "sha256").mockResolvedValue(archiveSha)
     vi.spyOn(mockSsh, "writeFile").mockResolvedValue()
@@ -2019,9 +2059,9 @@ describe("archive.extract — apply", () => {
         {
           code: 0,
         },
-      [`tar -tvzf '${remoteTmp}'`]: { code: 0, stdout: safeTarListing },
       [batchedChownCommand]: { code: 0 },
       "mktemp /tmp/paratix-upload.XXXXXXXX": { code: 0, stdout: remoteTmp },
+      [tarListCommand(remoteTmp)]: { code: 0, stdout: gnuTarListing(safeTarListing) },
     })
     vi.spyOn(mockSsh, "sha256").mockResolvedValue(archiveSha)
     vi.spyOn(mockSsh, "writeFile").mockResolvedValue()
@@ -2062,9 +2102,9 @@ describe("archive.extract — apply", () => {
         {
           code: 0,
         },
-      [`tar -tvzf '${firstRemoteTmp}'`]: { code: 0, stdout: safeTarListing },
-      [`tar -tvzf '${secondRemoteTmp}'`]: { code: 0, stdout: safeTarListing },
       "mktemp /tmp/paratix-upload.XXXXXXXX": { code: 0, stdout: "ignored-by-spy" },
+      [tarListCommand(firstRemoteTmp)]: { code: 0, stdout: gnuTarListing(safeTarListing) },
+      [tarListCommand(secondRemoteTmp)]: { code: 0, stdout: gnuTarListing(safeTarListing) },
     })
     // mktemp is queried via conn.output; rotate the response so concurrent
     // upload invocations produce different paths even though the local source
@@ -2156,7 +2196,7 @@ describe("archive.extract — apply", () => {
         code: 1,
         stderr: "tar: unexpected EOF",
       },
-      [`tar -tvzf '${src}'`]: { code: 0, stdout: safeTarListing },
+      [tarListCommand(src)]: { code: 0, stdout: gnuTarListing(safeTarListing) },
     })
 
     const mod = archive.extract(src, destination)
@@ -2190,8 +2230,8 @@ describe("archive.extract — apply", () => {
         {
           code: 1,
         },
-      [`tar -tvzf '${remoteTmp}'`]: { code: 0, stdout: safeTarListing },
       "mktemp /tmp/paratix-upload.XXXXXXXX": { code: 0, stdout: remoteTmp },
+      [tarListCommand(remoteTmp)]: { code: 0, stdout: gnuTarListing(safeTarListing) },
     })
     vi.spyOn(mockSsh, "uploadFile").mockResolvedValue()
 
@@ -2208,8 +2248,8 @@ describe("archive.extract — apply", () => {
     const remoteTmp = "/tmp/paratix-upload.AbCdEfGh"
     const mockSsh = createMockSsh(
       {
-        [`tar -tvzf '${remoteTmp}'`]: { code: 0, stdout: safeTarListing },
         "mktemp /tmp/paratix-upload.XXXXXXXX": { code: 0, stdout: remoteTmp },
+        [tarListCommand(remoteTmp)]: { code: 0, stdout: gnuTarListing(safeTarListing) },
       },
       {
         responseStubs: [
@@ -2230,7 +2270,7 @@ describe("archive.extract — apply", () => {
     expect(String(result.error)).toContain("failed to create destination directory")
     expect(mockSsh.uploadFile).toHaveBeenCalledWith(localFile, remoteTmp)
     expect(mockSsh.calls).toContain(`rm -f -- '${remoteTmp}'`)
-    expect(mockSsh.calls).toContain(`tar -tvzf '${remoteTmp}'`)
+    expect(mockSsh.calls).toContain(tarListCommand(remoteTmp))
     expect(mockSsh.calls).not.toContain(
       `tar --no-same-owner --no-overwrite-dir -xzf '${remoteTmp}' -C '${archiveStageDirectory}'`
     )
@@ -2242,7 +2282,7 @@ describe("archive.extract — apply", () => {
   it("fails when the inline destination mkdir guard sees a symlink after validation", async () => {
     const mockSsh = createMockSsh(
       {
-        [`tar -tvzf '${src}'`]: { code: 0, stdout: safeTarListing },
+        [tarListCommand(src)]: { code: 0, stdout: gnuTarListing(safeTarListing) },
       },
       {
         responseStubs: [
@@ -2270,7 +2310,7 @@ describe("archive.extract — apply", () => {
       [`tar --no-same-owner --no-overwrite-dir -xzf '${src}' -C '${archiveStageDirectory}'`]: {
         code: 0,
       },
-      [`tar -tvzf '${src}'`]: { code: 0, stdout: safeTarListing },
+      [tarListCommand(src)]: { code: 0, stdout: gnuTarListing(safeTarListing) },
     })
     vi.spyOn(mockSsh, "sha256").mockResolvedValue(null)
 
@@ -2286,7 +2326,7 @@ describe("archive.extract — apply", () => {
         [`tar --no-same-owner --no-overwrite-dir -xzf '${src}' -C '${archiveStageDirectory}'`]: {
           code: 0,
         },
-        [`tar -tvzf '${src}'`]: { code: 0, stdout: safeTarListing },
+        [tarListCommand(src)]: { code: 0, stdout: gnuTarListing(safeTarListing) },
       },
       {
         responseStubs: [
@@ -2313,7 +2353,7 @@ describe("archive.extract — apply", () => {
       [`tar --no-same-owner --no-overwrite-dir -xzf '${src}' -C '${archiveStageDirectory}'`]: {
         code: 0,
       },
-      [`tar -tvzf '${src}'`]: { code: 0, stdout: safeTarListing },
+      [tarListCommand(src)]: { code: 0, stdout: gnuTarListing(safeTarListing) },
     })
     vi.spyOn(mockSsh, "sha256").mockResolvedValue(archiveSha)
     // Issue #219: the first write is the containment flag before the merge.
@@ -2334,7 +2374,7 @@ describe("archive.extract — apply", () => {
       [`tar --no-same-owner --no-overwrite-dir -xzf '${src}' -C '${archiveStageDirectory}'`]: {
         code: 0,
       },
-      [`tar -tvzf '${src}'`]: { code: 0, stdout: safeTarListing },
+      [tarListCommand(src)]: { code: 0, stdout: gnuTarListing(safeTarListing) },
     })
     vi.spyOn(mockSsh, "sha256").mockResolvedValue(archiveSha)
     // Issue #219: the first write is the containment flag before the merge.
@@ -2356,8 +2396,8 @@ describe("archive.extract — apply", () => {
       [`tar --no-same-owner --no-overwrite-dir -xzf '${src}' -C '${archiveStageDirectory}'`]: {
         code: 0,
       },
-      [`tar -tvzf '${src}'`]: { code: 0, stdout: safeTarListing },
       [batchedChownCommand]: { code: 0 },
+      [tarListCommand(src)]: { code: 0, stdout: gnuTarListing(safeTarListing) },
     })
     vi.spyOn(mockSsh, "sha256").mockResolvedValue(archiveSha)
     // Issue #219: the first write is the containment flag before the merge.
@@ -2383,7 +2423,7 @@ describe("archive.extract — apply", () => {
   it("rejects a tar archive that contains a `../escape` member without invoking tar -x", async () => {
     const tarListing = `-rw-r--r-- root/root 0 1970-01-01 00:00 ../escape\n`
     const mockSsh = createMockSsh({
-      [`tar -tvzf '${src}'`]: { code: 0, stdout: tarListing },
+      [tarListCommand(src)]: { code: 0, stdout: gnuTarListing(tarListing) },
     })
 
     const mod = archive.extract(src, destination)
@@ -2391,7 +2431,7 @@ describe("archive.extract — apply", () => {
 
     expect(result.status).toBe("failed")
     expect(String(result.error)).toContain("would escape destination")
-    expect(mockSsh.calls).toContain(`tar -tvzf '${src}'`)
+    expect(mockSsh.calls).toContain(tarListCommand(src))
     expectNoTarExtractCalls(mockSsh)
     expectNoArchiveMarkerWrite(mockSsh)
   })
@@ -2399,7 +2439,7 @@ describe("archive.extract — apply", () => {
   it("rejects a tar archive whose member is an absolute path", async () => {
     const tarListing = `-rw-r--r-- root/root 0 1970-01-01 00:00 /etc/passwd\n`
     const mockSsh = createMockSsh({
-      [`tar -tvzf '${src}'`]: { code: 0, stdout: tarListing },
+      [tarListCommand(src)]: { code: 0, stdout: gnuTarListing(tarListing) },
     })
 
     const mod = archive.extract(src, destination)
@@ -2407,7 +2447,7 @@ describe("archive.extract — apply", () => {
 
     expect(result.status).toBe("failed")
     expect(String(result.error)).toContain("would escape destination")
-    expect(mockSsh.calls).toContain(`tar -tvzf '${src}'`)
+    expect(mockSsh.calls).toContain(tarListCommand(src))
     expectNoTarExtractCalls(mockSsh)
     expectNoArchiveMarkerWrite(mockSsh)
   })
@@ -2415,7 +2455,7 @@ describe("archive.extract — apply", () => {
   it("rejects a tar archive whose symlink target points outside the destination", async () => {
     const tarListing = `lrwxrwxrwx root/root 0 1970-01-01 00:00 link -> ../../etc/passwd\n`
     const mockSsh = createMockSsh({
-      [`tar -tvzf '${src}'`]: { code: 0, stdout: tarListing },
+      [tarListCommand(src)]: { code: 0, stdout: gnuTarListing(tarListing) },
     })
 
     const mod = archive.extract(src, destination)
@@ -2423,7 +2463,7 @@ describe("archive.extract — apply", () => {
 
     expect(result.status).toBe("failed")
     expect(String(result.error)).toContain("would escape destination")
-    expect(mockSsh.calls).toContain(`tar -tvzf '${src}'`)
+    expect(mockSsh.calls).toContain(tarListCommand(src))
     expectNoTarExtractCalls(mockSsh)
     expectNoArchiveMarkerWrite(mockSsh)
   })
@@ -2431,7 +2471,7 @@ describe("archive.extract — apply", () => {
   it("rejects a tar archive whose hardlink target is an absolute path", async () => {
     const tarListing = `hrw-r--r-- root/root 0 1970-01-01 00:00 app/passwd link to /etc/passwd\n`
     const mockSsh = createMockSsh({
-      [`tar -tvzf '${src}'`]: { code: 0, stdout: tarListing },
+      [tarListCommand(src)]: { code: 0, stdout: gnuTarListing(tarListing) },
     })
 
     const mod = archive.extract(src, destination)
@@ -2439,7 +2479,7 @@ describe("archive.extract — apply", () => {
 
     expect(result.status).toBe("failed")
     expect(String(result.error)).toContain("would escape destination")
-    expect(mockSsh.calls).toContain(`tar -tvzf '${src}'`)
+    expect(mockSsh.calls).toContain(tarListCommand(src))
     expectNoTarExtractCalls(mockSsh)
     expectNoArchiveMarkerWrite(mockSsh)
   })
@@ -2447,7 +2487,7 @@ describe("archive.extract — apply", () => {
   it("rejects a tar archive whose hardlink target traverses outside the destination", async () => {
     const tarListing = `hrw-r--r-- root/root 0 1970-01-01 00:00 app/passwd link to ../../etc/passwd\n`
     const mockSsh = createMockSsh({
-      [`tar -tvzf '${src}'`]: { code: 0, stdout: tarListing },
+      [tarListCommand(src)]: { code: 0, stdout: gnuTarListing(tarListing) },
     })
 
     const mod = archive.extract(src, destination)
@@ -2455,7 +2495,7 @@ describe("archive.extract — apply", () => {
 
     expect(result.status).toBe("failed")
     expect(String(result.error)).toContain("would escape destination")
-    expect(mockSsh.calls).toContain(`tar -tvzf '${src}'`)
+    expect(mockSsh.calls).toContain(tarListCommand(src))
     expectNoTarExtractCalls(mockSsh)
     expectNoArchiveMarkerWrite(mockSsh)
   })
@@ -2472,7 +2512,7 @@ describe("archive.extract — apply", () => {
     expect(String(result.error)).toContain("destination path")
     expect(String(result.error)).toContain("is a symlink")
     expect(mockSsh.calls).not.toContain(`mkdir -p '${destination}'`)
-    expect(mockSsh.calls).not.toContain(`tar -tvzf '${src}'`)
+    expect(mockSsh.calls).not.toContain(tarListCommand(src))
     expectNoTarExtractCalls(mockSsh)
     expectNoArchiveMarkerWrite(mockSsh)
   })
@@ -2489,7 +2529,7 @@ describe("archive.extract — apply", () => {
     expect(String(result.error)).toContain(JSON.stringify(symlinkedDestinationAncestor))
     expect(String(result.error)).toContain("is a symlink")
     expect(mockSsh.calls).not.toContain(`mkdir -p '${destination}'`)
-    expect(mockSsh.calls).not.toContain(`tar -tvzf '${src}'`)
+    expect(mockSsh.calls).not.toContain(tarListCommand(src))
     expectNoTarExtractCalls(mockSsh)
     expectNoArchiveMarkerWrite(mockSsh)
   })
@@ -2497,7 +2537,7 @@ describe("archive.extract — apply", () => {
   it("rejects extraction when an existing member ancestor is a symlink", async () => {
     const symlinkedMemberAncestor = `${destination}/app`
     const mockSsh = createMockSsh({
-      [`tar -tvzf '${src}'`]: { code: 0, stdout: safeTarListing },
+      [tarListCommand(src)]: { code: 0, stdout: gnuTarListing(safeTarListing) },
     })
     stubSymlinkViolationFor(mockSsh, symlinkedMemberAncestor)
 
@@ -2509,7 +2549,7 @@ describe("archive.extract — apply", () => {
     expect(String(result.error)).toContain("is a symlink")
     expect(findGuardedArchiveMkdirCall(mockSsh.calls, destination)).toBeDefined()
     expect(mockSsh.calls).not.toContain(`mkdir -p '${destination}'`)
-    expect(mockSsh.calls).toContain(`tar -tvzf '${src}'`)
+    expect(mockSsh.calls).toContain(tarListCommand(src))
     expectNoTarExtractCalls(mockSsh)
     expectNoArchiveMarkerWrite(mockSsh)
   })
@@ -3471,7 +3511,7 @@ describe("archive.extract — apply", () => {
   it("rejects a tar archive that contains a block device member", async () => {
     const tarListing = `brw-r--r-- root/root 8,0 1970-01-01 00:00 app/device\n`
     const mockSsh = createMockSsh({
-      [`tar -tvzf '${src}'`]: { code: 0, stdout: tarListing },
+      [tarListCommand(src)]: { code: 0, stdout: gnuTarListing(tarListing) },
     })
 
     const mod = archive.extract(src, destination)
@@ -3479,7 +3519,7 @@ describe("archive.extract — apply", () => {
 
     expect(result.status).toBe("failed")
     expect(String(result.error)).toContain("is a special file")
-    expect(mockSsh.calls).toContain(`tar -tvzf '${src}'`)
+    expect(mockSsh.calls).toContain(tarListCommand(src))
     expectNoTarExtractCalls(mockSsh)
     expectNoArchiveMarkerWrite(mockSsh)
   })
@@ -3487,7 +3527,7 @@ describe("archive.extract — apply", () => {
   it("rejects a tar archive with an unparsed listing line before invoking tar -x", async () => {
     const tarListing = `${safeTarListing}\nnot-a-member\n`
     const mockSsh = createMockSsh({
-      [`tar -tvzf '${src}'`]: { code: 0, stdout: tarListing },
+      [tarListCommand(src)]: { code: 0, stdout: gnuTarListing(tarListing) },
     })
 
     const mod = archive.extract(src, destination)
@@ -3495,7 +3535,7 @@ describe("archive.extract — apply", () => {
 
     expect(result.status).toBe("failed")
     expect(String(result.error)).toContain("could not parse tar listing line")
-    expect(mockSsh.calls).toContain(`tar -tvzf '${src}'`)
+    expect(mockSsh.calls).toContain(tarListCommand(src))
     expectNoTarExtractCalls(mockSsh)
     expectNoArchiveMarkerWrite(mockSsh)
   })
@@ -3510,7 +3550,7 @@ describe("archive.extract — apply", () => {
   it("rejects a tar archive whose member name contains a NUL byte", async () => {
     const tarListing = `-rw-r--r-- root/root 0 1970-01-01 00:00 app\x00file\n`
     const mockSsh = createMockSsh({
-      [`tar -tvzf '${src}'`]: { code: 0, stdout: tarListing },
+      [tarListCommand(src)]: { code: 0, stdout: gnuTarListing(tarListing) },
     })
 
     const mod = archive.extract(src, destination)
@@ -3518,7 +3558,7 @@ describe("archive.extract — apply", () => {
 
     expect(result.status).toBe("failed")
     expect(String(result.error)).toContain("contains control characters")
-    expect(mockSsh.calls).toContain(`tar -tvzf '${src}'`)
+    expect(mockSsh.calls).toContain(tarListCommand(src))
     expectNoTarExtractCalls(mockSsh)
     expectNoArchiveMarkerWrite(mockSsh)
   })
@@ -3531,7 +3571,7 @@ describe("archive.extract — apply", () => {
     // \x02, \t, … before they reach downstream guards or shell helpers.
     const tarListing = `-rw-r--r-- root/root 0 1970-01-01 00:00 app\x01file\n`
     const mockSsh = createMockSsh({
-      [`tar -tvzf '${src}'`]: { code: 0, stdout: tarListing },
+      [tarListCommand(src)]: { code: 0, stdout: gnuTarListing(tarListing) },
     })
 
     const mod = archive.extract(src, destination)
@@ -3539,7 +3579,7 @@ describe("archive.extract — apply", () => {
 
     expect(result.status).toBe("failed")
     expect(String(result.error)).toContain("contains control characters")
-    expect(mockSsh.calls).toContain(`tar -tvzf '${src}'`)
+    expect(mockSsh.calls).toContain(tarListCommand(src))
     expectNoTarExtractCalls(mockSsh)
     expectNoArchiveMarkerWrite(mockSsh)
   })
@@ -3547,7 +3587,7 @@ describe("archive.extract — apply", () => {
   it("rejects a tar archive whose symlink target contains a NUL byte", async () => {
     const tarListing = `lrwxrwxrwx root/root 0 1970-01-01 00:00 link -> target\x00evil\n`
     const mockSsh = createMockSsh({
-      [`tar -tvzf '${src}'`]: { code: 0, stdout: tarListing },
+      [tarListCommand(src)]: { code: 0, stdout: gnuTarListing(tarListing) },
     })
 
     const mod = archive.extract(src, destination)
@@ -3555,7 +3595,7 @@ describe("archive.extract — apply", () => {
 
     expect(result.status).toBe("failed")
     expect(String(result.error)).toContain("link target contains control characters")
-    expect(mockSsh.calls).toContain(`tar -tvzf '${src}'`)
+    expect(mockSsh.calls).toContain(tarListCommand(src))
     expectNoTarExtractCalls(mockSsh)
     expectNoArchiveMarkerWrite(mockSsh)
   })
@@ -3563,26 +3603,79 @@ describe("archive.extract — apply", () => {
   // Issue #219: GNU tar prints a backslash as `\\` and non-printable bytes as
   // `\NNN`, other tar implementations print names raw, so a listed name with a
   // backslash or a U+FFFD cannot be mapped reliably to the extracted name.
+  // Listings of GNU tar and bsdtar are decoded first; a decoded real
+  // backslash is refused all the same, so the verdict does not depend on the
+  // tar on the host.
   it.each([
-    { line: tarFileLine("app/a\\\\b"), name: "a backslash in the path" },
-    { line: tarFileLine("app/\\303\\251"), name: "an octal escape in the path" },
-    { line: tarFileLine("app/\ufffd"), name: "a U+FFFD in the path" },
-    { line: tarSymlinkLine("app/l", "x\\\\y"), name: "a backslash in the link target" },
-    { line: tarSymlinkLine("app/l", "\ufffd"), name: "a U+FFFD in the link target" },
-  ])("rejects a tar archive with $name before anything reaches the host", async ({ line }) => {
-    const mockSsh = createMockSsh({
-      [`tar -tvzf '${src}'`]: { code: 0, stdout: `${line}\n` },
-    })
+    {
+      line: tarFileLine("app/a\\\\b"),
+      modeLine: gnuTarListingModeLine,
+      name: "GNU tar: an escaped backslash in the path",
+    },
+    {
+      line: tarFileLine("app/\ufffd"),
+      modeLine: gnuTarListingModeLine,
+      name: "GNU tar: a U+FFFD in the path",
+    },
+    {
+      line: tarFileLine("app/\\357\\277\\275"),
+      modeLine: "paratix-tar-listing gnu C\n",
+      name: "GNU tar in C: an escaped U+FFFD in the path",
+    },
+    {
+      line: tarSymlinkLine("app/l", "x\\\\y"),
+      modeLine: gnuTarListingModeLine,
+      name: "GNU tar: an escaped backslash in the link target",
+    },
+    {
+      line: tarSymlinkLine("app/l", "\ufffd"),
+      modeLine: gnuTarListingModeLine,
+      name: "GNU tar: a U+FFFD in the link target",
+    },
+    {
+      line: tarFileLine("app/a\\b"),
+      modeLine: otherTarListingModeLine,
+      name: "another tar: a raw backslash in the path",
+    },
+    {
+      line: tarFileLine("app/\\303\\251"),
+      modeLine: otherTarListingModeLine,
+      name: "another tar: an octal escape in the path",
+    },
+    {
+      line: tarFileLine("app/\ufffd"),
+      modeLine: otherTarListingModeLine,
+      name: "another tar: a U+FFFD in the path",
+    },
+    {
+      line: tarSymlinkLine("app/l", "x\\y"),
+      modeLine: otherTarListingModeLine,
+      name: "another tar: a raw backslash in the link target",
+    },
+    {
+      line: tarSymlinkLine("app/l", "\ufffd"),
+      modeLine: otherTarListingModeLine,
+      name: "another tar: a U+FFFD in the link target",
+    },
+  ])(
+    "rejects a tar archive with $name before anything reaches the host",
+    async ({ line, modeLine }) => {
+      const mockSsh = createMockSsh({
+        [tarListCommand(src)]: { code: 0, stdout: `${modeLine}${line}\n` },
+      })
 
-    const result = await archive.extract(src, destination).apply(mockSsh, emptyEnv)
+      const result = await archive.extract(src, destination).apply(mockSsh, emptyEnv)
 
-    expect(result.status).toBe("failed")
-    expect(String(result.error)).toContain("a backslash or a U+FFFD replacement character")
-    expect(String(result.error)).toContain("a UTF-8 locale on the host")
-    expect(findGuardedArchiveMkdirCall(mockSsh.calls, destination)).toBeUndefined()
-    expectNoTarExtractCalls(mockSsh)
-    expect(mockSsh.writeFileCalls).toStrictEqual([])
-  })
+      expect(result.status).toBe("failed")
+      expect(String(result.error)).toContain("a backslash or a U+FFFD replacement character")
+      expect(String(result.error)).toContain(
+        "member names with a backslash are refused in every listing"
+      )
+      expect(findGuardedArchiveMkdirCall(mockSsh.calls, destination)).toBeUndefined()
+      expectNoTarExtractCalls(mockSsh)
+      expect(mockSsh.writeFileCalls).toStrictEqual([])
+    }
+  )
 
   it("refuses an archive whose listing is not valid UTF-8 (Issue #219)", async () => {
     const mockSsh = createMockSsh()
@@ -3595,7 +3688,7 @@ describe("archive.extract — apply", () => {
     const result = await listArchiveMembers(mockSsh, { archivePath: src, source: src })
 
     expect(result).toStrictEqual({
-      failureReason: `archive listing for ${src} is not valid UTF-8; refusing to validate member names that cannot be mapped to the extracted names reliably (a UTF-8 locale on the host avoids this for non-ASCII names)`,
+      failureReason: `archive listing for ${src} is not valid UTF-8; refusing to validate member names that cannot be mapped to the extracted names reliably (a member name whose bytes are not valid UTF-8 cannot be mapped)`,
     })
   })
 
@@ -3618,7 +3711,7 @@ describe("archive.extract — apply", () => {
   it("rejects a tar archive whose member has the setuid bit set", async () => {
     const tarListing = "-rwsr-xr-x root/root 0 1970-01-01 00:00 app/suid-bin\n"
     const mockSsh = createMockSsh({
-      [`tar -tvzf '${src}'`]: { code: 0, stdout: tarListing },
+      [tarListCommand(src)]: { code: 0, stdout: gnuTarListing(tarListing) },
     })
 
     const mod = archive.extract(src, destination)
@@ -3626,7 +3719,7 @@ describe("archive.extract — apply", () => {
 
     expect(result.status).toBe("failed")
     expect(String(result.error)).toContain("setuid or setgid bit set")
-    expect(mockSsh.calls).toContain(`tar -tvzf '${src}'`)
+    expect(mockSsh.calls).toContain(tarListCommand(src))
     expectNoTarExtractCalls(mockSsh)
     expectNoArchiveMarkerWrite(mockSsh)
   })
@@ -3634,7 +3727,7 @@ describe("archive.extract — apply", () => {
   it("rejects a tar archive whose member has the setgid bit set", async () => {
     const tarListing = "-rwxr-sr-x root/root 0 1970-01-01 00:00 app/sgid-bin\n"
     const mockSsh = createMockSsh({
-      [`tar -tvzf '${src}'`]: { code: 0, stdout: tarListing },
+      [tarListCommand(src)]: { code: 0, stdout: gnuTarListing(tarListing) },
     })
 
     const mod = archive.extract(src, destination)
@@ -3642,7 +3735,7 @@ describe("archive.extract — apply", () => {
 
     expect(result.status).toBe("failed")
     expect(String(result.error)).toContain("setuid or setgid bit set")
-    expect(mockSsh.calls).toContain(`tar -tvzf '${src}'`)
+    expect(mockSsh.calls).toContain(tarListCommand(src))
     expectNoTarExtractCalls(mockSsh)
     expectNoArchiveMarkerWrite(mockSsh)
   })
@@ -3822,7 +3915,7 @@ describe("archive.extract — apply", () => {
       [`tar --no-same-owner --no-overwrite-dir -xzf '${src}' -C '${archiveStageDirectory}'`]: {
         code: 0,
       },
-      [`tar -tvzf '${src}'`]: { code: 0, stdout: safeTarListing },
+      [tarListCommand(src)]: { code: 0, stdout: gnuTarListing(safeTarListing) },
     })
     vi.spyOn(mockSsh, "sha256").mockResolvedValue(archiveSha)
     vi.spyOn(mockSsh, "writeFile").mockResolvedValue()
@@ -3845,7 +3938,7 @@ describe("archive.extract — apply", () => {
         [`tar --no-same-owner --no-overwrite-dir -xzf '${src}' -C '${archiveStageDirectory}'`]: {
           code: 0,
         },
-        [`tar -tvzf '${src}'`]: { code: 0, stdout: safeTarListing },
+        [tarListCommand(src)]: { code: 0, stdout: gnuTarListing(safeTarListing) },
       },
       {
         responseStubs: [
@@ -3871,7 +3964,7 @@ describe("archive.extract — apply", () => {
         [`tar --no-same-owner --no-overwrite-dir -xzf '${src}' -C '${archiveStageDirectory}'`]: {
           code: 0,
         },
-        [`tar -tvzf '${src}'`]: { code: 0, stdout: safeTarListing },
+        [tarListCommand(src)]: { code: 0, stdout: gnuTarListing(safeTarListing) },
       },
       {
         responseStubs: [
@@ -3904,7 +3997,7 @@ describe("archive.extract — apply", () => {
   it("rejects a destination that resolves elsewhere after guarded creation", async () => {
     const mockSsh = createMockSsh(
       {
-        [`tar -tvzf '${src}'`]: { code: 0, stdout: safeTarListing },
+        [tarListCommand(src)]: { code: 0, stdout: gnuTarListing(safeTarListing) },
       },
       {
         responseStubs: [
@@ -3936,7 +4029,7 @@ describe("archive.extract — apply", () => {
       [`tar --no-same-owner --no-overwrite-dir -xzf '${src}' -C '${archiveStageDirectory}'`]: {
         code: 0,
       },
-      [`tar -tvzf '${src}'`]: { code: 0, stdout: safeTarListing },
+      [tarListCommand(src)]: { code: 0, stdout: gnuTarListing(safeTarListing) },
     })
     const recheck = stubSymlinkRecheck(mockSsh, memberPath)
 
@@ -3959,7 +4052,7 @@ describe("archive.extract — apply", () => {
       [`tar --no-same-owner --no-overwrite-dir -xzf '${src}' -C '${archiveStageDirectory}'`]: {
         code: 0,
       },
-      [`tar -tvzf '${src}'`]: { code: 0, stdout: safeTarListing },
+      [tarListCommand(src)]: { code: 0, stdout: gnuTarListing(safeTarListing) },
     })
     vi.spyOn(mockSsh, "sha256").mockResolvedValue(archiveSha)
     vi.spyOn(mockSsh, "writeFile").mockResolvedValue()
@@ -3977,7 +4070,7 @@ describe("archive.extract — apply", () => {
       [`tar --no-same-owner --no-overwrite-dir -xzf '${src}' -C '${archiveStageDirectory}'`]: {
         code: 0,
       },
-      [`tar -tvzf '${src}'`]: { code: 0, stdout: safeTarListing },
+      [tarListCommand(src)]: { code: 0, stdout: gnuTarListing(safeTarListing) },
     })
     vi.spyOn(mockSsh, "sha256").mockResolvedValue(archiveSha)
     vi.spyOn(mockSsh, "writeFile").mockResolvedValue()
@@ -3997,7 +4090,7 @@ describe("archive.extract — apply", () => {
       [`tar --no-same-owner --no-overwrite-dir -xzf '${src}' -C '${archiveStageDirectory}'`]: {
         code: 0,
       },
-      [`tar -tvzf '${src}'`]: { code: 0, stdout: safeTarListing },
+      [tarListCommand(src)]: { code: 0, stdout: gnuTarListing(safeTarListing) },
     })
     vi.spyOn(mockSsh, "sha256").mockResolvedValue(archiveSha)
     vi.spyOn(mockSsh, "writeFile").mockResolvedValue()
@@ -4027,7 +4120,7 @@ describe("archive.extract — apply", () => {
       [`tar --no-same-owner --no-overwrite-dir -xzf '${src}' -C '${archiveStageDirectory}'`]: {
         code: 0,
       },
-      [`tar -tvzf '${src}'`]: { code: 0, stdout: safeTarListing },
+      [tarListCommand(src)]: { code: 0, stdout: gnuTarListing(safeTarListing) },
     })
     vi.spyOn(mockSsh, "sha256").mockResolvedValue(archiveSha)
     vi.spyOn(mockSsh, "writeFile").mockResolvedValue()
@@ -4064,8 +4157,8 @@ describe("archive.extract — apply", () => {
       [`tar --no-same-owner --no-overwrite-dir -xzf '${src}' -C '${archiveStageDirectory}'`]: {
         code: 0,
       },
-      [`tar -tvzf '${src}'`]: { code: 0, stdout: safeTarListing },
       [batchedChownCommand]: { code: 0 },
+      [tarListCommand(src)]: { code: 0, stdout: gnuTarListing(safeTarListing) },
     })
     vi.spyOn(mockSsh, "sha256").mockResolvedValue(archiveSha)
     vi.spyOn(mockSsh, "writeFile").mockResolvedValue()
@@ -4097,8 +4190,8 @@ describe("archive.extract — apply", () => {
       [`tar --no-same-owner --no-overwrite-dir -xzf '${src}' -C '${archiveStageDirectory}'`]: {
         code: 0,
       },
-      [`tar -tvzf '${src}'`]: { code: 0, stdout: listing },
       [batchedChownCommand]: { code: 0 },
+      [tarListCommand(src)]: { code: 0, stdout: gnuTarListing(listing) },
     })
     vi.spyOn(mockSsh, "sha256").mockResolvedValue(archiveSha)
     vi.spyOn(mockSsh, "writeFile").mockResolvedValue()
@@ -4133,13 +4226,13 @@ describe("archive.extract — apply", () => {
         code: 0,
         stdout: JSON.stringify([`${destination}/app/file`]),
       },
-      [`tar -tvzf '${src}'`]: { code: 0, stdout: driftedTarListing },
       [`test -d '${destination}'`]: { code: 0 },
       [markerCheckCommand(marker)]: { code: 0 },
       [ownershipProbeCommand("www-data:www-data")]: ownershipReport(
         `${destination}/app/file`,
         "www-data www-data 33 33"
       ),
+      [tarListCommand(src)]: { code: 0, stdout: gnuTarListing(driftedTarListing) },
     })
     vi.spyOn(mockSsh, "sha256").mockResolvedValue(archiveSha)
 
@@ -4149,7 +4242,7 @@ describe("archive.extract — apply", () => {
     expect(result).toBe("ok")
     // The check must not consult the live archive listing when the marker is
     // available — that's the entire point of R-0000166.
-    expect(mockSsh.calls).not.toContain(`tar -tvzf '${src}'`)
+    expect(mockSsh.calls).not.toContain(tarListCommand(src))
   })
 
   it.each([
@@ -4174,7 +4267,7 @@ describe("archive.extract — apply", () => {
 
     expect(result).toBe("needs-apply")
     expectArchiveCaptureExecCall(mockSsh, `cat '${ownerPathsMarker}'`, { pinCLocale: true })
-    expect(mockSsh.calls).not.toContain(`tar -tvzf '${src}'`)
+    expect(mockSsh.calls).not.toContain(tarListCommand(src))
     expect(mockSsh.calls).not.toContain(ownershipProbeCommand("www-data:www-data"))
   })
 
@@ -4191,13 +4284,13 @@ describe("archive.extract — apply", () => {
         code: 1,
         stderr: "cat: No such file or directory",
       },
-      [`tar -tvzf '${src}'`]: { code: 0, stdout: safeTarListing },
       [`test -d '${destination}'`]: { code: 0 },
       [markerCheckCommand(marker)]: { code: 0 },
       [ownershipProbeCommand("www-data:www-data")]: ownershipReport(
         `${destination}/app/file`,
         "www-data www-data 33 33"
       ),
+      [tarListCommand(src)]: { code: 0, stdout: gnuTarListing(safeTarListing) },
     })
     vi.spyOn(mockSsh, "sha256").mockResolvedValue(archiveSha)
 
@@ -4206,8 +4299,8 @@ describe("archive.extract — apply", () => {
 
     expect(result).toBe("ok")
     expectArchiveCaptureExecCall(mockSsh, `cat '${ownerPathsMarker}'`, { pinCLocale: true })
-    expectArchiveCaptureExecCall(mockSsh, `tar -tvzf '${src}'`, { strictUtf8: true })
-    expect(mockSsh.calls).toContain(`tar -tvzf '${src}'`)
+    expectArchiveCaptureExecCall(mockSsh, tarListCommand(src), { strictUtf8: true })
+    expect(mockSsh.calls).toContain(tarListCommand(src))
   })
 
   it("returns ok when a numeric owner matches the extracted member ids", async () => {
@@ -4300,7 +4393,7 @@ describe("archive.extract — apply", () => {
   it("R-0000162: rejects a poisoned mktemp -d output for the staging directory", async () => {
     const mockSsh = createMockSsh(
       {
-        [`tar -tvzf '${src}'`]: { code: 0, stdout: safeTarListing },
+        [tarListCommand(src)]: { code: 0, stdout: gnuTarListing(safeTarListing) },
       },
       {
         responseStubs: [
@@ -4408,7 +4501,7 @@ describe("archive.extract containment-failure flag (Issue #219)", () => {
     // pre-staging probe and the pre-merge listing as well.
     const { calls } = run.mockSsh
     const flagDirectory = calls.indexOf("mkdir -p '/var/lib/paratix/flags'")
-    const archiveListing = calls.indexOf(`tar -tvzf '${src}'`)
+    const archiveListing = calls.indexOf(tarListCommand(src))
     const destinationMkdir = calls.indexOf(guardedArchiveDestinationMkdirCommand(destination))
     const destinationReadlink = calls.indexOf(`readlink -f -- '${destination}'`)
     const preStagingProbe = calls.indexOf(preStagingProbeCommand)

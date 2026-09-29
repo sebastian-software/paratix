@@ -199,10 +199,15 @@ export default server({
 own directory (hardlinks: from the archive root) and through the archive's own symlinks, stays
 inside `destination`; absolute targets, a link in place of the destination root, members below an
 archive symlink, and zip symlinks are rejected. The archive listing is decoded as strict UTF-8,
-never with replacement characters. A member whose path or link target contains a backslash or
-U+FFFD is rejected, because `tar` prints non-printable bytes (and, outside a UTF-8 locale, every
-non-ASCII byte) as escape sequences, so such names cannot be mapped reliably to the extracted names;
-a UTF-8 locale on the host avoids escaped non-ASCII names. Once the archive listing is validated, it
+never with replacement characters. `tar` lists the archive under a UTF-8 C locale (`C.UTF-8` or
+`C.utf8`) when the host has one and under `LC_ALL=C` otherwise (bsdtar always under `LC_ALL=C`); for
+GNU tar and bsdtar the escape sequences of the listing (`\NNN`, `\\` and the single-letter control
+escapes) are decoded back to the stored bytes, so non-ASCII names are accepted whatever locale the
+SSH session has. A member whose decoded name is not valid UTF-8, or whose name contains any other
+escape sequence, is rejected because it cannot be mapped to the extracted name. A member whose path
+or link target contains a backslash or U+FFFD is rejected in every listing, also after decoding,
+because another `tar` (such as BusyBox) and `unzip` print escape sequences and real backslashes
+alike. Once the archive listing is validated, it
 writes a per-destination flag before the destination is created or validated; an apply that cannot
 write it stops before the destination is touched. Before anything is staged, it then refuses a
 member whose path or parent directories are existing host symlinks (an archive symlink may replace

@@ -11,13 +11,16 @@
     "authfile",
     "badname",
     "behaviour",
+    "bsdtar",
     "callsites",
     "canonicalise",
     "cdpath",
     "centralised",
     "centralises",
+    "charmap",
     "chowns",
     "defence",
+    "fixedbugs",
     "neutralises",
     "chgrp",
     "chpasswd",
@@ -219,6 +222,7 @@
     "userdel",
     "userlist",
     "usermod",
+    "ustar",
     "worktree",
     "Xstugo",
     "multiarch",
@@ -228,6 +232,7 @@
     "casefold",
     "cifs",
     "unmappable",
-    "venv"
+    "venv",
+    "Þfoo"
   ]
 }
