@@ -8,17 +8,36 @@
  * `flagLock.shell.smoke.test.ts`.
  */
 import { spawnSync } from "node:child_process"
-import { mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs"
+import {
+  existsSync,
+  lstatSync,
+  mkdirSync,
+  mkdtempSync,
+  readdirSync,
+  readFileSync,
+  readlinkSync,
+  realpathSync,
+  rmSync,
+  symlinkSync,
+  writeFileSync,
+} from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { describe, expect, it } from "vitest"
 
+import type { ExecOptions, ExecResult, SshConnection } from "../../src/types.js"
+
+import { removeEscapingSymlinks } from "../../src/modules/archiveContainmentEnforcement.js"
 import {
   buildMemberTypeProbeScript,
   buildOwnershipProbeScript,
+  buildPreStagingProbeScript,
   buildSymlinkProbeScript,
+  buildSymlinkRemovalScript,
   encodeMemberTypeEntry,
   encodeNulPayload,
+  encodePreStagingEntry,
+  SYMLINK_REMOVED_OUTCOME,
 } from "../../src/modules/archiveProbe.js"
 import { renderBatchedChownSymlinkCommand } from "../../src/modules/fileMetadataHelpers.js"
 
@@ -45,6 +64,81 @@ function runProbe(script: string, entries: string[]): ProbeResult {
 
 function makeWorkspace(): string {
   return realpathSync(mkdtempSync(join(tmpdir(), "paratix-probe-smoke-")))
+}
+
+/**
+ * Issue #219: pair up NUL-decoded probe fields.
+ *
+ * @param fields - The decoded fields; an odd count leaves `<missing>` in the last pair.
+ * @returns The `(first, second)` pairs in output order.
+ */
+function fieldPairs(fields: readonly string[]): Array<[string, string]> {
+  const pairs: Array<[string, string]> = []
+  for (let index = 0; index < fields.length; index += 2) {
+    pairs.push([fields[index] ?? "", fields[index + 1] ?? "<missing>"])
+  }
+  return pairs
+}
+
+/**
+ * Issue #219: an `SshConnection` whose `exec` runs the command on the local
+ * `/bin/sh`, with `input` on stdin, so a production function can drive its
+ * real remote scripts against a temporary directory.
+ *
+ * @returns The connection and the commands it executed.
+ */
+function localShellConnection(): { commands: string[]; conn: SshConnection } {
+  const commands: string[] = []
+  const conn = {
+    async exec(command: string, options?: ExecOptions): Promise<ExecResult> {
+      await Promise.resolve()
+      commands.push(command)
+      const result = spawnSync("/bin/sh", ["-c", command], {
+        encoding: "utf8",
+        input: options?.input ?? "",
+        timeout: 10_000,
+      })
+      return { code: result.status ?? -1, stderr: result.stderr, stdout: result.stdout }
+    },
+  } as unknown as SshConnection
+  return { commands, conn }
+}
+
+/**
+ * Issue #219: the workspace for the removal cases: a destination plus an
+ * `outside` directory and file next to it that escaping links point at.
+ *
+ * @returns The workspace root, the destination and the outside targets.
+ */
+function makeRemovalWorkspace(): {
+  destination: string
+  outsideDirectory: string
+  outsideFile: string
+  root: string
+} {
+  const root = makeWorkspace()
+  const destination = join(root, "destination")
+  const outsideDirectory = join(root, "outside")
+  const outsideFile = join(root, "outside.txt")
+  mkdirSync(destination)
+  mkdirSync(outsideDirectory)
+  writeFileSync(join(outsideDirectory, "keep.txt"), "keep\n")
+  writeFileSync(outsideFile, "outside\n")
+  return { destination, outsideDirectory, outsideFile, root }
+}
+
+/**
+ * Issue #219: whether a path exists as a symlink, without following it.
+ *
+ * @param path - The path to inspect.
+ * @returns True when `lstat` reports a symlink.
+ */
+function isSymlink(path: string): boolean {
+  try {
+    return lstatSync(path).isSymbolicLink()
+  } catch {
+    return false
+  }
 }
 
 /**
@@ -401,6 +495,355 @@ describe.skipIf(SKIP_PLATFORM)("archive.extract batched probes", () => {
 
         expect(result.code).toBe(0)
         expect(result.fields).toStrictEqual([])
+      } finally {
+        rmSync(root, { force: true, recursive: true })
+      }
+    })
+  })
+
+  describe("pre-staging probe (Issue #219)", () => {
+    const probe = buildPreStagingProbeScript()
+
+    it("reports a symlink for l, a real directory for n and a non-directory for d", () => {
+      const root = makeWorkspace()
+      try {
+        const directory = join(root, "dir")
+        const file = join(root, "file")
+        const link = join(root, "link")
+        mkdirSync(directory)
+        writeFileSync(file, "x")
+        symlinkSync(directory, link)
+
+        const result = runProbe(probe, [
+          encodePreStagingEntry("l", directory),
+          encodePreStagingEntry("l", link),
+          encodePreStagingEntry("n", file),
+          encodePreStagingEntry("n", directory),
+          encodePreStagingEntry("d", directory),
+          encodePreStagingEntry("d", file),
+        ])
+
+        expect(result.stderr).toBe("")
+        expect(result.code).toBe(0)
+        expect(fieldPairs(result.fields)).toStrictEqual([
+          ["l", link],
+          ["n", directory],
+          ["d", file],
+        ])
+      } finally {
+        rmSync(root, { force: true, recursive: true })
+      }
+    })
+
+    it("never reports a symlink for n or d, even when it points at the conflicting type", () => {
+      // A symlink at a member path is the `l` check's business; `n` and `d`
+      // look at the entry itself, so `[ -d ]` must not follow the link.
+      const root = makeWorkspace()
+      try {
+        const directory = join(root, "dir")
+        const file = join(root, "file")
+        mkdirSync(directory)
+        writeFileSync(file, "x")
+        symlinkSync(directory, join(root, "to-dir"))
+        symlinkSync(file, join(root, "to-file"))
+        symlinkSync(join(root, "missing"), join(root, "dangling"))
+
+        const result = runProbe(probe, [
+          encodePreStagingEntry("n", join(root, "to-dir")),
+          encodePreStagingEntry("d", join(root, "to-file")),
+          encodePreStagingEntry("d", join(root, "dangling")),
+          encodePreStagingEntry("n", join(root, "dangling")),
+        ])
+
+        expect(result).toStrictEqual({ code: 0, fields: [], stderr: "" })
+      } finally {
+        rmSync(root, { force: true, recursive: true })
+      }
+    })
+
+    it("treats nonexistent paths as clean for every check", () => {
+      const root = makeWorkspace()
+      try {
+        const missing = join(root, "missing/deeper")
+
+        const result = runProbe(probe, [
+          encodePreStagingEntry("l", missing),
+          encodePreStagingEntry("n", missing),
+          encodePreStagingEntry("d", missing),
+        ])
+
+        expect(result).toStrictEqual({ code: 0, fields: [], stderr: "" })
+      } finally {
+        rmSync(root, { force: true, recursive: true })
+      }
+    })
+
+    it("keeps check and path paired for paths with colons, spaces and newlines", () => {
+      const root = makeWorkspace()
+      try {
+        const directory = join(root, "d:n: with space\nline")
+        const file = join(root, "l:d:file")
+        mkdirSync(directory)
+        writeFileSync(file, "x")
+
+        const result = runProbe(probe, [
+          encodePreStagingEntry("d", file),
+          encodePreStagingEntry("n", directory),
+          encodePreStagingEntry("d", directory),
+          encodePreStagingEntry("n", file),
+        ])
+
+        expect(result.code).toBe(0)
+        expect(fieldPairs(result.fields)).toStrictEqual([
+          ["d", file],
+          ["n", directory],
+        ])
+      } finally {
+        rmSync(root, { force: true, recursive: true })
+      }
+    })
+
+    it("reports an unknown check code with the kind ? instead of skipping the entry", () => {
+      const root = makeWorkspace()
+      try {
+        const result = runProbe(probe, [`x:${root}`, "no-colon"])
+
+        expect(result.code).toBe(0)
+        expect(fieldPairs(result.fields)).toStrictEqual([
+          ["?", root],
+          ["?", "no-colon"],
+        ])
+      } finally {
+        rmSync(root, { force: true, recursive: true })
+      }
+    })
+  })
+
+  describe("symlink removal script (Issue #219)", () => {
+    it("removes exactly the given symlinks without following them", () => {
+      const { destination, outsideDirectory, outsideFile, root } = makeRemovalWorkspace()
+      try {
+        mkdirSync(join(destination, "a"))
+        const toDirectory = join(destination, "a/to-dir")
+        const toFile = join(destination, "to-file")
+        const kept = join(destination, "a/kept")
+        symlinkSync("../../outside", toDirectory)
+        symlinkSync(outsideFile, toFile)
+        symlinkSync("../../outside", kept)
+
+        const result = runProbe(buildSymlinkRemovalScript(destination), [toDirectory, toFile])
+
+        expect(result.stderr).toBe("")
+        expect(result.code).toBe(0)
+        expect(fieldPairs(result.fields)).toStrictEqual([
+          [toDirectory, SYMLINK_REMOVED_OUTCOME],
+          [toFile, SYMLINK_REMOVED_OUTCOME],
+        ])
+        expect(isSymlink(toDirectory)).toBe(false)
+        expect(existsSync(toDirectory)).toBe(false)
+        expect(isSymlink(toFile)).toBe(false)
+        expect(readlinkSync(kept)).toBe("../../outside")
+        expect(readdirSync(outsideDirectory)).toStrictEqual(["keep.txt"])
+        expect(readFileSync(join(outsideDirectory, "keep.txt"), "utf8")).toBe("keep\n")
+        expect(readFileSync(outsideFile, "utf8")).toBe("outside\n")
+      } finally {
+        rmSync(root, { force: true, recursive: true })
+      }
+    })
+
+    it("refuses a link whose ancestor is a symlink, so rm is never redirected", () => {
+      // `a` points outside; the path `destination/a/l` names `outside/l`.
+      const { destination, outsideDirectory, root } = makeRemovalWorkspace()
+      try {
+        symlinkSync(outsideDirectory, join(destination, "a"))
+        symlinkSync("keep.txt", join(outsideDirectory, "l"))
+        const throughLink = join(destination, "a/l")
+
+        const result = runProbe(buildSymlinkRemovalScript(destination), [throughLink])
+
+        expect(result.code).toBe(0)
+        expect(fieldPairs(result.fields)).toStrictEqual([
+          [throughLink, "an ancestor directory is missing or a symlink"],
+        ])
+        expect(readlinkSync(join(outsideDirectory, "l"))).toBe("keep.txt")
+      } finally {
+        rmSync(root, { force: true, recursive: true })
+      }
+    })
+
+    it("refuses a link below a missing directory", () => {
+      const { destination, root } = makeRemovalWorkspace()
+      try {
+        const missing = join(destination, "missing/l")
+
+        const result = runProbe(buildSymlinkRemovalScript(destination), [missing])
+
+        expect(fieldPairs(result.fields)).toStrictEqual([
+          [missing, "an ancestor directory is missing or a symlink"],
+        ])
+      } finally {
+        rmSync(root, { force: true, recursive: true })
+      }
+    })
+
+    it("reports a regular file or directory at the path as no longer a symlink and keeps it", () => {
+      const { destination, root } = makeRemovalWorkspace()
+      try {
+        const file = join(destination, "f")
+        const directory = join(destination, "d")
+        writeFileSync(file, "file\n")
+        mkdirSync(directory)
+        writeFileSync(join(directory, "inner"), "inner\n")
+        const gone = join(destination, "gone")
+
+        const result = runProbe(buildSymlinkRemovalScript(destination), [file, directory, gone])
+
+        expect(fieldPairs(result.fields)).toStrictEqual([
+          [file, "no longer a symlink"],
+          [directory, "no longer a symlink"],
+          [gone, "no longer a symlink"],
+        ])
+        expect(readFileSync(file, "utf8")).toBe("file\n")
+        expect(readFileSync(join(directory, "inner"), "utf8")).toBe("inner\n")
+      } finally {
+        rmSync(root, { force: true, recursive: true })
+      }
+    })
+
+    it("refuses paths that are not strictly below the destination", () => {
+      const { destination, root } = makeRemovalWorkspace()
+      try {
+        const outsideLink = join(root, "outside-link")
+        const siblingLink = `${destination}-sibling/l`
+        mkdirSync(`${destination}-sibling`)
+        symlinkSync("outside", outsideLink)
+        symlinkSync("..", siblingLink)
+
+        const result = runProbe(buildSymlinkRemovalScript(destination), [
+          outsideLink,
+          siblingLink,
+          destination,
+          `${destination}/`,
+        ])
+
+        expect(fieldPairs(result.fields)).toStrictEqual([
+          [outsideLink, "not below the destination"],
+          [siblingLink, "not below the destination"],
+          [destination, "not below the destination"],
+          [`${destination}/`, "not below the destination"],
+        ])
+        expect(readlinkSync(outsideLink)).toBe("outside")
+        expect(readlinkSync(siblingLink)).toBe("..")
+      } finally {
+        rmSync(root, { force: true, recursive: true })
+      }
+    })
+
+    it("removes links whose names contain spaces and newlines", () => {
+      const { destination, root } = makeRemovalWorkspace()
+      try {
+        const directory = join(destination, "dir with space")
+        mkdirSync(directory)
+        const newline = join(directory, "two\nlines")
+        const trailing = join(directory, "trailing space ")
+        const keptSibling = join(directory, "two")
+        symlinkSync("../..", newline)
+        symlinkSync("../..", trailing)
+        symlinkSync("../..", keptSibling)
+
+        const result = runProbe(buildSymlinkRemovalScript(destination), [newline, trailing])
+
+        expect(result.code).toBe(0)
+        expect(fieldPairs(result.fields)).toStrictEqual([
+          [newline, SYMLINK_REMOVED_OUTCOME],
+          [trailing, SYMLINK_REMOVED_OUTCOME],
+        ])
+        expect(readdirSync(directory)).toStrictEqual(["two"])
+      } finally {
+        rmSync(root, { force: true, recursive: true })
+      }
+    })
+
+    it("keeps a destination whose name contains a quote as a fixed argument", () => {
+      const root = makeWorkspace()
+      try {
+        const destination = join(root, "it's here")
+        mkdirSync(destination)
+        const link = join(destination, "l")
+        symlinkSync("..", link)
+
+        const result = runProbe(buildSymlinkRemovalScript(destination), [link])
+
+        expect(fieldPairs(result.fields)).toStrictEqual([[link, SYMLINK_REMOVED_OUTCOME]])
+        expect(isSymlink(link)).toBe(false)
+      } finally {
+        rmSync(root, { force: true, recursive: true })
+      }
+    })
+
+    it("refuses non-normalized paths on its own and removes nothing inside or outside", () => {
+      // The script is hardened independently of the TypeScript vetting: a
+      // lexical `<destination>/` prefix must not let `..`, `.` or an empty
+      // segment reach `rm`.
+      const { destination, root } = makeRemovalWorkspace()
+      try {
+        const outsideLink = join(root, "outside-link")
+        symlinkSync("outside", outsideLink)
+        mkdirSync(join(destination, "a"))
+        const insideLink = join(destination, "a/l")
+        symlinkSync("../..", insideLink)
+        const parentSegment = `${destination}/../outside-link`
+        const dotSegment = `${destination}/./a/l`
+        const emptySegment = `${destination}//a/l`
+        const innerDot = `${destination}/a/./l`
+        const trailingSlash = `${destination}/a/l/`
+
+        const result = runProbe(buildSymlinkRemovalScript(destination), [
+          parentSegment,
+          dotSegment,
+          emptySegment,
+          innerDot,
+          trailingSlash,
+        ])
+
+        expect(result.stderr).toBe("")
+        expect(result.code).toBe(0)
+        expect(fieldPairs(result.fields)).toStrictEqual([
+          [parentSegment, "not normalized"],
+          [dotSegment, "not normalized"],
+          [emptySegment, "not normalized"],
+          [innerDot, "not normalized"],
+          [trailingSlash, "not normalized"],
+        ])
+        expect(readlinkSync(outsideLink)).toBe("outside")
+        expect(readlinkSync(insideLink)).toBe("../..")
+      } finally {
+        rmSync(root, { force: true, recursive: true })
+      }
+    })
+
+    it("never hands a non-normalized path to the script when driven by removeEscapingSymlinks", async () => {
+      // The script refuses `<destination>/../x` itself as well; the TypeScript
+      // vetting in front of it must refuse such a path first, so it never
+      // reaches the script at all.
+      const { destination, root } = makeRemovalWorkspace()
+      try {
+        const outsideLink = join(root, "outside-link")
+        symlinkSync("outside", outsideLink)
+        const escaping = join(destination, "esc")
+        symlinkSync("..", escaping)
+        const dotted = `${destination}/../outside-link`
+        const { commands, conn } = localShellConnection()
+
+        const report = await removeEscapingSymlinks(conn, destination, [dotted, escaping, escaping])
+
+        expect(report).toStrictEqual({
+          kept: [[dotted, "path is not normalized"]],
+          removed: [escaping],
+        })
+        expect(commands).toStrictEqual([buildSymlinkRemovalScript(destination)])
+        expect(readlinkSync(outsideLink)).toBe("outside")
+        expect(isSymlink(escaping)).toBe(false)
       } finally {
         rmSync(root, { force: true, recursive: true })
       }

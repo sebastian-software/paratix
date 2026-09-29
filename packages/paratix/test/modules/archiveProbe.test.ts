@@ -6,7 +6,12 @@ import {
   buildSymlinkListingProbeScript,
   buildSymlinkProbeScript,
   encodeNulPayload,
+  encodePreStagingEntry,
+  encodeSymlinkListingEntry,
+  escapingSymlinkRemovalRefusal,
   runBatchedProbe,
+  SYMLINK_REMOVED_OUTCOME,
+  symlinkRemovalReport,
 } from "../../src/modules/archiveProbe.js"
 import { CAPTURE_TRUNCATION_MARKER, DEFAULT_MAX_OUTPUT_BYTES } from "../../src/sshHelpers.js"
 
@@ -185,5 +190,124 @@ describe("truncation reaches the ownership caller", () => {
     const result = await mod.check(conn, {})
 
     expect(result).toBe("needs-apply")
+  })
+})
+
+describe("tagged probe entries (Issue #219)", () => {
+  it("prefixes the path with the check code and keeps colons inside the path", () => {
+    expect(encodePreStagingEntry("l", "/opt/app/a")).toBe("l:/opt/app/a")
+    expect(encodePreStagingEntry("n", "/opt/app/a:b")).toBe("n:/opt/app/a:b")
+    expect(encodePreStagingEntry("d", "/opt/app/x:y:z")).toBe("d:/opt/app/x:y:z")
+  })
+
+  it("prefixes the listing entry with its kind and keeps colons inside the path", () => {
+    expect(encodeSymlinkListingEntry("r", "/opt/app")).toBe("r:/opt/app")
+    expect(encodeSymlinkListingEntry("n", "/opt/app/n:x")).toBe("n:/opt/app/n:x")
+  })
+})
+
+describe("escapingSymlinkRemovalRefusal (Issue #219)", () => {
+  const destination = "/opt/app"
+
+  it.each([
+    "/opt/app/l",
+    "/opt/app/a/b/l",
+    "/opt/app/dir with space/two\nlines",
+    "/opt/app/..hidden",
+    "/opt/app/a/...",
+  ])("accepts the normalized path %j strictly below the destination", (link) => {
+    expect(escapingSymlinkRemovalRefusal(destination, link)).toBeNull()
+  })
+
+  it.each([
+    { link: "/opt/app", reason: "path is not strictly below the destination" },
+    { link: "/opt/app/", reason: "path is not strictly below the destination" },
+    { link: "/opt/app-alt/l", reason: "path is not strictly below the destination" },
+    { link: "/opt/other/l", reason: "path is not strictly below the destination" },
+    { link: "opt/app/l", reason: "path is not strictly below the destination" },
+    { link: "/opt/app/../etc", reason: "path is not normalized" },
+    { link: "/opt/app/a/../../etc", reason: "path is not normalized" },
+    { link: "/opt/app/./l", reason: "path is not normalized" },
+    { link: "/opt/app//l", reason: "path is not normalized" },
+    { link: "/opt/app/a/", reason: "path is not normalized" },
+    { link: "/opt/app/a\u0000b", reason: "path contains a NUL byte" },
+  ])("refuses $link: $reason", ({ link, reason }) => {
+    expect(escapingSymlinkRemovalRefusal(destination, link)).toBe(reason)
+  })
+})
+
+/**
+ * Issue #219: a successful removal exec that returned the given fields.
+ *
+ * @param fields - The decoded `(link, outcome)` fields.
+ * @returns The batched probe outcome.
+ */
+function reported(...fields: string[]): { fields: string[]; kind: "ok" } {
+  return { fields, kind: "ok" }
+}
+
+describe("symlinkRemovalReport (Issue #219)", () => {
+  const requested = ["/opt/app/a", "/opt/app/b"]
+
+  it("reports every link the script removed", () => {
+    expect(
+      symlinkRemovalReport(
+        requested,
+        reported("/opt/app/b", SYMLINK_REMOVED_OUTCOME, "/opt/app/a", SYMLINK_REMOVED_OUTCOME)
+      )
+    ).toStrictEqual({ kept: [], removed: ["/opt/app/a", "/opt/app/b"] })
+  })
+
+  it("keeps a link whose outcome is a reason, and one without any outcome", () => {
+    expect(symlinkRemovalReport(requested, reported("/opt/app/a", "rm failed"))).toStrictEqual({
+      kept: [
+        ["/opt/app/a", "rm failed"],
+        ["/opt/app/b", "no outcome reported"],
+      ],
+      removed: [],
+    })
+  })
+
+  it("keeps a link whose outcome only resembles the removed outcome", () => {
+    expect(
+      symlinkRemovalReport(["/opt/app/a"], reported("/opt/app/a", `${SYMLINK_REMOVED_OUTCOME}\n`))
+    ).toStrictEqual({ kept: [["/opt/app/a", `${SYMLINK_REMOVED_OUTCOME}\n`]], removed: [] })
+  })
+
+  it.each([
+    {
+      name: "a failed removal exec",
+      outcome: { detail: "xargs: sh: not found", kind: "failed" as const },
+      reason: "xargs: sh: not found",
+    },
+    {
+      name: "an odd field count",
+      outcome: reported("/opt/app/a", SYMLINK_REMOVED_OUTCOME, "/opt/app/b"),
+      reason: "removal returned 3 fields, expected (link, outcome) pairs",
+    },
+    {
+      name: "a link that was not requested",
+      outcome: reported("/opt/app/a", SYMLINK_REMOVED_OUTCOME, "/etc/passwd", "removed"),
+      reason: 'removal reported unexpected link "/etc/passwd"',
+    },
+    {
+      name: "a link reported twice",
+      outcome: reported(
+        "/opt/app/a",
+        SYMLINK_REMOVED_OUTCOME,
+        "/opt/app/a",
+        SYMLINK_REMOVED_OUTCOME
+      ),
+      reason: 'removal reported unexpected link "/opt/app/a"',
+    },
+  ])("fails closed on $name: every requested link counts as kept", ({ outcome, reason }) => {
+    expect(symlinkRemovalReport(requested, outcome)).toStrictEqual({
+      kept: requested.map((link) => [link, `removal outcome unknown: ${reason}`]),
+      removed: [],
+    })
+  })
+
+  it("reports nothing for nothing requested", () => {
+    expect(symlinkRemovalReport([], reported())).toStrictEqual({ kept: [], removed: [] })
   })
 })

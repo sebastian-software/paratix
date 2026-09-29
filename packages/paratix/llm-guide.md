@@ -198,14 +198,22 @@ export default server({
 `archive.extract` extracts a tar symlink or hardlink only if its target, resolved from the link's
 own directory (hardlinks: from the archive root) and through the archive's own symlinks, stays
 inside `destination`; absolute targets, a link in place of the destination root, members below an
-archive symlink, and zip symlinks are rejected. Before the merge it also resolves the symlinks
-already under `destination` together with the archive's (an archive member replaces the existing
-link at its path; existing absolute targets inside `destination` are allowed) and fails without
-copying anything if any link resolves outside `destination`; a second check of every symlink after
-the merge catches host changes made in between. When either check fails, no extraction marker is
-written, no `owner` is applied, and `check` reports `needs-apply` for every archive extracting into
-that destination until an apply succeeds completely, which requires removing the escaping link or
-pointing it inside.
+archive symlink, and zip symlinks are rejected. Before anything is staged, it refuses a member whose
+path or parent directories are existing host symlinks (an archive symlink may replace the link at
+its own path), a file, hardlink or symlink member where the host has a real directory, and a
+directory, including an implied parent directory, where the host has a non-directory. It then
+writes a per-destination flag (an apply that cannot write it stops there) and, still before copying
+anything, resolves the symlinks already under `destination` together with the archive's: an archive
+symlink replaces an existing symlink at the same path and existing absolute targets inside
+`destination` are allowed, while any other type combination at a member path, a member below an
+existing symlink, or any link resolving outside `destination` refuses the extraction; an existing
+escaping link must then be removed or pointed inside. Once the merge has started, a check of every
+symlink under `destination` always runs, also after a failed merge that may have copied entries: it
+removes each link resolving outside (only the link, never its target), re-checks, and still fails
+the run, naming the removed links and any it could not remove. On failure no extraction marker is
+written and no `owner` is applied. The flag is removed only after an apply succeeds completely,
+including `owner` and the marker files; while it exists, `check` reports `needs-apply` for every
+archive extracting into that destination.
 
 ### `command`
 

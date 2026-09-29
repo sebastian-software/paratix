@@ -1,3 +1,5 @@
+import { posix as pathPosix } from "node:path"
+
 import type { SshConnection } from "../types.js"
 
 import { shellQuote } from "../ssh.js"
@@ -27,6 +29,14 @@ const PROBE_EXEC_OPTS = { ignoreExitCode: true, silent: true } as const
 
 /** Shared prefix: read the NUL payload from stdin and hand it to a POSIX `sh`. */
 const XARGS_PREFIX = "xargs -0 sh -c '"
+
+/**
+ * Split a tagged entry `$a` of the form `<kind>:<path>` into `$k` and `$p` and
+ * open a `case` on the kind. Only the first colon separates, so a path may
+ * contain colons. `$\{` keeps the shell parameter expansion literal; a bare
+ * `${` would be read as JavaScript interpolation.
+ */
+const TAGGED_ENTRY_DISPATCH = `k=$\{a%%:*}; p=$\{a#*:}; case $k in `
 
 /**
  * Encode entries as a NUL-terminated payload for `xargs -0`.
@@ -179,7 +189,9 @@ const SYMLINK_CONTAINMENT_OUTER_SCRIPT =
  * path. It is the backstop behind the pre-merge check built on
  * {@link buildSymlinkListingProbeScript}: that check refuses such a combination
  * before anything is copied, and this one still catches a host change that
- * lands between the pre-merge listing and the merge. It is meant for
+ * lands between the pre-merge listing and the merge, or links a merge that
+ * failed half-way already published. The links it reports are the only ones
+ * {@link buildSymlinkRemovalScript} may remove. It is meant for
  * {@link runBatchedProbe} with the destination as the single entry, so it
  * costs exactly one `exec` regardless of member count.
  *
@@ -224,43 +236,90 @@ const SYMLINK_LISTING_INNER_SCRIPT = [
 ].join("")
 
 /**
+ * Issue #219: the kinds of entry {@link buildSymlinkListingProbeScript} takes.
+ *
+ * - `r`: a destination root; every symlink below it is listed with its target.
+ * - `n`: the destination path of a non-directory archive member; it is
+ *   reported when it is an existing directory that is not a symlink, because
+ *   the merge cannot replace such a directory with the member.
+ */
+export type SymlinkListingEntryKind = "n" | "r"
+
+/**
+ * Issue #219: encode one entry for {@link buildSymlinkListingProbeScript}.
+ *
+ * Kind and path share a single argument for the same reason as in
+ * {@link encodeMemberTypeEntry}: `xargs` may split its argument list anywhere,
+ * so separate arguments could be re-paired against the wrong path.
+ *
+ * @param kind - The entry kind, see {@link SymlinkListingEntryKind}.
+ * @param path - The absolute host path.
+ * @returns The encoded entry.
+ */
+export function encodeSymlinkListingEntry(kind: SymlinkListingEntryKind, path: string): string {
+  return `${kind}:${path}`
+}
+
+/**
  * Outer body of {@link buildSymlinkListingProbeScript}: `$1` is the inner
- * script, the remaining arguments are the destinations from stdin.
+ * script, the remaining arguments are the tagged entries from stdin (see
+ * {@link encodeSymlinkListingEntry}).
  *
  * `find` without `-L` never follows a symlink, so the walk stays inside the
  * destination tree. A traversal error, or a batch of the inner script that
  * exited non-zero, makes `find` exit non-zero, which the `|| exit $?` turns
- * into a failed probe rather than a partial listing read as complete.
+ * into a failed probe rather than a partial listing read as complete. An entry
+ * with an unknown kind exits non-zero as well, so a framing mistake on the
+ * sending side fails closed.
+ *
+ * Issue #219: an `n` entry that is an existing real directory is emitted as
+ * the pair `("", path)`. A link path is never empty, so the empty first field
+ * tells a directory hit apart from a `(link, target)` pair.
  */
-const SYMLINK_LISTING_OUTER_SCRIPT =
-  'inner=$1; shift; for d do find "$d" -type l -exec sh -c "$inner" sh {} + || exit $?; done; exit 0'
+const SYMLINK_LISTING_OUTER_SCRIPT = [
+  "inner=$1; shift; for a do ",
+  TAGGED_ENTRY_DISPATCH,
+  'r) find "$p" -type l -exec sh -c "$inner" sh {} + || exit $?;; ',
+  'n) if [ -d "$p" ] && [ ! -L "$p" ]; then printf \'%s\\0%s\\0\' "" "$p"; fi;; ',
+  '*) echo "unknown symlink listing entry kind" >&2; exit 64;; ',
+  "esac; done; exit 0",
+].join("")
 
 /**
  * Probe script listing every symlink below a destination together with its
- * raw stored target.
+ * raw stored target, and reporting which non-directory archive member paths
+ * are existing real directories on the host.
  *
  * Issue #219: the pre-merge containment check needs the links an earlier run
  * or the host left in the destination, because a link this archive ships can
  * redirect one of them (or the other way round). With this listing the
  * combined post-merge link set is resolved before anything is copied, so an
  * escaping combination is refused instead of being published and detected
- * only afterwards. It is meant for {@link runBatchedProbe} with the
- * destination as the single entry, so it costs exactly one `exec` regardless
- * of member count.
+ * only afterwards. The directory hits let the model refuse a member that the
+ * merge could not put in place: `cp -aT --remove-destination` cannot replace
+ * a directory with a non-directory, still copies the rest of that top-level
+ * entry and exits non-zero, so modelling such a member as a replacement would
+ * resolve paths through a link that never lands. It is meant for
+ * {@link runBatchedProbe} with one `r` entry for the destination plus one `n`
+ * entry per non-directory member (see {@link encodeSymlinkListingEntry}), so it
+ * costs exactly one `exec` regardless of member count.
  *
  * The composed command is `xargs -0 sh -c <outer> sh <inner>`, built exactly
  * like {@link buildSymlinkContainmentProbeScript}. Link paths travel as
  * arguments and results come back NUL-framed, so spaces and newlines in link
  * names and targets are transported faithfully.
  *
- * Failure mode: fail closed. A traversal error, an unreadable link target or
- * a failing `sh`/`xargs` makes the exec exit non-zero; the caller treats that,
- * a truncated capture and any output that is not made of `(link, target)`
- * pairs below the destination as "containment cannot be proven".
+ * Failure mode: fail closed. A traversal error, an unreadable link target, an
+ * unknown entry kind or a failing `sh`/`xargs` makes the exec exit non-zero;
+ * the caller treats that, a truncated capture and any output that is not made
+ * of pairs with paths below the destination as "containment cannot be
+ * proven".
  *
- * @returns The remote script. Its output is a flat list of `(link, target)`
- *   field pairs, one pair per symlink, with absolute link paths and the raw
- *   target exactly as stored. A tree without symlinks produces no output.
+ * @returns The remote script. Its output is a flat list of field pairs: a
+ *   `(link, target)` pair per symlink, with the absolute link path and the raw
+ *   target exactly as stored, and a `("", path)` pair per `n` entry that is an
+ *   existing real directory. A tree without symlinks and without such
+ *   directories produces no output.
  */
 export function buildSymlinkListingProbeScript(): string {
   return `xargs -0 sh -c ${shellQuote(SYMLINK_LISTING_OUTER_SCRIPT)} sh ${shellQuote(SYMLINK_LISTING_INNER_SCRIPT)}`
@@ -294,10 +353,7 @@ export function buildMemberTypeProbeScript(): string {
   return [
     XARGS_PREFIX,
     "for a do ",
-    // `$\{` keeps the shell parameter expansion literal; a bare `${` would be
-    // read as JavaScript interpolation.
-    `k=$\{a%%:*}; p=$\{a#*:}; `,
-    "case $k in ",
+    TAGGED_ENTRY_DISPATCH,
     'd) [ -d "$p" ] && [ ! -L "$p" ] || printf "%s\\0" "$p" ;; ',
     'f) [ -f "$p" ] && [ ! -L "$p" ] || printf "%s\\0" "$p" ;; ',
     'l) [ -L "$p" ] || printf "%s\\0" "$p" ;; ',
@@ -347,4 +403,208 @@ export function buildOwnershipProbeScript(expectedUser: string, expectedGroup: s
     "' sh ",
   ].join("")
   return `${script}${shellQuote(expectedUser)} ${shellQuote(expectedGroup)}`
+}
+
+/**
+ * Issue #219: the checks {@link buildPreStagingProbeScript} runs per entry.
+ *
+ * - `l`: the path must not be a symlink (the guard and link-target paths of
+ *   the former symlink-only probe).
+ * - `n`: the path of a non-directory member (file, hardlink, symlink) must not
+ *   be an existing directory that is not a symlink.
+ * - `d`: the path of a directory member, or of an implicit ancestor directory
+ *   of any member, must not exist as a non-directory that is not a symlink.
+ */
+export type PreStagingCheck = "d" | "l" | "n"
+
+/**
+ * Issue #219: encode one entry for {@link buildPreStagingProbeScript}.
+ *
+ * Check and path share a single argument for the same reason as in
+ * {@link encodeMemberTypeEntry}: `xargs` may split its argument list anywhere,
+ * so separate arguments could be re-paired against the wrong path.
+ *
+ * @param check - The check to run, see {@link PreStagingCheck}.
+ * @param path - The absolute destination path.
+ * @returns The encoded entry.
+ */
+export function encodePreStagingEntry(check: PreStagingCheck, path: string): string {
+  return `${check}:${path}`
+}
+
+/**
+ * Probe script for the pre-staging check of `archive.extract`: every guarded
+ * path that is a symlink, and every member path whose existing host type the
+ * staging merge cannot merge over.
+ *
+ * Issue #219: `cp -aT --no-dereference --remove-destination` cannot replace a
+ * directory with a non-directory, nor merge a directory over a file. Such a
+ * conflict used to surface only as a failed merge after other entries had
+ * already been copied, and the pre-merge link model assumed the member had
+ * replaced whatever the host had there. The checks run in the same single
+ * `exec` as the symlink guard, so the probe count stays independent of the
+ * member count.
+ *
+ * Entries are encoded with {@link encodePreStagingEntry}. Paths that do not
+ * exist are never violations. An unknown check code is reported with the
+ * kind `?`, so the caller fails closed instead of skipping the entry.
+ *
+ * @returns The remote script. Its output is a flat list of `(check, path)`
+ *   field pairs, one pair per violation, NUL-framed; a clean set produces no
+ *   output.
+ */
+export function buildPreStagingProbeScript(): string {
+  const report = 'printf "%s\\0%s\\0"'
+  return [
+    XARGS_PREFIX,
+    "for a do ",
+    TAGGED_ENTRY_DISPATCH,
+    `l) if [ -L "$p" ]; then ${report} l "$p"; fi ;; `,
+    `n) if [ -d "$p" ] && [ ! -L "$p" ]; then ${report} n "$p"; fi ;; `,
+    `d) if [ ! -L "$p" ] && [ -e "$p" ] && [ ! -d "$p" ]; then ${report} d "$p"; fi ;; `,
+    `*) ${report} "?" "$p" ;; `,
+    "esac; done; exit 0",
+    "' sh",
+  ].join("")
+}
+
+/**
+ * Outcome value {@link buildSymlinkRemovalScript} reports for a link it
+ * removed; every other outcome value is the reason the link was left alone.
+ */
+export const SYMLINK_REMOVED_OUTCOME = "removed"
+
+/**
+ * Per-link body of {@link buildSymlinkRemovalScript}. `$1` is the destination,
+ * the remaining arguments are the links from stdin.
+ */
+const SYMLINK_REMOVAL_SCRIPT = [
+  "d=$1; shift; ",
+  "for l do ",
+  'case $l in "$d"/?*) ;; *) printf "%s\\0%s\\0" "$l" "not below the destination"; continue;; esac; ',
+  // Issue #219: the check above is lexical, so `<destination>/../x` would pass
+  // it. Refuse any link whose part below the destination has an empty, `.` or
+  // `..` segment (including a trailing `/`) before anything else looks at it.
+  `case $\{l#"$d"/} in /*|*/|*//*|.|..|./*|../*|*/.|*/..|*/./*|*/../*) `,
+  'printf "%s\\0%s\\0" "$l" "not normalized"; continue;; esac; ',
+  // Walk from the link's parent up to and including the destination: every
+  // directory on the way must be a real directory, never a symlink, so the
+  // `rm` below cannot be redirected to a path outside the destination.
+  `p=$\{l%/*}; bad=; `,
+  "while :; do ",
+  'if [ -L "$p" ] || [ ! -d "$p" ]; then bad="an ancestor directory is missing or a symlink"; break; fi; ',
+  '[ "$p" = "$d" ] && break; ',
+  'case $p in "$d"/?*) ;; *) bad="the ancestor walk left the destination"; break;; esac; ',
+  `p=$\{p%/*}; `,
+  "done; ",
+  'if [ -n "$bad" ]; then printf "%s\\0%s\\0" "$l" "$bad"; continue; fi; ',
+  'if [ ! -L "$l" ]; then printf "%s\\0%s\\0" "$l" "no longer a symlink"; continue; fi; ',
+  'if ! rm -f -- "$l"; then printf "%s\\0%s\\0" "$l" "rm failed"; continue; fi; ',
+  'if [ -L "$l" ]; then printf "%s\\0%s\\0" "$l" "still a symlink after rm"; continue; fi; ',
+  `printf "%s\\0%s\\0" "$l" ${SYMLINK_REMOVED_OUTCOME}; done; exit 0`,
+].join("")
+
+/**
+ * Script that removes escaping symlinks the post-merge containment probe
+ * reported, without ever following them.
+ *
+ * Issue #219: the post-merge backstop used to only record a flag, which left
+ * a live escaping link in the destination until the next apply. This script
+ * unlinks exactly the links it receives on stdin (NUL-delimited, via
+ * {@link runBatchedProbe}); the destination is a fixed argument and never
+ * travels on stdin. Per link it requires the path to lie strictly below the
+ * destination with no empty, `.` or `..` segment below it (a lexical prefix
+ * match alone would accept `<destination>/../x`), every directory from the
+ * link's parent up to the destination to be a real directory and not a
+ * symlink, and the path itself to still be a symlink. A path that is not
+ * normalized is reported as `not normalized` and never removed. It then runs `rm -f --` on the link: `rm` unlinks a symlink operand
+ * itself, never its target, and without `-r` it never recurses. Afterwards it
+ * confirms that no symlink is left at the path.
+ *
+ * @param destination - The validated, canonical destination directory.
+ * @returns The remote command. Its output is a flat list of `(link, outcome)`
+ *   field pairs, NUL-framed, one per received link: the outcome is
+ *   {@link SYMLINK_REMOVED_OUTCOME} or the reason the link was left in place.
+ */
+export function buildSymlinkRemovalScript(destination: string): string {
+  return `xargs -0 sh -c ${shellQuote(SYMLINK_REMOVAL_SCRIPT)} sh ${shellQuote(destination)}`
+}
+
+/**
+ * Issue #219: what `removeEscapingSymlinks` (see `archiveContainmentEnforcement.ts`) did with the links it was
+ * given. `kept` pairs each link that is still in place (or whose fate is
+ * unknown) with the reason.
+ */
+export type SymlinkRemovalReport = {
+  kept: Array<readonly [string, string]>
+  removed: string[]
+}
+
+/**
+ * Issue #219: decide in TypeScript whether a link path the containment probe
+ * reported may be handed to the removal script at all.
+ *
+ * Only a path strictly below the destination that is already normalized — no
+ * empty, `.` or `..` segment, equal to its `posix.normalize` form — and free of
+ * NUL bytes qualifies. Anything else is never removed.
+ *
+ * @param destination - The validated, canonical destination directory.
+ * @param link - A link path as the probe reported it.
+ * @returns Null when the path may be removed, otherwise why it is left alone.
+ */
+export function escapingSymlinkRemovalRefusal(destination: string, link: string): null | string {
+  if (link.includes("\0")) return "path contains a NUL byte"
+  const prefix = `${destination}/`
+  if (!link.startsWith(prefix) || link.length === prefix.length) {
+    return "path is not strictly below the destination"
+  }
+  const segments = link.slice(prefix.length).split("/")
+  const irregular = segments.some(
+    (segment) => segment === "" || segment === "." || segment === ".."
+  )
+  if (irregular || pathPosix.normalize(link) !== link) return "path is not normalized"
+  return null
+}
+
+/**
+ * Issue #219: turn the removal script's output into a report, failing closed.
+ *
+ * A failed exec, a truncated capture, an odd field count, a link that was not
+ * requested or a link reported twice make every requested link's outcome
+ * unknown, so all of them are reported as not removed. A requested link without
+ * an outcome record is reported as not removed as well.
+ *
+ * @param requested - The links handed to {@link buildSymlinkRemovalScript}.
+ * @param outcome - The batched probe outcome of the removal exec.
+ * @returns Which links were removed and which were kept, with reasons.
+ */
+export function symlinkRemovalReport(
+  requested: readonly string[],
+  outcome: BatchedProbeOutcome
+): SymlinkRemovalReport {
+  const unknown = (reason: string): SymlinkRemovalReport => ({
+    kept: requested.map((link) => [link, `removal outcome unknown: ${reason}`] as const),
+    removed: [],
+  })
+  if (outcome.kind === "failed") return unknown(outcome.detail)
+  const { fields } = outcome
+  if (fields.length % 2 !== 0) {
+    return unknown(
+      `removal returned ${String(fields.length)} fields, expected (link, outcome) pairs`
+    )
+  }
+  const expected = new Set(requested)
+  const outcomes = new Map<string, string>()
+  for (let index = 0; index < fields.length; index += 2) {
+    const link = fields[index]
+    if (!expected.has(link) || outcomes.has(link)) {
+      return unknown(`removal reported unexpected link ${JSON.stringify(link)}`)
+    }
+    outcomes.set(link, fields[index + 1])
+  }
+  const removed = requested.filter((link) => outcomes.get(link) === SYMLINK_REMOVED_OUTCOME)
+  const kept = requested
+    .filter((link) => outcomes.get(link) !== SYMLINK_REMOVED_OUTCOME)
+    .map((link) => [link, outcomes.get(link) ?? "no outcome reported"] as const)
+  return { kept, removed }
 }

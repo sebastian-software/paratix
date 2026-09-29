@@ -4,23 +4,13 @@ import type { ModuleResult, SshConnection } from "../types.js"
 
 import { failed, failedCommand } from "../moduleFailure.js"
 import { shellQuote } from "../ssh.js"
+import { archiveSymlinkTargetPrefixes } from "./archiveLinkValidation.js"
+import { type ArchiveMember, normalizeArchiveMemberPath } from "./archiveMemberValidation.js"
 import {
-  archiveSymlinkTargetPrefixes,
-  mergedArchiveSymlinks,
-  type MergedSymlink,
-  type MergedSymlinkViolation,
-  mergedSymlinkViolations,
-  type SymlinkWalkTarget,
-} from "./archiveLinkValidation.js"
-import {
-  ARCHIVE_CAPTURE_LIMIT_BYTES,
-  type ArchiveMember,
-  normalizeArchiveMemberPath,
-} from "./archiveMemberValidation.js"
-import {
-  buildSymlinkContainmentProbeScript,
-  buildSymlinkListingProbeScript,
+  buildPreStagingProbeScript,
   buildSymlinkProbeScript,
+  encodePreStagingEntry,
+  type PreStagingCheck,
   runBatchedProbe,
 } from "./archiveProbe.js"
 
@@ -224,199 +214,167 @@ export async function validateNoSymlinkPaths(
   )
 }
 
-/**
- * Classify a raw host symlink target for the resolver.
- *
- * A relative target is walked from the link's parent. An absolute target equal
- * to or below the canonical destination restarts at the destination root; any
- * other absolute target counts as escaping, consistent with the post-merge
- * check's fail-closed stance on pre-existing links that point outside. The
- * prefix comparison is literal, so an absolute target that reaches the
- * destination through a non-canonical spelling is judged conservatively as
- * outside.
- *
- * @param destination - The validated, canonical destination directory.
- * @param target - The target exactly as `readlink` reported it.
- * @returns How the resolver walks the target: from the link's parent, from the
- *   destination root, or not at all because it lies outside.
- */
-function hostSymlinkWalkTarget(destination: string, target: string): SymlinkWalkTarget {
-  if (!target.startsWith("/")) return { anchor: "parent", path: target }
-  if (target === destination) return { anchor: "root", path: "" }
-  if (target.startsWith(`${destination}/`)) {
-    return { anchor: "root", path: target.slice(destination.length + 1) }
-  }
-  return { anchor: "outside" }
+/** Issue #219: how a member kind reads in a refusal message. */
+export const ARCHIVE_MEMBER_KIND_LABELS: Readonly<Record<ArchiveMember["kind"], string>> = {
+  directory: "directory",
+  file: "regular file",
+  hardlink: "hardlink",
+  special: "special file",
+  symlink: "symlink",
 }
 
 /**
- * Turn the `(link, target)` pairs of the listing probe into host links keyed
- * by destination-relative path, or explain why the output cannot be trusted.
+ * Issue #219: the destination paths of the archive's non-directory members
+ * below the destination, each with its normalized destination-relative key.
  *
  * @param destination - The validated, canonical destination directory.
- * @param fields - The decoded probe fields.
- * @returns The host links, or a reason the framing is broken.
+ * @param members - The validated archive members.
+ * @returns Absolute host path mapped to the member key, in listing order.
  */
-function hostSymlinksFromListing(
+export function nonDirectoryMemberPaths(
   destination: string,
-  fields: readonly string[]
-): Map<string, MergedSymlink> | string {
-  // An odd field count means the pair framing broke somewhere; pairing the
-  // rest anyway could attach a target to the wrong link.
-  if (fields.length % 2 !== 0) {
-    return `probe returned ${String(fields.length)} fields, expected (link, target) pairs`
+  members: readonly ArchiveMember[]
+): Map<string, string> {
+  const paths = new Map<string, string>()
+  for (const member of members) {
+    if (member.kind === "directory" || member.kind === "special") continue
+    const key = normalizeArchiveMemberPath(member.path)
+    if (key !== null && key !== "") paths.set(`${destination}/${key}`, key)
   }
-  const prefix = `${destination}/`
-  const links = new Map<string, MergedSymlink>()
-  for (let index = 0; index < fields.length; index += 2) {
-    const link = fields[index]
-    const stored = fields[index + 1]
-    if (!link.startsWith(prefix) || link.length === prefix.length) {
-      return `probe reported ${JSON.stringify(link)}, which is not below the destination`
+  return paths
+}
+
+/**
+ * Issue #219: the `n` and `d` entries of the pre-staging probe for one member.
+ *
+ * @param destination - The validated destination directory.
+ * @param member - One validated archive member.
+ * @returns `[check, path, reason]` triples, the member's own path first.
+ */
+function memberTypeConflictChecks(
+  destination: string,
+  member: ArchiveMember
+): Array<[PreStagingCheck, string, string]> {
+  const path = memberDestinationPath(destination, member)
+  if (path === null || member.kind === "special") return []
+  const name = JSON.stringify(member.path)
+  const checks: Array<[PreStagingCheck, string, string]> = []
+  if (member.kind !== "directory") {
+    checks.push([
+      "n",
+      path,
+      `archive member ${name} is a ${ARCHIVE_MEMBER_KIND_LABELS[member.kind]} but destination path ${JSON.stringify(path)} is an existing directory`,
+    ])
+  } else if (path !== destination) {
+    checks.push([
+      "d",
+      path,
+      `archive member ${name} is a directory but destination path ${JSON.stringify(path)} exists and is not a directory`,
+    ])
+  }
+  // Every proper ancestor below the destination has to become a directory,
+  // whether or not the archive lists it; `cp -aT` cannot merge a directory
+  // over a file there either.
+  let ancestor = pathPosix.dirname(path)
+  while (ancestor.startsWith(`${destination}/`)) {
+    checks.push([
+      "d",
+      ancestor,
+      `archive member ${name} needs destination path ${JSON.stringify(ancestor)} as a directory, but it exists and is not a directory`,
+    ])
+    ancestor = pathPosix.dirname(ancestor)
+  }
+  return checks
+}
+
+/**
+ * Issue #219: build the entries of the pre-staging probe (see
+ * {@link buildPreStagingProbeScript}) together with the refusal reason each
+ * entry stands for.
+ *
+ * The `l` entries are the guard paths ({@link archiveMemberGuardPaths}) and the
+ * paths the archive's link targets pass through
+ * ({@link archiveSymlinkTargetProbePaths}), in that order, with the messages
+ * of {@link validateNoSymlinkPaths}. The `n` entries are the paths of
+ * non-directory members, the `d` entries the paths of directory members and
+ * of every implicit ancestor directory below the destination. Symlink entries
+ * come first, so a path that is a symlink keeps its symlink refusal.
+ *
+ * @param destination - The validated destination directory.
+ * @param members - The validated archive members, in listing order.
+ * @returns Encoded probe entry (see {@link encodePreStagingEntry}) mapped to
+ *   the refusal reason, in probe order.
+ */
+export function preStagingProbeEntries(
+  destination: string,
+  members: ArchiveMember[]
+): Map<string, string> {
+  const paths = archiveMemberGuardPaths(destination, members)
+  const linkTargets = archiveSymlinkTargetProbePaths(destination, members)
+  const entries = new Map<string, string>()
+  for (const path of new Set([...paths, ...linkTargets.keys()])) {
+    entries.set(
+      encodePreStagingEntry("l", path),
+      symlinkProbeViolation(path, { linkTargets, paths })
+    )
+  }
+  for (const member of members) {
+    for (const [check, path, reason] of memberTypeConflictChecks(destination, member)) {
+      const entry = encodePreStagingEntry(check, path)
+      if (!entries.has(entry)) entries.set(entry, reason)
     }
-    links.set(link.slice(prefix.length), {
-      stored,
-      target: hostSymlinkWalkTarget(destination, stored),
-    })
   }
-  return links
+  return entries
 }
 
 /**
- * Refuse an extraction before the staging merge when the links already under
- * the destination and the links this archive ships would, together, resolve
- * outside the destination.
+ * Issue #219: refuse the extraction before anything is staged when a guarded
+ * path is a symlink or a member path has a host type the staging merge cannot
+ * merge over, with one batched probe.
  *
- * Issue #219: whether a relative link stays inside depends on the links its
- * target passes through, and those can come from an earlier run. Run 1 may
- * ship `a/esc -> up/..` (inside while `a/up` is missing) and run 2
- * `a/up -> ..` (inside on its own); merged, `a/esc` resolves above the
- * destination. This check lists every existing symlink with its stored target
- * in one batched exec ({@link buildSymlinkListingProbeScript}), builds the
- * combined post-merge link set ({@link mergedArchiveSymlinks}) and resolves
- * every link of it with the archive resolver. A link that escapes or exceeds
- * the resolution limit refuses the extraction, so nothing is copied into the
- * destination. {@link validateSymlinkContainment} stays in place after the
- * merge as the backstop for host changes that land between this listing and
- * the merge.
- *
- * Host link paths and targets are split on `/` only, so spaces and newlines in
- * them are handled faithfully. A probe failure (including a `find` traversal
- * error or an unreadable link), a truncated capture and output that is not
- * made of `(link, target)` pairs below the destination all fail closed.
- *
- * @param conn - The SSH connection.
- * @param parameters - Check inputs.
- * @param parameters.destination - The validated, canonical destination directory.
- * @param parameters.members - The validated archive members.
- * @param parameters.source - The archive source, for the failure message.
- * @returns A failure when the merged links would escape or the check could not run, otherwise null.
- */
-export async function validateMergedSymlinkContainment(
-  conn: SshConnection,
-  parameters: { destination: string; members: readonly ArchiveMember[]; source: string }
-): Promise<ModuleResult | null> {
-  const { destination, members, source } = parameters
-  const prefix = `[archive.extract] refusing to extract ${source}`
-  // The listing grows with the number of links on the host (a `node_modules`
-  // tree has many), not with violations, so it gets the archive capture cap
-  // instead of the 1 MiB default. Truncation still fails closed.
-  const outcome = await runBatchedProbe(conn, {
-    entries: [destination],
-    maxOutputBytes: ARCHIVE_CAPTURE_LIMIT_BYTES,
-    script: buildSymlinkListingProbeScript(),
-  })
-  if (outcome.kind === "failed") {
-    return failed(`${prefix}: symlink listing before the merge failed: ${outcome.detail}`)
-  }
-  const hostLinks = hostSymlinksFromListing(destination, outcome.fields)
-  if (typeof hostLinks === "string") {
-    return failed(`${prefix}: symlink listing before the merge failed: ${hostLinks}`)
-  }
-  const merged = mergedArchiveSymlinks(hostLinks, members)
-  const violations = mergedSymlinkViolations(merged)
-  if (violations.length === 0) return null
-  return failed(`${prefix}: ${mergedSymlinkRefusal({ destination, merged, violations })}`)
-}
-
-/**
- * Describe the first violation of the combined link set, naming the link by
- * absolute path with its stored target, plus how many more there are.
- *
- * @param parameters - Refusal inputs.
- * @param parameters.destination - The validated, canonical destination directory.
- * @param parameters.merged - The combined post-merge link set.
- * @param parameters.violations - The non-empty violations of `merged`.
- * @returns The refusal reason without the `[archive.extract]` prefix.
- */
-function mergedSymlinkRefusal(parameters: {
-  destination: string
-  merged: ReadonlyMap<string, MergedSymlink>
-  violations: readonly MergedSymlinkViolation[]
-}): string {
-  const { destination, merged, violations } = parameters
-  const [{ key, kind }] = violations
-  const linkPath = `${destination}/${key}`
-  const link = `symlink ${JSON.stringify(linkPath)} -> ${JSON.stringify(merged.get(key)?.stored ?? "")}`
-  const violation =
-    kind === "escape"
-      ? `${link} would resolve outside destination ${JSON.stringify(destination)}`
-      : `${link} would exceed the symlink resolution limit`
-  const more = violations.length - 1
-  const suffix = more > 0 ? ` (and ${String(more)} more)` : ""
-  return `${violation} once this archive is merged; existing symlinks under the destination are checked together with the archive's links before anything is copied${suffix}`
-}
-
-/**
- * Refuse to complete an extraction when any symlink below the destination
- * resolves outside it, with one batched probe over the whole tree.
- *
- * Issue #219: {@link validateMergedSymlinkContainment} already refuses an
- * escaping combination of host and archive links before the merge. This check
- * runs after the merge as the backstop: it covers every symlink under the
- * destination as it actually is, including links this archive did not ship
- * and links the host changed between the pre-merge listing and the merge. A
- * probe failure, an output that is not made of `(link, resolved)` pairs, or a
- * link that could not be resolved all fail closed.
+ * This is the pre-staging probe of `archive.extract`: the symlink checks of
+ * {@link validateNoSymlinkPaths} (guard paths and link-target paths) plus the
+ * type checks of {@link preStagingProbeEntries}, so a non-directory member
+ * over an existing directory, or a directory over an existing file, is
+ * refused before `cp -aT` would fail half-way through the merge. The probe
+ * costs one `exec` regardless of member count. A probe failure, output that
+ * is not made of `(check, path)` pairs and a record that matches no sent entry
+ * all fail closed.
  *
  * @param conn - The SSH connection.
  * @param parameters - Probe inputs.
- * @param parameters.destination - The validated, canonical destination directory.
+ * @param parameters.destination - The validated destination directory.
+ * @param parameters.members - The validated archive members.
  * @param parameters.source - The archive source, for the failure message.
- * @returns A failure when a symlink escapes the destination or the check could not run, otherwise null.
+ * @returns A failure naming the first violation or the probe failure, otherwise null.
  */
-export async function validateSymlinkContainment(
+export async function validatePreStagingPaths(
   conn: SshConnection,
-  parameters: { destination: string; source: string }
+  parameters: { destination: string; members: ArchiveMember[]; source: string }
 ): Promise<ModuleResult | null> {
-  const { destination, source } = parameters
-  const prefix = `[archive.extract] refusing to complete extraction of ${source}`
+  const entries = preStagingProbeEntries(parameters.destination, parameters.members)
   const outcome = await runBatchedProbe(conn, {
-    entries: [destination],
-    script: buildSymlinkContainmentProbeScript(),
+    entries: [...entries.keys()],
+    script: buildPreStagingProbeScript(),
   })
+  const prefix = `[archive.extract] refusing to extract ${parameters.source}`
   if (outcome.kind === "failed") {
-    return failed(`${prefix}: symlink containment check failed: ${outcome.detail}`)
+    return failed(`${prefix}: destination path probe failed: ${outcome.detail}`)
   }
   const { fields } = outcome
-  // An odd field count means the pair framing broke somewhere; pairing the
-  // rest anyway could attach a resolved path to the wrong link.
+  if (fields.length === 0) return null
   if (fields.length % 2 !== 0) {
     return failed(
-      `${prefix}: symlink containment check failed: probe returned ${String(fields.length)} fields, expected (link, resolved) pairs`
+      `${prefix}: destination path probe failed: probe returned ${String(fields.length)} fields, expected (check, path) pairs`
     )
   }
-  if (fields.length === 0) return null
-  const [link, resolved] = fields
-  const violation =
-    resolved === ""
-      ? `symlink ${JSON.stringify(link)} could not be resolved`
-      : `symlink ${JSON.stringify(link)} resolves to ${JSON.stringify(resolved)}, outside destination ${JSON.stringify(destination)}`
-  const more = fields.length / 2 - 1
-  const suffix = more > 0 ? ` (and ${String(more)} more)` : ""
-  return failed(
-    `${prefix}: ${violation}; every symlink under the destination is checked after the merge, including links this archive did not ship${suffix}`
-  )
+  const [check, path] = fields
+  // The reported check code is untrusted text, so it is matched against the
+  // sent entries by their encoded form instead of being narrowed to a type.
+  const reason =
+    entries.get(`${check}:${path}`) ??
+    `destination path probe failed: unexpected record ${JSON.stringify(check)} for ${JSON.stringify(path)}`
+  return failed(`${prefix}: ${reason}`)
 }
 
 export async function validateResolvedDestinationPath(

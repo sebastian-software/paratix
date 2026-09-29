@@ -31,6 +31,11 @@
  * The same resolver also judges the combined post-merge link set — the links
  * already on the host plus the links this archive ships — before the staging
  * merge; see {@link mergedArchiveSymlinks} and {@link mergedSymlinkViolations}.
+ * That model only covers merges whose outcome is known: a symlink member
+ * replacing a host symlink, a member landing on a path the host does not
+ * have, and a directory merging into a host directory. Any other type
+ * combination at a member path or below a host symlink is reported as a
+ * conflict, which refuses the extraction instead of guessing what `cp` does.
  */
 import {
   type ArchiveMember,
@@ -425,35 +430,128 @@ export function archiveSymlinkTargetPrefixes(
 }
 
 /**
+ * Issue #219: what the host holds below the destination before the merge, as
+ * far as the post-merge link model needs it. Keys are normalized
+ * destination-relative paths.
+ */
+export type MergeHostState = {
+  /**
+   * Paths of non-directory archive members that are existing real directories
+   * (not symlinks) on the host.
+   */
+  directories: ReadonlySet<string>
+  /** Every symlink below the destination with its target. */
+  links: ReadonlyMap<string, MergedSymlink>
+}
+
+/**
+ * Issue #219: why the merge of one archive member cannot be modelled as an
+ * exact-path replacement.
+ *
+ * - `host-directory`: a non-directory member at a path that is an existing
+ *   real directory; `cp` cannot replace a directory with a non-directory.
+ * - `host-symlink`: a non-symlink member at a path that is a host symlink; the
+ *   merge guard refuses it.
+ * - `below-host-symlink`: a member whose proper ancestor is a host symlink;
+ *   the merge guard refuses it.
+ */
+export type MergeConflictReason = "below-host-symlink" | "host-directory" | "host-symlink"
+
+/**
+ * Issue #219: the post-merge link model's verdict for one archive.
+ *
+ * `merged` carries the combined link set the destination holds once the merge
+ * has run. `conflict` names the first member (in listing order) whose merge
+ * would not be the modelled replacement: `key` is the host path the conflict
+ * is about — the member's own path, or for `below-host-symlink` the host
+ * symlink ancestor.
+ */
+export type MergedArchiveSymlinks =
+  | { key: string; kind: "conflict"; member: ArchiveMember; reason: MergeConflictReason }
+  | { kind: "merged"; links: Map<string, MergedSymlink> }
+
+type MergeConflict = Extract<MergedArchiveSymlinks, { kind: "conflict" }>
+
+/**
+ * Find the proper ancestor of a normalized path that is a host symlink.
+ *
+ * @param key - A normalized destination-relative path.
+ * @param links - The host symlinks by normalized path.
+ * @returns The ancestor, or undefined when no proper ancestor is a host symlink.
+ */
+function hostSymlinkAncestor(
+  key: string,
+  links: ReadonlyMap<string, MergedSymlink>
+): string | undefined {
+  for (let end = key.indexOf("/"); end !== -1; end = key.indexOf("/", end + 1)) {
+    const ancestor = key.slice(0, end)
+    if (links.has(ancestor)) return ancestor
+  }
+  return undefined
+}
+
+/**
+ * Decide whether merging one member is the modelled exact-path replacement.
+ *
+ * @param host - The host state before the merge.
+ * @param entry - The member with its normalized path.
+ * @returns The conflict, or null when the member merges as modelled.
+ */
+function mergeConflict(host: MergeHostState, entry: KeyedMember): MergeConflict | null {
+  const { key, member } = entry
+  const conflict = (reason: MergeConflictReason, at = key): MergeConflict => ({
+    key: at,
+    kind: "conflict",
+    member,
+    reason,
+  })
+  if (member.kind !== "directory" && host.directories.has(key)) return conflict("host-directory")
+  if (member.kind !== "symlink" && host.links.has(key)) return conflict("host-symlink")
+  const ancestor = hostSymlinkAncestor(key, host.links)
+  return ancestor === undefined ? null : conflict("below-host-symlink", ancestor)
+}
+
+/**
  * Issue #219: build the symlink set the destination will hold once the staged
- * archive is merged, keyed by normalized destination-relative path.
+ * archive is merged, keyed by normalized destination-relative path, or refuse
+ * where the merge would not do what the model assumes.
  *
  * It starts from the links already on the host and applies the archive's
  * members in listing order. The merge copies every staged entry with
- * `cp -aT --no-dereference --remove-destination`, so an archive member of any
- * kind at a path replaces the host link there: an archive symlink brings its
- * own target, any other member leaves no link at that path. Only this
- * exact-path replacement is modelled. A host link below an archive member path
- * is kept, which is conservative: a non-symlink member at or below a host
- * symlink is already refused by the pre-staging probe and the merge guard, and
- * a directory/non-directory conflict makes `cp` fail.
+ * `cp -aT --no-dereference --remove-destination`. Only the outcomes `cp` and
+ * the merge guard actually produce are modelled: an archive symlink replaces a
+ * host symlink at the same path and brings its own target, any member lands
+ * at a path the host does not have, and a directory member merges into a host
+ * directory, keeping the host links below it.
  *
- * @param hostLinks - The links on the host, keyed by destination-relative path.
+ * Every other combination is a conflict instead of a guessed outcome. A
+ * non-directory member over a host directory makes `cp` fail after it may
+ * already have copied the rest of that top-level entry, so paths through the
+ * member would really run through the host directory and the host links
+ * below it. A non-symlink member at a host symlink, or any member below a host
+ * symlink, is refused by the merge guard. Modelling any of these as a
+ * replacement could let an escaping link pass, so the caller refuses the
+ * extraction before anything is copied.
+ *
+ * @param host - The host state before the merge (see {@link MergeHostState}).
  * @param members - The validated archive members, in listing order.
- * @returns The combined post-merge link set.
+ * @returns The combined post-merge link set, or the first conflicting member.
  */
 export function mergedArchiveSymlinks(
-  hostLinks: ReadonlyMap<string, MergedSymlink>,
+  host: MergeHostState,
   members: readonly ArchiveMember[]
-): Map<string, MergedSymlink> {
-  const merged = new Map(hostLinks)
-  for (const { key, member } of keyedMembers(members)) {
-    merged.delete(key)
+): MergedArchiveSymlinks {
+  const links = new Map(host.links)
+  for (const entry of keyedMembers(members)) {
+    const conflict = mergeConflict(host, entry)
+    if (conflict !== null) return conflict
+    const { key, member } = entry
+    links.delete(key)
     if (member.kind !== "symlink") continue
     const stored = member.linkTarget ?? ""
-    merged.set(key, { stored, target: { anchor: "parent", path: stored } })
+    links.set(key, { stored, target: { anchor: "parent", path: stored } })
   }
-  return merged
+  return { kind: "merged", links }
 }
 
 /**

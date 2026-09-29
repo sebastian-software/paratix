@@ -29,21 +29,32 @@ import {
   writeFileSync,
 } from "node:fs"
 import { tmpdir } from "node:os"
-import { join } from "node:path"
+import { dirname, join } from "node:path"
 import { describe, expect, it } from "vitest"
 
 import type { ArchiveMember } from "../../src/modules/archiveMemberValidation.js"
+import type { ExecOptions, ExecResult, SshConnection } from "../../src/types.js"
 
 import { buildStagingMergeScript } from "../../src/modules/archive.js"
 import {
+  enforceSymlinkContainment,
+  type PreMergeContainmentVerdict,
+  preMergeContainmentVerdict,
+  symlinkListingEntries,
+} from "../../src/modules/archiveContainmentEnforcement.js"
+import {
   archiveMemberGuardPaths,
   destinationPathWithAncestors,
+  preStagingProbeEntries,
 } from "../../src/modules/archiveDestinationValidation.js"
 import {
+  buildPreStagingProbeScript,
   buildSymlinkContainmentProbeScript,
   buildSymlinkListingProbeScript,
   encodeNulPayload,
+  encodeSymlinkListingEntry,
 } from "../../src/modules/archiveProbe.js"
+import { shellQuote } from "../../src/ssh.js"
 
 type ShellResult = { code: number; stderr: string; stdout: string }
 
@@ -198,7 +209,7 @@ function runContainmentProbe(destination: string): ContainmentProbeResult {
 
 /**
  * Issue #219: run the production listing probe the way `runBatchedProbe`
- * does, with the destination NUL-terminated on stdin.
+ * does, with the destination as `r` entry NUL-terminated on stdin.
  *
  * @param destination - The canonical destination directory.
  * @returns Exit code, the reported `(link, target)` pairs sorted by link, and stderr.
@@ -206,7 +217,7 @@ function runContainmentProbe(destination: string): ContainmentProbeResult {
 function runListingProbe(destination: string): ContainmentProbeResult {
   const result = spawnSync("/bin/sh", ["-c", buildSymlinkListingProbeScript()], {
     encoding: "utf8",
-    input: encodeNulPayload([destination]),
+    input: encodeNulPayload([encodeSymlinkListingEntry("r", destination)]),
     timeout: 10_000,
   })
   const fields = result.stdout.split("\0")
@@ -821,5 +832,562 @@ describe.skipIf(SKIP_PLATFORM)(
         }
       }
     )
+  }
+)
+
+/**
+ * Issue #219: split a compact tree spec entry: `x/` is a directory, `x -> t` a
+ * symlink to `t`, anything else a regular file.
+ *
+ * @param entry - One `path`, `path/` or `path -> target` line of a tree spec.
+ * @returns The path, and the link target for a symlink entry, otherwise null.
+ */
+function parseSpecEntry(entry: string): { path: string; target: null | string } {
+  const separator = entry.indexOf(" -> ")
+  if (separator === -1) return { path: entry, target: null }
+  return { path: entry.slice(0, separator), target: entry.slice(separator + " -> ".length) }
+}
+
+/**
+ * Issue #219: an archive member built from a tree spec entry (see
+ * {@link parseSpecEntry}).
+ *
+ * @param entry - One `path`, `path/` or `path -> target` line of a tree spec.
+ * @returns The archive member as the tar listing parser produces it.
+ */
+function specMember(entry: string): ArchiveMember {
+  const { path, target } = parseSpecEntry(entry)
+  if (target !== null) return tarMember(path, target)
+  if (path.endsWith("/")) {
+    return { format: "tar", kind: "directory", linkTarget: null, mode: "drwxr-xr-x", path }
+  }
+  return tarMember(path)
+}
+
+/**
+ * Issue #219: create a tree from spec entries (see {@link specMember}) below
+ * `root`, creating missing parent directories on the way. `$DEST` in a link
+ * target is replaced with `destination`.
+ *
+ * @param root - The directory to build in.
+ * @param spec - The tree spec entries, parents before children.
+ * @param destination - The value of `$DEST` in link targets.
+ */
+function buildTree(root: string, spec: readonly string[], destination: string): void {
+  for (const entry of spec) {
+    const { path, target } = parseSpecEntry(entry)
+    const absolute = join(root, path)
+    mkdirSync(dirname(absolute), { recursive: true })
+    if (target !== null) symlinkSync(target.replaceAll("$DEST", destination), absolute)
+    else if (path.endsWith("/")) mkdirSync(absolute, { recursive: true })
+    else writeFileSync(absolute, `${path}\n`)
+  }
+}
+
+type ProbeFields = { code: number; fields: string[]; stderr: string }
+
+/**
+ * Issue #219: run a production probe script the way `runBatchedProbe` does.
+ *
+ * @param script - The production script to run under `/bin/sh -c`.
+ * @param entries - The NUL-transported entries.
+ * @returns Exit code, the decoded fields in output order, and stderr.
+ */
+function runProbeScript(script: string, entries: readonly string[]): ProbeFields {
+  const result = spawnSync("/bin/sh", ["-c", script], {
+    encoding: "utf8",
+    input: encodeNulPayload([...entries]),
+    timeout: 10_000,
+  })
+  const fields = result.stdout.split("\0")
+  if (fields.at(-1) === "") fields.pop()
+  return { code: result.status ?? -1, fields, stderr: result.stderr }
+}
+
+/**
+ * Issue #219: run the production pre-staging probe for an archive.
+ *
+ * @param destination - The canonical destination directory.
+ * @param members - The archive members.
+ * @returns The `(check, path)` pairs it reported, in output order.
+ */
+function runPreStagingProbe(
+  destination: string,
+  members: ArchiveMember[]
+): Array<readonly [string, string]> {
+  const entries = [...preStagingProbeEntries(destination, members).keys()]
+  const { code, fields, stderr } = runProbeScript(buildPreStagingProbeScript(), entries)
+  expect({ code, stderr }).toStrictEqual({ code: 0, stderr: "" })
+  const pairs: Array<readonly [string, string]> = []
+  for (let index = 0; index < fields.length; index += 2) {
+    pairs.push([fields[index] ?? "", fields[index + 1] ?? "<missing>"])
+  }
+  return pairs
+}
+
+/**
+ * Issue #219: the pre-merge model verdict, computed the production way: the
+ * real listing probe over the real destination, judged by
+ * `preMergeContainmentVerdict`.
+ *
+ * @param destination - The canonical destination directory.
+ * @param members - The archive members.
+ * @returns What `preMergeContainmentVerdict` decides for the archive on this host.
+ */
+function modelVerdict(destination: string, members: ArchiveMember[]): PreMergeContainmentVerdict {
+  const { code, fields, stderr } = runProbeScript(
+    buildSymlinkListingProbeScript(),
+    symlinkListingEntries(destination, members)
+  )
+  expect({ code, stderr }).toStrictEqual({ code: 0, stderr: "" })
+  return preMergeContainmentVerdict(destination, fields, members)
+}
+
+/**
+ * Issue #219: run the staging merge exactly as `archive.extract` issues it:
+ * `find <staging> -mindepth 1 -maxdepth 1 -exec sh -c <merge script> sh
+ * <destination> <destination> <guard paths> {} +`, with the product guard set.
+ *
+ * @param parameters - Merge inputs.
+ * @param parameters.destination - The canonical destination directory.
+ * @param parameters.members - The archive members, for the guard set.
+ * @param parameters.staging - The staging directory holding the extracted archive.
+ * @returns Exit code and captured output.
+ */
+function runProductionMerge(parameters: {
+  destination: string
+  members: ArchiveMember[]
+  staging: string
+}): ShellResult {
+  const { destination, members, staging } = parameters
+  const command = [
+    `find ${shellQuote(staging)} -mindepth 1 -maxdepth 1 -exec sh -c`,
+    shellQuote(buildStagingMergeScript()),
+    "sh",
+    shellQuote(destination),
+    shellQuote(destination),
+    shellQuote(productGuardPaths(destination, members).join("\n")),
+    "{} +",
+  ].join(" ")
+  const result = spawnSync("/bin/sh", ["-c", command], { encoding: "utf8", timeout: 10_000 })
+  return { code: result.status ?? -1, stderr: result.stderr, stdout: result.stdout }
+}
+
+/**
+ * Issue #219: an `SshConnection` whose `exec` runs the command on the local
+ * `/bin/sh` with `input` on stdin, so the production backstop drives its real
+ * probe and removal scripts against a temporary directory.
+ *
+ * @returns The connection and the commands it executed.
+ */
+function localShellConnection(): { commands: string[]; conn: SshConnection } {
+  const commands: string[] = []
+  const conn = {
+    async exec(command: string, options?: ExecOptions): Promise<ExecResult> {
+      await Promise.resolve()
+      commands.push(command)
+      const result = spawnSync("/bin/sh", ["-c", command], {
+        encoding: "utf8",
+        input: options?.input ?? "",
+        timeout: 10_000,
+      })
+      return { code: result.status ?? -1, stderr: result.stderr, stdout: result.stdout }
+    },
+  } as unknown as SshConnection
+  return { commands, conn }
+}
+
+/**
+ * Issue #219: the destination-relative paths of the links the real
+ * containment probe reports as escaping.
+ *
+ * @param destination - The canonical destination directory.
+ * @returns The escaping links, sorted, relative to the destination.
+ */
+function escapingLinks(destination: string): string[] {
+  const probe = runContainmentProbe(destination)
+  expect({ code: probe.code, stderr: probe.stderr }).toStrictEqual({ code: 0, stderr: "" })
+  return probe.pairs.map(([link]) => link.slice(destination.length + 1))
+}
+
+/**
+ * Issue #219: condense a model verdict for table comparison.
+ *
+ * @param verdict - What `preMergeContainmentVerdict` returned.
+ * @returns `ok`, `violations`, `invalid` or `conflict:<reason>@<key>`.
+ */
+function verdictLabel(verdict: PreMergeContainmentVerdict): string {
+  if (verdict.kind === "conflict") return `conflict:${verdict.reason}@${verdict.key}`
+  return verdict.kind
+}
+
+// Issue #219: the two-run case the pre-merge model used to get wrong. Run 1
+// leaves `a/b/` as a real directory with `a/b/hl -> ../..` (inside: it
+// resolves to the destination). Run 2 ships `a/b -> q` plus `a/c/l ->
+// ../b/hl/..`. The old model let `a/b -> q` replace the directory, so `a/c/l`
+// resolved via `a/q/hl/..` inside; `cp` cannot replace a directory with a
+// symlink, copies `a/c` anyway and fails, and `a/c/l` then walks the host
+// directory `a/b` and its link `hl` to the destination's parent.
+const twoRunFirstHost = ["a/", "a/b/", "a/b/hl -> ../.."]
+const twoRunSecondArchive = ["a/", "a/b -> q", "a/c/", "a/c/l -> ../b/hl/.."]
+
+describe.skipIf(SKIP_PLATFORM)(
+  "archive.extract two-run directory conflict, pre-merge (Issue #219)",
+  () => {
+    it("refuses run 2 in the pre-staging probe and the pre-merge model without touching the tree", () => {
+      // Run 1's result is built directly with fs, so no GNU cp is needed here.
+      const { destination, root } = makeWorkspace()
+      try {
+        buildTree(destination, twoRunFirstHost, destination)
+        const before = describeTree(destination)
+        const members = twoRunSecondArchive.map((entry) => specMember(entry))
+
+        const preStaging = runPreStagingProbe(destination, members)
+        const verdict = modelVerdict(destination, members)
+
+        expect(preStaging).toStrictEqual([["n", join(destination, "a/b")]])
+        expect(verdict).toStrictEqual({
+          key: "a/b",
+          kind: "conflict",
+          member: specMember("a/b -> q"),
+          reason: "host-directory",
+        })
+        expect(describeTree(destination)).toStrictEqual(before)
+      } finally {
+        rmSync(root, { force: true, recursive: true })
+      }
+    })
+  }
+)
+
+describe.skipIf(SKIP_PLATFORM || SKIP_NO_GNU_CP || SKIP_NO_REALPATH_MISSING_MODE)(
+  "archive.extract two-run directory conflict after a real merge (Issue #219, requires GNU cp and realpath -m)",
+  () => {
+    it("shows the escape the refusal prevents, and the backstop removes only the escaping link", async () => {
+      const { destination, root, staging } = makeWorkspace()
+      try {
+        const firstStaging = join(root, "staging-1")
+        buildTree(firstStaging, twoRunFirstHost, destination)
+        const first = runProductionMerge({
+          destination,
+          members: twoRunFirstHost.map((entry) => specMember(entry)),
+          staging: firstStaging,
+        })
+        expect(first).toMatchObject({ code: 0, stderr: "" })
+        expect(escapingLinks(destination)).toStrictEqual([])
+        const outsideBefore = readdirSync(root).toSorted()
+
+        // Run 2 merged anyway, as it would have been without the refusal.
+        buildTree(staging, twoRunSecondArchive, destination)
+        const second = runProductionMerge({
+          destination,
+          members: twoRunSecondArchive.map((entry) => specMember(entry)),
+          staging,
+        })
+        expect(second.code).not.toBe(0)
+        expect(lstatSync(join(destination, "a/b")).isDirectory()).toBe(true)
+        expect(readlinkSync(join(destination, "a/c/l"))).toBe("../b/hl/..")
+        expect(runContainmentProbe(destination).pairs).toStrictEqual([
+          [join(destination, "a/c/l"), root],
+        ])
+
+        const { commands, conn } = localShellConnection()
+        const failure = await enforceSymlinkContainment(conn, { destination, source: "run-2.tar" })
+
+        expect(failure?.status).toBe("failed")
+        expect(failure?.error?.message).toBe(
+          `[archive.extract] refusing to complete extraction of run-2.tar: symlink ${JSON.stringify(join(destination, "a/c/l"))} resolves to ${JSON.stringify(root)}, outside destination ${JSON.stringify(destination)}; every symlink under the destination is checked after the merge, including links this archive did not ship; removed escaping symlinks: ${JSON.stringify(join(destination, "a/c/l"))}; re-check found no escaping symlinks`
+        )
+        // One probe, one batched removal, one re-probe.
+        expect(commands).toHaveLength(3)
+        expect(describeTree(destination)).toStrictEqual([
+          "d a",
+          "d a/b",
+          "l a/b/hl -> ../..",
+          "d a/c",
+        ])
+        expect(readdirSync(root).toSorted()).toStrictEqual(outsideBefore)
+        expect(escapingLinks(destination)).toStrictEqual([])
+      } finally {
+        rmSync(root, { force: true, recursive: true })
+      }
+    })
+  }
+)
+
+type DifferentialCase = {
+  /** The archive as extracted into staging, in listing order. */
+  archive: string[]
+  /** Destination-relative links the real backstop reports after the real merge. */
+  escapes: string[]
+  /** The host tree below the destination before the merge. */
+  host: string[]
+  /** Whether the real merge exits zero. */
+  merge: "failed" | "ok"
+  name: string
+  /** The first check the real pre-staging probe reports, or `clean`. */
+  preStaging: "clean" | "d" | "l" | "n"
+  /** The model verdict, see {@link verdictLabel}. */
+  verdict: string
+}
+
+// Issue #219: host tree / archive combinations for the differential test. The
+// production path refuses a case when the pre-staging probe reports anything
+// or the model verdict is not `ok`; only the remaining cases reach the merge.
+const differentialCases: DifferentialCase[] = [
+  {
+    archive: ["a/", "a/b -> q"],
+    escapes: [],
+    host: ["a/", "a/b/", "a/b/f"],
+    merge: "failed",
+    name: "archive symlink over a host directory without links below",
+    preStaging: "n",
+    verdict: "conflict:host-directory@a/b",
+  },
+  {
+    archive: twoRunSecondArchive,
+    escapes: ["a/c/l"],
+    host: twoRunFirstHost,
+    merge: "failed",
+    name: "archive symlink over a host directory with a link below (two-run case)",
+    preStaging: "n",
+    verdict: "conflict:host-directory@a/b",
+  },
+  {
+    archive: ["b -> a"],
+    escapes: [],
+    host: ["a/", "b/", "b/f"],
+    merge: "failed",
+    name: "top-level archive symlink over a host directory",
+    preStaging: "n",
+    verdict: "conflict:host-directory@b",
+  },
+  {
+    archive: ["a/", "a/b", "a/c/", "a/c/l -> ../b/l/.."],
+    escapes: ["a/c/l"],
+    host: ["a/", "a/b/", "a/b/l -> ../.."],
+    merge: "failed",
+    name: "archive file over a host directory whose link the archive walks through",
+    preStaging: "l",
+    verdict: "conflict:host-directory@a/b",
+  },
+  {
+    archive: ["a/", "a/b/", "a/b/f"],
+    escapes: [],
+    host: ["a/", "a/b"],
+    merge: "failed",
+    name: "archive directory over a host file",
+    preStaging: "d",
+    verdict: "ok",
+  },
+  {
+    archive: ["a/", "a/b/", "a/up -> b"],
+    escapes: [],
+    host: ["a/", "a/b/", "a/esc -> up/..", "a/up -> .."],
+    merge: "ok",
+    name: "archive symlink over a host symlink that makes the combination safe",
+    preStaging: "clean",
+    verdict: "ok",
+  },
+  {
+    archive: ["a/", "a/up -> .."],
+    escapes: ["a/esc"],
+    host: ["a/", "a/b/", "a/esc -> up/..", "a/up -> b"],
+    merge: "ok",
+    name: "archive symlink over a host symlink that makes a host link escape",
+    preStaging: "clean",
+    verdict: "violations",
+  },
+  {
+    archive: ["a/", "a/x -> y"],
+    escapes: [],
+    host: ["a/", "a/x"],
+    merge: "ok",
+    name: "archive symlink over a host file",
+    preStaging: "clean",
+    verdict: "ok",
+  },
+  {
+    archive: ["a/", "a/f"],
+    escapes: [],
+    host: ["a/", "a/f"],
+    merge: "ok",
+    name: "archive file over a host file",
+    preStaging: "clean",
+    verdict: "ok",
+  },
+  {
+    archive: ["a/", "a/up"],
+    escapes: [],
+    host: ["a/", "a/up -> .."],
+    merge: "failed",
+    name: "archive file over a host symlink",
+    preStaging: "l",
+    verdict: "conflict:host-symlink@a/up",
+  },
+  {
+    archive: ["a/", "a/s/f"],
+    escapes: [],
+    host: ["a/", "t/", "a/s -> ../t"],
+    merge: "failed",
+    name: "archive file below a host symlink",
+    preStaging: "l",
+    verdict: "conflict:below-host-symlink@a/s",
+  },
+  {
+    archive: ["a/", "a/d/", "a/d/new -> ../x/f"],
+    escapes: [],
+    host: ["a/", "a/d/", "a/d/keep -> ../x"],
+    merge: "ok",
+    name: "nested directory with a symlink merged into a host directory with links",
+    preStaging: "clean",
+    verdict: "ok",
+  },
+  {
+    archive: ["a/", "a/d/", "a/d/s -> h/.."],
+    escapes: ["a/d/s"],
+    host: ["a/", "a/d/", "a/d/h -> ../.."],
+    merge: "ok",
+    name: "nested archive symlink that escapes through a host link in the same directory",
+    preStaging: "l",
+    verdict: "violations",
+  },
+  {
+    archive: ["a/", "a/up -> .."],
+    escapes: ["a/esc"],
+    host: ["a/", "a/esc -> up/.."],
+    merge: "ok",
+    name: "sibling archive link that makes an earlier host link escape",
+    preStaging: "clean",
+    verdict: "violations",
+  },
+  {
+    archive: ["a/", "a/lib/", "a/lib/f", "a/lib64 -> lib", "a/bin/", "a/bin/f -> ../lib64/f"],
+    escapes: [],
+    host: [],
+    merge: "ok",
+    name: "contained archive links on an empty host",
+    preStaging: "clean",
+    verdict: "ok",
+  },
+  {
+    archive: ["f"],
+    escapes: ["etc"],
+    host: ["etc -> /etc"],
+    merge: "ok",
+    name: "host link with an absolute target outside the destination",
+    preStaging: "clean",
+    verdict: "violations",
+  },
+  {
+    archive: ["a/", "a/f"],
+    escapes: [],
+    host: ["a/", "abs -> $DEST/a"],
+    merge: "ok",
+    name: "host link with an absolute target inside the destination",
+    preStaging: "clean",
+    verdict: "ok",
+  },
+]
+
+/**
+ * Issue #219: condense one differential run into the shape of its table row.
+ *
+ * @param run - The raw outcomes of one differential run.
+ * @param run.escapes - Destination-relative links the real backstop reported.
+ * @param run.merge - The real merge's exit status and output.
+ * @param run.preStaging - The `(check, path)` pairs of the real pre-staging probe.
+ * @param run.verdict - What `preMergeContainmentVerdict` returned.
+ * @returns The observed row, with the spec fields left for the caller to fill.
+ */
+function differentialObservation(run: {
+  escapes: string[]
+  merge: ShellResult
+  preStaging: ReadonlyArray<readonly [string, string]>
+  verdict: PreMergeContainmentVerdict
+}): Omit<DifferentialCase, "archive" | "host" | "name"> {
+  const firstCheck = run.preStaging.map(([check]) => check).at(0) ?? "clean"
+  return {
+    escapes: run.escapes,
+    merge: run.merge.code === 0 ? "ok" : "failed",
+    preStaging: firstCheck as DifferentialCase["preStaging"],
+    verdict: verdictLabel(run.verdict),
+  }
+}
+
+/**
+ * Issue #219: the properties that must hold between the model and the real
+ * merge for every differential row.
+ *
+ * - `escapeWasRefused` (model soundness): production merges only when the
+ *   pre-staging probe is clean and the verdict is `ok`, so an escape the real
+ *   backstop sees must never come out of such a case.
+ * - `mergedCaseIsClean`: a case production would merge merges successfully
+ *   and leaves nothing for the backstop.
+ * - `conflictMergeFails`: a conflict is a merge the model does not predict;
+ *   the real merge fails on it.
+ * - `publishedViolationsMatch`: when a merge the model refuses succeeds
+ *   anyway, the backstop finds exactly the escaping links the model named.
+ *
+ * @param observed - The observed row (see {@link differentialObservation}).
+ * @param verdict - What `preMergeContainmentVerdict` returned.
+ * @returns Each property with whether it holds.
+ */
+function differentialInvariants(
+  observed: Omit<DifferentialCase, "archive" | "host" | "name">,
+  verdict: PreMergeContainmentVerdict
+): Record<string, boolean> {
+  const refusedBeforeMerge = observed.preStaging !== "clean" || verdict.kind !== "ok"
+  const modelledEscapes =
+    verdict.kind === "violations"
+      ? verdict.violations
+          .filter(({ kind }) => kind === "escape")
+          .map(({ key }) => key)
+          .toSorted()
+      : []
+  return {
+    conflictMergeFails: verdict.kind !== "conflict" || observed.merge === "failed",
+    escapeWasRefused: observed.escapes.length === 0 || refusedBeforeMerge,
+    mergedCaseIsClean:
+      refusedBeforeMerge || (observed.merge === "ok" && observed.escapes.length === 0),
+    publishedViolationsMatch:
+      verdict.kind !== "violations" ||
+      observed.merge !== "ok" ||
+      JSON.stringify(observed.escapes) === JSON.stringify(modelledEscapes),
+  }
+}
+
+describe.skipIf(SKIP_PLATFORM || SKIP_NO_GNU_CP || SKIP_NO_REALPATH_MISSING_MODE)(
+  "archive.extract pre-merge model versus real merge (Issue #219, requires GNU cp and realpath -m)",
+  () => {
+    it.each(differentialCases)("$name", (testCase) => {
+      const { destination, root, staging } = makeWorkspace()
+      try {
+        buildTree(destination, testCase.host, destination)
+        buildTree(staging, testCase.archive, destination)
+        const members = testCase.archive.map((entry) => specMember(entry))
+
+        const preStaging = runPreStagingProbe(destination, members)
+        const verdict = modelVerdict(destination, members)
+        const merge = runProductionMerge({ destination, members, staging })
+        const escapes = escapingLinks(destination)
+
+        const observed = differentialObservation({ escapes, merge, preStaging, verdict })
+        expect(observed).toStrictEqual({
+          escapes: testCase.escapes,
+          merge: testCase.merge,
+          preStaging: testCase.preStaging,
+          verdict: testCase.verdict,
+        })
+        expect(differentialInvariants(observed, verdict)).toStrictEqual({
+          conflictMergeFails: true,
+          escapeWasRefused: true,
+          mergedCaseIsClean: true,
+          publishedViolationsMatch: true,
+        })
+      } finally {
+        rmSync(root, { force: true, recursive: true })
+      }
+    })
   }
 )

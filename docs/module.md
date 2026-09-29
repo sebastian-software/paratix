@@ -171,14 +171,24 @@ Tar-Symlinks und -Hardlinks werden nur entpackt, wenn ihr Ziel – bei Symlinks 
 Verzeichnis aus, bei Hardlinks vom Archiv-Stamm aus und auch über die Symlinks des Archivs hinweg
 aufgelöst – innerhalb von `destination` bleibt; absolute Ziele, ein Link anstelle des
 Zielverzeichnisses selbst, Einträge unterhalb eines Archiv-Symlinks und Zip-Symlinks werden
-abgelehnt. Vor dem Zusammenführen löst `archive.extract` zudem die bereits unter `destination`
-vorhandenen Symlinks gemeinsam mit denen des Archivs auf – ein Archiv-Eintrag ersetzt dabei den
-vorhandenen Link am selben Pfad, vorhandene absolute Ziele innerhalb von `destination` sind erlaubt
-– und bricht ohne jede Kopie ab, sobald ein Link außerhalb von `destination` auflöst; eine zweite
-Prüfung aller Symlinks nach dem Zusammenführen fängt zwischenzeitliche Änderungen am Host ab.
-Schlägt eine der beiden Prüfungen fehl, wird weder die Marker-Datei geschrieben noch `owner`
-angewendet, und `check` meldet für jedes Archiv mit diesem Zielverzeichnis `needs-apply`, bis ein
-Durchlauf vollständig gelingt – also erst, wenn der Link entfernt oder nach innen umgelenkt wurde.
+abgelehnt. Noch bevor etwas entpackt wird, lehnt `archive.extract` einen Eintrag ab, dessen Pfad
+oder übergeordnete Verzeichnisse auf dem Host vorhandene Symlinks sind (ein Archiv-Symlink darf den
+Link an seinem eigenen Pfad ersetzen), eine Datei, einen Hardlink oder Symlink dort, wo der Host
+ein echtes Verzeichnis hat, sowie ein Verzeichnis – auch ein implizites Elternverzeichnis – dort, wo
+der Host kein Verzeichnis hat. Danach schreibt es ein Flag je Zielverzeichnis – lässt es sich nicht
+schreiben, endet der Durchlauf dort – und löst, weiterhin vor jeder Kopie, die bereits unter
+`destination` vorhandenen Symlinks gemeinsam mit denen des Archivs auf: Ein Archiv-Symlink ersetzt
+einen vorhandenen Symlink am selben Pfad, vorhandene absolute Ziele innerhalb von `destination` sind
+erlaubt; jede andere Typ-Kombination am Pfad eines Eintrags, ein Eintrag unterhalb eines vorhandenen
+Symlinks oder ein Link, der außerhalb von `destination` auflöst, verhindert das Entpacken – ein
+vorhandener Link, der nach außen zeigt, muss dann entfernt oder nach innen umgelenkt werden. Hat das
+Zusammenführen begonnen, läuft immer eine Prüfung aller Symlinks unter `destination`, auch nach
+einem fehlgeschlagenen Zusammenführen, das bereits Einträge kopiert haben kann: Sie entfernt jeden
+Link, der außerhalb auflöst (nur den Link, nie sein Ziel), prüft erneut und lässt den Durchlauf
+trotzdem fehlschlagen, wobei sie die entfernten und die nicht entfernbaren Links nennt. Bei einem
+Fehlschlag wird weder die Marker-Datei geschrieben noch `owner` angewendet. Das Flag wird erst
+entfernt, wenn ein Durchlauf einschließlich `owner` und Marker-Dateien vollständig gelingt; solange
+es besteht, meldet `check` für jedes Archiv mit diesem Zielverzeichnis `needs-apply`.
 
 ---
 
