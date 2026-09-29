@@ -14,6 +14,7 @@ import {
   validateExtractDestination,
   validateNoSymlinkPaths,
   validateResolvedDestinationPath,
+  validateSymlinkContainment,
 } from "./archiveDestinationValidation.js"
 import { archiveLinkUnsafeReason } from "./archiveLinkValidation.js"
 import {
@@ -735,6 +736,46 @@ async function finalizeExtraction(
   return { status: "changed" }
 }
 
+/**
+ * Run the staged extraction and then check that no symlink under the
+ * destination resolves outside it.
+ *
+ * @param conn - The SSH connection.
+ * @param parameters - Inputs for the staged extraction (see {@link extractViaStagingDirectory}).
+ * @param parameters.destination - The validated destination directory.
+ * @param parameters.members - The validated archive members.
+ * @param parameters.remoteSource - The remote archive path (uploaded or original).
+ * @param parameters.source - The source archive path.
+ * @returns A failure `ModuleResult` if extraction or the containment check fails, or `null` on success.
+ */
+async function extractAndValidateSymlinkContainment(
+  conn: SshConnection,
+  parameters: {
+    destination: string
+    members: ArchiveMember[]
+    remoteSource: string
+    source: string
+  }
+): Promise<ModuleResult | null> {
+  const stagedFailure = await extractViaStagingDirectory(conn, parameters)
+  if (stagedFailure !== null) return stagedFailure
+
+  // Issue #219: the pre-merge probes only see this archive's own link targets,
+  // but the merge may replace symlinks that an earlier run left in the
+  // destination. Links from separate runs can then combine: a link that stayed
+  // inside when it was written may resolve outside once a later archive places
+  // a link on its path. One check over the whole tree after the merge covers
+  // links this archive did not ship. The caller runs it before
+  // `finalizeExtraction`, so a refused extraction performs no chown and writes
+  // no marker file, and the next `check` reports needs-apply. Staging has
+  // already been cleaned up here; a leftover staging directory lies inside the
+  // destination, so its links resolve inside as well and need no pruning.
+  return validateSymlinkContainment(conn, {
+    destination: parameters.destination,
+    source: parameters.source,
+  })
+}
+
 async function runExtraction(
   conn: SshConnection,
   parameters: ApplyParameters,
@@ -778,7 +819,10 @@ async function runExtraction(
   })
   if (unsafeMemberPath !== null) return unsafeMemberPath
 
-  const stagedFailure = await extractViaStagingDirectory(conn, {
+  // Issue #219: the staged merge is followed by the whole-tree symlink
+  // containment check, both before `finalizeExtraction`; see
+  // `extractAndValidateSymlinkContainment`.
+  const stagedFailure = await extractAndValidateSymlinkContainment(conn, {
     destination: validatedDestination.destination,
     members,
     remoteSource,

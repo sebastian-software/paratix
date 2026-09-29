@@ -198,7 +198,10 @@ export default server({
 `archive.extract` extracts a tar symlink or hardlink only if its target, resolved from the link's
 own directory (hardlinks: from the archive root) and through the archive's own symlinks, stays
 inside `destination`; absolute targets, a link in place of the destination root, members below an
-archive symlink, and zip symlinks are rejected.
+archive symlink, and zip symlinks are rejected. After the merge it also checks every symlink under
+`destination`, including links this archive did not ship, and fails if any resolves outside it; a
+failed check writes no extraction marker and applies no `owner`, so a destination that already
+holds such a link cannot be extracted into until that link is removed or changed to point inside.
 
 ### `command`
 

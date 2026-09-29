@@ -171,7 +171,11 @@ Tar-Symlinks und -Hardlinks werden nur entpackt, wenn ihr Ziel – bei Symlinks 
 Verzeichnis aus, bei Hardlinks vom Archiv-Stamm aus und auch über die Symlinks des Archivs hinweg
 aufgelöst – innerhalb von `destination` bleibt; absolute Ziele, ein Link anstelle des
 Zielverzeichnisses selbst, Einträge unterhalb eines Archiv-Symlinks und Zip-Symlinks werden
-abgelehnt.
+abgelehnt. Nach dem Zusammenführen prüft `archive.extract` zudem jeden Symlink unterhalb von
+`destination` – auch Links, die nicht aus diesem Archiv stammen – und schlägt fehl, sobald einer
+außerhalb von `destination` auflöst; dann wird weder die Marker-Datei der Extraktion geschrieben
+noch `owner` angewendet, sodass ein Zielverzeichnis mit einem solchen Link erst wieder entpackt
+werden kann, wenn der Link entfernt oder umgelenkt wurde.
 
 ---
 

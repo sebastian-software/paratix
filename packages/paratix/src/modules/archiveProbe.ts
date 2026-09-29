@@ -118,6 +118,79 @@ export function buildSymlinkProbeScript(): string {
 }
 
 /**
+ * Per-batch body of {@link buildSymlinkContainmentProbeScript}: `$1` is the
+ * destination, the remaining arguments are the symlinks `find` found.
+ *
+ * - `command -p realpath -m` is the hardened resolver already used in `ssh.ts`
+ *   and `aptKeyStaging.ts` (R-0000693): `command -p` looks `realpath` up on the
+ *   default system PATH, so a hijacked PATH on the target cannot substitute it.
+ * - `-m` resolves dangling links and missing intermediate components. GNU
+ *   `readlink -f` fails on a dangling link with a missing non-final component,
+ *   so a dangling link whose resolved path stays inside the destination passes
+ *   here instead of being reported. Symlink loops also resolve under `-m`
+ *   without an error.
+ * - The `printf x` sentinel keeps a resolved path that ends in newlines intact.
+ *   Command substitution strips every trailing newline, which could make a
+ *   sibling such as `/opt/app<newline>` compare equal to `/opt/app`; only the
+ *   single newline `realpath` itself appends is removed.
+ * - A link that cannot be resolved at all is reported with an empty resolved
+ *   field, so the caller fails closed instead of skipping it.
+ * - The quoted `"$d"` in the `case` pattern is matched literally, not as a
+ *   glob. The destination is already canonical (validated `readlink -f` equal
+ *   to itself, and `/` is rejected by `validateExtractDestination`), so a plain
+ *   prefix comparison is correct.
+ */
+const SYMLINK_CONTAINMENT_INNER_SCRIPT = [
+  // `nl` holds one newline; the trailing `x` survives command substitution.
+  "nl=$(printf '\\nx'); ",
+  // `$\{` keeps the shell parameter expansion literal; a bare `${` would be
+  // read as JavaScript interpolation.
+  `nl=$\{nl%x}; `,
+  "d=$1; shift; ",
+  "for l do ",
+  'r=$(command -p realpath -m -- "$l" && printf x) || { printf \'%s\\0\\0\' "$l"; continue; }; ',
+  `r=$\{r%x}; r=$\{r%"$nl"}; `,
+  'case $r in "$d"|"$d"/*) ;; *) printf \'%s\\0%s\\0\' "$l" "$r";; esac; done; exit 0',
+].join("")
+
+/**
+ * Outer body of {@link buildSymlinkContainmentProbeScript}: `$1` is the inner
+ * script, the remaining arguments are the destinations from stdin.
+ *
+ * `find` without `-L` never follows a symlink, so the walk stays inside the
+ * destination tree. A traversal error makes `find` exit non-zero, which the
+ * `|| exit $?` turns into a failed probe (fail closed) rather than a partial
+ * result read as clean.
+ */
+const SYMLINK_CONTAINMENT_OUTER_SCRIPT =
+  'inner=$1; shift; for d do find "$d" -type l -exec sh -c "$inner" sh "$d" {} + || exit $?; done; exit 0'
+
+/**
+ * Probe script reporting every symlink below a destination whose fully
+ * resolved target lies outside that destination.
+ *
+ * Issue #219: this checks the whole tree after the merge, including links that
+ * earlier runs or the host left there, because a link that was contained when
+ * it was written can be redirected by a link a later archive places on its
+ * path. It is meant for {@link runBatchedProbe} with the destination as the
+ * single entry, so it costs exactly one `exec` regardless of member count.
+ *
+ * The composed command is `xargs -0 sh -c <outer> sh <inner>`: `xargs` appends
+ * the NUL-delimited stdin entries after `<inner>`, so the outer script receives
+ * the inner script as `$1` and the destinations after it. Both bodies contain
+ * single quotes and are therefore composed with `shellQuote` instead of the
+ * literal `XARGS_PREFIX`. Link paths travel as arguments and results come back
+ * NUL-framed, so newlines in link names are safe.
+ *
+ * @returns The remote script. Its output is a flat list of `(link, resolved)`
+ *   field pairs, one pair per violation; an empty `resolved` field means the
+ *   link could not be resolved. A converged tree produces no output.
+ */
+export function buildSymlinkContainmentProbeScript(): string {
+  return `xargs -0 sh -c ${shellQuote(SYMLINK_CONTAINMENT_OUTER_SCRIPT)} sh ${shellQuote(SYMLINK_CONTAINMENT_INNER_SCRIPT)}`
+}
+
+/**
  * Encode one member for {@link buildMemberTypeProbeScript}.
  *
  * Kind and path share a single argument on purpose. `xargs` splits its argument

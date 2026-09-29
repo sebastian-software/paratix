@@ -1,8 +1,10 @@
+import { posix } from "node:path"
 import { describe, expect, it, vi } from "vitest"
 
 import type { ExecResult, ModuleResult } from "../../src/types.js"
 
 import { archive } from "../../src/modules/archive.js"
+import { validateSymlinkContainment } from "../../src/modules/archiveDestinationValidation.js"
 import {
   ARCHIVE_CAPTURE_LIMIT_BYTES,
   listArchiveMembers,
@@ -10,9 +12,10 @@ import {
 import {
   buildMemberTypeProbeScript,
   buildOwnershipProbeScript,
+  buildSymlinkContainmentProbeScript,
   buildSymlinkProbeScript,
 } from "../../src/modules/archiveProbe.js"
-import { CAPTURE_TRUNCATION_MARKER } from "../../src/sshHelpers.js"
+import { CAPTURE_TRUNCATION_MARKER, DEFAULT_MAX_OUTPUT_BYTES } from "../../src/sshHelpers.js"
 import { createMockSsh as createBaseMockSsh } from "../helpers/mockSsh.js"
 
 const emptyEnv = {}
@@ -31,6 +34,7 @@ const membersMarker = `${marker}.members`
 const archiveSha = "abc123def456"
 const extractedFileMember = { kind: "file", path: `${destination}/app/file` } as const
 const symlinkProbeCommand = buildSymlinkProbeScript()
+const symlinkContainmentProbeCommand = buildSymlinkContainmentProbeScript()
 const extractedFileTypeProbe = buildMemberTypeProbeScript()
 const batchedChownCommand = "xargs -0 chown -h -- 'www-data:www-data'"
 const memberTypeMatchResponse = { code: 0, stdout: "" }
@@ -138,6 +142,8 @@ const archiveApplyResponseStubs: NonNullable<
 >["responseStubs"] = [
   { command: archiveMembersMarkerPattern, result: { code: 1, stderr: "cat: No such file" } },
   { command: symlinkProbeCommand, result: { code: 0, stdout: "" } },
+  // Issue #219: the post-merge containment check; a converged tree reports nothing.
+  { command: symlinkContainmentProbeCommand, result: { code: 0, stdout: "" } },
   { command: extractedFileTypeProbe, result: { code: 0, stdout: "" } },
   { command: batchedChownCommand, result: { code: 0 } },
   {
@@ -291,23 +297,134 @@ function tarHardlinkLine(path: string, target: string): string {
 type SymlinkProbeRecord = { callIndex: number; entries: string[] }
 
 /**
+ * Issue #219: the symlinks a host keeps below the destination across runs,
+ * keyed by absolute link path. Each run's successful staging merge adds (or
+ * replaces) the links it ships, and the post-merge containment probe is
+ * answered from the whole map, so a test can span several runs on one host.
+ */
+type HostLinkTree = Map<string, string>
+
+type HostLinkRun = { shipped: ReadonlyArray<readonly [string, string]>; tree: HostLinkTree }
+
+const tarSymlinkLinePrefix = `lrwxrwxrwx ${tarListingLineFields} `
+
+/**
+ * The symlinks a listing built with `tarSymlinkLine` ships, as host paths.
+ *
+ * @param lines - The listing lines.
+ * @returns `[link, target]` pairs below the destination.
+ */
+function shippedSymlinks(lines: readonly string[]): Array<readonly [string, string]> {
+  return lines
+    .filter((line) => line.startsWith(tarSymlinkLinePrefix))
+    .map((line) => {
+      const [path = "", target = ""] = line.slice(tarSymlinkLinePrefix.length).split(" -> ")
+      return [posix.join(destination, path), target] as const
+    })
+}
+
+function pathComponents(path: string): string[] {
+  return path.split("/").filter((component) => component !== "")
+}
+
+/**
+ * Resolve a host path the way `realpath -m` does: follow every symlink of the
+ * tree component by component and treat a missing component as a directory.
+ *
+ * @param tree - The host symlinks.
+ * @param path - The absolute path to resolve.
+ * @returns The resolved absolute path.
+ */
+function resolveOnHost(tree: ReadonlyMap<string, string>, path: string): string {
+  let resolved: string[] = []
+  const pending = pathComponents(path)
+  let hops = 0
+  while (pending.length > 0) {
+    const component = pending.shift() ?? "."
+    const target = tree.get(`/${[...resolved, component].join("/")}`)
+    if (target === undefined) {
+      resolved = appendPathComponent(resolved, component)
+    } else {
+      hops += 1
+      if (hops > 40) throw new Error(`test host model: symlink loop resolving ${path}`)
+      if (target.startsWith("/")) resolved = []
+      pending.unshift(...pathComponents(target))
+    }
+  }
+  return `/${resolved.join("/")}`
+}
+
+function appendPathComponent(resolved: string[], component: string): string[] {
+  if (component === "..") return resolved.slice(0, -1)
+  return component === "." ? resolved : [...resolved, component]
+}
+
+function isInsideDirectory(root: string, path: string): boolean {
+  return path === root || path.startsWith(`${root}/`)
+}
+
+/**
+ * Answer the containment probe from the host model: one `(link, resolved)`
+ * pair for every link below a transported destination that resolves outside it.
+ *
+ * @param tree - The host symlinks.
+ * @param input - The probe's NUL-terminated destinations.
+ * @returns The NUL-framed probe output.
+ */
+function containmentProbeStdout(tree: ReadonlyMap<string, string>, input: string): string {
+  return pathsFromNulPayload(input)
+    .flatMap((root) =>
+      [...tree.keys()]
+        .filter((link) => link.startsWith(`${root}/`))
+        .map((link) => [link, resolveOnHost(tree, link)] as const)
+        .filter(([, resolved]) => !isInsideDirectory(root, resolved))
+    )
+    .flat()
+    .map((field) => `${field}\u0000`)
+    .join("")
+}
+
+function pathsFromNulPayload(input: string | undefined): string[] {
+  return (input ?? "").split("\u0000").filter((entry) => entry !== "")
+}
+
+function answerFromHostLinks(
+  host: HostLinkRun,
+  command: string,
+  exchange: { input: string | undefined; result: ExecResult }
+): ExecResult {
+  const { input, result } = exchange
+  if (result.code === 0 && archiveStageMovePattern.test(command)) {
+    for (const [link, target] of host.shipped) host.tree.set(link, target)
+  }
+  if (command !== symlinkContainmentProbeCommand) return result
+  return { ...result, stdout: containmentProbeStdout(host.tree, input ?? "") }
+}
+
+/**
  * Record the NUL-separated payload of every batched symlink probe and report
  * the given host paths as symlinks whenever a probe carries them.
  *
  * @param mockSsh - The mock connection to patch.
  * @param hostSymlinks - Absolute host paths the probe reports as symlinks.
+ * @param host - Optional host link model that the merge updates and the containment probe reads.
  * @returns The recorded probes, in call order, with their position in `mockSsh.calls`.
  */
 function recordSymlinkProbes(
   mockSsh: MockSsh,
-  hostSymlinks: readonly string[] = []
+  hostSymlinks: readonly string[] = [],
+  host?: HostLinkRun
 ): SymlinkProbeRecord[] {
   const originalExec = mockSsh.exec.bind(mockSsh)
   const probes: SymlinkProbeRecord[] = []
   vi.spyOn(mockSsh, "exec").mockImplementation(async (command, options) => {
-    const result = await originalExec(command, options)
+    const executed = await originalExec(command, options)
+    const result =
+      host === undefined
+        ? executed
+        : answerFromHostLinks(host, command, { input: options?.input, result: executed })
     if (command !== symlinkProbeCommand) return result
-    const entries = (options?.input ?? "").split("\u0000").filter((entry) => entry !== "")
+    const entries = pathsFromNulPayload(options?.input)
     probes.push({ callIndex: mockSsh.calls.length - 1, entries })
     const reported = entries.filter((entry) => hostSymlinks.includes(entry))
     if (reported.length === 0) return result
@@ -321,21 +438,33 @@ type TarListingApplyRun = {
   mockSsh: MockSsh
   probes: SymlinkProbeRecord[]
   result: ModuleResult
+  /** Every `writeFile`, with the number of `exec` calls issued before it. */
+  writes: Array<{ callIndex: number; remotePath: string }>
 }
 
 async function applyTarListing(
   lines: readonly string[],
-  options: { hostSymlinks?: readonly string[] } = {}
+  options: { hostLinks?: HostLinkTree; hostSymlinks?: readonly string[]; owner?: string } = {}
 ): Promise<TarListingApplyRun> {
   const mockSsh = createMockSsh({
     [`tar -tvzf '${src}'`]: { code: 0, stdout: `${lines.join("\n")}\n` },
     [stagedTarExtractCommand]: { code: 0 },
   })
   vi.spyOn(mockSsh, "sha256").mockResolvedValue(archiveSha)
-  const writeFile = vi.spyOn(mockSsh, "writeFile").mockResolvedValue()
-  const probes = recordSymlinkProbes(mockSsh, options.hostSymlinks)
-  const result = await archive.extract(src, destination).apply(mockSsh, emptyEnv)
-  return { markerWrites: () => writeFile.mock.calls.length, mockSsh, probes, result }
+  const writes: TarListingApplyRun["writes"] = []
+  vi.spyOn(mockSsh, "writeFile").mockImplementation(async (remotePath) => {
+    await Promise.resolve()
+    writes.push({ callIndex: mockSsh.calls.length, remotePath })
+  })
+  const { hostLinks } = options
+  // With a host link model, the pre-merge probes see the links earlier runs left.
+  const hostSymlinks = options.hostSymlinks ?? [...(hostLinks?.keys() ?? [])]
+  const host =
+    hostLinks === undefined ? undefined : { shipped: shippedSymlinks(lines), tree: hostLinks }
+  const probes = recordSymlinkProbes(mockSsh, hostSymlinks, host)
+  const moduleOptions = options.owner === undefined ? {} : { owner: options.owner }
+  const result = await archive.extract(src, destination, moduleOptions).apply(mockSsh, emptyEnv)
+  return { markerWrites: () => writes.length, mockSsh, probes, result, writes }
 }
 
 /**
@@ -1151,7 +1280,9 @@ describe("archive.extract — apply", () => {
     // The bound is deliberately a fixed number rather than a ratio: a
     // regression back to per-path probing would push this far past it, which is
     // what makes the assertion worth having.
-    const runWith = async (memberCount: number): Promise<number> => {
+    const runWith = async (
+      memberCount: number
+    ): Promise<{ containmentProbes: number; symlinkProbes: number }> => {
       const memberPaths = Array.from(
         { length: memberCount },
         (_value, index) => `app/file-${String(index)}`
@@ -1167,14 +1298,23 @@ describe("archive.extract — apply", () => {
 
       const result = await archive.extract(src, destination).apply(mockSsh, emptyEnv)
       expect(result.status).toBe("changed")
-      return mockSsh.calls.filter((command) => command === symlinkProbeCommand).length
+      const count = (probe: string): number =>
+        mockSsh.calls.filter((command) => command === probe).length
+      return {
+        containmentProbes: count(symlinkContainmentProbeCommand),
+        symlinkProbes: count(symlinkProbeCommand),
+      }
     }
 
     const few = await runWith(5)
     const many = await runWith(500)
 
-    expect(many).toBe(few)
-    expect(many).toBeLessThanOrEqual(4)
+    expect(many.symlinkProbes).toBe(few.symlinkProbes)
+    expect(many.symlinkProbes).toBeLessThanOrEqual(4)
+    // Issue #219: the post-merge containment check walks the whole tree in one
+    // exec, so it adds exactly one round trip regardless of member count.
+    expect(few.containmentProbes).toBe(1)
+    expect(many.containmentProbes).toBe(1)
   })
 
   it("R-0000267: returns failed when chown of an extracted member fails", async () => {
@@ -2173,6 +2313,64 @@ describe("archive.extract — apply", () => {
       )
     })
 
+    it("refuses a later run whose link makes an earlier run's link escape (a/esc -> up/.., then a/up -> ..)", async () => {
+      // Issue #219: the reverse order of the case above. Run 1 ships
+      // `a/esc -> up/..`, which resolves to `a` while `a/up` does not exist.
+      // Run 2 ships `a/up -> ..`, which on its own resolves to the destination
+      // root. Neither archive is unsafe, and the pre-merge probes of run 2 never
+      // look at `a/esc` — only the post-merge check over the whole tree sees
+      // that `a/esc` now resolves via `a/up/..` to the parent of `/opt/app`.
+      const hostLinks: HostLinkTree = new Map()
+      const owner = "www-data:www-data"
+      const escapingLink = `${destination}/a/esc`
+
+      const first = await applyTarListing(
+        [tarDirectoryLine("a/"), tarSymlinkLine("a/esc", "up/..")],
+        { hostLinks, owner }
+      )
+
+      expect(extractionSummary(first)).toStrictEqual(extractedThroughStaging)
+      const firstCalls = first.mockSsh.calls
+      const firstContainment = firstCalls.indexOf(symlinkContainmentProbeCommand)
+      const firstCleanup = firstCalls.findIndex((command) =>
+        archiveStageCleanupPattern.test(command)
+      )
+      expect(firstCalls.findIndex((command) => archiveStageMovePattern.test(command))).toBeLessThan(
+        firstCleanup
+      )
+      expect(firstContainment).toBeGreaterThan(firstCleanup)
+      expect(firstCalls.indexOf(batchedChownCommand)).toBeGreaterThan(firstContainment)
+      expect(first.writes.map(({ remotePath }) => remotePath)).toStrictEqual(
+        expect.arrayContaining([marker, membersMarker])
+      )
+      for (const write of first.writes) expect(write.callIndex).toBeGreaterThan(firstContainment)
+
+      const second = await applyTarListing([tarDirectoryLine("a/"), tarSymlinkLine("a/up", "..")], {
+        hostLinks,
+        owner,
+      })
+
+      expect(extractionSummary(second)).toStrictEqual({
+        error: expect.stringContaining(
+          `[archive.extract] refusing to complete extraction of ${src}: symlink ${JSON.stringify(escapingLink)} resolves to "/opt", outside destination ${JSON.stringify(destination)}; every symlink under the destination is checked after the merge, including links this archive did not ship`
+        ),
+        markerWritten: false,
+        status: "failed",
+        tarExtractCalls: [stagedTarExtractCommand],
+      })
+      expect(preStagingProbeEntries(second)).not.toContain(escapingLink)
+      const secondCalls = second.mockSsh.calls
+      const secondMerge = secondCalls.findIndex((command) => archiveStageMovePattern.test(command))
+      expect(secondMerge).toBeGreaterThanOrEqual(0)
+      expect(secondCalls.indexOf(symlinkContainmentProbeCommand)).toBeGreaterThan(secondMerge)
+      expect(secondCalls).not.toContain(batchedChownCommand)
+      expect(second.writes).toStrictEqual([])
+      expect([...hostLinks]).toStrictEqual([
+        [escapingLink, "up/.."],
+        [`${destination}/a/up`, ".."],
+      ])
+    })
+
     it("keeps archive symlink leaves out of the pre-staging probe and the merge guard paths", async () => {
       // Downward links only, so the listing already validates today: this case
       // isolates the guard set, which used to include the link paths themselves
@@ -3035,5 +3233,70 @@ describe("archive.extract — apply", () => {
     expect(mockSsh.calls).not.toContain(
       `tar --no-same-owner --no-overwrite-dir -xzf '${src}' -C '${archiveStageDirectory}'`
     )
+  })
+})
+
+describe("validateSymlinkContainment (Issue #219)", () => {
+  const refusal = `[archive.extract] refusing to complete extraction of ${src}: `
+  const checkedAfterMerge =
+    "every symlink under the destination is checked after the merge, including links this archive did not ship"
+
+  async function validateWith(
+    result: Partial<ExecResult>
+  ): Promise<{ mockSsh: MockSsh; outcome: ModuleResult | null }> {
+    const mockSsh = createMockSsh(
+      {},
+      { responseStubs: [{ command: symlinkContainmentProbeCommand, result }] }
+    )
+    const outcome = await validateSymlinkContainment(mockSsh, { destination, source: src })
+    return { mockSsh, outcome }
+  }
+
+  it("probes the destination in one exec and accepts a tree that reports nothing", async () => {
+    const { mockSsh, outcome } = await validateWith({ code: 0, stdout: "" })
+
+    expect(outcome).toBeNull()
+    expect(mockSsh.execCalls).toStrictEqual([
+      {
+        command: symlinkContainmentProbeCommand,
+        options: { ignoreExitCode: true, input: `${destination}\u0000`, silent: true },
+      },
+    ])
+  })
+
+  it.each([
+    {
+      message: `symlink containment check failed: find: '/opt/app/x': Permission denied`,
+      name: "a probe that exits non-zero",
+      result: { code: 1, stderr: "find: '/opt/app/x': Permission denied\n" },
+    },
+    {
+      message: `symlink containment check failed: probe output exceeded the captured-output cap of ${String(DEFAULT_MAX_OUTPUT_BYTES)} bytes; refusing to evaluate a truncated result`,
+      name: "truncated output",
+      result: {
+        code: 0,
+        stdout: `/opt/app/l\u0000/etc\u0000/opt/app/m${CAPTURE_TRUNCATION_MARKER}`,
+      },
+    },
+    {
+      message:
+        "symlink containment check failed: probe returned 3 fields, expected (link, resolved) pairs",
+      name: "an odd field count",
+      result: { code: 0, stdout: "/opt/app/l\u0000/etc\u0000/opt/app/m\u0000" },
+    },
+    {
+      message: `symlink "/opt/app/l" could not be resolved; ${checkedAfterMerge}`,
+      name: "a link that could not be resolved",
+      result: { code: 0, stdout: "/opt/app/l\u0000\u0000" },
+    },
+    {
+      message: `symlink "/opt/app/l" resolves to "/etc", outside destination "/opt/app"; ${checkedAfterMerge} (and 1 more)`,
+      name: "several escaping links",
+      result: { code: 0, stdout: "/opt/app/l\u0000/etc\u0000/opt/app/m\u0000/root\u0000" },
+    },
+  ])("fails closed on $name", async ({ message, result }) => {
+    const { outcome } = await validateWith(result)
+
+    expect(outcome).toStrictEqual({ error: new Error(`${refusal}${message}`), status: "failed" })
   })
 })

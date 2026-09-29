@@ -6,7 +6,11 @@ import { failed, failedCommand } from "../moduleFailure.js"
 import { shellQuote } from "../ssh.js"
 import { archiveSymlinkTargetPrefixes } from "./archiveLinkValidation.js"
 import { type ArchiveMember, normalizeArchiveMemberPath } from "./archiveMemberValidation.js"
-import { buildSymlinkProbeScript, runBatchedProbe } from "./archiveProbe.js"
+import {
+  buildSymlinkContainmentProbeScript,
+  buildSymlinkProbeScript,
+  runBatchedProbe,
+} from "./archiveProbe.js"
 
 const EXEC_OPTS = { ignoreExitCode: true, silent: true } as const
 
@@ -205,6 +209,57 @@ export async function validateNoSymlinkPaths(
   const [unsafe] = outcome.fields
   return failed(
     `[archive.extract] refusing to extract ${parameters.source}: ${symlinkProbeViolation(unsafe, parameters)}`
+  )
+}
+
+/**
+ * Refuse to complete an extraction when any symlink below the destination
+ * resolves outside it, with one batched probe over the whole tree.
+ *
+ * Issue #219: the pre-merge probes only see the current archive's link
+ * targets, but the merge may replace links an earlier run left behind. This
+ * check runs after the merge and covers every symlink under the destination,
+ * including links this archive did not ship. A probe failure, an output that
+ * is not made of `(link, resolved)` pairs, or a link that could not be
+ * resolved all fail closed.
+ *
+ * @param conn - The SSH connection.
+ * @param parameters - Probe inputs.
+ * @param parameters.destination - The validated, canonical destination directory.
+ * @param parameters.source - The archive source, for the failure message.
+ * @returns A failure when a symlink escapes the destination or the check could not run, otherwise null.
+ */
+export async function validateSymlinkContainment(
+  conn: SshConnection,
+  parameters: { destination: string; source: string }
+): Promise<ModuleResult | null> {
+  const { destination, source } = parameters
+  const prefix = `[archive.extract] refusing to complete extraction of ${source}`
+  const outcome = await runBatchedProbe(conn, {
+    entries: [destination],
+    script: buildSymlinkContainmentProbeScript(),
+  })
+  if (outcome.kind === "failed") {
+    return failed(`${prefix}: symlink containment check failed: ${outcome.detail}`)
+  }
+  const { fields } = outcome
+  // An odd field count means the pair framing broke somewhere; pairing the
+  // rest anyway could attach a resolved path to the wrong link.
+  if (fields.length % 2 !== 0) {
+    return failed(
+      `${prefix}: symlink containment check failed: probe returned ${String(fields.length)} fields, expected (link, resolved) pairs`
+    )
+  }
+  if (fields.length === 0) return null
+  const [link, resolved] = fields
+  const violation =
+    resolved === ""
+      ? `symlink ${JSON.stringify(link)} could not be resolved`
+      : `symlink ${JSON.stringify(link)} resolves to ${JSON.stringify(resolved)}, outside destination ${JSON.stringify(destination)}`
+  const more = fields.length / 2 - 1
+  const suffix = more > 0 ? ` (and ${String(more)} more)` : ""
+  return failed(
+    `${prefix}: ${violation}; every symlink under the destination is checked after the merge, including links this archive did not ship${suffix}`
   )
 }
 

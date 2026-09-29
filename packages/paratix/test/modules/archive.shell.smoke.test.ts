@@ -38,6 +38,10 @@ import {
   archiveMemberGuardPaths,
   destinationPathWithAncestors,
 } from "../../src/modules/archiveDestinationValidation.js"
+import {
+  buildSymlinkContainmentProbeScript,
+  encodeNulPayload,
+} from "../../src/modules/archiveProbe.js"
 
 type ShellResult = { code: number; stderr: string; stdout: string }
 
@@ -150,8 +154,49 @@ function describeTree(root: string, prefix = ""): string[] {
   return lines
 }
 
+/**
+ * Issue #219: whether `command -p realpath -m` works, which the containment
+ * probe relies on. GNU coreutils has it; the BSD `realpath` on macOS rejects
+ * `-m`, so the probe cases are skipped there and run on Linux.
+ *
+ * @returns True when the system `realpath` resolves missing components.
+ */
+function hasRealpathMissingMode(): boolean {
+  const result = spawnSync("/bin/sh", ["-c", "command -p realpath -m -- /nonexistent/a/b"], {
+    encoding: "utf8",
+    timeout: 2000,
+  })
+  return result.status === 0
+}
+
+type ContainmentProbeResult = { code: number; pairs: Array<[string, string]>; stderr: string }
+
+/**
+ * Issue #219: run the production containment probe the way `runBatchedProbe`
+ * does, with the destination NUL-terminated on stdin.
+ *
+ * @param destination - The canonical destination directory.
+ * @returns Exit code, the reported `(link, resolved)` pairs sorted by link, and stderr.
+ */
+function runContainmentProbe(destination: string): ContainmentProbeResult {
+  const result = spawnSync("/bin/sh", ["-c", buildSymlinkContainmentProbeScript()], {
+    encoding: "utf8",
+    input: encodeNulPayload([destination]),
+    timeout: 10_000,
+  })
+  const fields = result.stdout.split("\0")
+  if (fields.at(-1) === "") fields.pop()
+  const pairs: Array<[string, string]> = []
+  for (let index = 0; index < fields.length; index += 2) {
+    pairs.push([fields[index] ?? "", fields[index + 1] ?? "<missing>"])
+  }
+  pairs.sort(([left], [right]) => left.localeCompare(right))
+  return { code: result.status ?? -1, pairs, stderr: result.stderr }
+}
+
 const SKIP_PLATFORM = process.platform === "win32"
 const SKIP_NO_GNU_CP = !hasGnuCp()
+const SKIP_NO_REALPATH_MISSING_MODE = !hasRealpathMissingMode()
 
 describe.skipIf(SKIP_PLATFORM)("archive.extract staging merge shell smoke tests", () => {
   it("refuses a staging entry whose name contains a literal newline", () => {
@@ -436,3 +481,123 @@ describe.skipIf(SKIP_PLATFORM)("archive.extract staging merge shell smoke tests"
     })
   })
 })
+
+describe.skipIf(SKIP_PLATFORM || SKIP_NO_REALPATH_MISSING_MODE)(
+  "archive.extract symlink containment probe shell smoke tests (Issue #219)",
+  () => {
+    it("reports nothing for contained, dangling-inside, looping and self links", () => {
+      const { destination, root } = makeWorkspace()
+      try {
+        mkdirSync(join(destination, "a/lib"), { recursive: true })
+        writeFileSync(join(destination, "a/lib/f"), "f\n")
+        symlinkSync("lib/f", join(destination, "a/inside"))
+        symlinkSync("..", join(destination, "a/up"))
+        symlinkSync("missing/y/z", join(destination, "a/dangling"))
+        symlinkSync("loop-b", join(destination, "loop-a"))
+        symlinkSync("loop-a", join(destination, "loop-b"))
+        symlinkSync(".", join(destination, "self"))
+        symlinkSync(join(destination, "a/lib"), join(destination, "absolute-inside"))
+
+        const result = runContainmentProbe(destination)
+
+        expect(result).toStrictEqual({ code: 0, pairs: [], stderr: "" })
+      } finally {
+        rmSync(root, { force: true, recursive: true })
+      }
+    })
+
+    it("reports an absolute link outside and a relative link into a prefix sibling", () => {
+      const { destination, root } = makeWorkspace()
+      try {
+        mkdirSync(join(destination, "a"))
+        symlinkSync("/etc", join(destination, "a/etc"))
+        // `<root>/destination-sibling` shares the destination's string prefix
+        // but is a sibling, so a bare prefix comparison would accept it.
+        symlinkSync("../destination-sibling", join(destination, "sibling"))
+
+        const result = runContainmentProbe(destination)
+
+        expect(result).toStrictEqual({
+          code: 0,
+          pairs: [
+            [join(destination, "a/etc"), "/etc"],
+            [join(destination, "sibling"), `${destination}-sibling`],
+          ],
+          stderr: "",
+        })
+      } finally {
+        rmSync(root, { force: true, recursive: true })
+      }
+    })
+
+    it("reports a link whose name contains a newline with its exact name", () => {
+      const { destination, root } = makeWorkspace()
+      try {
+        const link = join(destination, "two\nlines")
+        symlinkSync("..", link)
+
+        const result = runContainmentProbe(destination)
+
+        expect(result).toStrictEqual({ code: 0, pairs: [[link, root]], stderr: "" })
+      } finally {
+        rmSync(root, { force: true, recursive: true })
+      }
+    })
+
+    it("fails closed with a non-zero exit when find cannot walk the destination", () => {
+      const { destination, root } = makeWorkspace()
+      try {
+        const result = runContainmentProbe(join(destination, "missing"))
+
+        expect(result.code).not.toBe(0)
+        expect(result.pairs).toStrictEqual([])
+      } finally {
+        rmSync(root, { force: true, recursive: true })
+      }
+    })
+
+    describe.skipIf(SKIP_NO_GNU_CP)("after real merges (requires GNU cp)", () => {
+      it("reports the earlier run's link once a later run ships the link it walks through", () => {
+        // Run 1 ships `a/esc -> up/..`, run 2 ships `a/up -> ..`. Each merge
+        // succeeds with the product guard set and each tree is contained on its
+        // own; after run 2, `a/esc` resolves via `a/up/..` to the destination's
+        // parent.
+        const { destination, root, staging } = makeWorkspace()
+        try {
+          const secondStaging = join(root, "staging-2")
+          mkdirSync(join(staging, "a"))
+          symlinkSync("up/..", join(staging, "a/esc"))
+          mkdirSync(join(secondStaging, "a"), { recursive: true })
+          symlinkSync("..", join(secondStaging, "a/up"))
+          const mergeRun = (stagingRoot: string, link: [string, string]): ShellResult =>
+            runMergeScript({
+              destination,
+              guardPaths: productGuardPaths(destination, [tarMember(...link)]),
+              sourcePaths: [join(stagingRoot, "a")],
+            })
+
+          const first = mergeRun(staging, ["a/esc", "up/.."])
+          expect(first).toMatchObject({ code: 0, stderr: "" })
+          expect(runContainmentProbe(destination)).toStrictEqual({
+            code: 0,
+            pairs: [],
+            stderr: "",
+          })
+
+          const second = mergeRun(secondStaging, ["a/up", ".."])
+          expect(second).toMatchObject({ code: 0, stderr: "" })
+
+          expect(readlinkSync(join(destination, "a/esc"))).toBe("up/..")
+          expect(readlinkSync(join(destination, "a/up"))).toBe("..")
+          expect(runContainmentProbe(destination)).toStrictEqual({
+            code: 0,
+            pairs: [[join(destination, "a/esc"), root]],
+            stderr: "",
+          })
+        } finally {
+          rmSync(root, { force: true, recursive: true })
+        }
+      })
+    })
+  }
+)
