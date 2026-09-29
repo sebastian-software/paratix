@@ -22,7 +22,9 @@
  *    would become a second name for the link and read its relative target from
  *    a different directory;
  * 5. resolution — every symlink target, walked through the archive's own
- *    symlinks, must end inside the destination within the Linux hop limit.
+ *    symlinks, must end inside the destination within the Linux hop limit, and
+ *    must not pass through a name that differs from another symlink only by
+ *    letter case or Unicode normalization (see `pathNameVariantKey` in `archiveSymlinkResolver.ts`).
  *
  * Rules 3 and 4 make every archive symlink a leaf whose parent contains no
  * archive symlink, which is what lets rule 5 start each walk from the literal
@@ -37,37 +39,22 @@
  * combination at a member path or below a host symlink is reported as a
  * conflict, which refuses the extraction instead of guessing what `cp` does.
  */
+import { type ArchiveMember, normalizeArchiveMemberPath } from "./archiveMemberValidation.js"
 import {
-  type ArchiveMember,
-  archiveMemberParentPath,
-  normalizeArchiveMemberPath,
-} from "./archiveMemberValidation.js"
+  ArchiveSymlinkResolver,
+  type SymlinkFailure,
+  type SymlinkWalkTarget,
+  variantDescription,
+} from "./archiveSymlinkResolver.js"
 
-/**
- * Issue #219: the maximum number of symlinks one resolution may follow. It
- * mirrors Linux `MAXSYMLINKS` (40): the kernel refuses a lookup with `ELOOP`
- * after that many follows, so a longer chain cannot resolve on the host
- * either. Internal on purpose, not an option.
- */
-const SYMLINK_RESOLUTION_LIMIT = 40
+export {
+  pathNameVariantKey,
+  type SymlinkWalkTarget,
+  variantDescription,
+} from "./archiveSymlinkResolver.js"
 
 /** A member paired with its normalized path, the key every rule compares. */
 type KeyedMember = { key: string; member: ArchiveMember }
-
-/**
- * Issue #219: a symlink target as the resolver walks it.
- *
- * - `parent`: `path` is resolved from the link's parent directory. Every
- *   archive target is of this kind, and so is a relative host target.
- * - `root`: an absolute host target inside the destination. `path` is the part
- *   below the destination, and the walk restarts at the destination root, as
- *   the kernel restarts an absolute target at `/`. This is deliberately not
- *   rewritten into a `../` chain: `..` after a symlinked prefix lands somewhere
- *   else than an absolute restart does.
- * - `outside`: an absolute host target outside the destination. Resolving or
- *   passing through such a link always escapes.
- */
-export type SymlinkWalkTarget = { anchor: "outside" } | { anchor: "parent" | "root"; path: string }
 
 /**
  * Issue #219: one symlink of the combined post-merge link set, keyed elsewhere
@@ -80,12 +67,44 @@ export type MergedSymlink = {
   target: SymlinkWalkTarget
 }
 
-/** A link of the combined set that cannot be shown to stay inside the destination. */
-export type MergedSymlinkViolation = {
-  /** Normalized destination-relative path of the link. */
-  key: string
-  /** `escape` resolves outside; `limit` exceeds the hop limit or recursion depth. */
-  kind: "escape" | "limit"
+/**
+ * A link of the combined set that cannot be shown to stay inside the destination.
+ *
+ * - `escape`: it resolves outside.
+ * - `limit`: it exceeds the hop limit or recursion depth.
+ * - `variant`: Issue #219: its resolution passes through `prefix`, a name that
+ *   differs from the symlink `link` only by letter case or Unicode
+ *   normalization, so a case-folding or normalizing filesystem may follow
+ *   `link` where the model walks a plain path.
+ */
+export type MergedSymlinkViolation =
+  | {
+      /** Normalized destination-relative path of the link. */
+      key: string
+      kind: "escape" | "limit"
+    }
+  | {
+      /** Normalized destination-relative path of the link. */
+      key: string
+      kind: "variant"
+      /** The symlink whose name the visited path matches only after folding. */
+      link: string
+      /** The visited destination-relative path. */
+      prefix: string
+    }
+
+/**
+ * Issue #219: the combined link set judged by the resolver, see
+ * {@link mergedSymlinkResolutions}.
+ */
+export type MergedSymlinkResolutions = {
+  /**
+   * Every link that resolves inside the destination, mapped to the normalized
+   * destination-relative path it resolves to (`""` for the destination root).
+   */
+  inside: Map<string, string>
+  /** The links that cannot be shown to stay inside, in iteration order. */
+  violations: MergedSymlinkViolation[]
 }
 
 /** A non-member path visited while resolving a symlink target. */
@@ -95,29 +114,6 @@ export type ArchiveSymlinkTargetPrefix = {
   /** Raw path of the symlink member whose target resolution visited it. */
   symlink: string
 }
-
-/**
- * Outcome of resolving one symlink member.
- *
- * `depth` marks a resolution cut off because the stack of links being
- * resolved grew past {@link SYMLINK_RESOLUTION_LIMIT}. Only the link at the
- * bottom of that stack is known to fail, so a `depth` outcome is never
- * memoized for the links above it.
- */
-type SymlinkResolution =
-  | { hops: number; kind: "resolved"; prefixes: readonly string[]; segments: readonly string[] }
-  | { kind: "depth" }
-  | { kind: "escape" }
-  | { kind: "limit" }
-
-type SymlinkFailure = Exclude<SymlinkResolution, { kind: "resolved" }>
-
-/** The state of one walk: hops spent, visited non-member prefixes, resolved segments. */
-type WalkState = { hops: number; prefixes: string[]; segments: readonly string[] }
-
-const ESCAPE: SymlinkFailure = { kind: "escape" }
-const LIMIT: SymlinkFailure = { kind: "limit" }
-const DEPTH: SymlinkFailure = { kind: "depth" }
 
 function isLink(member: ArchiveMember): boolean {
   return member.kind === "symlink" || member.kind === "hardlink"
@@ -217,128 +213,6 @@ function hardlinkToSymlinkReason(
 }
 
 /**
- * Issue #219: resolves symlink targets through the archive's own symlinks.
- *
- * A walk starts from the segments of the link's parent and applies the
- * target's segments: `.` is skipped, `..` drops the last resolved segment and
- * escapes when none is left, and every other segment is appended. When the
- * resolved prefix is itself a symlink member, the walk continues from that
- * link's own resolution, which also follows the final component. Following a
- * link costs one hop plus the hops its own resolution needed, so a chain of N
- * links costs N hops from its head, and more than
- * {@link SYMLINK_RESOLUTION_LIMIT} fails, as does a link re-entered while it
- * is still being resolved (a cycle).
- *
- * Results are memoized per link, so every link is walked once and the total
- * work stays linear in the member count. The recursion never nests deeper than
- * the hop limit: a deeper stack means the link at its bottom has already
- * exceeded the limit.
- *
- * A `root` target (see {@link SymlinkWalkTarget}) starts its walk at the
- * destination root instead of the link's parent; an `outside` target escapes
- * as soon as it is resolved or followed.
- */
-class ArchiveSymlinkResolver {
-  private readonly inProgress = new Set<string>()
-  private readonly memberKeys: ReadonlySet<string>
-  private readonly memo = new Map<string, SymlinkResolution>()
-  private readonly targets: ReadonlyMap<string, SymlinkWalkTarget>
-
-  /**
-   * @param targets - Every symlink by normalized path, with its walk target.
-   * @param memberKeys - Normalized paths that are known to exist; any other
-   *   visited prefix is collected for the host probe.
-   */
-  public constructor(
-    targets: ReadonlyMap<string, SymlinkWalkTarget>,
-    memberKeys: ReadonlySet<string>
-  ) {
-    this.memberKeys = memberKeys
-    this.targets = targets
-  }
-
-  /**
-   * Resolve the target of the symlink member at `key`.
-   *
-   * @param key - Normalized path of a symlink member.
-   * @returns The resolved path segments and hop count, or the failure kind.
-   */
-  public resolve(key: string): SymlinkResolution {
-    const known = this.memo.get(key)
-    if (known !== undefined) return known
-    if (this.inProgress.has(key)) return LIMIT
-    if (this.inProgress.size >= SYMLINK_RESOLUTION_LIMIT) return DEPTH
-    this.inProgress.add(key)
-    const resolution = this.walk(key)
-    this.inProgress.delete(key)
-    if (resolution.kind !== "depth") this.memo.set(key, resolution)
-    return resolution
-  }
-
-  /**
-   * Handle one resolved prefix of a walk.
-   *
-   * @param prefix - The resolved prefix after appending a segment.
-   * @param prefixes - Collector for visited prefixes that are not archive members.
-   * @returns The resolution of the archive symlink at `prefix`, or null when it is none.
-   */
-  private follow(prefix: string, prefixes: string[]): null | SymlinkResolution {
-    if (this.targets.has(prefix)) return this.resolve(prefix)
-    // Issue #219: a prefix the archive does not ship already exists on the
-    // host or is created by nothing; either way the kernel follows whatever is
-    // there, so the host probe has to look at it.
-    if (!this.memberKeys.has(prefix)) prefixes.push(prefix)
-    return null
-  }
-
-  /**
-   * Apply one target segment to a walk.
-   *
-   * @param state - The walk so far.
-   * @param segment - One `/`-separated segment of the link target.
-   * @returns The walk after the segment, or the failure that ends it.
-   */
-  private step(state: WalkState, segment: string): SymlinkFailure | WalkState {
-    if (segment === "" || segment === ".") return state
-    if (segment === "..") {
-      if (state.segments.length === 0) return ESCAPE
-      return { ...state, segments: state.segments.slice(0, -1) }
-    }
-    const segments = [...state.segments, segment]
-    const followed = this.follow(segments.join("/"), state.prefixes)
-    if (followed === null) return { ...state, segments }
-    if (followed.kind !== "resolved") return followed
-    const hops = state.hops + followed.hops
-    if (hops > SYMLINK_RESOLUTION_LIMIT) return LIMIT
-    return { hops, prefixes: state.prefixes, segments: [...followed.segments] }
-  }
-
-  private walk(key: string): SymlinkResolution {
-    const target = this.targets.get(key)
-    // Fail closed: `resolve` is only called for known links, and a link whose
-    // target lies outside the destination escapes by definition.
-    if (target === undefined || target.anchor === "outside") return ESCAPE
-    const start = target.anchor === "root" ? "" : archiveMemberParentPath(key)
-    let state: WalkState = {
-      hops: 1,
-      prefixes: [],
-      segments: start === "" ? [] : start.split("/"),
-    }
-    for (const segment of target.path.split("/")) {
-      const next = this.step(state, segment)
-      if ("kind" in next) return next
-      state = next
-    }
-    return {
-      hops: state.hops,
-      kind: "resolved",
-      prefixes: state.prefixes,
-      segments: state.segments,
-    }
-  }
-}
-
-/**
  * Build a resolver over an archive's own symlink members, each walked from its
  * parent directory.
  *
@@ -364,6 +238,9 @@ function resolutionReason(
     const resolution = resolver.resolve(key)
     if (resolution.kind === "resolved") continue
     const detail = `member ${JSON.stringify(member.path)} -> ${JSON.stringify(member.linkTarget)}`
+    if (resolution.kind === "variant") {
+      return `${detail} ${variantDescription(resolution)}`
+    }
     return resolution.kind === "escape"
       ? `${detail} would escape destination`
       : `${detail} exceeds the symlink resolution limit`
@@ -555,11 +432,51 @@ export function mergedArchiveSymlinks(
 }
 
 /**
- * Issue #219: resolve every link of a combined post-merge link set with the
- * same resolver the archive-level rules use and report each link that escapes
- * the destination or exceeds the resolution limit. A link that cannot be
- * resolved within the limit cannot be proven to stay inside, so it counts as a
- * violation as well.
+ * Issue #219: turn a failed resolution into the violation it stands for.
+ *
+ * @param key - Normalized path of the link.
+ * @param failure - The failed resolution.
+ * @returns The violation of the matching kind; a `depth` failure counts as
+ *   `limit`.
+ */
+function mergedViolation(key: string, failure: SymlinkFailure): MergedSymlinkViolation {
+  if (failure.kind === "variant") {
+    return { key, kind: "variant", link: failure.link, prefix: failure.prefix }
+  }
+  return { key, kind: failure.kind === "escape" ? "escape" : "limit" }
+}
+
+/**
+ * Issue #219: resolve every link of a combined link set with the same
+ * resolver the archive-level rules use. A link that escapes the destination,
+ * exceeds the resolution limit or passes through a name that differs from a
+ * symlink only by case or normalization is a violation: it cannot be proven
+ * to stay inside. Every other link is reported with the destination-relative
+ * path it resolves to, which the post-merge backstop hands to the host kernel
+ * as the expected location of the link.
+ *
+ * @param links - The combined link set, e.g. from {@link mergedArchiveSymlinks}.
+ * @returns The violations in the iteration order of `links`, and the resolved
+ *   path of every other link.
+ */
+export function mergedSymlinkResolutions(
+  links: ReadonlyMap<string, MergedSymlink>
+): MergedSymlinkResolutions {
+  const targets = new Map<string, SymlinkWalkTarget>()
+  for (const [key, link] of links) targets.set(key, link.target)
+  const resolver = new ArchiveSymlinkResolver(targets, new Set(targets.keys()))
+  const inside = new Map<string, string>()
+  const violations: MergedSymlinkViolation[] = []
+  for (const key of targets.keys()) {
+    const resolution = resolver.resolve(key)
+    if (resolution.kind === "resolved") inside.set(key, resolution.segments.join("/"))
+    else violations.push(mergedViolation(key, resolution))
+  }
+  return { inside, violations }
+}
+
+/**
+ * Issue #219: the violations of {@link mergedSymlinkResolutions} alone.
  *
  * @param links - The combined link set, e.g. from {@link mergedArchiveSymlinks}.
  * @returns The violations in the iteration order of `links`.
@@ -567,14 +484,5 @@ export function mergedArchiveSymlinks(
 export function mergedSymlinkViolations(
   links: ReadonlyMap<string, MergedSymlink>
 ): MergedSymlinkViolation[] {
-  const targets = new Map<string, SymlinkWalkTarget>()
-  for (const [key, link] of links) targets.set(key, link.target)
-  const resolver = new ArchiveSymlinkResolver(targets, new Set(targets.keys()))
-  const violations: MergedSymlinkViolation[] = []
-  for (const key of targets.keys()) {
-    const resolution = resolver.resolve(key)
-    if (resolution.kind === "resolved") continue
-    violations.push({ key, kind: resolution.kind === "escape" ? "escape" : "limit" })
-  }
-  return violations
+  return mergedSymlinkResolutions(links).violations
 }

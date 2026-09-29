@@ -198,27 +198,52 @@ export default server({
 `archive.extract` extracts a tar symlink or hardlink only if its target, resolved from the link's
 own directory (hardlinks: from the archive root) and through the archive's own symlinks, stays
 inside `destination`; absolute targets, a link in place of the destination root, members below an
-archive symlink, and zip symlinks are rejected. Before anything is staged, it refuses a member whose
-path or parent directories are existing host symlinks (an archive symlink may replace the link at
-its own path), a file, hardlink or symlink member where the host has a real directory, and a
-directory, including an implied parent directory, where the host has a non-directory. It then
-writes a per-destination flag (an apply that cannot write it stops there) and, still before copying
-anything, resolves the symlinks already under `destination` together with the archive's: an archive
-symlink replaces an existing symlink at the same path and existing absolute targets inside
-`destination` are allowed, while any other type combination at a member path, a member below an
-existing symlink, or any link resolving outside `destination` refuses the extraction; an existing
-escaping link must then be removed or pointed inside. The host stops the merge with GNU `timeout`
-after 100 seconds (killing it 10 seconds later), before the 120-second command timeout; without
-`timeout` the merge fails before copying anything. Once the merge has started, a check of every
-symlink under `destination` always runs, also after a failed or stopped merge that may have copied
-entries: it resolves the links like the pre-merge check, without asking the host to resolve them,
-removes each link resolving outside or not resolvable within the symlink limit, such as a loop
-(only the link, never its target, and only below a verified real directory inside `destination`),
-re-checks and repeats while removal makes progress, and still fails the run, naming the removed
-links and any it could not remove or that still escape. On failure no extraction marker is
+archive symlink, and zip symlinks are rejected. The archive listing and the host's symlink listings
+are decoded as strict UTF-8, never with replacement characters: a listing with invalid UTF-8, a
+duplicate link path, or U+FFFD in a listed path or target fails closed. A member whose path or link
+target contains a backslash or U+FFFD is rejected, because `tar` prints non-printable bytes (and,
+outside a UTF-8 locale, every non-ASCII byte) as escape sequences, so such names cannot be mapped
+reliably to the extracted names; a UTF-8 locale on the host avoids escaped non-ASCII names. Once the
+archive listing is validated, it writes a per-destination flag before the destination is created or
+validated; an apply that cannot write it stops before the destination is touched. Before anything is
+staged, it then refuses a member whose path or parent directories are existing host symlinks (an
+archive symlink may replace the link at its own path), a file, hardlink or symlink member where the
+host has a real directory, and a directory, including an implied parent directory, where the host
+has a non-directory. Still before copying anything, it resolves the symlinks already under
+`destination` together with the archive's: an archive symlink replaces an existing symlink at the
+same path and existing absolute targets inside `destination` are allowed, while any other type
+combination at a member path, a member below an existing symlink, a link resolving outside
+`destination`, or a link whose target passes through a path that differs from an existing symlink
+(of the archive or already on the host) only by letter case or Unicode normalization (NFC, NFD or
+compatibility forms) refuses the extraction, because a case-insensitive or normalizing filesystem
+may follow that symlink; an existing escaping link must then be removed or pointed inside.
+
+The host stops the merge with GNU `timeout` after 100 seconds (killing it 10 seconds later), before
+the 120-second command timeout; without `timeout` the merge fails before copying anything. Once the
+merge has started, a check of every symlink under `destination` always runs, also after a failed or
+stopped merge that may have copied entries: it resolves the links like the pre-merge check, without
+asking the host to resolve them, and counts name variants as violations too. It then asks the kernel
+in one batched command (`test -e` and `test -ef`, bounded by the kernel's symlink limit; never
+`realpath` or `readlink -f`) whether each link it judged inside really reaches the resolved path; a
+link the kernel resolves to a different object, or that resolves on one side only (for example a
+target through a missing directory), is a violation, and a cross-check that cannot be completed
+fails the run. With symlinks under `destination` this check costs two commands, without any one,
+independent of the number of members. Each violating link (resolving outside, not resolvable within
+the symlink limit such as a loop, a name variant, or a kernel mismatch) is renamed into a fresh
+private quarantine directory (`.paratix-quarantine.XXXXXXXX`, created with `mktemp -d` next to the
+link, inside its verified parent directory, a real directory inside `destination`) and inspected
+there: a symlink is deleted and the quarantine directory removed; anything else, because the entry
+was replaced meanwhile, is moved back without overwriting where `mv -n -T` is available (for example
+GNU coreutils or BusyBox) and otherwise left in the quarantine directory. Without a working `mv -n`
+nothing is removed. The removal never follows links, never recurses and deletes nothing but
+symlinks. The check re-checks and repeats while removal makes progress, and still fails the run,
+reporting per link whether it was removed, restored, or left in quarantine (naming its path there),
+and naming any link it could not remove or that still escapes. On failure no extraction marker is
 written and no `owner` is applied. The flag is removed only after an apply succeeds completely,
-including `owner` and the marker files; while it exists, `check` reports `needs-apply` for every
-archive extracting into that destination.
+including `owner` and the marker files; a refusal while the destination is created or validated, by
+the checks before staging, by the pre-merge check, by the merge, or by the post-merge check leaves
+it set, and while it exists, `check` reports `needs-apply` for every archive extracting into that
+destination.
 
 ### `command`
 
@@ -761,9 +786,14 @@ Methods available on the `ssh` parameter:
   maxOutputBytes?: number            // Cap stored stdout/stderr bytes
   secrets?: string[]                 // Strings to mask in error output
   silent?: boolean                   // Suppress stdout/stderr
+  strictUtf8Stdout?: boolean         // Reject invalid UTF-8 on stdout instead of substituting U+FFFD
   timeout?: number                   // Abort after N milliseconds
 }
 ```
+
+With `strictUtf8Stdout: true`, stdout is decoded as strict UTF-8 and the command rejects with an
+error named `InvalidUtf8OutputError` instead of substituting U+FFFD, so different host bytes cannot
+decode to the same string. stderr is always decoded leniently; the default (`false`) is unchanged.
 
 Prefer `input` for secret payloads instead of shell arguments, so values do not
 leak through process lists, `/proc/<pid>/cmdline`, or SSH logs. Add the same

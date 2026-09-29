@@ -171,31 +171,60 @@ Tar-Symlinks und -Hardlinks werden nur entpackt, wenn ihr Ziel – bei Symlinks 
 Verzeichnis aus, bei Hardlinks vom Archiv-Stamm aus und auch über die Symlinks des Archivs hinweg
 aufgelöst – innerhalb von `destination` bleibt; absolute Ziele, ein Link anstelle des
 Zielverzeichnisses selbst, Einträge unterhalb eines Archiv-Symlinks und Zip-Symlinks werden
-abgelehnt. Noch bevor etwas entpackt wird, lehnt `archive.extract` einen Eintrag ab, dessen Pfad
-oder übergeordnete Verzeichnisse auf dem Host vorhandene Symlinks sind (ein Archiv-Symlink darf den
-Link an seinem eigenen Pfad ersetzen), eine Datei, einen Hardlink oder Symlink dort, wo der Host
-ein echtes Verzeichnis hat, sowie ein Verzeichnis – auch ein implizites Elternverzeichnis – dort, wo
-der Host kein Verzeichnis hat. Danach schreibt es ein Flag je Zielverzeichnis – lässt es sich nicht
-schreiben, endet der Durchlauf dort – und löst, weiterhin vor jeder Kopie, die bereits unter
-`destination` vorhandenen Symlinks gemeinsam mit denen des Archivs auf: Ein Archiv-Symlink ersetzt
-einen vorhandenen Symlink am selben Pfad, vorhandene absolute Ziele innerhalb von `destination` sind
-erlaubt; jede andere Typ-Kombination am Pfad eines Eintrags, ein Eintrag unterhalb eines vorhandenen
-Symlinks oder ein Link, der außerhalb von `destination` auflöst, verhindert das Entpacken – ein
-vorhandener Link, der nach außen zeigt, muss dann entfernt oder nach innen umgelenkt werden. Der
-Host bricht das Zusammenführen per GNU `timeout` nach 100 Sekunden ab (10 Sekunden später
+abgelehnt. Die Archivliste und die Symlink-Listen des Hosts werden als striktes UTF-8 gelesen, nie
+mit Ersatzzeichen: Eine Liste mit ungültigem UTF-8, einem doppelten Link-Pfad oder U+FFFD in einem
+aufgeführten Pfad oder Ziel lässt die Prüfung fehlschlagen. Ein Eintrag, dessen Pfad oder Link-Ziel
+einen Backslash oder U+FFFD enthält, wird abgelehnt, weil `tar` nicht druckbare Bytes (und außerhalb
+einer UTF-8-Locale jedes Nicht-ASCII-Byte) als Escape-Sequenz ausgibt und sich solche Namen daher
+nicht zuverlässig den entpackten Namen zuordnen lassen; eine UTF-8-Locale auf dem Host vermeidet
+maskierte Nicht-ASCII-Namen. Ist die Archivliste geprüft, schreibt `archive.extract` ein Flag je
+Zielverzeichnis, noch bevor das Zielverzeichnis angelegt oder geprüft wird – lässt es sich nicht
+schreiben, endet der Durchlauf, bevor das Zielverzeichnis berührt wird. Noch bevor etwas entpackt
+wird, lehnt es dann einen Eintrag ab, dessen Pfad oder übergeordnete Verzeichnisse auf dem Host
+vorhandene Symlinks sind (ein Archiv-Symlink darf den Link an seinem eigenen Pfad ersetzen), eine
+Datei, einen Hardlink oder Symlink dort, wo der Host ein echtes Verzeichnis hat, sowie ein
+Verzeichnis – auch ein implizites Elternverzeichnis – dort, wo der Host kein Verzeichnis hat.
+Weiterhin vor jeder Kopie löst es die bereits unter `destination` vorhandenen Symlinks gemeinsam mit
+denen des Archivs auf: Ein Archiv-Symlink ersetzt einen vorhandenen Symlink am selben Pfad,
+vorhandene absolute Ziele innerhalb von `destination` sind erlaubt; jede andere Typ-Kombination am
+Pfad eines Eintrags, ein Eintrag unterhalb eines vorhandenen Symlinks, ein Link, der außerhalb von
+`destination` auflöst, oder ein Link, dessen Ziel durch einen Pfad führt, der sich von einem
+vorhandenen Symlink (des Archivs oder bereits auf dem Host) nur in Groß- und Kleinschreibung oder
+Unicode-Normalisierung (NFC, NFD oder Kompatibilitätsformen) unterscheidet, verhindert das
+Entpacken, weil ein Dateisystem, das Groß- und Kleinschreibung nicht unterscheidet oder Namen
+normalisiert, diesem Symlink folgen kann – ein vorhandener Link, der nach außen zeigt, muss dann
+entfernt oder nach innen umgelenkt werden.
+
+Der Host bricht das Zusammenführen per GNU `timeout` nach 100 Sekunden ab (10 Sekunden später
 erzwungen), also vor dem Befehls-Timeout von 120 Sekunden; fehlt `timeout`, scheitert das
 Zusammenführen, bevor etwas kopiert wird. Hat das Zusammenführen begonnen, läuft immer eine Prüfung
 aller Symlinks unter `destination`, auch nach einem fehlgeschlagenen oder abgebrochenen
 Zusammenführen, das bereits Einträge kopiert haben kann: Sie löst die Links wie die Prüfung vor dem
-Zusammenführen auf, ohne den Host auflösen zu lassen, entfernt jeden Link, der außerhalb auflöst
-oder sich innerhalb des Symlink-Limits nicht auflösen lässt, etwa bei einer Schleife (nur den Link,
-nie sein Ziel, und nur unterhalb eines geprüften echten Verzeichnisses in `destination`), prüft
-erneut und wiederholt das, solange das Entfernen vorankommt, und lässt den Durchlauf trotzdem
-fehlschlagen, wobei sie die entfernten, die nicht entfernbaren und die weiterhin nach außen
-zeigenden Links nennt. Bei einem Fehlschlag wird weder die Marker-Datei geschrieben noch `owner`
-angewendet. Das Flag wird erst entfernt, wenn ein Durchlauf einschließlich `owner` und
-Marker-Dateien vollständig gelingt; solange es besteht, meldet `check` für jedes Archiv mit diesem
-Zielverzeichnis `needs-apply`.
+Zusammenführen auf, ohne den Host auflösen zu lassen, und wertet Namensvarianten ebenfalls als
+Verstoß. Danach fragt sie den Kernel in einem gebündelten Befehl (`test -e` und `test -ef`, begrenzt
+durch das Symlink-Limit des Kernels; nie `realpath` oder `readlink -f`), ob jeder Link, den sie als
+innen liegend einstuft, tatsächlich den aufgelösten Pfad erreicht; löst der Kernel einen Link zu
+einem anderen Objekt auf oder nur auf einer Seite (etwa bei einem Ziel durch ein fehlendes
+Verzeichnis), gilt das als Verstoß, und lässt sich dieser Abgleich nicht vollständig durchführen,
+schlägt der Durchlauf fehl. Enthält `destination` Symlinks, kostet diese Prüfung zwei Befehle, sonst
+einen, unabhängig von der Zahl der Einträge. Jeden verstoßenden Link – einen, der außerhalb auflöst,
+einen, der sich innerhalb des Symlink-Limits nicht auflösen lässt, etwa bei einer Schleife, eine
+Namensvariante oder eine Abweichung des Kernels – benennt sie in ein frisches, privates
+Quarantäne-Verzeichnis um (`.paratix-quarantine.XXXXXXXX`, per `mktemp -d` neben dem Link in seinem
+geprüften Elternverzeichnis angelegt, einem echten Verzeichnis in `destination`) und untersucht ihn
+dort: Ein Symlink wird gelöscht und das Quarantäne-Verzeichnis entfernt; alles andere – der Eintrag
+wurde inzwischen ersetzt – wird ohne Überschreiben zurückverschoben, wo `mv -n -T` verfügbar ist
+(etwa bei GNU coreutils oder BusyBox), und bleibt sonst im Quarantäne-Verzeichnis. Ohne
+funktionierendes `mv -n` wird nichts entfernt. Dabei folgt sie keinem Link, arbeitet nie rekursiv
+und löscht ausschließlich Symlinks. Sie prüft erneut und wiederholt das, solange das Entfernen
+vorankommt, und lässt den Durchlauf trotzdem fehlschlagen; dabei meldet sie je Link, ob er entfernt,
+wiederhergestellt oder in Quarantäne belassen wurde (samt Pfad dort), und nennt die nicht
+entfernbaren und die weiterhin nach außen zeigenden Links. Bei einem Fehlschlag wird weder die
+Marker-Datei geschrieben noch `owner` angewendet. Das Flag wird erst entfernt, wenn ein Durchlauf
+einschließlich `owner` und Marker-Dateien vollständig gelingt; eine Ablehnung beim Anlegen oder
+Prüfen des Zielverzeichnisses, durch die Prüfungen vor dem Entpacken, durch die Prüfung vor dem
+Zusammenführen, beim Zusammenführen oder durch die Prüfung danach lässt es stehen, und solange es
+besteht, meldet `check` für jedes Archiv mit diesem Zielverzeichnis `needs-apply`.
 
 ---
 

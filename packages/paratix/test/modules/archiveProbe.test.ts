@@ -13,10 +13,16 @@ import {
   escapingSymlinkRemovalRefusal,
   removeEscapingSymlinks,
   runBatchedProbe,
+  SYMLINK_QUARANTINED_OUTCOME_PREFIX,
   SYMLINK_REMOVED_OUTCOME,
+  SYMLINK_RESTORED_OUTCOME,
   symlinkRemovalReport,
 } from "../../src/modules/archiveProbe.js"
-import { CAPTURE_TRUNCATION_MARKER, DEFAULT_MAX_OUTPUT_BYTES } from "../../src/sshHelpers.js"
+import {
+  CAPTURE_TRUNCATION_MARKER,
+  DEFAULT_MAX_OUTPUT_BYTES,
+  InvalidUtf8OutputError,
+} from "../../src/sshHelpers.js"
 
 function connectionReturning(result: Partial<ExecResult>): {
   conn: SshConnection
@@ -59,6 +65,26 @@ describe("runBatchedProbe", () => {
       ignoreExitCode: true,
       input: "/opt/app\u0000/opt/two\nlines\u0000",
       silent: true,
+      strictUtf8Stdout: true,
+    })
+  })
+
+  it("reports a rejected exec, e.g. stdout that is not valid UTF-8, as a failure (Issue #219)", async () => {
+    const conn = {
+      async exec(): Promise<ExecResult> {
+        await Promise.resolve()
+        throw new InvalidUtf8OutputError("Command stdout is not valid UTF-8 (exit code 0): probe")
+      },
+    } as unknown as SshConnection
+
+    const outcome = await runBatchedProbe(conn, {
+      entries: ["/opt/app"],
+      script: buildSymlinkListingProbeScript(),
+    })
+
+    expect(outcome).toStrictEqual({
+      detail: "Command stdout is not valid UTF-8 (exit code 0): probe",
+      kind: "failed",
     })
   })
 
@@ -102,8 +128,14 @@ describe("runBatchedProbe", () => {
     })
 
     expect(execCalls.map(({ options }) => options)).toStrictEqual([
-      { ignoreExitCode: true, input: "/opt/app\u0000", silent: true },
-      { ignoreExitCode: true, input: "/opt/app\u0000", maxOutputBytes: 16_777_216, silent: true },
+      { ignoreExitCode: true, input: "/opt/app\u0000", silent: true, strictUtf8Stdout: true },
+      {
+        ignoreExitCode: true,
+        input: "/opt/app\u0000",
+        maxOutputBytes: 16_777_216,
+        silent: true,
+        strictUtf8Stdout: true,
+      },
     ])
   })
 
@@ -258,7 +290,49 @@ describe("symlinkRemovalReport (Issue #219)", () => {
         requested,
         reported("/opt/app/b", SYMLINK_REMOVED_OUTCOME, "/opt/app/a", SYMLINK_REMOVED_OUTCOME)
       )
-    ).toStrictEqual({ kept: [], removed: ["/opt/app/a", "/opt/app/b"] })
+    ).toStrictEqual({ kept: [], notes: [], removed: ["/opt/app/a", "/opt/app/b"] })
+  })
+
+  it("counts a removal that left its quarantine directory behind as removed, with a note", () => {
+    expect(
+      symlinkRemovalReport(
+        ["/opt/app/a"],
+        reported("/opt/app/a", `${SYMLINK_REMOVED_OUTCOME}:.paratix-quarantine.AbC123`)
+      )
+    ).toStrictEqual({
+      kept: [],
+      notes: [
+        [
+          "/opt/app/a",
+          'quarantine directory ".paratix-quarantine.AbC123" below the destination was left behind',
+        ],
+      ],
+      removed: ["/opt/app/a"],
+    })
+  })
+
+  it("keeps an entry that was no longer a symlink, restored or left in quarantine", () => {
+    expect(
+      symlinkRemovalReport(
+        requested,
+        reported(
+          "/opt/app/a",
+          SYMLINK_RESTORED_OUTCOME,
+          "/opt/app/b",
+          `${SYMLINK_QUARANTINED_OUTCOME_PREFIX}.paratix-quarantine.AbC123/entry`
+        )
+      )
+    ).toStrictEqual({
+      kept: [
+        ["/opt/app/a", "no longer a symlink; restored at its path"],
+        [
+          "/opt/app/b",
+          'no longer a symlink; left in quarantine as ".paratix-quarantine.AbC123/entry" below the destination',
+        ],
+      ],
+      notes: [],
+      removed: [],
+    })
   })
 
   it("keeps a link whose outcome is a reason, and one without any outcome", () => {
@@ -267,6 +341,7 @@ describe("symlinkRemovalReport (Issue #219)", () => {
         ["/opt/app/a", "rm failed"],
         ["/opt/app/b", "no outcome reported"],
       ],
+      notes: [],
       removed: [],
     })
   })
@@ -274,7 +349,11 @@ describe("symlinkRemovalReport (Issue #219)", () => {
   it("keeps a link whose outcome only resembles the removed outcome", () => {
     expect(
       symlinkRemovalReport(["/opt/app/a"], reported("/opt/app/a", `${SYMLINK_REMOVED_OUTCOME}\n`))
-    ).toStrictEqual({ kept: [["/opt/app/a", `${SYMLINK_REMOVED_OUTCOME}\n`]], removed: [] })
+    ).toStrictEqual({
+      kept: [["/opt/app/a", `${SYMLINK_REMOVED_OUTCOME}\n`]],
+      notes: [],
+      removed: [],
+    })
   })
 
   it.each([
@@ -306,12 +385,17 @@ describe("symlinkRemovalReport (Issue #219)", () => {
   ])("fails closed on $name: every requested link counts as kept", ({ outcome, reason }) => {
     expect(symlinkRemovalReport(requested, outcome)).toStrictEqual({
       kept: requested.map((link) => [link, `removal outcome unknown: ${reason}`]),
+      notes: [],
       removed: [],
     })
   })
 
   it("reports nothing for nothing requested", () => {
-    expect(symlinkRemovalReport([], reported())).toStrictEqual({ kept: [], removed: [] })
+    expect(symlinkRemovalReport([], reported())).toStrictEqual({
+      kept: [],
+      notes: [],
+      removed: [],
+    })
   })
 })
 
@@ -340,12 +424,18 @@ describe("removeEscapingSymlinks (Issue #219)", () => {
         ["/opt/app/../etc", "path is not normalized"],
         ["/opt/app-alt/l", "path is not strictly below the destination"],
       ],
+      notes: [],
       removed: [escaping],
     })
     expect(execCalls).toStrictEqual([
       {
         command: buildSymlinkRemovalScript(destination),
-        options: { ignoreExitCode: true, input: `${escaping}\u0000`, silent: true },
+        options: {
+          ignoreExitCode: true,
+          input: `${escaping}\u0000`,
+          silent: true,
+          strictUtf8Stdout: true,
+        },
       },
     ])
   })
@@ -360,6 +450,7 @@ describe("removeEscapingSymlinks (Issue #219)", () => {
         ["/opt/app//l", "path is not normalized"],
         ["/etc/l", "path is not strictly below the destination"],
       ],
+      notes: [],
       removed: [],
     })
     expect(execCalls).toStrictEqual([])

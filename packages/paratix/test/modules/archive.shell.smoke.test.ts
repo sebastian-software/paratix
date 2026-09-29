@@ -17,6 +17,7 @@
 import { spawnSync } from "node:child_process"
 import {
   chmodSync,
+  existsSync,
   lstatSync,
   mkdirSync,
   mkdtempSync,
@@ -32,8 +33,8 @@ import { tmpdir } from "node:os"
 import { dirname, join } from "node:path"
 import { describe, expect, it } from "vitest"
 
+import type { MergedSymlinkViolation } from "../../src/modules/archiveLinkValidation.js"
 import type { ArchiveMember } from "../../src/modules/archiveMemberValidation.js"
-import type { ExecOptions, ExecResult, SshConnection } from "../../src/types.js"
 
 import {
   boundedStagingMergeCommand,
@@ -52,12 +53,17 @@ import {
   preStagingProbeEntries,
 } from "../../src/modules/archiveDestinationValidation.js"
 import {
+  buildKernelCrossCheckScript,
+  kernelCrossCheckEntry,
+} from "../../src/modules/archiveKernelCrossCheck.js"
+import {
   buildPreStagingProbeScript,
   buildSymlinkListingProbeScript,
   encodeNulPayload,
   encodeSymlinkListingEntry,
 } from "../../src/modules/archiveProbe.js"
 import { shellQuote } from "../../src/ssh.js"
+import { localShellConnection } from "../helpers/localShell.js"
 
 type ShellResult = { code: number; stderr: string; stdout: string }
 
@@ -840,32 +846,8 @@ function runProductionMerge(parameters: {
   return { code: result.status ?? -1, stderr: result.stderr, stdout: result.stdout }
 }
 
-/**
- * Issue #219: an `SshConnection` whose `exec` runs the command on the local
- * `/bin/sh` with `input` on stdin, so the production backstop drives its real
- * probe and removal scripts against a temporary directory.
- *
- * @returns The connection and the commands it executed.
- */
-function localShellConnection(): { commands: string[]; conn: SshConnection } {
-  const commands: string[] = []
-  const conn = {
-    async exec(command: string, options?: ExecOptions): Promise<ExecResult> {
-      await Promise.resolve()
-      commands.push(command)
-      const result = spawnSync("/bin/sh", ["-c", command], {
-        encoding: "utf8",
-        input: options?.input ?? "",
-        timeout: 10_000,
-      })
-      return { code: result.status ?? -1, stderr: result.stderr, stdout: result.stdout }
-    },
-  } as unknown as SshConnection
-  return { commands, conn }
-}
-
 /** Issue #219: one violation of the post-merge backstop: the link's key and why. */
-type BackstopViolation = readonly [key: string, kind: "escape" | "limit"]
+type BackstopViolation = readonly [key: string, kind: MergedSymlinkViolation["kind"]]
 
 /**
  * Issue #219: the post-merge backstop's verdict on the real tree, computed the
@@ -1055,8 +1037,9 @@ describe.skipIf(SKIP_PLATFORM || SKIP_NO_GNU_CP)(
         expect(failure?.error?.message).toBe(
           `[archive.extract] refusing to complete extraction of run-2.tar: symlink ${JSON.stringify(join(destination, "a/c/l"))} -> "../b/hl/.." resolves outside destination ${JSON.stringify(destination)}; every symlink under the destination is checked after the merge, including links this archive did not ship; removed escaping symlinks: ${JSON.stringify(join(destination, "a/c/l"))}; re-check found no escaping symlinks`
         )
-        // One listing, one batched removal, one re-listing.
-        expect(commands).toHaveLength(3)
+        // Issue #219: one listing and the kernel cross-check of `a/b/hl`, one
+        // batched removal, then the same listing and cross-check again.
+        expect(commands).toHaveLength(5)
         expect(describeTree(destination)).toStrictEqual([
           "d a",
           "d a/b",
@@ -1470,7 +1453,7 @@ describe.skipIf(SKIP_PLATFORM)(
       }
     }, 10_000)
 
-    it("removes those links with the real removal script in exactly three execs", async () => {
+    it("removes those links with the real removal script in exactly five execs", async () => {
       const { destination, root } = makeWorkspace()
       try {
         writeFileSync(join(destination, "w"), "w\n")
@@ -1492,8 +1475,9 @@ describe.skipIf(SKIP_PLATFORM)(
         expect(removedLinks(message)).toStrictEqual(
           ["b", "x", "y"].map((key) => join(destination, key))
         )
-        // One listing, one batched removal, one re-listing.
-        expect(commands).toHaveLength(3)
+        // Issue #219: one listing and one kernel cross-check of `in`, one
+        // batched removal, then the same listing and cross-check again.
+        expect(commands).toHaveLength(5)
         expect(describeTree(destination)).toStrictEqual(["l in -> w", "f w w\n"])
       } finally {
         rmSync(root, { force: true, recursive: true })
@@ -1745,5 +1729,209 @@ describe.skipIf(SKIP_PLATFORM || !HAS_COMMAND_P_TIMEOUT)(
         killMatching(marker)
       }
     }, 15_000)
+  }
+)
+
+/**
+ * Issue #219: whether the filesystem of the test workspaces folds letter case,
+ * found by creating `x` and looking for `X` in a scratch directory next to
+ * them.
+ *
+ * @returns True on a case-insensitive filesystem such as default APFS.
+ */
+function workspaceFoldsLetterCase(): boolean {
+  const scratch = realpathSync(mkdtempSync(join(tmpdir(), "paratix-case-probe-")))
+  try {
+    writeFileSync(join(scratch, "x"), "")
+    return existsSync(join(scratch, "X"))
+  } finally {
+    rmSync(scratch, { force: true, recursive: true })
+  }
+}
+
+/**
+ * Issue #219: whether the filesystem of the test workspaces stores names that
+ * are not valid UTF-8, found by trying to create one (APFS refuses them).
+ *
+ * @returns True when such a name could be created.
+ */
+function workspaceAcceptsNonUtf8Names(): boolean {
+  const scratch = realpathSync(mkdtempSync(join(tmpdir(), "paratix-bytes-probe-")))
+  try {
+    writeFileSync(Buffer.concat([Buffer.from(`${scratch}/`), Buffer.from([0x70, 0xff])]), "")
+    return true
+  } catch {
+    return false
+  } finally {
+    rmSync(scratch, { force: true, recursive: true })
+  }
+}
+
+const FOLDS_LETTER_CASE = !SKIP_PLATFORM && workspaceFoldsLetterCase()
+const ACCEPTS_NON_UTF8_NAMES = !SKIP_PLATFORM && workspaceAcceptsNonUtf8Names()
+
+/**
+ * Issue #219: run the real kernel cross-check script for `(link, expected)`
+ * pairs and return its `(link, verdict)` pairs.
+ *
+ * @param checks - Absolute link paths with the location they should resolve to.
+ * @returns The exit code and the verdict per link, in output order.
+ */
+function runKernelCrossCheckScript(checks: ReadonlyArray<readonly [string, string]>): {
+  code: number
+  verdicts: Array<[string, string]>
+} {
+  const entries = checks.map(([link, expected]) => kernelCrossCheckEntry(expected, link) ?? "")
+  const { code, fields } = runProbeScript(buildKernelCrossCheckScript(), entries)
+  const verdicts: Array<[string, string]> = []
+  for (let index = 0; index < fields.length; index += 2) {
+    verdicts.push([fields[index] ?? "", fields[index + 1] ?? "<missing>"])
+  }
+  return { code, verdicts }
+}
+
+describe.skipIf(SKIP_PLATFORM)(
+  "archive.extract kernel cross-check shell smoke tests (Issue #219)",
+  () => {
+    it("reports same, differ and dangling from the kernel's view of each link", () => {
+      const { destination, root } = makeAppWorkspace()
+      try {
+        mkdirSync(join(destination, "d"))
+        writeFileSync(join(destination, "d/f"), "f\n")
+        symlinkSync("f", join(destination, "d/right"))
+        symlinkSync("f", join(destination, "d/wrong"))
+        symlinkSync("missing/x", join(destination, "d/dangling"))
+        symlinkSync("gone", join(destination, "d/half"))
+        const link = (name: string): string => join(destination, "d", name)
+
+        const { code, verdicts } = runKernelCrossCheckScript([
+          [link("right"), link("f")],
+          [link("wrong"), join(destination, "d")],
+          [link("dangling"), join(destination, "d/missing/x")],
+          [link("half"), link("f")],
+        ])
+
+        expect(code).toBe(0)
+        expect(verdicts).toStrictEqual([
+          [link("right"), "same"],
+          [link("wrong"), "differ"],
+          [link("dangling"), "dangling"],
+          [link("half"), "differ"],
+        ])
+      } finally {
+        rmSync(root, { force: true, recursive: true })
+      }
+    })
+
+    it("lets the backstop confirm contained links with the real cross-check and accept the tree", async () => {
+      const { destination, root } = makeAppWorkspace()
+      try {
+        mkdirSync(join(destination, "a/lib"), { recursive: true })
+        writeFileSync(join(destination, "a/lib/f"), "f\n")
+        symlinkSync("lib/f", join(destination, "a/inside"))
+        symlinkSync("..", join(destination, "a/up"))
+        symlinkSync("missing/y", join(destination, "a/dangling"))
+        const { commands, conn } = localShellConnection()
+
+        const failure = await enforceSymlinkContainment(conn, { destination, source: "ok.tar" })
+
+        expect(failure).toBeNull()
+        expect(commands).toStrictEqual([
+          buildSymlinkListingProbeScript(),
+          buildKernelCrossCheckScript(),
+        ])
+      } finally {
+        rmSync(root, { force: true, recursive: true })
+      }
+    })
+
+    it.skipIf(!FOLDS_LETTER_CASE)(
+      "sees d/esc -> UP/.. resolve through d/up in the kernel on a case-folding filesystem",
+      () => {
+        const { destination, root } = makeAppWorkspace()
+        try {
+          mkdirSync(join(destination, "d"))
+          symlinkSync("..", join(destination, "d/up"))
+          symlinkSync("UP/..", join(destination, "d/esc"))
+          const esc = join(destination, "d/esc")
+
+          // The kernel follows `d/up` for `d/UP`, so the cross-check alone
+          // already disagrees with the plain lexical expectation `d`.
+          expect(runKernelCrossCheckScript([[esc, join(destination, "d")]]).verdicts).toStrictEqual(
+            [[esc, "differ"]]
+          )
+          expect(realpathSync.native(esc)).toBe(root)
+        } finally {
+          rmSync(root, { force: true, recursive: true })
+        }
+      }
+    )
+
+    it("reports and removes d/esc -> UP/.. next to d/up -> .. on every filesystem", async () => {
+      const { destination, root } = makeAppWorkspace()
+      try {
+        mkdirSync(join(destination, "d"))
+        symlinkSync("..", join(destination, "d/up"))
+        symlinkSync("UP/..", join(destination, "d/esc"))
+        const esc = join(destination, "d/esc")
+        // The name-variant rule reports the link lexically, whether or not the
+        // filesystem folds case.
+        expect(backstopViolations(destination)).toStrictEqual([["d/esc", "variant"]])
+        const { conn } = localShellConnection()
+
+        const failure = await enforceSymlinkContainment(conn, { destination, source: "case.tar" })
+
+        expect(failure?.error?.message).toContain(
+          'passes through "d/UP", a name that differs from existing symlink "d/up" only by letter case or Unicode normalization'
+        )
+        expect(removedLinks(failure?.error?.message)).toStrictEqual([esc])
+        expect(describeTree(destination)).toStrictEqual(["d d", "l d/up -> .."])
+        expect(readdirSync(root).toSorted()).toStrictEqual(["app", "other"])
+      } finally {
+        rmSync(root, { force: true, recursive: true })
+      }
+    })
+  }
+)
+
+describe.skipIf(SKIP_PLATFORM || !ACCEPTS_NON_UTF8_NAMES)(
+  "archive.extract listing decoding shell smoke tests (Issue #219, requires names that are not UTF-8)",
+  () => {
+    // `find` lists the two names in directory order, which the test cannot
+    // choose, so the escaping target is put on each name in turn: whichever
+    // name comes first, both the escaping-first and the escaping-last listing
+    // occur across the two cases. The filesystem-independent variant with a
+    // fixed listing order is in `archive.test.ts`.
+    it.each([
+      { name: "escaping link on <fe>", targets: { fe: "..", ff: "." } },
+      { name: "escaping link on <ff>", targets: { fe: ".", ff: ".." } },
+    ])(
+      "fails closed on two host links whose names differ only in bytes that are not UTF-8 ($name)",
+      async ({ targets }) => {
+        const { destination, root } = makeAppWorkspace()
+        try {
+          mkdirSync(join(destination, "d"))
+          const base = Buffer.from(`${destination}/d/`)
+          // One link escapes, the other does not. A lossy decode would read both
+          // names as `d/U+FFFD`, so one could hide the other.
+          symlinkSync(targets.fe, Buffer.concat([base, Buffer.from([0xfe])]))
+          symlinkSync(targets.ff, Buffer.concat([base, Buffer.from([0xff])]))
+          const { commands, conn } = localShellConnection()
+
+          const failure = await enforceSymlinkContainment(conn, {
+            destination,
+            source: "bytes.tar",
+          })
+
+          expect(failure?.error?.message).toContain(
+            "symlink containment check failed: Command stdout is not valid UTF-8"
+          )
+          expect(commands).toStrictEqual([buildSymlinkListingProbeScript()])
+          expect(readdirSync(Buffer.from(join(destination, "d")))).toHaveLength(2)
+        } finally {
+          rmSync(root, { force: true, recursive: true })
+        }
+      }
+    )
   }
 )

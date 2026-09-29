@@ -1,6 +1,6 @@
 import { posix as pathPosix } from "node:path"
 
-import type { SshConnection } from "../types.js"
+import type { ExecResult, SshConnection } from "../types.js"
 
 import { shellQuote } from "../ssh.js"
 import { CAPTURE_TRUNCATION_MARKER, DEFAULT_MAX_OUTPUT_BYTES } from "../sshHelpers.js"
@@ -25,7 +25,7 @@ import { CAPTURE_TRUNCATION_MARKER, DEFAULT_MAX_OUTPUT_BYTES } from "../sshHelpe
  * produced #178.
  */
 
-const PROBE_EXEC_OPTS = { ignoreExitCode: true, silent: true } as const
+const PROBE_EXEC_OPTS = { ignoreExitCode: true, silent: true, strictUtf8Stdout: true } as const
 
 /** Shared prefix: read the NUL payload from stdin and hand it to a POSIX `sh`. */
 const XARGS_PREFIX = "xargs -0 sh -c '"
@@ -75,6 +75,14 @@ export type BatchedProbeOutcome =
  * symlink guards (R-0000162, R-0000563, R-0000751), and a crashed script whose
  * silence was read as "no violations" would disable them without a trace.
  *
+ * Issue #219: every probe decodes its stdout as strict UTF-8
+ * (`strictUtf8Stdout`). The output carries host paths, and a lossy decode maps
+ * different invalid byte sequences to the same U+FFFD, so two distinct host
+ * paths could collapse into one string. With the strict decode every accepted
+ * string maps back to exactly the host's bytes; output that is not valid UTF-8
+ * makes the exec reject, which is reported as `failed` like any other
+ * rejected exec.
+ *
  * @param conn - The SSH connection.
  * @param parameters - Probe inputs.
  * @param parameters.entries - The NUL-transported entries; an empty list runs nothing.
@@ -89,11 +97,16 @@ export async function runBatchedProbe(
 ): Promise<BatchedProbeOutcome> {
   if (parameters.entries.length === 0) return { fields: [], kind: "ok" }
   const { maxOutputBytes } = parameters
-  const result = await conn.exec(parameters.script, {
-    ...PROBE_EXEC_OPTS,
-    input: encodeNulPayload(parameters.entries),
-    ...(maxOutputBytes === undefined ? {} : { maxOutputBytes }),
-  })
+  let result: ExecResult
+  try {
+    result = await conn.exec(parameters.script, {
+      ...PROBE_EXEC_OPTS,
+      input: encodeNulPayload(parameters.entries),
+      ...(maxOutputBytes === undefined ? {} : { maxOutputBytes }),
+    })
+  } catch (error) {
+    return { detail: error instanceof Error ? error.message : String(error), kind: "failed" }
+  }
   if (result.code !== 0) {
     const detail =
       result.stderr.trim() || result.stdout.trim() || `exit code ${String(result.code)}`
@@ -406,9 +419,79 @@ export function buildPreStagingProbeScript(): string {
 
 /**
  * Outcome value {@link buildSymlinkRemovalScript} reports for a link it
- * removed; every other outcome value is the reason the link was left alone.
+ * removed. `removed:<path>` means the same, with the quarantine directory
+ * `<path>` (relative to the destination) left behind; `restored` and
+ * `quarantined:<path>` are the two outcomes for an entry that was no longer a
+ * symlink once it was in quarantine (see {@link buildSymlinkRemovalScript}).
+ * Every other outcome value is the reason the link was left alone.
  */
 export const SYMLINK_REMOVED_OUTCOME = "removed"
+
+/** Issue #219: outcome of an entry that was put back at its path unchanged. */
+export const SYMLINK_RESTORED_OUTCOME = "restored"
+
+/** Issue #219: prefix of the outcome of an entry left in quarantine. */
+export const SYMLINK_QUARANTINED_OUTCOME_PREFIX = "quarantined:"
+
+/**
+ * Issue #219: the quarantine steps of {@link buildSymlinkRemovalScript}. They
+ * run in the verified parent directory of the link, with `$n` the link's own
+ * name, `$p` its parent below the destination and `o` the function that
+ * prints the outcome and ends the per-link subshell. `\${` keeps the shell
+ * parameter expansion literal.
+ *
+ * 1. `mktemp -d` creates a fresh directory next to the link (mode 0700), so
+ *    the rename below stays on one filesystem and cannot overwrite anything.
+ * 2. Inside that private directory the script checks once that `mv -n` moves
+ *    to a free name and refuses to replace an existing one. It inspects the
+ *    resulting entries instead of trusting the exit status: GNU coreutils,
+ *    busybox and the BSDs all accept `-n`, but whether a refused move exits
+ *    non-zero differs between versions. Without a working `mv -n` nothing is
+ *    touched. It also checks whether `mv -n -T` renames onto a free name
+ *    without moving into an existing directory (GNU coreutils, recent
+ *    busybox); only then may an entry be moved back later.
+ * 3. `mv` renames the link into the private directory. A rename never follows
+ *    the link, and the name that was checked is now out of reach of anyone
+ *    who can write to the parent directory.
+ * 4. If the quarantined entry is a symlink, `rm -f` unlinks it and the empty
+ *    directory is removed.
+ * 5. Otherwise another entry replaced the link after the listing. It is never
+ *    deleted: with `mv -n -T` it is moved back under its name unless that name
+ *    was taken again meanwhile, else it stays in quarantine and its path is
+ *    reported. Plain `mv` onto a name that is a directory, or a symlink to
+ *    one, would move the entry into that directory, which is why the move
+ *    back needs `-T`. On coreutils versions whose `mv -n` checks and renames
+ *    in two steps, a name created in between can still be replaced.
+ */
+const SYMLINK_QUARANTINE_SCRIPT = [
+  "q=$(mktemp -d ./.paratix-quarantine.XXXXXXXX 2>/dev/null) || ",
+  'o "quarantine directory could not be created"; ',
+  'case $q in ./.paratix-quarantine.*/*|*"$nl"*) o "quarantine directory could not be created";; ',
+  './.paratix-quarantine.?*) ;; *) o "quarantine directory could not be created";; esac; ',
+  '[ -d "$q" ] && [ ! -L "$q" ] || o "quarantine directory could not be created"; ',
+  `qr=$\{p:+$p/}$\{q#./}; `,
+  // Step 2: `mv -n` must move to a free name and must not replace an entry.
+  ': > "$q/1" && : > "$q/2" && mv -n -- "$q/1" "$q/3" 2>/dev/null; ',
+  'mv -n -- "$q/3" "$q/2" 2>/dev/null; ',
+  'if [ ! -e "$q/1" ] && [ -e "$q/2" ] && [ -e "$q/3" ]; then k=1; else k=0; fi; ',
+  // `mv -n -T` must not move into an existing directory and must move to a free name.
+  'mkdir -- "$q/t" 2>/dev/null && mv -n -T -- "$q/3" "$q/t" 2>/dev/null; ',
+  'mv -n -T -- "$q/3" "$q/4" 2>/dev/null; ',
+  'if [ ! -e "$q/t/3" ] && [ ! -e "$q/3" ] && [ -e "$q/4" ]; then b=1; else b=0; fi; ',
+  'rm -f -- "$q/1" "$q/2" "$q/3" "$q/4" "$q/t/3" 2>/dev/null; rmdir -- "$q/t" 2>/dev/null; ',
+  '[ "$k" = 1 ] || { rmdir -- "$q" 2>/dev/null; o "mv -n is unavailable"; }; ',
+  // Step 3: rename the link into the private directory.
+  'mv -- "./$n" "$q/entry" 2>/dev/null || { rmdir -- "$q" 2>/dev/null; ',
+  'o "moving the link into quarantine failed; it was left in place"; }; ',
+  // Step 4: a symlink is unlinked.
+  'if [ -L "$q/entry" ]; then rm -f -- "$q/entry" 2>/dev/null; ',
+  'if [ -e "$q/entry" ] || [ -L "$q/entry" ]; then o "rm failed; the symlink is left in quarantine as $qr/entry"; fi; ',
+  `rmdir -- "$q" 2>/dev/null || o "${SYMLINK_REMOVED_OUTCOME}:$qr"; o ${SYMLINK_REMOVED_OUTCOME}; fi; `,
+  // Step 5: anything else is moved back, or left in quarantine.
+  '[ "$b" = 1 ] && mv -n -T -- "$q/entry" "./$n" 2>/dev/null; ',
+  `if [ -e "$q/entry" ] || [ -L "$q/entry" ]; then o "${SYMLINK_QUARANTINED_OUTCOME_PREFIX}$qr/entry"; fi; `,
+  `rmdir -- "$q" 2>/dev/null; o ${SYMLINK_RESTORED_OUTCOME}`,
+].join("")
 
 /**
  * Per-link body of {@link buildSymlinkRemovalScript}. `$1` is the destination,
@@ -439,22 +522,24 @@ const SYMLINK_REMOVAL_SCRIPT = [
   // never leaks into the next link. `r` is the destination-relative path, `n`
   // the link's own name, `p` its parent below the destination (empty for a
   // top-level link) and `e` the canonical parent path `pwd -P` must report.
-  `( r=$\{l#"$d"/}; n=$\{r##*/}; `,
+  // `o` prints the outcome and ends the subshell.
+  `( o() { printf "%s\\0%s\\0" "$l" "$1"; exit 0; }; r=$\{l#"$d"/}; n=$\{r##*/}; `,
   `case $r in */*) p=$\{r%/*}; e=$d/$p;; *) p=; e=$d;; esac; `,
   'a="an ancestor directory is missing or a symlink"; ',
-  'cd -P -- "$d" 2>/dev/null || { printf "%s\\0%s\\0" "$l" "$a"; exit 0; }; ',
-  'if [ -n "$p" ]; then cd -P -- "./$p" 2>/dev/null || { printf "%s\\0%s\\0" "$l" "$a"; exit 0; }; fi; ',
+  'cd -P -- "$d" 2>/dev/null || o "$a"; ',
+  'if [ -n "$p" ]; then cd -P -- "./$p" 2>/dev/null || o "$a"; fi; ',
   // Same sentinel as `nl`: only the single newline `pwd` appends is removed,
   // so a directory name that ends in a newline still compares faithfully.
-  'w=$(pwd -P && printf x) || { printf "%s\\0%s\\0" "$l" "$a"; exit 0; }; ',
+  'w=$(pwd -P && printf x) || o "$a"; ',
   `w=$\{w%x}; w=$\{w%"$nl"}; `,
-  '[ "$w" = "$e" ] || { printf "%s\\0%s\\0" "$l" "$a"; exit 0; }; ',
+  '[ "$w" = "$e" ] || o "$a"; ',
   // From here on every operation is relative to the verified working
-  // directory and names only the link itself, never a path through an ancestor.
-  '[ -L "$n" ] || { printf "%s\\0%s\\0" "$l" "no longer a symlink"; exit 0; }; ',
-  'rm -f -- "$n" || { printf "%s\\0%s\\0" "$l" "rm failed"; exit 0; }; ',
-  'if [ -L "$n" ]; then printf "%s\\0%s\\0" "$l" "still a symlink after rm"; exit 0; fi; ',
-  `printf "%s\\0%s\\0" "$l" ${SYMLINK_REMOVED_OUTCOME} ); done; exit 0`,
+  // directory and names only the link itself, never a path through an
+  // ancestor. The `[ -L ]` check is only a shortcut; the quarantine steps
+  // decide what is removed.
+  '[ -L "$n" ] || o "no longer a symlink"; ',
+  SYMLINK_QUARANTINE_SCRIPT,
+  " ); done; exit 0",
 ].join("")
 
 /**
@@ -483,21 +568,28 @@ const SYMLINK_REMOVAL_SCRIPT = [
  * removes nothing. The previous form checked the ancestors with `[ -L ]` and
  * then ran `rm` on the absolute path, so an ancestor swapped for a symlink
  * between check and `rm` redirected the `rm` outside the destination; now the
- * working directory is pinned before the check and the `rm` names only the
- * final component relative to it, so no path operation ever follows an
- * ancestor.
+ * working directory is pinned before the check and every later operation names
+ * only the final component relative to it, so no path operation ever follows
+ * an ancestor.
  *
- * In that verified directory it requires the name to still be a symlink, runs
- * `rm -f -- <name>` (`rm` unlinks a symlink operand itself, never its target,
- * and without `-r` it never recurses) and confirms that no symlink is left.
- * The window between `[ -L ]` and `rm` on the final component remains; `rm`
- * never follows that component either way.
+ * Issue #219: checking `[ -L <name> ]` and then running `rm -f <name>` left a
+ * window in which another writer could replace the link with a different
+ * entry, which `rm` would then delete. The link is therefore first renamed
+ * into a fresh private quarantine directory next to it and inspected there,
+ * where nobody else can swap it: a symlink is unlinked, anything else is moved
+ * back or left in quarantine, never deleted. The steps and their portability
+ * are described at {@link SYMLINK_QUARANTINE_SCRIPT}. Nothing is followed,
+ * nothing is removed recursively, and a quarantine directory created by an
+ * earlier run is never touched, because each link gets a new one.
  *
  * @param destination - The validated, canonical destination directory.
  * @returns The remote command. Its output is a flat list of `(link, outcome)`
  *   field pairs, NUL-framed, one per received link, each naming the link by the
  *   absolute path it was received as: the outcome is
- *   {@link SYMLINK_REMOVED_OUTCOME} or the reason the link was left in place.
+ *   {@link SYMLINK_REMOVED_OUTCOME} (optionally with `:<quarantine directory>`
+ *   left behind), {@link SYMLINK_RESTORED_OUTCOME},
+ *   {@link SYMLINK_QUARANTINED_OUTCOME_PREFIX}`<path>` or the reason the link
+ *   was left in place.
  */
 export function buildSymlinkRemovalScript(destination: string): string {
   return `xargs -0 sh -c ${shellQuote(SYMLINK_REMOVAL_SCRIPT)} sh ${shellQuote(destination)}`
@@ -506,10 +598,12 @@ export function buildSymlinkRemovalScript(destination: string): string {
 /**
  * Issue #219: what `removeEscapingSymlinks` (see `archiveContainmentEnforcement.ts`) did with the links it was
  * given. `kept` pairs each link that is still in place (or whose fate is
- * unknown) with the reason.
+ * unknown) with the reason. `notes` pairs removed links with something the
+ * operator should know, such as a quarantine directory that was left behind.
  */
 export type SymlinkRemovalReport = {
   kept: Array<readonly [string, string]>
+  notes: Array<readonly [string, string]>
   removed: string[]
 }
 
@@ -540,12 +634,49 @@ export function escapingSymlinkRemovalRefusal(destination: string, link: string)
 }
 
 /**
+ * Issue #219: sort one link's removal outcome into the report.
+ *
+ * @param report - The report being built, updated in place.
+ * @param link - The link the outcome belongs to.
+ * @param outcome - The outcome the removal script printed, if any.
+ */
+function recordRemovalOutcome(
+  report: SymlinkRemovalReport,
+  link: string,
+  outcome: string | undefined
+): void {
+  const leftoverPrefix = `${SYMLINK_REMOVED_OUTCOME}:`
+  if (outcome === SYMLINK_REMOVED_OUTCOME) {
+    report.removed.push(link)
+  } else if (outcome?.startsWith(leftoverPrefix) === true) {
+    report.removed.push(link)
+    const leftover = outcome.slice(leftoverPrefix.length)
+    report.notes.push([
+      link,
+      `quarantine directory ${JSON.stringify(leftover)} below the destination was left behind`,
+    ])
+  } else if (outcome === SYMLINK_RESTORED_OUTCOME) {
+    report.kept.push([link, "no longer a symlink; restored at its path"])
+  } else if (outcome?.startsWith(SYMLINK_QUARANTINED_OUTCOME_PREFIX) === true) {
+    const path = outcome.slice(SYMLINK_QUARANTINED_OUTCOME_PREFIX.length)
+    report.kept.push([
+      link,
+      `no longer a symlink; left in quarantine as ${JSON.stringify(path)} below the destination`,
+    ])
+  } else {
+    report.kept.push([link, outcome ?? "no outcome reported"])
+  }
+}
+
+/**
  * Issue #219: turn the removal script's output into a report, failing closed.
  *
  * A failed exec, a truncated capture, an odd field count, a link that was not
  * requested or a link reported twice make every requested link's outcome
  * unknown, so all of them are reported as not removed. A requested link without
- * an outcome record is reported as not removed as well.
+ * an outcome record is reported as not removed as well. An entry that was no
+ * longer a symlink in quarantine is reported as kept, whether it was restored
+ * at its path or left in quarantine.
  *
  * @param requested - The links handed to {@link buildSymlinkRemovalScript}.
  * @param outcome - The batched probe outcome of the removal exec.
@@ -557,6 +688,7 @@ export function symlinkRemovalReport(
 ): SymlinkRemovalReport {
   const unknown = (reason: string): SymlinkRemovalReport => ({
     kept: requested.map((link) => [link, `removal outcome unknown: ${reason}`] as const),
+    notes: [],
     removed: [],
   })
   if (outcome.kind === "failed") return unknown(outcome.detail)
@@ -575,11 +707,9 @@ export function symlinkRemovalReport(
     }
     outcomes.set(link, fields[index + 1])
   }
-  const removed = requested.filter((link) => outcomes.get(link) === SYMLINK_REMOVED_OUTCOME)
-  const kept = requested
-    .filter((link) => outcomes.get(link) !== SYMLINK_REMOVED_OUTCOME)
-    .map((link) => [link, outcomes.get(link) ?? "no outcome reported"] as const)
-  return { kept, removed }
+  const report: SymlinkRemovalReport = { kept: [], notes: [], removed: [] }
+  for (const link of requested) recordRemovalOutcome(report, link, outcomes.get(link))
+  return report
 }
 
 /**
@@ -589,8 +719,9 @@ export function symlinkRemovalReport(
  *
  * Each link is first vetted by {@link escapingSymlinkRemovalRefusal}; only the
  * vetted ones reach {@link buildSymlinkRemovalScript}, which pins its working
- * directory to the link's verified parent and unlinks only the final
- * component relative to it.
+ * directory to the link's verified parent, moves only the final component
+ * into a private quarantine directory and unlinks it there when it is still a
+ * symlink.
  *
  * @param conn - The SSH connection.
  * @param destination - The validated, canonical destination directory.
@@ -614,5 +745,5 @@ export async function removeEscapingSymlinks(
     script: buildSymlinkRemovalScript(destination),
   })
   const report = symlinkRemovalReport(vetted, outcome)
-  return { kept: [...refused, ...report.kept], removed: report.removed }
+  return { kept: [...refused, ...report.kept], notes: report.notes, removed: report.removed }
 }

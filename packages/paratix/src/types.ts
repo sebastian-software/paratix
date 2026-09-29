@@ -316,6 +316,18 @@ export type ExecOptions = {
   secrets?: string[]
   /** Suppress stdout/stderr from the console while running. */
   silent?: boolean
+  /**
+   * Decode stdout as strict UTF-8. By default, byte sequences that are not
+   * valid UTF-8 are replaced with U+FFFD, so different host bytes can decode
+   * to the same string. When `true`, the command instead rejects with an error
+   * saying that stdout is not valid UTF-8, so every string it resolves with
+   * maps back to exactly the bytes the command wrote, apart from secret
+   * masking (a masked secret becomes the redaction placeholder) and a
+   * `maxOutputBytes` cut. A leading byte order mark is kept as U+FEFF. stderr
+   * is always decoded leniently; secret masking and `maxOutputBytes` apply
+   * unchanged.
+   */
+  strictUtf8Stdout?: boolean
   /** Abort the command after this many milliseconds. */
   timeout?: number
 }

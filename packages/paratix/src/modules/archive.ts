@@ -51,7 +51,7 @@ const FLAGS_DIR = "/var/lib/paratix/flags"
 const ARCHIVE_MARKER_MODE = "0644"
 /**
  * Issue #219: body of the containment flag; only its presence is read. The
- * flag is written before every merge and removed only after a fully
+ * flag is written before the destination is touched and removed only after a fully
  * successful apply, so it stands for "apply in progress or containment
  * failed".
  */
@@ -542,12 +542,13 @@ async function writeMarker(
 }
 
 /**
- * Issue #219: establish the containment flag before the merge. The flag is
- * written like the markers — `mkdir -p` of the flags directory and
- * `writeFile`, which stages a temp file and moves it into place with its
- * symlink guards. Writing it before anything is copied means every way the
- * apply can end early — a refusal, a failed merge, a crash — leaves `check`
- * at needs-apply, even when a marker from an earlier source still matches.
+ * Issue #219: establish the containment flag before the destination is
+ * touched. The flag is written like the markers — `mkdir -p` of the flags
+ * directory and `writeFile`, which stages a temp file and moves it into place
+ * with its symlink guards. Writing it before the destination is created,
+ * resolved or probed means every way the apply can end early because of host
+ * state — a refusal, a failed merge, a crash — leaves `check` at needs-apply,
+ * even when a marker from an earlier source still matches.
  *
  * @param conn - The SSH connection.
  * @param flag - The containment-failure flag path.
@@ -1042,48 +1043,37 @@ async function runContainmentBackstop(
 }
 
 /**
- * Establish the containment flag, check the combined host and archive links,
- * run the staged extraction and then enforce that no symlink under the
- * destination resolves outside it.
+ * Check the combined host and archive links, run the staged extraction and
+ * then enforce that no symlink under the destination resolves outside it.
  *
- * Issue #219: the flag is written first, before the pre-merge listing and
- * before any staging directory exists; if it cannot be written, nothing else
- * runs. Every later failure — a pre-merge refusal, a failed listing, extract
- * or merge, a backstop violation, a thrown error — leaves the flag set, so
- * `check` reports needs-apply even when a marker from an earlier source still
- * matches. Only `finalizeExtraction` removes it, after owner handling and all
- * marker writes succeeded.
+ * Issue #219: the caller has already written the containment flag, before the
+ * destination was created or probed. Every failure here — a pre-merge
+ * refusal, a failed listing, extract or merge, a backstop violation, a thrown
+ * error — leaves the flag set, so `check` reports needs-apply even when a
+ * marker from an earlier source still matches. Only `finalizeExtraction`
+ * removes it, after owner handling and all marker writes succeeded.
  *
  * @param conn - The SSH connection.
  * @param parameters - Inputs for the staged extraction (see {@link extractViaStagingDirectory}).
- * @param parameters.containmentFlag - The destination's containment-failure flag path.
  * @param parameters.destination - The validated destination directory.
  * @param parameters.members - The validated archive members.
  * @param parameters.remoteSource - The remote archive path (uploaded or original).
  * @param parameters.source - The source archive path.
- * @returns A failure `ModuleResult` if the flag write, extraction, merge or the
+ * @returns A failure `ModuleResult` if the extraction, merge or the
  *   containment backstop fails, or `null` on success.
  */
 async function extractAndValidateSymlinkContainment(
   conn: SshConnection,
   parameters: {
-    containmentFlag: string
     destination: string
     members: ArchiveMember[]
     remoteSource: string
     source: string
   }
 ): Promise<ModuleResult | null> {
-  const flagFailure = await writeContainmentFailureFlag(conn, parameters.containmentFlag)
-  if (flagFailure !== null) {
-    return failed(
-      `[archive.extract] refusing to extract ${parameters.source}: ${flagFailure}; the flag must be in place before anything is copied`
-    )
-  }
-
   // Issue #219: resolve the host's existing links together with this archive's
   // links before any staging directory exists. A refusal here runs no merge,
-  // no chown and writes no marker; the flag written above stays set.
+  // no chown and writes no marker; the flag the caller wrote stays set.
   const unsafeMergedLinks = await validateMergedSymlinkContainment(conn, parameters)
   if (unsafeMergedLinks !== null) return unsafeMergedLinks
 
@@ -1105,6 +1095,40 @@ async function extractAndValidateSymlinkContainment(
   // no pruning.
   const backstopFailure = await runContainmentBackstop(conn, parameters)
   return combineMergeFailures(staged.failure, backstopFailure)
+}
+
+/**
+ * Issue #219: put the containment flag in place, then create and validate the
+ * destination.
+ *
+ * The flag goes in place before the destination is created, resolved or
+ * probed. The only host checks that ran before it — the symlink preflight of
+ * the destination and its ancestors — are repeated by `check` itself, so a
+ * refusal there needs no flag. Every later refusal that depends on host state
+ * (destination creation or validation, the pre-staging probe, the pre-merge
+ * check, the merge, the backstop) leaves the flag set, so `check` reports
+ * needs-apply even when a marker from an earlier source still matches. If the
+ * flag cannot be written, nothing else runs.
+ *
+ * @param conn - The SSH connection.
+ * @param parameters - Destination inputs.
+ * @param parameters.containmentFlag - The destination's containment-failure flag path.
+ * @param parameters.destination - The validated destination directory.
+ * @param parameters.source - The source archive path, for failure messages.
+ * @returns A failure when the flag write or the destination fails, otherwise null.
+ */
+async function flagAndCreateExtractDestination(
+  conn: SshConnection,
+  parameters: { containmentFlag: string; destination: string; source: string }
+): Promise<ModuleResult | null> {
+  const { containmentFlag, destination, source } = parameters
+  const flagFailure = await writeContainmentFailureFlag(conn, containmentFlag)
+  if (flagFailure !== null) {
+    return failed(
+      `[archive.extract] refusing to extract ${source}: ${flagFailure}; the flag must be in place before the destination is touched`
+    )
+  }
+  return createAndValidateExtractDestination(conn, { destination, source })
 }
 
 async function runExtraction(
@@ -1135,7 +1159,8 @@ async function runExtraction(
   })
   if ("status" in markerPayloads) return markerPayloads
 
-  const destinationFailure = await createAndValidateExtractDestination(conn, {
+  const destinationFailure = await flagAndCreateExtractDestination(conn, {
+    containmentFlag: parameters.containmentFlag,
     destination: validatedDestination.destination,
     source,
   })
@@ -1145,8 +1170,8 @@ async function runExtraction(
   // paths that the archive's symlink targets pass through without the archive
   // shipping them, and the member paths whose host type the merge cannot merge
   // over (a directory where the archive has a non-directory, or the other way
-  // round). A refusal here happens before the containment flag is written and
-  // before anything is staged.
+  // round). A refusal here happens before anything is staged; the containment
+  // flag written above stays set.
   const unsafeMemberPath = await validatePreStagingPaths(conn, {
     destination: validatedDestination.destination,
     members,
@@ -1154,12 +1179,10 @@ async function runExtraction(
   })
   if (unsafeMemberPath !== null) return unsafeMemberPath
 
-  // Issue #219: the containment flag, the pre-merge check of the combined host
-  // and archive links, the staged merge and the whole-tree symlink containment
-  // backstop all run before `finalizeExtraction`; see
-  // `extractAndValidateSymlinkContainment`.
+  // Issue #219: the pre-merge check of the combined host and archive links,
+  // the staged merge and the whole-tree symlink containment backstop all run
+  // before `finalizeExtraction`; see `extractAndValidateSymlinkContainment`.
   const stagedFailure = await extractAndValidateSymlinkContainment(conn, {
-    containmentFlag: parameters.containmentFlag,
     destination: validatedDestination.destination,
     members,
     remoteSource,

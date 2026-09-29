@@ -7,10 +7,14 @@ import {
   symlinkListingEntries,
 } from "../../src/modules/archiveContainmentEnforcement.js"
 import {
+  archiveLinkUnsafeReason,
+  archiveSymlinkTargetPrefixes,
   mergedArchiveSymlinks,
   type MergedSymlink,
+  mergedSymlinkResolutions,
   mergedSymlinkViolations,
   type MergeHostState,
+  pathNameVariantKey,
   type SymlinkWalkTarget,
 } from "../../src/modules/archiveLinkValidation.js"
 
@@ -354,6 +358,37 @@ describe("preMergeContainmentVerdict (Issue #219)", () => {
     })
   })
 
+  // Issue #219: two host links whose names a lossy decode would map to the
+  // same string must never collapse into one entry, in either listing order.
+  it.each([
+    { fields: ["/opt/app/a/\ufffd", "..", "/opt/app/a/\ufffd", "."], name: "escaping first" },
+    { fields: ["/opt/app/a/\ufffd", ".", "/opt/app/a/\ufffd", ".."], name: "escaping last" },
+  ])("is invalid for two links that decode to the same name ($name)", ({ fields }) => {
+    expect(preMergeContainmentVerdict(destination, fields, members)).toMatchObject({
+      kind: "invalid",
+      reason: expect.stringContaining("U+FFFD replacement character"),
+    })
+  })
+
+  it.each([
+    { fields: ["/opt/app/a/up", "..", "/opt/app/a/up", "."], name: "the same link twice" },
+    {
+      fields: ["/opt/app/a/up", ".", "/opt/app/a/up", ".."],
+      name: "the same link twice, reversed",
+    },
+  ])("is invalid for $name", ({ fields }) => {
+    expect(preMergeContainmentVerdict(destination, fields, members)).toStrictEqual({
+      kind: "invalid",
+      reason: 'probe reported symlink "/opt/app/a/up" more than once',
+    })
+  })
+
+  it("is invalid for a U+FFFD in a stored target", () => {
+    expect(
+      preMergeContainmentVerdict(destination, ["/opt/app/a/l", "x\ufffd"], members)
+    ).toMatchObject({ kind: "invalid", reason: expect.stringContaining("U+FFFD") })
+  })
+
   it("combines host links and archive links and reports the escaping host link", () => {
     const verdict = preMergeContainmentVerdict(
       destination,
@@ -511,5 +546,150 @@ describe("mergedSymlinkViolations (Issue #219)", () => {
     expect(mergedSymlinkViolations(links)).toStrictEqual([
       { key: "dir with space/two\nlines", kind: "escape" },
     ])
+  })
+})
+
+/** Issue #219: the wording every name-variant refusal shares. */
+const VARIANT_WORDING = "only by letter case or Unicode normalization"
+
+describe("pathNameVariantKey (Issue #219)", () => {
+  it.each([
+    ["d/UP", "d/up"],
+    ["\u00e9", "e\u0301"],
+    ["STRASSE", "stra\u00dfe"],
+    ["\u212a", "k"],
+    ["\ufb01le", "file"],
+  ])("gives %j and %j the same key", (left, right) => {
+    expect(pathNameVariantKey(left)).toBe(pathNameVariantKey(right))
+  })
+
+  it("keeps names apart that differ by more than case or normalization", () => {
+    expect(pathNameVariantKey("d/up")).not.toBe(pathNameVariantKey("d/uq"))
+  })
+})
+
+describe("name variants in the archive-level check (Issue #219)", () => {
+  it("refuses a link whose target passes through a case variant of an archive symlink", () => {
+    const reason = archiveLinkUnsafeReason([
+      member("d/", "directory"),
+      member("d/up", "symlink", ".."),
+      member("d/esc", "symlink", "UP/.."),
+    ])
+
+    expect(reason).toBe(
+      `member "d/esc" -> "UP/.." passes through "d/UP", a name that differs from existing symlink "d/up" ${VARIANT_WORDING}; a case-insensitive or normalizing filesystem may follow that symlink instead`
+    )
+  })
+
+  it("refuses a link whose target passes through an NFD spelling of an NFC symlink name", () => {
+    const reason = archiveLinkUnsafeReason([
+      member("d/", "directory"),
+      member("d/\u00e9", "symlink", ".."),
+      member("d/esc", "symlink", "e\u0301/.."),
+    ])
+
+    expect(reason).toContain(VARIANT_WORDING)
+    expect(reason).toContain('member "d/esc"')
+  })
+
+  it("refuses a walk through a differently cased parent directory of a symlink", () => {
+    const reason = archiveLinkUnsafeReason([
+      member("d/", "directory"),
+      member("x/", "directory"),
+      member("d/up", "symlink", ".."),
+      member("x/esc", "symlink", "../D/up/.."),
+    ])
+
+    expect(reason).toContain('passes through "D/up"')
+    expect(reason).toContain('existing symlink "d/up"')
+  })
+
+  it("refuses a walk through a symlink when another symlink differs from it only by case", () => {
+    const reason = archiveLinkUnsafeReason([
+      member("d/", "directory"),
+      member("d/up", "symlink", "."),
+      member("d/UP", "symlink", ".."),
+      member("d/esc", "symlink", "up/x"),
+    ])
+
+    expect(reason).toContain('member "d/esc"')
+    expect(reason).toContain('existing symlink "d/UP"')
+  })
+
+  it("refuses a symlink whose own parent path is a case variant of a symlink", () => {
+    const reason = archiveLinkUnsafeReason([
+      member("d", "symlink", "sub"),
+      member("sub/", "directory"),
+      member("D/esc", "symlink", "x"),
+    ])
+
+    expect(reason).toContain('member "D/esc"')
+    expect(reason).toContain('passes through "D"')
+  })
+
+  it("accepts an ordinary archive whose names differ by case only where no symlink is involved", () => {
+    expect(
+      archiveLinkUnsafeReason([
+        member("a/", "directory"),
+        member("a/up", "symlink", ".."),
+        member("a/x", "symlink", "up/b"),
+        member("B/c", "file"),
+        member("b/c", "file"),
+        member("b/link", "symlink", "../B/c"),
+      ])
+    ).toBeNull()
+  })
+
+  it("contributes no probe prefixes for a variant link", () => {
+    expect(
+      archiveSymlinkTargetPrefixes([
+        member("d/", "directory"),
+        member("d/up", "symlink", ".."),
+        member("d/esc", "symlink", "UP/x"),
+      ])
+    ).toStrictEqual([])
+  })
+})
+
+describe("name variants in the merged link set (Issue #219)", () => {
+  const destination = "/opt/app"
+  const variant = { key: "d/esc", kind: "variant", link: "d/up", prefix: "d/UP" }
+
+  it("refuses a host link d/up -> .. combined with an archive link d/esc -> UP/..", () => {
+    const verdict = preMergeContainmentVerdict(
+      destination,
+      ["/opt/app/d/up", ".."],
+      [member("d/", "directory"), member("d/esc", "symlink", "UP/..")]
+    )
+
+    expect(verdict).toMatchObject({ kind: "violations", violations: [variant] })
+  })
+
+  it("refuses the reverse: a host link d/esc -> UP/.. combined with an archive link d/up -> ..", () => {
+    const verdict = preMergeContainmentVerdict(
+      destination,
+      ["/opt/app/d/esc", "UP/.."],
+      [member("d/", "directory"), member("d/up", "symlink", "..")]
+    )
+
+    expect(verdict).toMatchObject({ kind: "violations", violations: [variant] })
+  })
+
+  it("reports the variant link as a violation and every other link with its resolved path", () => {
+    const { inside, violations } = mergedSymlinkResolutions(
+      relativeLinks([
+        ["d/up", ".."],
+        ["d/esc", "UP/.."],
+        ["d/bin", "../lib"],
+      ])
+    )
+
+    expect(violations).toStrictEqual([variant])
+    expect(inside).toStrictEqual(
+      new Map([
+        ["d/bin", "lib"],
+        ["d/up", ""],
+      ])
+    )
   })
 })

@@ -223,6 +223,9 @@
     "Xstugo",
     "multiarch",
     "noninteractive",
-    "rpmsave"
+    "rpmsave",
+    "apfs",
+    "casefold",
+    "cifs"
   ]
 }

@@ -1,7 +1,7 @@
-import type { SshConnection } from "../types.js"
+import type { ExecResult, SshConnection } from "../types.js"
 
 import { shellQuote } from "../ssh.js"
-import { CAPTURE_TRUNCATION_MARKER } from "../sshHelpers.js"
+import { CAPTURE_TRUNCATION_MARKER, InvalidUtf8OutputError } from "../sshHelpers.js"
 
 /** Maximum captured bytes for archive listings and persisted member metadata. */
 export const ARCHIVE_CAPTURE_LIMIT_BYTES = 16_777_216
@@ -433,6 +433,58 @@ function modeHasSetuidOrSetgid(mode: string): boolean {
 }
 
 /**
+ * Return why a member's path or link target contains control characters.
+ *
+ * @param member - A single parsed archive member.
+ * @returns The refusal reason, or null.
+ */
+function controlCharacterReason(member: ArchiveMember): null | string {
+  // R-0000636: report control-character members with a dedicated reason so
+  // the failure surface clearly identifies the cause instead of conflating
+  // it with traversal escapes. The check runs before
+  // `memberEscapesDestination` so even paths that would otherwise look
+  // benign (no leading `/`, no `..`) are still rejected.
+  if (ARCHIVE_MEMBER_CONTROL_CHARACTER_PATTERN.test(member.path)) {
+    return `member ${JSON.stringify(member.path)} contains control characters`
+  }
+  if (
+    member.linkTarget !== null &&
+    ARCHIVE_MEMBER_CONTROL_CHARACTER_PATTERN.test(member.linkTarget)
+  ) {
+    return `member ${JSON.stringify(member.path)} -> ${JSON.stringify(member.linkTarget)} link target contains control characters`
+  }
+  return null
+}
+
+/**
+ * Issue #219: refuse a member whose listed name cannot be mapped reliably to
+ * the name that will be extracted.
+ *
+ * GNU tar prints non-printable bytes — and, outside a UTF-8 locale, every
+ * non-ASCII byte — as a `\NNN` escape and a backslash as `\\`, while other tar
+ * implementations print names raw. A listed name with a backslash can
+ * therefore stand for different bytes on disk, and the paths the containment
+ * checks compare could diverge from the names on the host. A U+FFFD
+ * replacement character marks the same problem after decoding. Refusing both
+ * in the path and in the link target keeps archive names and host names one
+ * to one.
+ *
+ * @param member - A single parsed archive member.
+ * @returns The refusal reason, or null.
+ */
+function ambiguousNameReason(member: ArchiveMember): null | string {
+  const hint =
+    "the listed name cannot be mapped reliably to the extracted name (a UTF-8 locale on the host avoids escaped non-ASCII names)"
+  if (/[\\\uFFFD]/v.test(member.path)) {
+    return `member ${JSON.stringify(member.path)} contains a backslash or a U+FFFD replacement character; ${hint}`
+  }
+  if (member.linkTarget !== null && /[\\\uFFFD]/v.test(member.linkTarget)) {
+    return `member ${JSON.stringify(member.path)} -> ${JSON.stringify(member.linkTarget)} link target contains a backslash or a U+FFFD replacement character; ${hint}`
+  }
+  return null
+}
+
+/**
  * Return why an archive member is unsafe, or null when it may be extracted.
  *
  * @param member - A single parsed archive member.
@@ -455,20 +507,8 @@ export function archiveMemberUnsafeReason(member: ArchiveMember): null | string 
   if (modeHasSetuidOrSetgid(member.mode)) {
     return `member ${JSON.stringify(member.path)} has setuid or setgid bit set (mode ${member.mode})`
   }
-  // R-0000636: report control-character members with a dedicated reason so
-  // the failure surface clearly identifies the cause instead of conflating
-  // it with traversal escapes. The check runs before
-  // `memberEscapesDestination` so even paths that would otherwise look
-  // benign (no leading `/`, no `..`) are still rejected.
-  if (ARCHIVE_MEMBER_CONTROL_CHARACTER_PATTERN.test(member.path)) {
-    return `member ${JSON.stringify(member.path)} contains control characters`
-  }
-  if (
-    member.linkTarget !== null &&
-    ARCHIVE_MEMBER_CONTROL_CHARACTER_PATTERN.test(member.linkTarget)
-  ) {
-    return `member ${JSON.stringify(member.path)} -> ${JSON.stringify(member.linkTarget)} link target contains control characters`
-  }
+  const nameProblem = controlCharacterReason(member) ?? ambiguousNameReason(member)
+  if (nameProblem !== null) return nameProblem
   if (!memberEscapesDestination(member)) return null
   const detail =
     member.linkTarget === null
@@ -495,11 +535,24 @@ export async function listArchiveMembers(
   if (command === null) {
     return { failureReason: `unsupported archive format for ${parameters.source}` }
   }
-  const result = await conn.exec(command, {
-    ignoreExitCode: true,
-    maxOutputBytes: ARCHIVE_CAPTURE_LIMIT_BYTES,
-    silent: true,
-  })
+  // Issue #219: the listing is decoded as strict UTF-8, so every member name
+  // maps back to exactly the bytes the listing printed; a lossy decode could
+  // turn two different names into the same string. A listing that is not
+  // valid UTF-8 is refused.
+  let result: ExecResult
+  try {
+    result = await conn.exec(command, {
+      ignoreExitCode: true,
+      maxOutputBytes: ARCHIVE_CAPTURE_LIMIT_BYTES,
+      silent: true,
+      strictUtf8Stdout: true,
+    })
+  } catch (error) {
+    if (!(error instanceof InvalidUtf8OutputError)) throw error
+    return {
+      failureReason: `archive listing for ${parameters.source} is not valid UTF-8; refusing to validate member names that cannot be mapped to the extracted names reliably (a UTF-8 locale on the host avoids this for non-ASCII names)`,
+    }
+  }
   if (
     result.stdout.endsWith(CAPTURE_TRUNCATION_MARKER) ||
     result.stderr.endsWith(CAPTURE_TRUNCATION_MARKER)

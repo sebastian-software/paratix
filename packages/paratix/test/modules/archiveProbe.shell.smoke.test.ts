@@ -9,6 +9,7 @@
  */
 import { spawnSync } from "node:child_process"
 import {
+  chmodSync,
   existsSync,
   lstatSync,
   mkdirSync,
@@ -25,8 +26,6 @@ import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { describe, expect, it } from "vitest"
 
-import type { ExecOptions, ExecResult, SshConnection } from "../../src/types.js"
-
 import { removeEscapingSymlinks } from "../../src/modules/archiveContainmentEnforcement.js"
 import {
   buildMemberTypeProbeScript,
@@ -37,9 +36,13 @@ import {
   encodeMemberTypeEntry,
   encodeNulPayload,
   encodePreStagingEntry,
+  runBatchedProbe,
+  SYMLINK_QUARANTINED_OUTCOME_PREFIX,
   SYMLINK_REMOVED_OUTCOME,
+  SYMLINK_RESTORED_OUTCOME,
 } from "../../src/modules/archiveProbe.js"
 import { renderBatchedChownSymlinkCommand } from "../../src/modules/fileMetadataHelpers.js"
+import { localShellConnection } from "../helpers/localShell.js"
 
 type ProbeResult = { code: number; fields: string[]; stderr: string }
 
@@ -81,30 +84,6 @@ function fieldPairs(fields: readonly string[]): Array<[string, string]> {
     pairs.push([fields[index] ?? "", fields[index + 1] ?? "<missing>"])
   }
   return pairs
-}
-
-/**
- * Issue #219: an `SshConnection` whose `exec` runs the command on the local
- * `/bin/sh`, with `input` on stdin, so a production function can drive its
- * real remote scripts against a temporary directory.
- *
- * @returns The connection and the commands it executed.
- */
-function localShellConnection(): { commands: string[]; conn: SshConnection } {
-  const commands: string[] = []
-  const conn = {
-    async exec(command: string, options?: ExecOptions): Promise<ExecResult> {
-      await Promise.resolve()
-      commands.push(command)
-      const result = spawnSync("/bin/sh", ["-c", command], {
-        encoding: "utf8",
-        input: options?.input ?? "",
-        timeout: 10_000,
-      })
-      return { code: result.status ?? -1, stderr: result.stderr, stdout: result.stdout }
-    },
-  } as unknown as SshConnection
-  return { commands, conn }
 }
 
 /**
@@ -190,6 +169,102 @@ function runChown(spec: string, paths: string[]): { code: number; stderr: string
 
 /** Own uid:gid — the one spec an unprivileged process may chown to. */
 const ownSpec = `${String(process.getuid?.() ?? 0)}:${String(process.getgid?.() ?? 0)}`
+
+/**
+ * Issue #219: whether an `mv` renames onto a free name with `-n -T` without
+ * ever moving into an existing directory, the capability the removal script
+ * needs before it moves an entry back out of quarantine.
+ *
+ * @param mv - The `mv` executable to test.
+ * @returns True when `mv -n -T` behaves like GNU coreutils.
+ */
+function renamesWithoutTargetDirectory(mv: string): boolean {
+  const scratch = mkdtempSync(join(tmpdir(), "paratix-mv-probe-"))
+  try {
+    const script = [
+      'mkdir t && : > f && "$0" -n -T f t 2>/dev/null; "$0" -n -T f g 2>/dev/null;',
+      "[ -e g ] && [ ! -e f ] && [ ! -e t/f ]",
+    ].join(" ")
+    return spawnSync("/bin/sh", ["-c", script, mv], { cwd: scratch, timeout: 5000 }).status === 0
+  } finally {
+    rmSync(scratch, { force: true, recursive: true })
+  }
+}
+
+/**
+ * Issue #219: the absolute path of a command on the test runner's PATH.
+ *
+ * @param name - The command to look up with `command -v`.
+ * @returns The path, or undefined when the command is missing.
+ */
+function commandPath(name: string): string | undefined {
+  const found = spawnSync("/bin/sh", ["-c", 'command -v "$0"', name], { encoding: "utf8" })
+  const path = found.stdout.trim()
+  return found.status === 0 && path.startsWith("/") ? path : undefined
+}
+
+/** Issue #219: the system `mv`, which the removal script runs by default. */
+const SYSTEM_MV = commandPath("mv") ?? "/bin/mv"
+/** Issue #219: whether the system `mv` supports `-n -T` (GNU coreutils). */
+const SYSTEM_MV_HAS_NO_TARGET_DIRECTORY = renamesWithoutTargetDirectory(SYSTEM_MV)
+/**
+ * Issue #219: an `mv` that supports `-n -T`: the system one where it does
+ * (GNU coreutils), else GNU `gmv` when installed, else none.
+ */
+const NO_TARGET_DIRECTORY_MV = [SYSTEM_MV, commandPath("gmv")]
+  .filter((mv): mv is string => mv !== undefined)
+  .find((mv) => renamesWithoutTargetDirectory(mv))
+
+/**
+ * Issue #219: put an `mv` wrapper first on the removal script's PATH. The
+ * wrapper runs `body` with the original arguments and then the real `mv`
+ * (`$PARATIX_REAL_MV`), unless `body` exits itself. It stands in for another
+ * writer acting at the exact moment the script renames an entry, which no
+ * real concurrency could hit deterministically.
+ *
+ * @param root - A scratch directory for the wrapper.
+ * @param body - Shell code run before the real `mv`.
+ * @param realMv - The real `mv` the wrapper delegates to.
+ * @returns The environment for the local shell.
+ */
+function interposedMvEnvironment(
+  root: string,
+  body: string,
+  realMv: string = SYSTEM_MV
+): NodeJS.ProcessEnv {
+  const bin = join(root, "bin")
+  mkdirSync(bin, { recursive: true })
+  writeFileSync(join(bin, "mv"), `#!/bin/sh\n${body}\nexec "$PARATIX_REAL_MV" "$@"\n`, {
+    mode: 0o755,
+  })
+  return { ...process.env, PARATIX_REAL_MV: realMv, PATH: `${bin}:${process.env.PATH ?? ""}` }
+}
+
+/**
+ * Issue #219: wrapper body that swaps the link named `$PARATIX_SWAP_NAME` for
+ * a regular file just before the script renames it into quarantine, and with
+ * `$PARATIX_RETAKE` set creates the name again right after the rename.
+ */
+const SWAP_ON_QUARANTINE = [
+  'if [ "$1" = "--" ] && [ "$2" = "./$PARATIX_SWAP_NAME" ]; then',
+  '  rm -f -- "$2" && printf "swapped\\n" > "$2" || exit 1',
+  '  "$PARATIX_REAL_MV" "$@" || exit $?',
+  '  if [ -n "$PARATIX_RETAKE" ]; then printf "retaken\\n" > "$2"; fi',
+  "  exit 0",
+  "fi",
+].join("\n")
+
+/**
+ * Issue #219: the quarantine directories left in a directory.
+ *
+ * @param directory - The directory to list.
+ * @returns The names that start with `.paratix-quarantine.`, sorted.
+ */
+function quarantineEntries(directory: string): string[] {
+  return readdirSync(directory)
+    .filter((name) => name.startsWith(".paratix-quarantine."))
+    .toSorted()
+}
 
 const SKIP_PLATFORM = process.platform === "win32"
 const SKIP_NO_GNU_STAT = !hasGnuStat()
@@ -622,6 +697,25 @@ describe.skipIf(SKIP_PLATFORM)("archive.extract batched probes", () => {
     })
   })
 
+  describe("strict UTF-8 transport (Issue #219)", () => {
+    it("fails a probe closed when its output is not valid UTF-8, and decodes valid output exactly", async () => {
+      // Two paths that differ only in bytes that are not UTF-8 would both
+      // decode to U+FFFD leniently; the strict decode refuses the output.
+      const invalid = "xargs -0 sh -c 'printf \"d/\\376\\0d/\\377\\0\"' sh"
+      const valid = "xargs -0 sh -c 'printf \"d/\\303\\251\\0\"' sh"
+      const { conn } = localShellConnection()
+
+      const refused = await runBatchedProbe(conn, { entries: ["x"], script: invalid })
+      const accepted = await runBatchedProbe(conn, { entries: ["x"], script: valid })
+
+      expect(refused).toStrictEqual({
+        detail: `Command stdout is not valid UTF-8 (exit code 0): ${invalid}`,
+        kind: "failed",
+      })
+      expect(accepted).toStrictEqual({ fields: ["d/\u00e9"], kind: "ok" })
+    })
+  })
+
   describe("symlink removal script (Issue #219)", () => {
     it("removes exactly the given symlinks without following them", () => {
       const { destination, outsideDirectory, outsideFile, root } = makeRemovalWorkspace()
@@ -992,6 +1086,7 @@ describe.skipIf(SKIP_PLATFORM)("archive.extract batched probes", () => {
 
         expect(report).toStrictEqual({
           kept: [[dotted, "path is not normalized"]],
+          notes: [],
           removed: [escaping],
         })
         expect(commands).toStrictEqual([buildSymlinkRemovalScript(destination)])
@@ -1001,5 +1096,246 @@ describe.skipIf(SKIP_PLATFORM)("archive.extract batched probes", () => {
         rmSync(root, { force: true, recursive: true })
       }
     })
+
+    it("removes a link through quarantine and leaves no quarantine directory behind", () => {
+      const { destination, outsideDirectory, root } = makeRemovalWorkspace()
+      try {
+        mkdirSync(join(destination, "a"))
+        const nested = join(destination, "a/esc")
+        const top = join(destination, "top")
+        symlinkSync("../../outside", nested)
+        symlinkSync("..", top)
+
+        const result = runProbe(buildSymlinkRemovalScript(destination), [nested, top])
+
+        expect(fieldPairs(result.fields)).toStrictEqual([
+          [nested, SYMLINK_REMOVED_OUTCOME],
+          [top, SYMLINK_REMOVED_OUTCOME],
+        ])
+        expect(readdirSync(join(destination, "a"))).toStrictEqual([])
+        expect(readdirSync(destination)).toStrictEqual(["a"])
+        expect(readdirSync(outsideDirectory)).toStrictEqual(["keep.txt"])
+      } finally {
+        rmSync(root, { force: true, recursive: true })
+      }
+    })
+
+    it("keeps a regular file that replaced the listed link before the removal ran", async () => {
+      // The backstop listed `esc` as a symlink; by the time the removal runs, it
+      // is a regular file. The quick `[ -L ]` check reports it and nothing is
+      // renamed or deleted.
+      const { destination, root } = makeRemovalWorkspace()
+      try {
+        const listed = join(destination, "esc")
+        symlinkSync("..", listed)
+        rmSync(listed)
+        writeFileSync(listed, "replacement\n")
+        const { conn } = localShellConnection()
+
+        const report = await removeEscapingSymlinks(conn, destination, [listed])
+
+        expect(report).toStrictEqual({
+          kept: [[listed, "no longer a symlink"]],
+          notes: [],
+          removed: [],
+        })
+        expect(readFileSync(listed, "utf8")).toBe("replacement\n")
+        expect(quarantineEntries(destination)).toStrictEqual([])
+      } finally {
+        rmSync(root, { force: true, recursive: true })
+      }
+    })
+
+    it.skipIf(!SYSTEM_MV_HAS_NO_TARGET_DIRECTORY)(
+      "never deletes a regular file swapped in at the moment of the rename, and restores it",
+      async () => {
+        // An `mv` wrapper swaps the link for a regular file right before the
+        // script renames it into quarantine, after the `[ -L ]` check passed.
+        const { destination, root } = makeRemovalWorkspace()
+        try {
+          mkdirSync(join(destination, "d"))
+          const listed = join(destination, "d/esc")
+          symlinkSync("../..", listed)
+          const env = {
+            ...interposedMvEnvironment(root, SWAP_ON_QUARANTINE),
+            PARATIX_SWAP_NAME: "esc",
+          }
+          const { conn } = localShellConnection({ env })
+
+          const report = await removeEscapingSymlinks(conn, destination, [listed])
+
+          expect(report).toStrictEqual({
+            kept: [[listed, "no longer a symlink; restored at its path"]],
+            notes: [],
+            removed: [],
+          })
+          expect(readFileSync(listed, "utf8")).toBe("swapped\n")
+          expect(quarantineEntries(join(destination, "d"))).toStrictEqual([])
+        } finally {
+          rmSync(root, { force: true, recursive: true })
+        }
+      }
+    )
+
+    it.skipIf(SYSTEM_MV_HAS_NO_TARGET_DIRECTORY)(
+      "never deletes a regular file swapped in at the moment of the rename, and keeps it in quarantine without mv -T",
+      async () => {
+        // Without `mv -T` the entry cannot be moved back safely and stays in
+        // quarantine, intact.
+        const { destination, root } = makeRemovalWorkspace()
+        try {
+          mkdirSync(join(destination, "d"))
+          const listed = join(destination, "d/esc")
+          symlinkSync("../..", listed)
+          const env = {
+            ...interposedMvEnvironment(root, SWAP_ON_QUARANTINE),
+            PARATIX_SWAP_NAME: "esc",
+          }
+          const { conn } = localShellConnection({ env })
+
+          const report = await removeEscapingSymlinks(conn, destination, [listed])
+
+          const [quarantine] = quarantineEntries(join(destination, "d"))
+          const quarantined = JSON.stringify(`d/${quarantine}/entry`)
+          expect(report).toStrictEqual({
+            kept: [
+              [
+                listed,
+                `no longer a symlink; left in quarantine as ${quarantined} below the destination`,
+              ],
+            ],
+            notes: [],
+            removed: [],
+          })
+          expect(readFileSync(join(destination, "d", quarantine, "entry"), "utf8")).toBe(
+            "swapped\n"
+          )
+          expect(existsSync(listed)).toBe(false)
+        } finally {
+          rmSync(root, { force: true, recursive: true })
+        }
+      }
+    )
+
+    it.skipIf(NO_TARGET_DIRECTORY_MV === undefined)(
+      "restores a swapped-in entry at its free path with its content and removes the quarantine",
+      () => {
+        const { destination, root } = makeRemovalWorkspace()
+        try {
+          const listed = join(destination, "esc")
+          symlinkSync("..", listed)
+          const env = {
+            ...interposedMvEnvironment(root, SWAP_ON_QUARANTINE, NO_TARGET_DIRECTORY_MV),
+            PARATIX_SWAP_NAME: "esc",
+          }
+
+          const result = runProbe(buildSymlinkRemovalScript(destination), [listed], env)
+
+          expect(fieldPairs(result.fields)).toStrictEqual([[listed, SYMLINK_RESTORED_OUTCOME]])
+          expect(lstatSync(listed).isFile()).toBe(true)
+          expect(readFileSync(listed, "utf8")).toBe("swapped\n")
+          expect(quarantineEntries(destination)).toStrictEqual([])
+        } finally {
+          rmSync(root, { force: true, recursive: true })
+        }
+      }
+    )
+
+    it("leaves the entry in quarantine when its name was taken again, and keeps both intact", () => {
+      const { destination, root } = makeRemovalWorkspace()
+      try {
+        const listed = join(destination, "esc")
+        symlinkSync("..", listed)
+        const env = {
+          ...interposedMvEnvironment(root, SWAP_ON_QUARANTINE, NO_TARGET_DIRECTORY_MV),
+          PARATIX_RETAKE: "1",
+          PARATIX_SWAP_NAME: "esc",
+        }
+
+        const result = runProbe(buildSymlinkRemovalScript(destination), [listed], env)
+
+        const [quarantine] = quarantineEntries(destination)
+        expect(fieldPairs(result.fields)).toStrictEqual([
+          [listed, `${SYMLINK_QUARANTINED_OUTCOME_PREFIX}${quarantine}/entry`],
+        ])
+        expect(readFileSync(listed, "utf8")).toBe("retaken\n")
+        expect(readFileSync(join(destination, quarantine, "entry"), "utf8")).toBe("swapped\n")
+      } finally {
+        rmSync(root, { force: true, recursive: true })
+      }
+    })
+
+    it("leaves quarantine entries from earlier runs untouched", () => {
+      const { destination, outsideDirectory, root } = makeRemovalWorkspace()
+      try {
+        const earlierFile = join(destination, ".paratix-quarantine.AAAAAAAA")
+        const earlierDirectory = join(destination, ".paratix-quarantine.BBBBBBBB")
+        const earlierLink = join(destination, ".paratix-quarantine.CCCCCCCC")
+        writeFileSync(earlierFile, "file\n")
+        mkdirSync(earlierDirectory)
+        writeFileSync(join(earlierDirectory, "entry"), "entry\n")
+        symlinkSync("../outside", earlierLink)
+        const escaping = join(destination, "esc")
+        symlinkSync("..", escaping)
+
+        const result = runProbe(buildSymlinkRemovalScript(destination), [escaping])
+
+        expect(fieldPairs(result.fields)).toStrictEqual([[escaping, SYMLINK_REMOVED_OUTCOME]])
+        expect(quarantineEntries(destination)).toStrictEqual([
+          ".paratix-quarantine.AAAAAAAA",
+          ".paratix-quarantine.BBBBBBBB",
+          ".paratix-quarantine.CCCCCCCC",
+        ])
+        expect(readFileSync(earlierFile, "utf8")).toBe("file\n")
+        expect(readFileSync(join(earlierDirectory, "entry"), "utf8")).toBe("entry\n")
+        expect(readlinkSync(earlierLink)).toBe("../outside")
+        expect(readdirSync(outsideDirectory)).toStrictEqual(["keep.txt"])
+      } finally {
+        rmSync(root, { force: true, recursive: true })
+      }
+    })
+
+    it("fails closed and keeps the link when mv -n replaces an existing entry", () => {
+      // The wrapper drops `-n`, so the no-clobber check in the private
+      // quarantine directory sees an entry being replaced.
+      const { destination, root } = makeRemovalWorkspace()
+      try {
+        const escaping = join(destination, "esc")
+        symlinkSync("..", escaping)
+        const env = interposedMvEnvironment(root, 'if [ "$1" = "-n" ]; then shift; fi')
+
+        const result = runProbe(buildSymlinkRemovalScript(destination), [escaping], env)
+
+        expect(fieldPairs(result.fields)).toStrictEqual([[escaping, "mv -n is unavailable"]])
+        expect(readlinkSync(escaping)).toBe("..")
+        expect(quarantineEntries(destination)).toStrictEqual([])
+      } finally {
+        rmSync(root, { force: true, recursive: true })
+      }
+    })
+
+    it.skipIf(process.getuid?.() === 0)(
+      "fails closed and keeps the link when no quarantine directory can be created",
+      () => {
+        const { destination, root } = makeRemovalWorkspace()
+        const parent = join(destination, "ro")
+        try {
+          mkdirSync(parent)
+          const escaping = join(parent, "esc")
+          symlinkSync("../..", escaping)
+          chmodSync(parent, 0o555)
+
+          const result = runProbe(buildSymlinkRemovalScript(destination), [escaping])
+
+          expect(fieldPairs(result.fields)).toStrictEqual([
+            [escaping, "quarantine directory could not be created"],
+          ])
+          expect(readlinkSync(escaping)).toBe("../..")
+        } finally {
+          chmodSync(parent, 0o755)
+          rmSync(root, { force: true, recursive: true })
+        }
+      }
+    )
   })
 })
