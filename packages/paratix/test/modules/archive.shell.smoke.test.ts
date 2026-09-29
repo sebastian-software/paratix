@@ -14,7 +14,7 @@
  * observed filesystem state and exit codes. Same approach as
  * `flagLock.shell.smoke.test.ts`.
  */
-import { spawnSync } from "node:child_process"
+import { type ChildProcess, spawn, spawnSync } from "node:child_process"
 import {
   chmodSync,
   existsSync,
@@ -38,6 +38,7 @@ import type { ArchiveMember } from "../../src/modules/archiveMemberValidation.js
 
 import {
   boundedStagingMergeCommand,
+  buildStagingMergeExec,
   buildStagingMergeScript,
   type StagingMergeTimeLimits,
 } from "../../src/modules/archive.js"
@@ -77,9 +78,13 @@ type ShellResult = { code: number; stderr: string; stdout: string }
 /**
  * Run the production merge script the way the remote `find -exec sh -c` does.
  *
+ * Issue #219: `$3` names a file with the NUL-terminated guard paths, as the
+ * outer script of `buildStagingMergeExec` writes it on the host; this helper
+ * writes it into its own scratch directory.
+ *
  * @param parameters - Invocation inputs.
  * @param parameters.destination - Value for `$1` and `$2` (destination and its expected resolution).
- * @param parameters.guardPaths - Newline-separated guard paths for `$3`.
+ * @param parameters.guardPaths - Guard paths for the file named by `$3`.
  * @param parameters.sourcePaths - Staging entries passed as the trailing arguments.
  * @returns Exit code and captured output.
  */
@@ -89,13 +94,19 @@ function runMergeScript(parameters: {
   sourcePaths: string[]
 }): ShellResult {
   const { destination, sourcePaths } = parameters
-  const guardPaths = (parameters.guardPaths ?? []).join("\n")
-  const result = spawnSync(
-    "/bin/sh",
-    ["-c", buildStagingMergeScript(), "sh", destination, destination, guardPaths, ...sourcePaths],
-    { encoding: "utf8", timeout: 5000 }
-  )
-  return { code: result.status ?? -1, stderr: result.stderr, stdout: result.stdout }
+  const scratch = mkdtempSync(join(tmpdir(), "paratix-merge-guards-"))
+  try {
+    const guardFile = join(scratch, "guards")
+    writeFileSync(guardFile, encodeNulPayload(parameters.guardPaths ?? []))
+    const result = spawnSync(
+      "/bin/sh",
+      ["-c", buildStagingMergeScript(), "sh", destination, destination, guardFile, ...sourcePaths],
+      { encoding: "utf8", timeout: 5000 }
+    )
+    return { code: result.status ?? -1, stderr: result.stderr, stdout: result.stdout }
+  } finally {
+    rmSync(scratch, { force: true, recursive: true })
+  }
 }
 
 function makeWorkspace(): { destination: string; root: string; staging: string } {
@@ -1006,9 +1017,8 @@ function modelVerdict(destination: string, members: ArchiveMember[]): PreMergeCo
 
 /**
  * Issue #219: run the staging merge exactly as `archive.extract` issues it:
- * `find <staging> -mindepth 1 -maxdepth 1 -exec sh -c <merge script> sh
- * <destination> <destination> <guard paths> {} +`, with the product guard set,
- * bounded by `boundedStagingMergeCommand` where `command -p timeout` exists.
+ * the command and stdin of `buildStagingMergeExec`, with the product guard
+ * set, bounded by `boundedStagingMergeCommand` where `command -p timeout` exists.
  * Without it (e.g. macOS with GNU `cp` from Homebrew on PATH) the bare merge
  * runs; the wrapper only passes the exit status through, so the merge outcome
  * is the same.
@@ -1025,17 +1035,17 @@ function runProductionMerge(parameters: {
   staging: string
 }): ShellResult {
   const { destination, members, staging } = parameters
-  const command = [
-    `find ${shellQuote(staging)} -mindepth 1 -maxdepth 1 -exec sh -c`,
-    shellQuote(buildStagingMergeScript()),
-    "sh",
-    shellQuote(destination),
-    shellQuote(destination),
-    shellQuote(productGuardPaths(destination, members).join("\n")),
-    "{} +",
-  ].join(" ")
+  const { command, input } = buildStagingMergeExec({
+    destination,
+    guardPaths: productGuardPaths(destination, members),
+    staging,
+  })
   const bounded = HAS_COMMAND_P_TIMEOUT ? boundedStagingMergeCommand(command) : command
-  const result = spawnSync("/bin/sh", ["-c", bounded], { encoding: "utf8", timeout: 10_000 })
+  const result = spawnSync("/bin/sh", ["-c", bounded], {
+    encoding: "utf8",
+    input,
+    timeout: 10_000,
+  })
   return { code: result.status ?? -1, stderr: result.stderr, stdout: result.stdout }
 }
 
@@ -2104,6 +2114,320 @@ describe.skipIf(SKIP_PLATFORM || !HAS_COMMAND_P_TIMEOUT)(
         killMatching(marker)
       }
     }, 15_000)
+  }
+)
+
+/** Issue #219: Linux's limit for a single argument (`MAX_ARG_STRLEN`). */
+const LINUX_MAX_ARG_STRLEN = 128 * 1024
+
+/**
+ * Issue #219: a merge workspace with its own `TMPDIR`, so a case can see
+ * whether the merge left its guard file behind.
+ *
+ * @returns The workspace paths.
+ */
+function makeGuardTransportWorkspace(): {
+  destination: string
+  root: string
+  staging: string
+  tmp: string
+} {
+  const workspace = makeWorkspace()
+  const tmp = join(workspace.root, "tmp")
+  mkdirSync(tmp)
+  writeFileSync(join(workspace.staging, "payload.txt"), "payload\n")
+  return { ...workspace, tmp }
+}
+
+/**
+ * Issue #219: guard paths shaped like those of a Node.js tarball, whose
+ * roughly 6,000 members yield about 750 KB of guard paths.
+ *
+ * @param destination - The destination directory.
+ * @param count - The number of guard paths.
+ * @returns Absolute guard paths below the destination; none of them exists.
+ */
+function syntheticGuardPaths(destination: string, count: number): string[] {
+  return Array.from({ length: count }, (_, index) =>
+    join(
+      destination,
+      `node-v24.21.0-linux-x64/lib/node_modules/npm/node_modules/package-${String(index)}/lib/index.js`
+    )
+  )
+}
+
+/**
+ * Issue #219: run the command and stdin of `buildStagingMergeExec` under a
+ * real `/bin/sh`, unbounded; the bounded shape is covered separately.
+ *
+ * @param parameters - Merge inputs.
+ * @param parameters.env - Extra environment entries, e.g. a different `TMPDIR`.
+ * @param parameters.guardPaths - Destination paths the merge must find free of symlinks.
+ * @param parameters.input - Optional replacement of the stdin payload.
+ * @param parameters.workspace - The workspace from {@link makeGuardTransportWorkspace}.
+ * @returns Exit code and captured output.
+ */
+function runMergeExec(parameters: {
+  env?: NodeJS.ProcessEnv
+  guardPaths: string[]
+  input?: (payload: string) => string
+  workspace: ReturnType<typeof makeGuardTransportWorkspace>
+}): ShellResult {
+  const { destination, staging, tmp } = parameters.workspace
+  const { command, input } = buildStagingMergeExec({
+    destination,
+    guardPaths: parameters.guardPaths,
+    staging,
+  })
+  const result = spawnSync("/bin/sh", ["-c", command], {
+    encoding: "utf8",
+    env: { ...process.env, TMPDIR: tmp, ...parameters.env },
+    input: parameters.input === undefined ? input : parameters.input(input),
+    timeout: 10_000,
+  })
+  return { code: result.status ?? -1, stderr: result.stderr, stdout: result.stdout }
+}
+
+/**
+ * Issue #219: a `find` stand-in that records its start and then sleeps, so a
+ * case can stop the merge while `find` runs.
+ *
+ * @param workspace - The workspace from {@link makeGuardTransportWorkspace}.
+ * @returns The environment that puts the stand-in first on PATH and uses the
+ *   workspace `TMPDIR`, and the start marker file.
+ */
+function sleepingFindShim(workspace: ReturnType<typeof makeGuardTransportWorkspace>): {
+  env: NodeJS.ProcessEnv
+  started: string
+} {
+  const bin = join(workspace.root, "bin")
+  const started = join(workspace.root, "find-started")
+  mkdirSync(bin)
+  writeFileSync(join(bin, "find"), `#!/bin/sh\n: > ${shellQuote(started)}\nexec sleep 30\n`)
+  chmodSync(join(bin, "find"), 0o755)
+  const path = [bin, process.env.PATH].filter((entry) => entry !== undefined).join(":")
+  return { env: { ...process.env, PATH: path, TMPDIR: workspace.tmp }, started }
+}
+
+/**
+ * Issue #219: send a signal to the process group of a detached child,
+ * tolerating a group that is already gone.
+ *
+ * @param child - The detached child, leader of its process group.
+ * @param signal - The signal to send.
+ */
+function signalProcessGroup(child: ChildProcess, signal: NodeJS.Signals): void {
+  if (child.pid === undefined) return
+  try {
+    process.kill(-child.pid, signal)
+  } catch {
+    // Already gone.
+  }
+}
+
+/**
+ * Issue #219: wait until a file exists, or give up.
+ *
+ * @param path - The file to wait for.
+ * @returns True when the file appeared in time.
+ */
+async function appeared(path: string): Promise<boolean> {
+  for (let attempt = 0; attempt < 50; attempt += 1) {
+    if (existsSync(path)) return true
+    // eslint-disable-next-line no-await-in-loop -- polling with a delay by design
+    await new Promise((resolve) => {
+      setTimeout(resolve, 100)
+    })
+  }
+  return existsSync(path)
+}
+
+describe.skipIf(SKIP_PLATFORM)(
+  "archive.extract staging merge guard transport shell smoke tests (Issue #219)",
+  () => {
+    // The guard paths used to travel as one newline-separated argument, which
+    // fails with E2BIG on Linux once it exceeds 128 KiB. macOS has no
+    // per-argument limit, so these cases cannot reproduce E2BIG there; they
+    // assert the argument sizes instead, and the Linux CI runs the same cases
+    // against the real limit.
+    it("keeps every argument far below 128 KiB for a guard list above it", () => {
+      const workspace = makeGuardTransportWorkspace()
+      try {
+        const guardPaths = syntheticGuardPaths(workspace.destination, 6000)
+        const { command, input } = buildStagingMergeExec({
+          destination: workspace.destination,
+          guardPaths,
+          staging: workspace.staging,
+        })
+
+        expect(Buffer.byteLength(guardPaths.join("\n"))).toBeGreaterThan(LINUX_MAX_ARG_STRLEN)
+        expect(Buffer.byteLength(input)).toBeGreaterThan(LINUX_MAX_ARG_STRLEN)
+        expect(Buffer.byteLength(boundedStagingMergeCommand(command))).toBeLessThan(16 * 1024)
+
+        const result = runMergeExec({ guardPaths, workspace })
+
+        expect(result.stderr).not.toContain("refusing staging merge")
+        expect(readdirSync(workspace.tmp)).toStrictEqual([])
+      } finally {
+        rmSync(workspace.root, { force: true, recursive: true })
+      }
+    })
+
+    it("still refuses a symlinked guard path at the end of a guard list above 128 KiB", () => {
+      const workspace = makeGuardTransportWorkspace()
+      try {
+        const guarded = join(workspace.destination, "guarded")
+        symlinkSync(join(workspace.root, "elsewhere"), guarded)
+
+        const result = runMergeExec({
+          guardPaths: [...syntheticGuardPaths(workspace.destination, 6000), guarded],
+          workspace,
+        })
+
+        // The merge script exits 64; `find -exec … {} +` reports it as 1.
+        expect(result.code).not.toBe(0)
+        expect(result.stderr).toContain(
+          `refusing staging merge: destination path ${guarded} is a symlink`
+        )
+        expect(result.stderr).toContain("refusing staging merge: the guard path check failed")
+        expect(readdirSync(workspace.destination)).toStrictEqual(["guarded"])
+        expect(readdirSync(workspace.tmp)).toStrictEqual([])
+      } finally {
+        rmSync(workspace.root, { force: true, recursive: true })
+      }
+    })
+
+    it("refuses a guard list that arrives truncated", () => {
+      const workspace = makeGuardTransportWorkspace()
+      try {
+        const result = runMergeExec({
+          guardPaths: syntheticGuardPaths(workspace.destination, 6000),
+          input: (payload) => payload.slice(0, 1000),
+          workspace,
+        })
+
+        expect(result.code).toBe(64)
+        expect(result.stderr).toMatch(/refusing staging merge: received \d+ of 6000 guard paths/v)
+        expect(readdirSync(workspace.destination)).toStrictEqual([])
+        expect(readdirSync(workspace.tmp)).toStrictEqual([])
+      } finally {
+        rmSync(workspace.root, { force: true, recursive: true })
+      }
+    })
+
+    it("refuses the merge when the guard file cannot be created", () => {
+      const workspace = makeGuardTransportWorkspace()
+      try {
+        const result = runMergeExec({
+          env: { TMPDIR: join(workspace.root, "missing") },
+          guardPaths: [workspace.destination],
+          workspace,
+        })
+
+        expect(result.code).toBe(64)
+        expect(result.stderr).toContain(
+          "refusing staging merge: failed to create the guard path file"
+        )
+        expect(readdirSync(workspace.destination)).toStrictEqual([])
+      } finally {
+        rmSync(workspace.root, { force: true, recursive: true })
+      }
+    })
+
+    it("removes the guard file when the merge is stopped with SIGTERM", async () => {
+      const workspace = makeGuardTransportWorkspace()
+      const { env, started } = sleepingFindShim(workspace)
+      const { command, input } = buildStagingMergeExec({
+        destination: workspace.destination,
+        guardPaths: syntheticGuardPaths(workspace.destination, 10),
+        staging: workspace.staging,
+      })
+      // Its own process group, like the one GNU `timeout` creates, so the
+      // signal reaches the outer shell and `find` together.
+      const child = spawn("/bin/sh", ["-c", command], {
+        detached: true,
+        env,
+        stdio: ["pipe", "ignore", "ignore"],
+      })
+      const exited = new Promise<null | number>((resolve) => {
+        child.on("exit", (code) => {
+          resolve(code)
+        })
+      })
+      try {
+        child.stdin.end(input)
+        expect(await appeared(started)).toBe(true)
+        expect(readdirSync(workspace.tmp)).toHaveLength(1)
+
+        signalProcessGroup(child, "SIGTERM")
+
+        await expect(exited).resolves.toBe(143)
+        expect(readdirSync(workspace.tmp)).toStrictEqual([])
+      } finally {
+        signalProcessGroup(child, "SIGKILL")
+        rmSync(workspace.root, { force: true, recursive: true })
+      }
+    }, 15_000)
+
+    it.skipIf(!HAS_COMMAND_P_TIMEOUT)(
+      "removes the guard file when the host timeout stops the merge: exit 124",
+      () => {
+        const workspace = makeGuardTransportWorkspace()
+        try {
+          const { env } = sleepingFindShim(workspace)
+          const { command, input } = buildStagingMergeExec({
+            destination: workspace.destination,
+            guardPaths: syntheticGuardPaths(workspace.destination, 10),
+            staging: workspace.staging,
+          })
+
+          const result = spawnSync(
+            "/bin/sh",
+            ["-c", boundedStagingMergeCommand(command, smallMergeLimits)],
+            { encoding: "utf8", env, input, timeout: 10_000 }
+          )
+
+          expect(result.status).toBe(124)
+          expect(readdirSync(workspace.tmp)).toStrictEqual([])
+        } finally {
+          rmSync(workspace.root, { force: true, recursive: true })
+        }
+      },
+      15_000
+    )
+
+    describe.skipIf(SKIP_NO_GNU_CP)("copy behavior (requires GNU cp)", () => {
+      it("merges with a guard list above 128 KiB", () => {
+        const workspace = makeGuardTransportWorkspace()
+        try {
+          const result = runMergeExec({
+            guardPaths: syntheticGuardPaths(workspace.destination, 6000),
+            workspace,
+          })
+
+          expect(result.stderr).toBe("")
+          expect(result.code).toBe(0)
+          expect(readFileSync(join(workspace.destination, "payload.txt"), "utf8")).toBe("payload\n")
+          expect(readdirSync(workspace.tmp)).toStrictEqual([])
+        } finally {
+          rmSync(workspace.root, { force: true, recursive: true })
+        }
+      })
+
+      it("merges with an empty guard list", () => {
+        const workspace = makeGuardTransportWorkspace()
+        try {
+          const result = runMergeExec({ guardPaths: [], workspace })
+
+          expect(result.stderr).toBe("")
+          expect(result.code).toBe(0)
+          expect(readFileSync(join(workspace.destination, "payload.txt"), "utf8")).toBe("payload\n")
+          expect(readdirSync(workspace.tmp)).toStrictEqual([])
+        } finally {
+          rmSync(workspace.root, { force: true, recursive: true })
+        }
+      })
+    })
   }
 )
 

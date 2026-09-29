@@ -324,6 +324,10 @@ function parseZipListing(stdout: string): ArchiveListing {
 // would terminate a path early when interpolated into a shell argument.
 // Carriage returns and other control bytes serve no legitimate purpose in
 // POSIX paths, so we reject them across the board.
+// Issue #219: the guard paths now travel NUL-terminated on stdin
+// (`buildStagingMergeExec`), so a newline no longer splits that list. The
+// refusal stays: a NUL would now split it the same way, and would still cut a
+// path short in a shell argument.
 /* eslint-disable-next-line regexp/no-control-character -- matching control characters is the explicit purpose of this guard */ /* oxlint-disable-next-line no-control-regex */
 const ARCHIVE_MEMBER_CONTROL_CHARACTER_PATTERN = /[\x00-\x1F]/v
 

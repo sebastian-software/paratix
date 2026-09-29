@@ -18,11 +18,16 @@ const EXEC_OPTS = { ignoreExitCode: true, silent: true } as const
 
 // R-0000672: control characters (\x00-\x1F) in extract destinations are
 // rejected before any further validation. `moveExtractedContentsIntoDestination`
-// transports the guard-paths list as a newline-separated string, so a literal
-// `\n` in the destination would split that list and let a crafted invocation
+// transported the guard-paths list as a newline-separated string, so a literal
+// `\n` in the destination would have split that list and let a crafted invocation
 // bypass the symlink probes that protect ancestor paths. NUL would terminate
 // the path early when interpolated into a shell argument. Reject the full
 // control-character range up front, mirroring `archiveMemberValidation.ts`.
+// Issue #219: the guard paths now travel NUL-terminated on stdin into a host
+// temp file (`buildStagingMergeExec`), so a newline no longer splits that
+// list. The refusal stays: a NUL would now split it the same way, and the
+// destination is still interpolated into shell arguments, where a NUL would
+// cut it short.
 /* eslint-disable-next-line regexp/no-control-character -- matching control characters is the explicit purpose of this guard */ /* oxlint-disable-next-line no-control-regex */
 const EXTRACT_DESTINATION_CONTROL_CHARACTER_PATTERN = /[\x00-\x1F]/v
 

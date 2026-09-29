@@ -60,12 +60,6 @@ const CONTAINMENT_FLAG_CONTENT = "archive apply in progress or symlink containme
 const ARCHIVE_STAT_OWNERSHIP_FIELDS = 4
 const MISSING_OWNER_PATHS_MARKER_PATTERN = /no such file or directory/iv
 
-type StagingMergeParameters = {
-  destination: string
-  guardPaths: string[]
-  staging: string
-}
-
 /**
  * Derive the marker file path from the source and destination paths.
  *
@@ -251,12 +245,18 @@ async function allocateExtractStagingDirectory(
  * Build the `sh -c` snippet that merges one batch of staging entries into the
  * destination.
  *
- * The script reads `destination`, `expected_destination` and `guard_paths` from
+ * The script reads `destination`, `expected_destination` and `guard_file` from
  * `$1`–`$3` and the staging entries from the remaining positional arguments, so
  * it is free of interpolated paths and can be executed verbatim against a real
  * `/bin/sh` in a test. Issue #178 showed why that matters: a guard that reads
  * correctly can still be inert at run time, and only executing it proves
  * otherwise.
+ *
+ * Issue #219: `guard_file` names a file holding the guard paths, each
+ * terminated by a NUL byte, as {@link buildStagingMergeExec} writes it on the
+ * host. Before every staged entry is copied, the script re-reads the file with
+ * `xargs -0` and refuses the merge (exit 64) when any guard path is a symlink
+ * or the check itself fails. An empty file checks nothing and passes.
  *
  * @returns The merge script as a single shell command string.
  */
@@ -268,6 +268,11 @@ export function buildStagingMergeScript(): string {
   // touches it. Newlines in extracted filenames are extremely unusual and
   // would otherwise corrupt the `printf | while read` loop that processes
   // `guard_paths`.
+  // Issue #219: the guard paths no longer travel as one newline-separated
+  // argument but NUL-terminated in a file (see `buildStagingMergeExec`), so
+  // that loop is gone. The newline refusal for staged entries stays: it costs
+  // nothing, and a newline in an extracted name would still garble the
+  // refusal messages that quote it.
   // R-0000801 addendum: capture the newline via a sacrificial `x` that is
   // stripped afterwards. A bare `$(printf '\n')` is useless as a guard —
   // command substitution strips *all* trailing newlines, so it expands to the
@@ -280,7 +285,7 @@ export function buildStagingMergeScript(): string {
     // `$\{` is the same escape the `target_path` line below uses to emit a
     // literal shell parameter expansion from a template literal.
     `nl=$(printf '\\nx'); nl=$\{nl%x}; `,
-    String.raw`destination=$1; expected_destination=$2; guard_paths=$3; shift 3; `,
+    String.raw`destination=$1; expected_destination=$2; guard_file=$3; shift 3; `,
     String.raw`for source_path do `,
     String.raw`case "$source_path" in *"$nl"*) `,
     String.raw`echo "[archive.extract] refusing staging merge: extracted path contains a newline" >&2; `,
@@ -291,12 +296,17 @@ export function buildStagingMergeScript(): string {
     String.raw`if [ "$resolved_destination" != "$expected_destination" ]; then `,
     String.raw`echo "[archive.extract] refusing staging merge: destination path $destination resolves to $resolved_destination" >&2; `,
     String.raw`exit 64; fi; `,
-    String.raw`printf "%s\n" "$guard_paths" | while IFS= read -r guarded_path; do `,
-    String.raw`[ -z "$guarded_path" ] && continue; `,
-    String.raw`if [ -L "$guarded_path" ]; then `,
+    // Issue #219: the guard check runs again for every staged entry, right
+    // before its `cp`. `xargs -0` splits the file only at NUL bytes and
+    // batches the paths below the host's argument limits, however many there
+    // are. A batch exits 1 on its first symlink, so `xargs` exits non-zero
+    // (123 with GNU `xargs`) after the remaining batches; any non-zero `xargs`
+    // status, including a missing or unreadable guard file, refuses the merge.
+    String.raw`xargs -0 sh -c 'for guarded_path do if [ -L "$guarded_path" ]; then `,
     String.raw`echo "[archive.extract] refusing staging merge: destination path $guarded_path is a symlink" >&2; `,
-    String.raw`exit 64; fi; `,
-    String.raw`done || exit $?; `,
+    String.raw`exit 1; fi; done' sh < "$guard_file" || { `,
+    String.raw`echo "[archive.extract] refusing staging merge: the guard path check failed" >&2; `,
+    String.raw`exit 64; }; `,
     `target_path="$destination/$\{source_path##*/}"; `,
     // Issue #219: a destination symlink may only be replaced by a staged
     // symlink. Refusing it unconditionally failed every later run of an
@@ -310,6 +320,93 @@ export function buildStagingMergeScript(): string {
     String.raw`cp -aT --no-dereference --remove-destination "$source_path" "$target_path" || exit $?; `,
     String.raw`done`,
   ].join("")
+}
+
+/**
+ * Issue #219: the outer `sh -c` script of the staging merge exec. It stores
+ * the NUL-terminated guard paths from stdin in a private temporary file and
+ * runs the merge with that file as `$3` of {@link buildStagingMergeScript}.
+ *
+ * Positional parameters: `$1` staging directory, `$2` merge script, `$3`
+ * destination, `$4` expected number of guard paths. The count check refuses a
+ * truncated stdin, which would otherwise silently drop guard paths.
+ *
+ * The file comes from `mktemp` (mode 0600, owned by the merge user, i.e. root
+ * under sudo) below `$TMPDIR` or `/tmp`. The `EXIT` trap removes it on every
+ * exit the shell sees, and the `HUP`/`INT`/`TERM` traps turn those signals
+ * into such an exit — including the `SIGTERM` of the host timeout. Only a
+ * `SIGKILL` (the timeout's kill-after stage) leaves the file behind: a
+ * harmless root-owned list of destination paths that the next run does not
+ * read. `find` is not the last command (`; exit $?`), so the shell cannot
+ * `exec` it and skip the trap.
+ */
+const STAGING_MERGE_GUARD_FILE_SCRIPT = [
+  String.raw`guard_file=; `,
+  String.raw`trap '[ -z "$guard_file" ] || rm -f -- "$guard_file"' EXIT; `,
+  String.raw`trap 'exit 129' HUP; trap 'exit 130' INT; trap 'exit 143' TERM; `,
+  // Not `String.raw`: `$\{` emits a literal shell parameter expansion.
+  `guard_file=$(mktemp "$\{TMPDIR:-/tmp}/paratix-merge-guards.XXXXXXXX") && [ -f "$guard_file" ] || { `,
+  String.raw`echo "[archive.extract] refusing staging merge: failed to create the guard path file" >&2; `,
+  String.raw`exit 64; }; `,
+  String.raw`cat > "$guard_file" || { `,
+  String.raw`echo "[archive.extract] refusing staging merge: failed to store the guard paths" >&2; `,
+  String.raw`exit 64; }; `,
+  String.raw`guard_count=$(LC_ALL=C tr -cd '\000' < "$guard_file" | wc -c | tr -d ' '); `,
+  String.raw`[ "$guard_count" = "$4" ] || { `,
+  String.raw`echo "[archive.extract] refusing staging merge: received $guard_count of $4 guard paths" >&2; `,
+  String.raw`exit 64; }; `,
+  String.raw`find "$1" -mindepth 1 -maxdepth 1 -exec sh -c "$2" sh "$3" "$3" "$guard_file" {} +; `,
+  String.raw`exit $?`,
+].join("")
+
+/** Issue #219: staging merge inputs. */
+export type StagingMergeParameters = {
+  /** The final destination directory; also its expected `readlink -f` resolution. */
+  destination: string
+  /** Destination paths that must not be symlinks during the merge; duplicates are dropped. */
+  guardPaths: string[]
+  /** The staging directory holding the freshly extracted files. */
+  staging: string
+}
+
+/** Issue #219: the staging merge exec: its command and its stdin. */
+export type StagingMergeExec = {
+  /** The unbounded merge command; a simple command, see {@link boundedStagingMergeCommand}. */
+  command: string
+  /** The deduplicated guard paths, each terminated by a NUL byte. */
+  input: string
+}
+
+/**
+ * Issue #219: build the staging merge exec.
+ *
+ * The guard paths travel NUL-terminated on stdin (the framing of the batched
+ * probes, see `encodeNulPayload`), not as an argument. As one
+ * newline-separated argument they failed with `E2BIG` on Linux, which caps a
+ * single argument at 128 KiB: a Node.js tarball with about 6,000 members
+ * yields about 750 KB of guard paths, so the merge failed for an archive that
+ * validation had accepted. The command now carries only the two scripts, the
+ * staging and destination paths and the guard count, and stays a few KiB
+ * whatever the archive holds. Like the probes, the exec needs passwordless
+ * sudo when it runs through sudo: the SSH layer refuses stdin input when sudo
+ * would read a password from it.
+ *
+ * @param parameters - Staging merge inputs.
+ * @returns The command, to be bounded with {@link boundedStagingMergeCommand},
+ *   and its stdin.
+ */
+export function buildStagingMergeExec(parameters: StagingMergeParameters): StagingMergeExec {
+  const guardPaths = [...new Set(parameters.guardPaths)]
+  const command = [
+    "sh -c",
+    shellQuote(STAGING_MERGE_GUARD_FILE_SCRIPT),
+    "sh",
+    shellQuote(parameters.staging),
+    shellQuote(buildStagingMergeScript()),
+    shellQuote(parameters.destination),
+    String(guardPaths.length),
+  ].join(" ")
+  return { command, input: encodeNulPayload(guardPaths) }
 }
 
 /**
@@ -367,6 +464,12 @@ const TIMEOUT_KILLED_EXIT_CODE = 137
  * exited would not be killed, and a process blocked in uninterruptible I/O
  * cannot be stopped by any signal.
  *
+ * Issue #219: since the guard paths moved to stdin, the bounded command is
+ * the outer `sh -c` of {@link buildStagingMergeExec}, which runs `find` as its
+ * child. The same process group covers it: the outer shell turns the
+ * `SIGTERM` into an exit that removes its guard file, and the `SIGKILL`
+ * follows while that shell still waits for `find`.
+ *
  * The trailing `; exit $?` keeps the remote shell from replacing itself with
  * `timeout` (shells `exec` the last simple command of `sh -c`). When the
  * `SIGKILL` stage is needed, `timeout` dies with its own process group; the
@@ -379,7 +482,8 @@ const TIMEOUT_KILLED_EXIT_CODE = 137
  * kill-after grace period), which the caller reports as stopped on the host.
  *
  * @param mergeCommand - The complete merge command, starting with the program
- *   to run (e.g. `find …`); it must not be a shell compound command.
+ *   to run (e.g. `sh -c …` from {@link buildStagingMergeExec}); it must not be
+ *   a shell compound command.
  * @param limits - The time limits; defaults to {@link STAGING_MERGE_TIME_LIMITS}.
  * @returns The command as `command -p timeout -k <K> <S> <mergeCommand>; exit $?`.
  */
@@ -405,7 +509,8 @@ export function boundedStagingMergeCommand(
  * Issue #219: the merge is bounded on the host by
  * {@link boundedStagingMergeCommand} and on the client by
  * {@link STAGING_MERGE_TIME_LIMITS}; a merge the host stopped is reported with
- * that reason.
+ * that reason. The guard paths travel on stdin, not as an argument (see
+ * {@link buildStagingMergeExec}); the merge is still one exec.
  *
  * @param conn - The SSH connection.
  * @param parameters - Staging merge inputs.
@@ -418,9 +523,7 @@ async function moveExtractedContentsIntoDestination(
   conn: SshConnection,
   parameters: StagingMergeParameters
 ): Promise<ModuleResult | null> {
-  const { destination, staging } = parameters
-  const guardPaths = [...new Set(parameters.guardPaths)].join("\n")
-  const mergeScript = buildStagingMergeScript()
+  const { destination } = parameters
   // R-0000751: defense-in-depth — `[ -L "$target_path" ]` runs immediately
   // before the `cp -aT` so a symlink planted between the first probe and
   // the copy cannot smuggle the merge through to an attacker-controlled
@@ -430,17 +533,10 @@ async function moveExtractedContentsIntoDestination(
   // ancestor of `target_path` between the guard checks above and the `cp`
   // invocation is preserved (and refused by the in-tree handling) instead
   // of being silently followed to an attacker-controlled location.
-  const copyCommand = [
-    `find ${shellQuote(staging)} -mindepth 1 -maxdepth 1 -exec sh -c`,
-    shellQuote(mergeScript),
-    "sh",
-    shellQuote(destination),
-    shellQuote(destination),
-    shellQuote(guardPaths),
-    "{} +",
-  ].join(" ")
-  const copyResult = await conn.exec(boundedStagingMergeCommand(copyCommand), {
+  const merge = buildStagingMergeExec(parameters)
+  const copyResult = await conn.exec(boundedStagingMergeCommand(merge.command), {
     ...EXEC_OPTS,
+    input: merge.input,
     timeout: STAGING_MERGE_TIME_LIMITS.clientTimeoutMs,
   })
   if (copyResult.code !== 0) {

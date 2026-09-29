@@ -8,6 +8,8 @@ import type { ExecOptions, ExecResult, ModuleResult, SshConnection } from "../..
 import {
   archive,
   boundedStagingMergeCommand,
+  buildStagingMergeExec,
+  buildStagingMergeScript,
   STAGING_MERGE_TIME_LIMITS,
 } from "../../src/modules/archive.js"
 import { POST_MERGE_VIOLATION_REPORT_LIMIT } from "../../src/modules/archiveContainmentBackstop.js"
@@ -27,8 +29,10 @@ import {
   buildPreStagingProbeScript,
   buildSymlinkListingProbeScript,
   buildSymlinkProbeScript,
+  encodeNulPayload,
 } from "../../src/modules/archiveProbe.js"
 import { SYMLINK_LISTING_CAPTURE_LIMIT_BYTES } from "../../src/modules/archiveSymlinkListing.js"
+import { shellQuote } from "../../src/ssh.js"
 import {
   CAPTURE_TRUNCATION_MARKER,
   collectStreamOutput,
@@ -161,13 +165,15 @@ function ownershipReport(path: string, stat: string): { code: number; stdout: st
 const archiveStageDirectory = "/opt/app/.paratix-stage.AbCdEfGh"
 const archiveStageMktempPattern = /^mktemp -d '\/opt\/app\/\.paratix-stage\.X{8}'$/v
 // Issue #219: the merge runs under `command -p timeout -k 10 100 … ; exit $?`
-// (see `boundedStagingMergeCommand`).
+// (see `boundedStagingMergeCommand`) as `sh -c <outer> sh <staging> <merge
+// script> <destination> <guard count>`; the guard paths travel on stdin (see
+// `buildStagingMergeExec`).
 const archiveStageMovePattern =
-  /^command -p timeout -k 10 100 find '\/opt\/app\/\.paratix-stage\.[^']+' -mindepth 1 -maxdepth 1 -exec sh -c '.*cp -aT --no-dereference --remove-destination "\$source_path" "\$target_path" \|\| exit \$\?; done' sh '\/opt\/app' '\/opt\/app' '[^']*' \{\} \+; exit \$\?$/sv
+  /^command -p timeout -k 10 100 sh -c '.*' sh '\/opt\/app\/\.paratix-stage\.[^']+' '.*cp -aT --no-dereference --remove-destination "\$source_path" "\$target_path" \|\| exit \$\?; done' '\/opt\/app' \d+; exit \$\?$/sv
 const archiveStageCleanupPattern = /^rm -rf -- '\/opt\/app\/\.paratix-stage\.[^']+'$/v
 const archiveAlternateStageMktempPattern = /^mktemp -d '\/opt\/app-alt\/\.paratix-stage\.X{8}'$/v
 const archiveAlternateStageMovePattern =
-  /^command -p timeout -k 10 100 find '\/opt\/app-alt\/\.paratix-stage\.[^']+' -mindepth 1 -maxdepth 1 -exec sh -c '.*cp -aT --no-dereference --remove-destination "\$source_path" "\$target_path" \|\| exit \$\?; done' sh '\/opt\/app-alt' '\/opt\/app-alt' '[^']*' \{\} \+; exit \$\?$/sv
+  /^command -p timeout -k 10 100 sh -c '.*' sh '\/opt\/app-alt\/\.paratix-stage\.[^']+' '.*cp -aT --no-dereference --remove-destination "\$source_path" "\$target_path" \|\| exit \$\?; done' '\/opt\/app-alt' \d+; exit \$\?$/sv
 const archiveAlternateStageCleanupPattern = /^rm -rf -- '\/opt\/app-alt\/\.paratix-stage\.[^']+'$/v
 const archiveMembersMarkerPattern =
   /^cat '\/var\/lib\/paratix\/flags\/archive-[a-f0-9]+\.sha256\.members'$/v
@@ -449,8 +455,6 @@ function stagedTarExtractCommandFor(source: string): string {
 }
 
 const stagedTarExtractCommand = stagedTarExtractCommandFor(src)
-const archiveStageMergeGuardPathsPattern =
-  / sh '\/opt\/app' '\/opt\/app' '(?<guards>[^']*)' \{\} \+; exit \$\?$/v
 
 function tarFileLine(path: string): string {
   return `-rw-r--r-- ${tarListingLineFields} ${path}`
@@ -1020,10 +1024,16 @@ function preStagingProbeEntries(run: TarListingApplyRun): string[] {
     .flatMap((probe) => probe.entries)
 }
 
+/**
+ * Issue #219: the guard paths the staging merge received, decoded from the
+ * NUL-terminated stdin of its exec.
+ *
+ * @param mockSsh - The mock connection whose exec calls are recorded.
+ * @returns The guard paths, or an empty list when no merge ran.
+ */
 function stagingMergeGuardPaths(mockSsh: MockSsh): string[] {
-  const mergeCommand = mockSsh.calls.find((command) => archiveStageMovePattern.test(command))
-  const guards = archiveStageMergeGuardPathsPattern.exec(mergeCommand ?? "")?.groups?.guards
-  return guards === undefined ? [] : guards.split("\n")
+  const merge = mockSsh.execCalls.find(({ command }) => archiveStageMovePattern.test(command))
+  return pathsFromNulPayload(merge?.options?.input)
 }
 
 describe("archive.extract — check", () => {
@@ -1960,6 +1970,8 @@ describe("archive.extract — apply", () => {
   // early when interpolated into a shell argument. Tests use JavaScript escape
   // sequences instead of literal control bytes so the source stays
   // grep-friendly and the intent of each case is explicit.
+  // Issue #219: the guard paths now travel NUL-terminated on stdin, so a
+  // newline no longer splits them; a NUL now would, and the refusal stays.
   it.each([
     ["newline", "/opt/app\n/etc"],
     ["carriage return", "/opt/app\r/etc"],
@@ -5607,6 +5619,35 @@ describe("archive.extract bounded staging merge (Issue #219)", () => {
     ).toBe("command -p timeout -k 1 2 find /s; exit $?")
   })
 
+  it("builds the merge exec with the guard paths deduplicated and NUL-terminated on stdin", () => {
+    const merge = buildStagingMergeExec({
+      destination: "/opt/app",
+      guardPaths: ["/opt", "/opt/app", "/opt", "/opt/app/it's"],
+      staging: "/opt/app/.paratix-stage.AbCdEfGh",
+    })
+
+    expect(merge.input).toBe("/opt\0/opt/app\0/opt/app/it's\0")
+    expect(merge.command).toMatch(
+      /^sh -c '.*mktemp.*' sh '\/opt\/app\/\.paratix-stage\.AbCdEfGh' /sv
+    )
+    expect(merge.command).toContain(` sh '/opt/app/.paratix-stage.AbCdEfGh' `)
+    expect(merge.command.endsWith(` ${shellQuote(buildStagingMergeScript())} '/opt/app' 3`)).toBe(
+      true
+    )
+    expect(merge.command).not.toContain("it'\\''s")
+  })
+
+  it("builds the merge exec for an empty guard list", () => {
+    const merge = buildStagingMergeExec({
+      destination: "/opt/app",
+      guardPaths: [],
+      staging: "/opt/app/.paratix-stage.AbCdEfGh",
+    })
+
+    expect(merge.input).toBe("")
+    expect(merge.command.endsWith(" '/opt/app' 0")).toBe(true)
+  })
+
   it("issues the merge bounded on the host and with the client timeout", async () => {
     const run = await applyTarListing([tarDirectoryLine("a/"), tarFileLine("a/f")])
 
@@ -5616,11 +5657,48 @@ describe("archive.extract bounded staging merge (Issue #219)", () => {
     )
     expect(merges).toHaveLength(1)
     const [merge] = merges
-    expect(
-      merge.command.startsWith("command -p timeout -k 10 100 find '/opt/app/.paratix-stage.")
-    ).toBe(true)
-    expect(merge.command.endsWith(" {} +; exit $?")).toBe(true)
-    expect(merge.options).toStrictEqual({ ignoreExitCode: true, silent: true, timeout: 120_000 })
+    expect(merge.command.startsWith("command -p timeout -k 10 100 sh -c '")).toBe(true)
+    expect(merge.command.endsWith(" '/opt/app' 4; exit $?")).toBe(true)
+    // Issue #219: the guard paths travel NUL-terminated on stdin.
+    expect(merge.options).toStrictEqual({
+      ignoreExitCode: true,
+      input: encodeNulPayload(["/opt", "/opt/app", "/opt/app/a", "/opt/app/a/f"]),
+      silent: true,
+      timeout: 120_000,
+    })
+  })
+
+  it("keeps the merge command small and moves a guard list above 128 KiB to stdin", async () => {
+    // Issue #219: Linux caps one argument at 128 KiB (MAX_ARG_STRLEN). The
+    // guard paths used to travel as one newline-separated argument of the
+    // merge, so a Node.js tarball with about 6,000 members (about 750 KB of
+    // guard paths) failed the merge with E2BIG after validation had passed.
+    const lines = Array.from({ length: 6000 }, (_, index) =>
+      tarFileLine(
+        `node-v24.21.0-linux-x64/lib/node_modules/npm/node_modules/package-${String(index)}/lib/index.js`
+      )
+    )
+    const run = await applyTarListing(lines)
+
+    expect(extractionSummary(run)).toStrictEqual(extractedThroughStaging)
+    const merges = run.mockSsh.execCalls.filter(({ command }) =>
+      archiveStageMovePattern.test(command)
+    )
+    expect(merges).toHaveLength(1)
+    const [merge] = merges
+    const guardPaths = stagingMergeGuardPaths(run.mockSsh)
+    expect(guardPaths).toHaveLength(18_007)
+    expect(guardPaths).toContain(
+      `${destination}/node-v24.21.0-linux-x64/lib/node_modules/npm/node_modules/package-5999/lib/index.js`
+    )
+    // The old transport would have exceeded the per-argument limit ...
+    expect(Buffer.byteLength(guardPaths.join("\n"))).toBeGreaterThan(128 * 1024)
+    // ... while the command, and with it every argument the SSH layer and the
+    // remote shells build from it, stays a few KiB and names no guard path.
+    expect(Buffer.byteLength(merge.command)).toBeLessThan(16 * 1024)
+    expect(merge.command).not.toContain("package-0")
+    expect(merge.command.endsWith(` '${destination}' 18007; exit $?`)).toBe(true)
+    expect(merge.options?.input).toBe(encodeNulPayload(guardPaths))
   })
 
   const stopped = `: the merge was stopped on the host after 100 seconds`
