@@ -2354,11 +2354,13 @@ describe.skipIf(SKIP_PLATFORM)(
         env,
         stdio: ["pipe", "ignore", "ignore"],
       })
-      const exited = new Promise<null | number>((resolve) => {
-        child.on("exit", (code) => {
-          resolve(code)
-        })
-      })
+      const exited = new Promise<{ code: null | number; signal: NodeJS.Signals | null }>(
+        (resolve) => {
+          child.on("exit", (code, signal) => {
+            resolve({ code, signal })
+          })
+        }
+      )
       try {
         child.stdin.end(input)
         expect(await appeared(started)).toBe(true)
@@ -2366,7 +2368,15 @@ describe.skipIf(SKIP_PLATFORM)(
 
         signalProcessGroup(child, "SIGTERM")
 
-        await expect(exited).resolves.toBe(143)
+        // Issue #219: shells report the stop differently. Observed: bash and
+        // macOS dash exit with 143 from `trap 'exit 143' TERM`, while dash on
+        // Ubuntu is reported as terminated by SIGTERM. Either way the shell
+        // has exited, so the EXIT trap must already have removed the file.
+        const { code, signal } = await exited
+        expect([
+          { code: 143, signal: null },
+          { code: null, signal: "SIGTERM" },
+        ]).toContainEqual({ code, signal })
         expect(readdirSync(workspace.tmp)).toStrictEqual([])
       } finally {
         signalProcessGroup(child, "SIGKILL")
