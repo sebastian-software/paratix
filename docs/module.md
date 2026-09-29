@@ -171,11 +171,14 @@ Tar-Symlinks und -Hardlinks werden nur entpackt, wenn ihr Ziel – bei Symlinks 
 Verzeichnis aus, bei Hardlinks vom Archiv-Stamm aus und auch über die Symlinks des Archivs hinweg
 aufgelöst – innerhalb von `destination` bleibt; absolute Ziele, ein Link anstelle des
 Zielverzeichnisses selbst, Einträge unterhalb eines Archiv-Symlinks und Zip-Symlinks werden
-abgelehnt. Nach dem Zusammenführen prüft `archive.extract` zudem jeden Symlink unterhalb von
-`destination` – auch Links, die nicht aus diesem Archiv stammen – und schlägt fehl, sobald einer
-außerhalb von `destination` auflöst; dann wird weder die Marker-Datei der Extraktion geschrieben
-noch `owner` angewendet, sodass ein Zielverzeichnis mit einem solchen Link erst wieder entpackt
-werden kann, wenn der Link entfernt oder umgelenkt wurde.
+abgelehnt. Vor dem Zusammenführen löst `archive.extract` zudem die bereits unter `destination`
+vorhandenen Symlinks gemeinsam mit denen des Archivs auf – ein Archiv-Eintrag ersetzt dabei den
+vorhandenen Link am selben Pfad, vorhandene absolute Ziele innerhalb von `destination` sind erlaubt
+– und bricht ohne jede Kopie ab, sobald ein Link außerhalb von `destination` auflöst; eine zweite
+Prüfung aller Symlinks nach dem Zusammenführen fängt zwischenzeitliche Änderungen am Host ab.
+Schlägt eine der beiden Prüfungen fehl, wird weder die Marker-Datei geschrieben noch `owner`
+angewendet, und `check` meldet für jedes Archiv mit diesem Zielverzeichnis `needs-apply`, bis ein
+Durchlauf vollständig gelingt – also erst, wenn der Link entfernt oder nach innen umgelenkt wurde.
 
 ---
 

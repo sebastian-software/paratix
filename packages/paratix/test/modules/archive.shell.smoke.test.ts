@@ -16,6 +16,7 @@
  */
 import { spawnSync } from "node:child_process"
 import {
+  chmodSync,
   lstatSync,
   mkdirSync,
   mkdtempSync,
@@ -40,6 +41,7 @@ import {
 } from "../../src/modules/archiveDestinationValidation.js"
 import {
   buildSymlinkContainmentProbeScript,
+  buildSymlinkListingProbeScript,
   encodeNulPayload,
 } from "../../src/modules/archiveProbe.js"
 
@@ -194,9 +196,59 @@ function runContainmentProbe(destination: string): ContainmentProbeResult {
   return { code: result.status ?? -1, pairs, stderr: result.stderr }
 }
 
+/**
+ * Issue #219: run the production listing probe the way `runBatchedProbe`
+ * does, with the destination NUL-terminated on stdin.
+ *
+ * @param destination - The canonical destination directory.
+ * @returns Exit code, the reported `(link, target)` pairs sorted by link, and stderr.
+ */
+function runListingProbe(destination: string): ContainmentProbeResult {
+  const result = spawnSync("/bin/sh", ["-c", buildSymlinkListingProbeScript()], {
+    encoding: "utf8",
+    input: encodeNulPayload([destination]),
+    timeout: 10_000,
+  })
+  const fields = result.stdout.split("\0")
+  if (fields.at(-1) === "") fields.pop()
+  const pairs: Array<[string, string]> = []
+  for (let index = 0; index < fields.length; index += 2) {
+    pairs.push([fields[index] ?? "", fields[index + 1] ?? "<missing>"])
+  }
+  pairs.sort(([left], [right]) => left.localeCompare(right))
+  return { code: result.status ?? -1, pairs, stderr: result.stderr }
+}
+
+/**
+ * Issue #219: whether the system `readlink` always appends one newline, even
+ * to a target that already ends in one. GNU coreutils and busybox do, so the
+ * listing probe strips exactly that newline and keeps the target intact. The
+ * BSD `readlink` on macOS omits its newline when the target already ends in
+ * one, so the probe cannot tell `x\n` from `x` there.
+ *
+ * @returns True when `readlink` prints `x\n\n` for the target `x\n`.
+ */
+function readlinkAlwaysAppendsNewline(): boolean {
+  const root = mkdtempSync(join(tmpdir(), "paratix-readlink-probe-"))
+  try {
+    const link = join(root, "link")
+    symlinkSync("x\n", link)
+    const result = spawnSync("/bin/sh", ["-c", 'command -p readlink -- "$1"', "sh", link], {
+      encoding: "utf8",
+      timeout: 2000,
+    })
+    return result.status === 0 && result.stdout === "x\n\n"
+  } finally {
+    rmSync(root, { force: true, recursive: true })
+  }
+}
+
 const SKIP_PLATFORM = process.platform === "win32"
 const SKIP_NO_GNU_CP = !hasGnuCp()
 const SKIP_NO_REALPATH_MISSING_MODE = !hasRealpathMissingMode()
+const SKIP_NO_TRAILING_NEWLINE_READLINK = SKIP_PLATFORM || !readlinkAlwaysAppendsNewline()
+// A privileged user reads directories regardless of their mode.
+const SKIP_AS_ROOT = process.getuid?.() === 0
 
 describe.skipIf(SKIP_PLATFORM)("archive.extract staging merge shell smoke tests", () => {
   it("refuses a staging entry whose name contains a literal newline", () => {
@@ -599,5 +651,175 @@ describe.skipIf(SKIP_PLATFORM || SKIP_NO_REALPATH_MISSING_MODE)(
         }
       })
     })
+  }
+)
+
+describe.skipIf(SKIP_PLATFORM)(
+  "archive.extract symlink listing probe shell smoke tests (Issue #219)",
+  () => {
+    it("lists every symlink with its raw target as NUL-framed pairs and nothing else", () => {
+      const { destination, root } = makeWorkspace()
+      try {
+        mkdirSync(join(destination, "a/lib"), { recursive: true })
+        writeFileSync(join(destination, "a/lib/f"), "f\n")
+        writeFileSync(join(destination, "plain"), "plain\n")
+        symlinkSync("lib/f", join(destination, "a/inside"))
+        symlinkSync("..", join(destination, "a/up"))
+        symlinkSync("up/..", join(destination, "a/esc"))
+        symlinkSync("missing/y/z", join(destination, "a/dangling"))
+        symlinkSync("/etc", join(destination, "etc"))
+        symlinkSync(`${destination}/a/lib`, join(destination, "absolute-inside"))
+
+        const result = runListingProbe(destination)
+
+        expect(result).toStrictEqual({
+          code: 0,
+          pairs: [
+            [join(destination, "a/dangling"), "missing/y/z"],
+            [join(destination, "a/esc"), "up/.."],
+            [join(destination, "a/inside"), "lib/f"],
+            [join(destination, "a/up"), ".."],
+            [join(destination, "absolute-inside"), `${destination}/a/lib`],
+            [join(destination, "etc"), "/etc"],
+          ].toSorted(([left = ""], [right = ""]) => left.localeCompare(right)),
+          stderr: "",
+        })
+      } finally {
+        rmSync(root, { force: true, recursive: true })
+      }
+    })
+
+    it("reports nothing and succeeds for a destination without symlinks", () => {
+      const { destination, root } = makeWorkspace()
+      try {
+        mkdirSync(join(destination, "a"))
+        writeFileSync(join(destination, "a/f"), "f\n")
+
+        expect(runListingProbe(destination)).toStrictEqual({ code: 0, pairs: [], stderr: "" })
+      } finally {
+        rmSync(root, { force: true, recursive: true })
+      }
+    })
+
+    it("does not follow a symlinked directory out of the destination", () => {
+      const { destination, root } = makeWorkspace()
+      try {
+        const elsewhere = join(root, "elsewhere")
+        mkdirSync(elsewhere)
+        symlinkSync("/etc", join(elsewhere, "outside-link"))
+        symlinkSync(elsewhere, join(destination, "to-elsewhere"))
+
+        expect(runListingProbe(destination)).toStrictEqual({
+          code: 0,
+          pairs: [[join(destination, "to-elsewhere"), elsewhere]],
+          stderr: "",
+        })
+      } finally {
+        rmSync(root, { force: true, recursive: true })
+      }
+    })
+
+    it("transports link names with newlines and spaces and targets with spaces faithfully", () => {
+      const { destination, root } = makeWorkspace()
+      try {
+        const directory = join(destination, "dir with space")
+        mkdirSync(directory)
+        symlinkSync("..", join(directory, "two\nlines"))
+        symlinkSync("target with space", join(directory, "link with space"))
+        symlinkSync("../other dir/f", join(directory, "trailing space "))
+
+        expect(runListingProbe(destination)).toStrictEqual({
+          code: 0,
+          pairs: [
+            [join(directory, "link with space"), "target with space"],
+            [join(directory, "trailing space "), "../other dir/f"],
+            [join(directory, "two\nlines"), ".."],
+          ],
+          stderr: "",
+        })
+      } finally {
+        rmSync(root, { force: true, recursive: true })
+      }
+    })
+
+    it("keeps a newline inside a target and a target that starts with a newline", () => {
+      const { destination, root } = makeWorkspace()
+      try {
+        symlinkSync("up\n/..", join(destination, "embedded"))
+        symlinkSync("\nleading", join(destination, "leading"))
+
+        expect(runListingProbe(destination)).toStrictEqual({
+          code: 0,
+          pairs: [
+            [join(destination, "embedded"), "up\n/.."],
+            [join(destination, "leading"), "\nleading"],
+          ],
+          stderr: "",
+        })
+      } finally {
+        rmSync(root, { force: true, recursive: true })
+      }
+    })
+
+    // BSD `readlink` (macOS) prints no newline of its own after a target that
+    // already ends in one, so the probe's single-newline strip eats the
+    // target's own newline there. Linux hosts use GNU or busybox `readlink`.
+    it.skipIf(SKIP_NO_TRAILING_NEWLINE_READLINK)(
+      "keeps trailing newlines of a target (requires a readlink that always appends one)",
+      () => {
+        const { destination, root } = makeWorkspace()
+        try {
+          symlinkSync("up\n", join(destination, "one"))
+          symlinkSync("up\n\n", join(destination, "two"))
+
+          expect(runListingProbe(destination)).toStrictEqual({
+            code: 0,
+            pairs: [
+              [join(destination, "one"), "up\n"],
+              [join(destination, "two"), "up\n\n"],
+            ],
+            stderr: "",
+          })
+        } finally {
+          rmSync(root, { force: true, recursive: true })
+        }
+      }
+    )
+
+    it("fails closed with a non-zero exit when the destination does not exist", () => {
+      const { destination, root } = makeWorkspace()
+      try {
+        const result = runListingProbe(join(destination, "missing"))
+
+        expect(result.code).not.toBe(0)
+        expect(result.pairs).toStrictEqual([])
+      } finally {
+        rmSync(root, { force: true, recursive: true })
+      }
+    })
+
+    it.skipIf(SKIP_AS_ROOT)(
+      "fails closed with a non-zero exit when find cannot read a subdirectory",
+      () => {
+        const { destination, root } = makeWorkspace()
+        const locked = join(destination, "locked")
+        try {
+          symlinkSync("..", join(destination, "visible"))
+          mkdirSync(locked)
+          symlinkSync("../..", join(locked, "hidden"))
+          chmodSync(locked, 0o000)
+
+          const result = runListingProbe(destination)
+
+          // A partial listing must not look complete: `visible` may be
+          // reported, but the exit status makes the caller refuse it.
+          expect(result.code).not.toBe(0)
+          expect(result.stderr).not.toBe("")
+        } finally {
+          chmodSync(locked, 0o755)
+          rmSync(root, { force: true, recursive: true })
+        }
+      }
+    )
   }
 )

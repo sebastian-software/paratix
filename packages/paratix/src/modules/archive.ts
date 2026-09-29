@@ -12,6 +12,7 @@ import {
   destinationPathWithAncestors,
   validateExistingExtractDestination,
   validateExtractDestination,
+  validateMergedSymlinkContainment,
   validateNoSymlinkPaths,
   validateResolvedDestinationPath,
   validateSymlinkContainment,
@@ -46,6 +47,8 @@ const ARCHIVE_CAPTURE_EXEC_OPTS = {
 const SILENT = { silent: true } as const
 const FLAGS_DIR = "/var/lib/paratix/flags"
 const ARCHIVE_MARKER_MODE = "0644"
+/** Issue #219: body of the containment-failure flag; only its presence is read. */
+const CONTAINMENT_FAILURE_FLAG_CONTENT = "symlink containment check failed\n"
 /** Columns emitted by the member ownership probe: `%U %G %u %g`. */
 const ARCHIVE_STAT_OWNERSHIP_FIELDS = 4
 const MISSING_OWNER_PATHS_MARKER_PATTERN = /no such file or directory/iv
@@ -66,6 +69,36 @@ type StagingMergeParameters = {
 function markerPath(source: string, destination: string): string {
   const hash = sha256String(`${source}\n${destination}`)
   return `${FLAGS_DIR}/archive-${hash}.sha256`
+}
+
+/**
+ * Issue #219: derive the containment-failure flag path from the destination.
+ *
+ * The flag is keyed by destination only, unlike the marker: an escaping link
+ * is a property of the destination tree, so it must force `check` to report
+ * needs-apply for every source that extracts there, including an earlier
+ * source whose marker still matches after a rollback.
+ *
+ * @param destination - The normalized extraction target path.
+ * @returns The absolute path to the flag file.
+ */
+function containmentFailureFlagPath(destination: string): string {
+  return `${FLAGS_DIR}/archive-containment-${sha256String(destination)}.failed`
+}
+
+/**
+ * Issue #219: build the `check` test that the marker exists and no
+ * containment-failure flag is present. Folding both into one `test` keeps the
+ * exec count of `check` unchanged. A dangling symlink at the flag path counts
+ * as present, so only a genuinely absent flag lets `check` continue.
+ *
+ * @param marker - The marker file path.
+ * @param flag - The containment-failure flag path.
+ * @returns The shell test command.
+ */
+function markerWithoutContainmentFailureCommand(marker: string, flag: string): string {
+  const quotedFlag = shellQuote(flag)
+  return `test -f ${shellQuote(marker)} && test ! -e ${quotedFlag} && test ! -L ${quotedFlag}`
 }
 
 function ownerPathsMarkerPath(marker: string): string {
@@ -410,8 +443,80 @@ async function writeMarker(
   return null
 }
 
+/**
+ * Issue #219: record a symlink containment failure for the destination so the
+ * next `check` reports needs-apply even when an existing marker still matches.
+ * The flag is written like the markers — `mkdir -p` of the flags directory and
+ * `writeFile`, which stages a temp file and moves it into place with its
+ * symlink guards. The original failure is returned in every case; a failed
+ * flag write only appends its reason.
+ *
+ * @param conn - The SSH connection.
+ * @param failure - The containment failure to return.
+ * @param flag - The containment-failure flag path.
+ * @returns The original failure, extended by the flag-write reason if that failed.
+ */
+async function recordContainmentFailure(
+  conn: SshConnection,
+  failure: ModuleResult,
+  flag: string
+): Promise<ModuleResult> {
+  const flagFailure = await writeContainmentFailureFlag(conn, flag)
+  if (flagFailure === null) return failure
+  const message = failure.error?.message ?? "[archive.extract] symlink containment check failed"
+  return failed(`${message}; additionally ${flagFailure}`)
+}
+
+async function writeContainmentFailureFlag(
+  conn: SshConnection,
+  flag: string
+): Promise<null | string> {
+  try {
+    const flagsDirectory = await conn.exec(`mkdir -p ${shellQuote(FLAGS_DIR)}`, EXEC_OPTS)
+    if (flagsDirectory.code !== 0) {
+      const detail =
+        flagsDirectory.stderr.trim() ||
+        flagsDirectory.stdout.trim() ||
+        `exit code ${String(flagsDirectory.code)}`
+      return `failed to create archive marker directory for containment-failure flag ${flag}: ${detail}`
+    }
+    await conn.writeFile(flag, CONTAINMENT_FAILURE_FLAG_CONTENT, { mode: ARCHIVE_MARKER_MODE })
+  } catch (error) {
+    const reason = error instanceof Error ? error.message : String(error)
+    return `failed to write containment-failure flag ${flag}: ${reason}`
+  }
+  return null
+}
+
+/**
+ * Issue #219: remove the containment-failure flag after a fully successful
+ * apply. A removal failure fails the apply: a flag left behind would make
+ * every later `check` report needs-apply without end.
+ *
+ * @param conn - The SSH connection.
+ * @param flag - The containment-failure flag path.
+ * @returns Null when the flag is gone, otherwise a structured failure.
+ */
+async function clearContainmentFailureFlag(
+  conn: SshConnection,
+  flag: string
+): Promise<ModuleResult | null> {
+  // `--` keeps the path from being read as an option; `-f` makes an absent
+  // flag the normal case rather than an error.
+  const result = await conn.exec(`rm -f -- ${shellQuote(flag)}`, EXEC_OPTS)
+  if (result.code !== 0) {
+    return failedCommand(
+      `[archive.extract] failed to remove containment-failure flag ${flag}`,
+      result
+    )
+  }
+  return null
+}
+
 /** Parameters for the apply helper. */
 type ApplyParameters = {
+  /** Issue #219: the destination's containment-failure flag path. */
+  containmentFlag: string
   /** The destination directory on the remote host. */
   destination: string
   /** The marker file path. */
@@ -711,7 +816,16 @@ async function finalizeExtraction(
     remoteSource: string
   } & ApplyParameters
 ): Promise<ModuleResult> {
-  const { destination, marker, markerPayloads, members, owner, remoteSource, source } = parameters
+  const {
+    containmentFlag,
+    destination,
+    marker,
+    markerPayloads,
+    members,
+    owner,
+    remoteSource,
+    source,
+  } = parameters
 
   const ownerFailure = await applyExtractedMemberOwner(conn, {
     destination,
@@ -733,15 +847,20 @@ async function finalizeExtraction(
     marker,
   })
   if (ownerPathsMarkerFailure !== null) return ownerPathsMarkerFailure
+  // Issue #219: only now is the apply fully successful. A crash before this
+  // point leaves the flag in place, which keeps `check` at needs-apply.
+  const flagFailure = await clearContainmentFailureFlag(conn, containmentFlag)
+  if (flagFailure !== null) return flagFailure
   return { status: "changed" }
 }
 
 /**
- * Run the staged extraction and then check that no symlink under the
- * destination resolves outside it.
+ * Check the combined host and archive links, run the staged extraction and
+ * then check that no symlink under the destination resolves outside it.
  *
  * @param conn - The SSH connection.
  * @param parameters - Inputs for the staged extraction (see {@link extractViaStagingDirectory}).
+ * @param parameters.containmentFlag - The destination's containment-failure flag path.
  * @param parameters.destination - The validated destination directory.
  * @param parameters.members - The validated archive members.
  * @param parameters.remoteSource - The remote archive path (uploaded or original).
@@ -751,29 +870,44 @@ async function finalizeExtraction(
 async function extractAndValidateSymlinkContainment(
   conn: SshConnection,
   parameters: {
+    containmentFlag: string
     destination: string
     members: ArchiveMember[]
     remoteSource: string
     source: string
   }
 ): Promise<ModuleResult | null> {
+  // Issue #219: resolve the host's existing links together with this archive's
+  // links before any staging directory exists. A refusal here runs no merge,
+  // no chown and writes no marker; it only records the containment-failure
+  // flag so `check` cannot report ok on a stale matching marker.
+  const unsafeMergedLinks = await validateMergedSymlinkContainment(conn, parameters)
+  if (unsafeMergedLinks !== null) {
+    return recordContainmentFailure(conn, unsafeMergedLinks, parameters.containmentFlag)
+  }
+
   const stagedFailure = await extractViaStagingDirectory(conn, parameters)
   if (stagedFailure !== null) return stagedFailure
 
-  // Issue #219: the pre-merge probes only see this archive's own link targets,
-  // but the merge may replace symlinks that an earlier run left in the
-  // destination. Links from separate runs can then combine: a link that stayed
+  // Issue #219: links from separate runs can combine — a link that stayed
   // inside when it was written may resolve outside once a later archive places
-  // a link on its path. One check over the whole tree after the merge covers
-  // links this archive did not ship. The caller runs it before
+  // a link on its path. `validateMergedSymlinkContainment` already refused such
+  // a combination before the merge, from a listing of the host's links. This
+  // check over the whole tree after the merge is the backstop for host changes
+  // that landed between that listing and the merge. The caller runs it before
   // `finalizeExtraction`, so a refused extraction performs no chown and writes
-  // no marker file, and the next `check` reports needs-apply. Staging has
-  // already been cleaned up here; a leftover staging directory lies inside the
-  // destination, so its links resolve inside as well and need no pruning.
-  return validateSymlinkContainment(conn, {
+  // no marker file. An existing marker from an earlier source may still match,
+  // so the failure is also recorded in the destination's containment-failure
+  // flag, which makes `check` report needs-apply until an apply succeeds.
+  // Staging has already been cleaned up here; a leftover staging directory
+  // lies inside the destination, so its links resolve inside as well and need
+  // no pruning.
+  const containmentFailure = await validateSymlinkContainment(conn, {
     destination: parameters.destination,
     source: parameters.source,
   })
+  if (containmentFailure === null) return null
+  return recordContainmentFailure(conn, containmentFailure, parameters.containmentFlag)
 }
 
 async function runExtraction(
@@ -819,10 +953,11 @@ async function runExtraction(
   })
   if (unsafeMemberPath !== null) return unsafeMemberPath
 
-  // Issue #219: the staged merge is followed by the whole-tree symlink
-  // containment check, both before `finalizeExtraction`; see
-  // `extractAndValidateSymlinkContainment`.
+  // Issue #219: the pre-merge check of the combined host and archive links,
+  // the staged merge and the whole-tree symlink containment backstop all run
+  // before `finalizeExtraction`; see `extractAndValidateSymlinkContainment`.
   const stagedFailure = await extractAndValidateSymlinkContainment(conn, {
+    containmentFlag: parameters.containmentFlag,
     destination: validatedDestination.destination,
     members,
     remoteSource,
@@ -1137,9 +1272,11 @@ export const archive = {
     }
     const normalizedDestination = validatedDestination.destination
     const marker = markerPath(source, normalizedDestination)
+    const containmentFlag = containmentFailureFlagPath(normalizedDestination)
     const upload = options?.upload === true
     const owner = options?.owner
     const parameters: ApplyParameters = {
+      containmentFlag,
       destination: normalizedDestination,
       marker,
       owner,
@@ -1163,7 +1300,12 @@ export const archive = {
         })
         if (unsafeDestination !== null) return NEEDS_APPLY
 
-        const markerExists = await conn.test(`test -f ${shellQuote(marker)}`)
+        // Issue #219: a containment-failure flag means the last apply refused
+        // an escaping symlink; a marker from an earlier source may still
+        // match, so the flag alone forces needs-apply until an apply succeeds.
+        const markerExists = await conn.test(
+          markerWithoutContainmentFailureCommand(marker, containmentFlag)
+        )
         if (!markerExists) return NEEDS_APPLY
         if (!(await extractedMembersMatch(conn, marker))) return NEEDS_APPLY
         if (

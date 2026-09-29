@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto"
 import { posix } from "node:path"
 import { describe, expect, it, vi } from "vitest"
 
@@ -13,6 +14,7 @@ import {
   buildMemberTypeProbeScript,
   buildOwnershipProbeScript,
   buildSymlinkContainmentProbeScript,
+  buildSymlinkListingProbeScript,
   buildSymlinkProbeScript,
 } from "../../src/modules/archiveProbe.js"
 import { CAPTURE_TRUNCATION_MARKER, DEFAULT_MAX_OUTPUT_BYTES } from "../../src/sshHelpers.js"
@@ -23,6 +25,8 @@ const emptyEnv = {}
 const src = "/tmp/app.tar.gz"
 const destination = "/opt/app"
 const alternateDestination = "/opt/app-alt"
+/** Issue #219: a second source extracted into the same destination. */
+const otherSrc = "/tmp/other.tar.gz"
 const safeTarListing = "-rw-r--r-- root/root 0 1970-01-01 00:00 app/file"
 const archiveListingMaxOutputBytes = ARCHIVE_CAPTURE_LIMIT_BYTES
 const legacyCaptureLimitBytes = 1_048_576
@@ -35,6 +39,34 @@ const archiveSha = "abc123def456"
 const extractedFileMember = { kind: "file", path: `${destination}/app/file` } as const
 const symlinkProbeCommand = buildSymlinkProbeScript()
 const symlinkContainmentProbeCommand = buildSymlinkContainmentProbeScript()
+const symlinkListingProbeCommand = buildSymlinkListingProbeScript()
+
+/**
+ * Issue #219: the destination-keyed flag that records a symlink containment
+ * failure, derived independently of the module so a changed key is caught.
+ *
+ * @param path - The extraction destination.
+ * @returns The absolute flag path.
+ */
+function containmentFlagPath(path: string): string {
+  const hash = createHash("sha256").update(path).digest("hex")
+  return `/var/lib/paratix/flags/archive-containment-${hash}.failed`
+}
+
+const containmentFlag = containmentFlagPath(destination)
+
+/**
+ * Issue #219: `check` tests the marker and the absence of the containment
+ * flag in one `test` call.
+ *
+ * @param markerFile - The marker path.
+ * @param path - The extraction destination the flag is keyed by.
+ * @returns The combined test command.
+ */
+function markerCheckCommand(markerFile: string, path = destination): string {
+  const flag = containmentFlagPath(path)
+  return `test -f '${markerFile}' && test ! -e '${flag}' && test ! -L '${flag}'`
+}
 const extractedFileTypeProbe = buildMemberTypeProbeScript()
 const batchedChownCommand = "xargs -0 chown -h -- 'www-data:www-data'"
 const memberTypeMatchResponse = { code: 0, stdout: "" }
@@ -144,6 +176,13 @@ const archiveApplyResponseStubs: NonNullable<
   { command: symlinkProbeCommand, result: { code: 0, stdout: "" } },
   // Issue #219: the post-merge containment check; a converged tree reports nothing.
   { command: symlinkContainmentProbeCommand, result: { code: 0, stdout: "" } },
+  // Issue #219: the pre-merge listing of host symlinks; by default the host has none.
+  { command: symlinkListingProbeCommand, result: { code: 0, stdout: "" } },
+  // Issue #219: a successful apply clears the containment-failure flag.
+  ...[destination, alternateDestination].map((path) => ({
+    command: `rm -f -- '${containmentFlagPath(path)}'`,
+    result: { code: 0 },
+  })),
   { command: extractedFileTypeProbe, result: { code: 0, stdout: "" } },
   { command: batchedChownCommand, result: { code: 0 } },
   {
@@ -274,7 +313,17 @@ async function consumeNextUploadMktemp(
 // and hardlink members, plus recorders for the batched symlink probe payloads
 // and the staging-merge guard paths.
 const tarListingLineFields = "root/root 0 1970-01-01 00:00"
-const stagedTarExtractCommand = `tar --no-same-owner --no-overwrite-dir -xzf '${src}' -C '${archiveStageDirectory}'`
+/**
+ * The staged `tar -x` of a `.tar.gz` source into the staging directory.
+ *
+ * @param source - Remote path of the `.tar.gz` archive to extract.
+ * @returns The `tar` command that extracts it into the staging directory.
+ */
+function stagedTarExtractCommandFor(source: string): string {
+  return `tar --no-same-owner --no-overwrite-dir -xzf '${source}' -C '${archiveStageDirectory}'`
+}
+
+const stagedTarExtractCommand = stagedTarExtractCommandFor(src)
 const archiveStageMergeGuardPathsPattern =
   / sh '\/opt\/app' '\/opt\/app' '(?<guards>[^']*)' \{\} \+$/v
 
@@ -299,12 +348,29 @@ type SymlinkProbeRecord = { callIndex: number; entries: string[] }
 /**
  * Issue #219: the symlinks a host keeps below the destination across runs,
  * keyed by absolute link path. Each run's successful staging merge adds (or
- * replaces) the links it ships, and the post-merge containment probe is
- * answered from the whole map, so a test can span several runs on one host.
+ * replaces) the links it ships, and both the pre-merge listing probe and the
+ * post-merge containment probe are answered from the whole map, so a test can
+ * span several runs on one host.
  */
 type HostLinkTree = Map<string, string>
 
-type HostLinkRun = { shipped: ReadonlyArray<readonly [string, string]>; tree: HostLinkTree }
+type HostLinkRun = {
+  /**
+   * Issue #219: the marker and flag files on the host, keyed by path. Writes
+   * add them and a successful `rm -f -- <flag file>` removes one, so `check`
+   * can be answered from what earlier runs left behind.
+   */
+  files?: Map<string, string>
+  /**
+   * Issue #219: links the host gains while the merge runs, e.g. from a
+   * concurrent change after the pre-merge listing.
+   */
+  injectedOnMerge?: ReadonlyArray<readonly [string, string]>
+  shipped: ReadonlyArray<readonly [string, string]>
+  tree: HostLinkTree
+}
+
+const flagFileRemovalPattern = /^rm -f -- '(?<path>\/var\/lib\/paratix\/flags\/[^']+)'$/v
 
 const tarSymlinkLinePrefix = `lrwxrwxrwx ${tarListingLineFields} `
 
@@ -388,14 +454,48 @@ function pathsFromNulPayload(input: string | undefined): string[] {
   return (input ?? "").split("\u0000").filter((entry) => entry !== "")
 }
 
+/**
+ * Answer the pre-merge listing probe from the host model: one
+ * `(link, raw target)` pair for every link below a transported destination.
+ *
+ * @param tree - The host symlinks.
+ * @param input - The probe's NUL-terminated destinations.
+ * @returns The NUL-framed probe output.
+ */
+function listingProbeStdout(tree: ReadonlyMap<string, string>, input: string): string {
+  return pathsFromNulPayload(input)
+    .flatMap((root) => [...tree].filter(([link]) => link.startsWith(`${root}/`)))
+    .flat()
+    .map((field) => `${field}\u0000`)
+    .join("")
+}
+
+/**
+ * Apply what a successful command changes on the modelled host: the staging
+ * merge places the shipped (and any injected) links, and `rm -f` of a flags
+ * file removes it.
+ *
+ * @param host - The host model to update.
+ * @param command - The executed command.
+ */
+function applyHostSideEffects(host: HostLinkRun, command: string): void {
+  if (archiveStageMovePattern.test(command)) {
+    const merged = [...host.shipped, ...(host.injectedOnMerge ?? [])]
+    for (const [link, target] of merged) host.tree.set(link, target)
+  }
+  const removedFile = flagFileRemovalPattern.exec(command)?.groups?.path
+  if (removedFile !== undefined) host.files?.delete(removedFile)
+}
+
 function answerFromHostLinks(
   host: HostLinkRun,
   command: string,
   exchange: { input: string | undefined; result: ExecResult }
 ): ExecResult {
   const { input, result } = exchange
-  if (result.code === 0 && archiveStageMovePattern.test(command)) {
-    for (const [link, target] of host.shipped) host.tree.set(link, target)
+  if (result.code === 0) applyHostSideEffects(host, command)
+  if (command === symlinkListingProbeCommand) {
+    return { ...result, stdout: listingProbeStdout(host.tree, input ?? "") }
   }
   if (command !== symlinkContainmentProbeCommand) return result
   return { ...result, stdout: containmentProbeStdout(host.tree, input ?? "") }
@@ -442,29 +542,107 @@ type TarListingApplyRun = {
   writes: Array<{ callIndex: number; remotePath: string }>
 }
 
+/**
+ * Issue #219: the archive content hash the mocks report for a source, distinct
+ * per source so two sources never share a matching marker.
+ *
+ * @param source - The archive path.
+ * @returns The hash `sha256` reports for it.
+ */
+function archiveShaFor(source: string): string {
+  return source === src ? archiveSha : createHash("sha256").update(source).digest("hex")
+}
+
+/**
+ * The content marker path for a source extracted into the destination,
+ * derived independently of the module.
+ *
+ * @param source - The archive path.
+ * @returns The absolute marker path.
+ */
+function markerFor(source: string): string {
+  const hash = createHash("sha256").update(`${source}\n${destination}`).digest("hex")
+  return `/var/lib/paratix/flags/archive-${hash}.sha256`
+}
+
+type TarListingApplyOptions = {
+  /** `writeFile` rejects this path, e.g. to fail the containment-flag write. */
+  failWrite?: string
+  /** Host marker and flag files (see {@link HostLinkRun}); requires `hostLinks`. */
+  files?: Map<string, string>
+  hostLinks?: HostLinkTree
+  hostSymlinks?: readonly string[]
+  injectedOnMerge?: ReadonlyArray<readonly [string, string]>
+  owner?: string
+  /** Exact command responses that take priority over the shared stubs. */
+  responses?: NonNullable<Parameters<typeof createBaseMockSsh>[0]>
+  source?: string
+}
+
 async function applyTarListing(
   lines: readonly string[],
-  options: { hostLinks?: HostLinkTree; hostSymlinks?: readonly string[]; owner?: string } = {}
+  options: TarListingApplyOptions = {}
 ): Promise<TarListingApplyRun> {
+  const { failWrite, files, hostLinks, source = src } = options
   const mockSsh = createMockSsh({
-    [`tar -tvzf '${src}'`]: { code: 0, stdout: `${lines.join("\n")}\n` },
-    [stagedTarExtractCommand]: { code: 0 },
+    [`tar -tvzf '${source}'`]: { code: 0, stdout: `${lines.join("\n")}\n` },
+    [stagedTarExtractCommandFor(source)]: { code: 0 },
+    ...options.responses,
   })
-  vi.spyOn(mockSsh, "sha256").mockResolvedValue(archiveSha)
+  vi.spyOn(mockSsh, "sha256").mockResolvedValue(archiveShaFor(source))
   const writes: TarListingApplyRun["writes"] = []
-  vi.spyOn(mockSsh, "writeFile").mockImplementation(async (remotePath) => {
+  vi.spyOn(mockSsh, "writeFile").mockImplementation(async (remotePath, content) => {
     await Promise.resolve()
     writes.push({ callIndex: mockSsh.calls.length, remotePath })
+    if (remotePath === failWrite) throw new Error("No space left on device")
+    files?.set(remotePath, content)
   })
-  const { hostLinks } = options
   // With a host link model, the pre-merge probes see the links earlier runs left.
   const hostSymlinks = options.hostSymlinks ?? [...(hostLinks?.keys() ?? [])]
   const host =
-    hostLinks === undefined ? undefined : { shipped: shippedSymlinks(lines), tree: hostLinks }
+    hostLinks === undefined
+      ? undefined
+      : {
+          files,
+          injectedOnMerge: options.injectedOnMerge,
+          shipped: shippedSymlinks(lines),
+          tree: hostLinks,
+        }
   const probes = recordSymlinkProbes(mockSsh, hostSymlinks, host)
   const moduleOptions = options.owner === undefined ? {} : { owner: options.owner }
-  const result = await archive.extract(src, destination, moduleOptions).apply(mockSsh, emptyEnv)
+  const result = await archive.extract(source, destination, moduleOptions).apply(mockSsh, emptyEnv)
   return { markerWrites: () => writes.length, mockSsh, probes, result, writes }
+}
+
+/**
+ * Issue #219: run `check` for a source against the marker and flag files an
+ * earlier apply left in the host model. The combined marker test is answered
+ * from the model, so a present containment-failure flag makes it fail.
+ *
+ * @param source - The archive path.
+ * @param files - The host marker and flag files.
+ * @returns The check verdict and the issued commands.
+ */
+async function checkAgainstHostFiles(
+  source: string,
+  files: ReadonlyMap<string, string>
+): Promise<{ calls: string[]; result: "needs-apply" | "ok" }> {
+  const sourceMarker = markerFor(source)
+  const catFile = (path: string): Partial<ExecResult> => {
+    const content = files.get(path)
+    return content === undefined
+      ? { code: 1, stderr: `cat: ${path}: No such file or directory` }
+      : { code: 0, stdout: content }
+  }
+  const markerTestPasses = files.has(sourceMarker) && !files.has(containmentFlag)
+  const mockSsh = createMockSsh({
+    [`cat '${sourceMarker}.members'`]: catFile(`${sourceMarker}.members`),
+    [`cat '${sourceMarker}'`]: catFile(sourceMarker),
+    [markerCheckCommand(sourceMarker)]: { code: markerTestPasses ? 0 : 1 },
+  })
+  vi.spyOn(mockSsh, "sha256").mockResolvedValue(archiveShaFor(source))
+  const result = await archive.extract(source, destination).check(mockSsh, emptyEnv)
+  return { calls: mockSsh.calls, result }
 }
 
 /**
@@ -554,7 +732,7 @@ describe("archive.extract — check", () => {
   it("returns needs-apply when destination is a symlink to a directory", async () => {
     const mockSsh = createMockSsh(
       {
-        [`test -f '${marker}'`]: { code: 0 },
+        [markerCheckCommand(marker)]: { code: 0 },
       },
       {
         responseStubs: [
@@ -574,7 +752,7 @@ describe("archive.extract — check", () => {
   it("returns needs-apply when destination resolves elsewhere", async () => {
     const mockSsh = createMockSsh(
       {
-        [`test -f '${marker}'`]: { code: 0 },
+        [markerCheckCommand(marker)]: { code: 0 },
       },
       {
         responseStubs: [
@@ -594,7 +772,7 @@ describe("archive.extract — check", () => {
   it("returns needs-apply when marker file does not exist", async () => {
     const mockSsh = createMockSsh({
       [`test -d '${destination}'`]: { code: 0 },
-      [`test -f '${marker}'`]: { code: 1 },
+      [markerCheckCommand(marker)]: { code: 1 },
     })
     const mod = archive.extract(src, destination)
     const result = await mod.check(mockSsh, emptyEnv)
@@ -606,8 +784,8 @@ describe("archive.extract — check", () => {
       [`cat '${marker}'`]: { code: 0, stdout: archiveSha },
       [`cat '${membersMarker}'`]: validMembersMarkerResponse(),
       [`test -d '${destination}'`]: { code: 0 },
-      [`test -f '${marker}'`]: { code: 0 },
       [extractedFileTypeProbe]: memberTypeMatchResponse,
+      [markerCheckCommand(marker)]: { code: 0 },
     })
     vi.spyOn(mockSsh, "sha256").mockResolvedValue(archiveSha)
     const mod = archive.extract(src, destination)
@@ -616,12 +794,38 @@ describe("archive.extract — check", () => {
     expectArchiveCaptureExecCall(mockSsh, `cat '${membersMarker}'`)
   })
 
+  it("folds the containment-failure flag into the single marker test (Issue #219)", async () => {
+    const mockSsh = createMockSsh({
+      [`cat '${marker}'`]: { code: 0, stdout: archiveSha },
+      [`cat '${membersMarker}'`]: validMembersMarkerResponse(),
+      [extractedFileTypeProbe]: memberTypeMatchResponse,
+      [markerCheckCommand(marker)]: { code: 0 },
+    })
+    vi.spyOn(mockSsh, "sha256").mockResolvedValue(archiveSha)
+
+    const result = await archive.extract(src, destination).check(mockSsh, emptyEnv)
+
+    expect(result).toBe("ok")
+    // One `test` call covers the marker and the flag, so `check` issues no
+    // extra round trip for the flag and never writes or removes it.
+    expect(
+      mockSsh.calls.filter((command) => command.includes("archive-containment-"))
+    ).toStrictEqual([markerCheckCommand(marker)])
+    expect(mockSsh.calls.filter((command) => command.includes(marker))).toStrictEqual([
+      markerCheckCommand(marker),
+      `cat '${membersMarker}'`,
+      `cat '${marker}'`,
+    ])
+    expect(mockSsh.writeFileCalls).toStrictEqual([])
+    expect(mockSsh.calls.some((command) => /^(?:rm|mkdir) /v.test(command))).toBe(false)
+  })
+
   it("returns needs-apply when an extracted member was deleted after extraction", async () => {
     const mockSsh = createMockSsh({
       [`cat '${membersMarker}'`]: validMembersMarkerResponse(),
       [`test -d '${destination}'`]: { code: 0 },
-      [`test -f '${marker}'`]: { code: 0 },
       [extractedFileTypeProbe]: memberTypeDriftResponse,
+      [markerCheckCommand(marker)]: { code: 0 },
     })
     const mod = archive.extract(src, destination)
     const result = await mod.check(mockSsh, emptyEnv)
@@ -636,8 +840,8 @@ describe("archive.extract — check", () => {
         stdout: JSON.stringify([{ kind: "directory", path: `${destination}/app` }]),
       },
       [`test -d '${destination}'`]: { code: 0 },
-      [`test -f '${marker}'`]: { code: 0 },
       [extractedFileTypeProbe]: { code: 0, stdout: `${destination}/app\u0000` },
+      [markerCheckCommand(marker)]: { code: 0 },
     })
     const mod = archive.extract(src, destination)
     const result = await mod.check(mockSsh, emptyEnv)
@@ -649,7 +853,7 @@ describe("archive.extract — check", () => {
       [`cat '${marker}'`]: { code: 0, stdout: archiveSha },
       [`cat '${membersMarker}'`]: { code: 1, stderr: "cat: No such file or directory" },
       [`test -d '${destination}'`]: { code: 0 },
-      [`test -f '${marker}'`]: { code: 0 },
+      [markerCheckCommand(marker)]: { code: 0 },
     })
     vi.spyOn(mockSsh, "sha256").mockResolvedValue(archiveSha)
     const mod = archive.extract(src, destination)
@@ -663,7 +867,7 @@ describe("archive.extract — check", () => {
       [`cat '${marker}'`]: { code: 0, stdout: archiveSha },
       [`cat '${membersMarker}'`]: { code: 0, stdout: "{not-json" },
       [`test -d '${destination}'`]: { code: 0 },
-      [`test -f '${marker}'`]: { code: 0 },
+      [markerCheckCommand(marker)]: { code: 0 },
     })
     vi.spyOn(mockSsh, "sha256").mockResolvedValue(archiveSha)
     const mod = archive.extract(src, destination)
@@ -680,7 +884,7 @@ describe("archive.extract — check", () => {
         stdout: `${JSON.stringify([extractedFileMember])}${CAPTURE_TRUNCATION_MARKER}`,
       },
       [`test -d '${destination}'`]: { code: 0 },
-      [`test -f '${marker}'`]: { code: 0 },
+      [markerCheckCommand(marker)]: { code: 0 },
     })
 
     const result = await archive.extract(src, destination).check(mockSsh, emptyEnv)
@@ -699,7 +903,7 @@ describe("archive.extract — check", () => {
         stdout: JSON.stringify([{ kind: "socket", path: `${destination}/app/file` }]),
       },
       [`test -d '${destination}'`]: { code: 0 },
-      [`test -f '${marker}'`]: { code: 0 },
+      [markerCheckCommand(marker)]: { code: 0 },
     })
     vi.spyOn(mockSsh, "sha256").mockResolvedValue(archiveSha)
     const mod = archive.extract(src, destination)
@@ -718,8 +922,8 @@ describe("archive.extract — check", () => {
         stdout: JSON.stringify([`${destination}/app/file`]),
       },
       [`test -d '${destination}'`]: { code: 0 },
-      [`test -f '${marker}'`]: { code: 0 },
       [extractedFileTypeProbe]: memberTypeMatchResponse,
+      [markerCheckCommand(marker)]: { code: 0 },
       [ownershipProbeCommand("www-data:www-data")]: ownershipReport(
         `${destination}/app/file`,
         "www-data www-data 33 33"
@@ -742,8 +946,8 @@ describe("archive.extract — check", () => {
         stdout: JSON.stringify([`${destination}/app/file`]),
       },
       [`test -d '${destination}'`]: { code: 0 },
-      [`test -f '${marker}'`]: { code: 0 },
       [extractedFileTypeProbe]: memberTypeMatchResponse,
+      [markerCheckCommand(marker)]: { code: 0 },
       [ownershipProbeCommand("www-data:www-data")]: ownershipReport(
         `${destination}/app/file`,
         "root root 0 0"
@@ -777,7 +981,7 @@ describe("archive.extract — check", () => {
         stdout: JSON.stringify(memberPaths.map((path) => `${destination}/${path}`)),
       },
       [`test -d '${destination}'`]: { code: 0 },
-      [`test -f '${marker}'`]: { code: 0 },
+      [markerCheckCommand(marker)]: { code: 0 },
       [ownerProbe]: { code: 0, stdout: "" },
     })
     vi.spyOn(mockSsh, "sha256").mockResolvedValue(archiveSha)
@@ -794,8 +998,8 @@ describe("archive.extract — check", () => {
       [`cat '${marker}'`]: { code: 0, stdout: "old-hash" },
       [`cat '${membersMarker}'`]: validMembersMarkerResponse(),
       [`test -d '${destination}'`]: { code: 0 },
-      [`test -f '${marker}'`]: { code: 0 },
       [extractedFileTypeProbe]: memberTypeMatchResponse,
+      [markerCheckCommand(marker)]: { code: 0 },
     })
     const sha256Spy = vi.spyOn(mockSsh, "sha256").mockResolvedValue("new-hash")
     const mod = archive.extract(src, destination)
@@ -810,14 +1014,14 @@ describe("archive.extract — check", () => {
     const alternateMarker = `/var/lib/paratix/flags/archive-${alternateMarkerHash}.sha256`
     const mockSsh = createMockSsh({
       [`test -d '${alternateDestination}'`]: { code: 0 },
-      [`test -f '${alternateMarker}'`]: { code: 1 },
+      [markerCheckCommand(alternateMarker, alternateDestination)]: { code: 1 },
     })
 
     const mod = archive.extract(src, alternateDestination)
     const result = await mod.check(mockSsh, emptyEnv)
 
     expect(result).toBe("needs-apply")
-    expect(mockSsh.calls).not.toContain(`test -f '${marker}'`)
+    expect(mockSsh.calls).not.toContain(markerCheckCommand(marker))
   })
 
   it("R-0000276: returns needs-apply when marker cat fails with a non-missing error", async () => {
@@ -829,8 +1033,8 @@ describe("archive.extract — check", () => {
       [`cat '${marker}'`]: { code: 1, stderr: `cat: '${marker}': Permission denied` },
       [`cat '${membersMarker}'`]: validMembersMarkerResponse(),
       [`test -d '${destination}'`]: { code: 0 },
-      [`test -f '${marker}'`]: { code: 0 },
       [extractedFileTypeProbe]: memberTypeMatchResponse,
+      [markerCheckCommand(marker)]: { code: 0 },
     })
     const mod = archive.extract(src, destination)
     const result = await mod.check(mockSsh, emptyEnv)
@@ -846,8 +1050,8 @@ describe("archive.extract — check", () => {
       [`cat '${marker}'`]: { code: 1, stderr: `cat: '${marker}': No such file or directory` },
       [`cat '${membersMarker}'`]: validMembersMarkerResponse(),
       [`test -d '${destination}'`]: { code: 0 },
-      [`test -f '${marker}'`]: { code: 0 },
       [extractedFileTypeProbe]: memberTypeMatchResponse,
+      [markerCheckCommand(marker)]: { code: 0 },
     })
     const mod = archive.extract(src, destination)
     const result = await mod.check(mockSsh, emptyEnv)
@@ -868,8 +1072,8 @@ describe("archive.extract — check", () => {
         stderr: `cat: '${ownerPathsMarker}': Permission denied`,
       },
       [`test -d '${destination}'`]: { code: 0 },
-      [`test -f '${marker}'`]: { code: 0 },
       [extractedFileTypeProbe]: memberTypeMatchResponse,
+      [markerCheckCommand(marker)]: { code: 0 },
     })
     const mod = archive.extract(src, destination, { owner: "www-data:www-data" })
     const result = await mod.check(mockSsh, emptyEnv)
@@ -895,7 +1099,7 @@ describe("archive.extract — check", () => {
       },
       [`cat '${localMarker}'`]: { code: 0, stdout: localFileHash },
       [`test -d '${destination}'`]: { code: 0 },
-      [`test -f '${localMarker}'`]: { code: 0 },
+      [markerCheckCommand(localMarker)]: { code: 0 },
     })
 
     const fileHelpers = await import("../../src/modules/fileHelpers.js")
@@ -929,7 +1133,7 @@ describe("archive.extract — check", () => {
         stdout: JSON.stringify([`${destination}/app/file`]),
       },
       [`test -d '${destination}'`]: { code: 0 },
-      [`test -f '${localMarker}'`]: { code: 0 },
+      [markerCheckCommand(localMarker)]: { code: 0 },
       [ownershipProbeCommand("www-data:www-data")]: ownershipReport(
         `${destination}/app/file`,
         "www-data www-data 33 33"
@@ -964,8 +1168,8 @@ describe("archive.extract — check", () => {
         stdout: JSON.stringify([`${destination}/app/file`]),
       },
       [`test -d '${destination}'`]: { code: 0 },
-      [`test -f '${localMarker}'`]: { code: 0 },
       [extractedFileTypeProbe]: memberTypeMatchResponse,
+      [markerCheckCommand(localMarker)]: { code: 0 },
       [ownershipProbeCommand("www-data:www-data")]: ownershipReport(
         `${destination}/app/file`,
         "root root 0 0"
@@ -1282,7 +1486,7 @@ describe("archive.extract — apply", () => {
     // what makes the assertion worth having.
     const runWith = async (
       memberCount: number
-    ): Promise<{ containmentProbes: number; symlinkProbes: number }> => {
+    ): Promise<{ containmentProbes: number; listingProbes: number; symlinkProbes: number }> => {
       const memberPaths = Array.from(
         { length: memberCount },
         (_value, index) => `app/file-${String(index)}`
@@ -1302,6 +1506,7 @@ describe("archive.extract — apply", () => {
         mockSsh.calls.filter((command) => command === probe).length
       return {
         containmentProbes: count(symlinkContainmentProbeCommand),
+        listingProbes: count(symlinkListingProbeCommand),
         symlinkProbes: count(symlinkProbeCommand),
       }
     }
@@ -1315,6 +1520,9 @@ describe("archive.extract — apply", () => {
     // exec, so it adds exactly one round trip regardless of member count.
     expect(few.containmentProbes).toBe(1)
     expect(many.containmentProbes).toBe(1)
+    // Issue #219: the pre-merge listing of host symlinks is one exec as well.
+    expect(few.listingProbes).toBe(1)
+    expect(many.listingProbes).toBe(1)
   })
 
   it("R-0000267: returns failed when chown of an extracted member fails", async () => {
@@ -2317,9 +2525,10 @@ describe("archive.extract — apply", () => {
       // Issue #219: the reverse order of the case above. Run 1 ships
       // `a/esc -> up/..`, which resolves to `a` while `a/up` does not exist.
       // Run 2 ships `a/up -> ..`, which on its own resolves to the destination
-      // root. Neither archive is unsafe, and the pre-merge probes of run 2 never
-      // look at `a/esc` — only the post-merge check over the whole tree sees
-      // that `a/esc` now resolves via `a/up/..` to the parent of `/opt/app`.
+      // root. Neither archive is unsafe, and the pre-staging probe of run 2
+      // never looks at `a/esc`. The pre-merge listing of the host's links does:
+      // resolved together with run 2's links, `a/esc` goes via `a/up/..` to the
+      // parent of `/opt/app`, so run 2 is refused before anything is copied.
       const hostLinks: HostLinkTree = new Map()
       const owner = "www-data:www-data"
       const escapingLink = `${destination}/a/esc`
@@ -2352,23 +2561,284 @@ describe("archive.extract — apply", () => {
 
       expect(extractionSummary(second)).toStrictEqual({
         error: expect.stringContaining(
-          `[archive.extract] refusing to complete extraction of ${src}: symlink ${JSON.stringify(escapingLink)} resolves to "/opt", outside destination ${JSON.stringify(destination)}; every symlink under the destination is checked after the merge, including links this archive did not ship`
+          `[archive.extract] refusing to extract ${src}: symlink ${JSON.stringify(escapingLink)} -> "up/.." would resolve outside destination ${JSON.stringify(destination)} once this archive is merged`
         ),
-        markerWritten: false,
+        // The only write is the containment-failure flag, not a marker.
+        markerWritten: true,
         status: "failed",
-        tarExtractCalls: [stagedTarExtractCommand],
+        tarExtractCalls: [],
       })
       expect(preStagingProbeEntries(second)).not.toContain(escapingLink)
       const secondCalls = second.mockSsh.calls
-      const secondMerge = secondCalls.findIndex((command) => archiveStageMovePattern.test(command))
-      expect(secondMerge).toBeGreaterThanOrEqual(0)
-      expect(secondCalls.indexOf(symlinkContainmentProbeCommand)).toBeGreaterThan(secondMerge)
+      expect(secondCalls).toContain(symlinkListingProbeCommand)
+      expect(secondCalls.some((command) => archiveStageMktempPattern.test(command))).toBe(false)
+      expect(secondCalls.some((command) => archiveStageMovePattern.test(command))).toBe(false)
+      expect(secondCalls).not.toContain(symlinkContainmentProbeCommand)
       expect(secondCalls).not.toContain(batchedChownCommand)
-      expect(second.writes).toStrictEqual([])
-      expect([...hostLinks]).toStrictEqual([
-        [escapingLink, "up/.."],
+      expect(second.writes.map(({ remotePath }) => remotePath)).toStrictEqual([containmentFlag])
+      const flagDirectory = secondCalls.indexOf("mkdir -p '/var/lib/paratix/flags'")
+      expect(flagDirectory).toBeGreaterThan(secondCalls.indexOf(symlinkListingProbeCommand))
+      expect(second.writes[0]?.callIndex).toBeGreaterThan(flagDirectory)
+      // Nothing of run 2 reached the destination.
+      expect([...hostLinks]).toStrictEqual([[escapingLink, "up/.."]])
+    })
+
+    it("refuses the reverse order before the merge as well (a/up -> .., then a/esc -> up/..)", async () => {
+      // Issue #219: run 1 ships `a/up -> ..`, contained on its own. Run 2 ships
+      // `a/esc -> up/..`, whose target passes the non-member prefix `a/up`. The
+      // pre-staging probe already reports that host symlink, so run 2 stops
+      // before the listing probe and the merge. The host tree is untouched and
+      // still contained, so no containment-failure flag is recorded and run 1's
+      // marker keeps describing the destination.
+      const hostLinks: HostLinkTree = new Map()
+      const files = new Map<string, string>()
+      const owner = "www-data:www-data"
+      const upLink = `${destination}/a/up`
+
+      const first = await applyTarListing([tarDirectoryLine("a/"), tarSymlinkLine("a/up", "..")], {
+        files,
+        hostLinks,
+        owner,
+      })
+      expect(extractionSummary(first)).toStrictEqual(extractedThroughStaging)
+
+      const second = await applyTarListing(
+        [tarDirectoryLine("a/"), tarSymlinkLine("a/esc", "up/..")],
+        { files, hostLinks, owner, source: otherSrc }
+      )
+
+      expect(extractionSummary(second)).toStrictEqual({
+        error: expect.stringContaining(
+          `[archive.extract] refusing to extract ${otherSrc}: link target of member "a/esc" passes through existing host symlink ${JSON.stringify(upLink)}`
+        ),
+        markerWritten: false,
+        status: "failed",
+        tarExtractCalls: [],
+      })
+      expect(preStagingProbeEntries(second)).toContain(upLink)
+      const secondCalls = second.mockSsh.calls
+      expect(secondCalls.some((command) => archiveStageMktempPattern.test(command))).toBe(false)
+      expect(secondCalls.some((command) => archiveStageMovePattern.test(command))).toBe(false)
+      expect(secondCalls).not.toContain(symlinkContainmentProbeCommand)
+      expect(secondCalls).not.toContain(batchedChownCommand)
+      expect([...hostLinks]).toStrictEqual([[upLink, ".."]])
+      expect(files.has(containmentFlag)).toBe(false)
+      await expect(checkAgainstHostFiles(src, files)).resolves.toMatchObject({ result: "ok" })
+    })
+
+    it("accepts an archive symlink that replaces a host link and makes the combination safe", async () => {
+      // Issue #219: on their own the host links `a/up -> ..` and
+      // `a/esc -> up/..` escape. This archive ships `a/up -> b`, which the merge
+      // puts in place of the host link (`--remove-destination`), so after the
+      // merge `a/esc` resolves via `a/b/..` to `a`. The pre-merge check models
+      // that replacement and does not refuse.
+      const hostLinks: HostLinkTree = new Map([
+        [`${destination}/a/esc`, "up/.."],
         [`${destination}/a/up`, ".."],
       ])
+
+      const run = await applyTarListing(
+        [tarDirectoryLine("a/"), tarDirectoryLine("a/b/"), tarSymlinkLine("a/up", "b")],
+        { hostLinks }
+      )
+
+      expect(extractionSummary(run)).toStrictEqual(extractedThroughStaging)
+      expect(run.mockSsh.calls).toContain(symlinkListingProbeCommand)
+      expect(run.writes.map(({ remotePath }) => remotePath)).not.toContain(containmentFlag)
+      expect(run.mockSsh.calls).toContain(`rm -f -- '${containmentFlag}'`)
+      expect(Object.fromEntries(hostLinks)).toStrictEqual({
+        [`${destination}/a/esc`]: "up/..",
+        [`${destination}/a/up`]: "b",
+      })
+    })
+
+    it("refuses a regular file member at the path of a host link before any merge", async () => {
+      // Issue #219: a non-symlink member would remove the host link `a/up`
+      // (`mergedArchiveSymlinks`), but the member path itself is a guard path,
+      // so the pre-staging probe refuses the existing host symlink first. No
+      // listing probe, no staging and no flag: nothing reached the host.
+      const upLink = `${destination}/a/up`
+      const hostLinks: HostLinkTree = new Map([
+        [`${destination}/a/esc`, "up/.."],
+        [upLink, ".."],
+      ])
+
+      const run = await applyTarListing([tarDirectoryLine("a/"), tarFileLine("a/up")], {
+        hostLinks,
+      })
+
+      expect(extractionSummary(run)).toStrictEqual(
+        refusedBeforeExtraction(`destination path ${JSON.stringify(upLink)} is a symlink`)
+      )
+      expect(preStagingProbeEntries(run)).toContain(upLink)
+      expect(run.mockSsh.calls).not.toContain(symlinkListingProbeCommand)
+      expect(run.mockSsh.calls.some((command) => archiveStageMktempPattern.test(command))).toBe(
+        false
+      )
+      expect(run.writes).toStrictEqual([])
+    })
+
+    it.each([
+      { link: "abs-inside", target: `${destination}/b` },
+      { link: "abs-root", target: destination },
+      { link: "abs-root-slash", target: `${destination}/` },
+      { link: "a/abs-sibling-dir", target: `${destination}/a/../c` },
+    ])(
+      "accepts a host link whose absolute target $target stays inside the destination",
+      async ({ link, target }) => {
+        const hostLinks: HostLinkTree = new Map([[`${destination}/${link}`, target]])
+
+        const run = await applyTarListing([tarFileLine("f")], { hostLinks })
+
+        expect(extractionSummary(run)).toStrictEqual(extractedThroughStaging)
+      }
+    )
+
+    it.each([
+      { link: "etc", target: "/etc" },
+      { link: "a/up", target: `${destination}/..` },
+      { link: "a/deep-up", target: `${destination}/a/../..` },
+      { link: "sibling", target: `${alternateDestination}/x` },
+    ])(
+      "refuses a host link whose absolute target $target leaves the destination before the merge",
+      async ({ link, target }) => {
+        const linkPath = `${destination}/${link}`
+        const hostLinks: HostLinkTree = new Map([[linkPath, target]])
+
+        const run = await applyTarListing([tarFileLine("f")], { hostLinks })
+
+        expect(extractionSummary(run)).toStrictEqual({
+          error: expect.stringContaining(
+            `[archive.extract] refusing to extract ${src}: symlink ${JSON.stringify(linkPath)} -> ${JSON.stringify(target)} would resolve outside destination ${JSON.stringify(destination)} once this archive is merged`
+          ),
+          markerWritten: true,
+          status: "failed",
+          tarExtractCalls: [],
+        })
+        expect(run.writes.map(({ remotePath }) => remotePath)).toStrictEqual([containmentFlag])
+        expect(run.mockSsh.calls.some((command) => archiveStageMovePattern.test(command))).toBe(
+          false
+        )
+      }
+    )
+
+    it("refuses a host link cycle before the merge with the resolution-limit reason", async () => {
+      const hostLinks: HostLinkTree = new Map([
+        [`${destination}/loop-a`, "loop-b"],
+        [`${destination}/loop-b`, "loop-a"],
+      ])
+
+      const run = await applyTarListing([tarFileLine("f")], { hostLinks })
+
+      expect(extractionSummary(run)).toStrictEqual({
+        error: expect.stringContaining(
+          `[archive.extract] refusing to extract ${src}: symlink "/opt/app/loop-a" -> "loop-b" would exceed the symlink resolution limit once this archive is merged; existing symlinks under the destination are checked together with the archive's links before anything is copied (and 1 more)`
+        ),
+        markerWritten: true,
+        status: "failed",
+        tarExtractCalls: [],
+      })
+      expect(run.writes.map(({ remotePath }) => remotePath)).toStrictEqual([containmentFlag])
+    })
+
+    it.each([
+      {
+        detail: "find: '/opt/app/private': Permission denied",
+        name: "a non-zero exit",
+        response: { code: 1, stderr: "find: '/opt/app/private': Permission denied" },
+      },
+      {
+        detail: `probe output exceeded the captured-output cap of ${String(ARCHIVE_CAPTURE_LIMIT_BYTES)} bytes; refusing to evaluate a truncated result`,
+        name: "a truncated capture",
+        response: {
+          code: 0,
+          stdout: `${destination}/a/up\u0000..\u0000${destination}/a/e${CAPTURE_TRUNCATION_MARKER}`,
+        },
+      },
+      {
+        detail: "probe returned 3 fields, expected (link, target) pairs",
+        name: "an odd field count",
+        response: { code: 0, stdout: `${destination}/a/up\u0000..\u0000${destination}/b\u0000` },
+      },
+      {
+        detail: 'probe reported "/opt/other/l", which is not below the destination',
+        name: "a link outside the destination",
+        response: { code: 0, stdout: "/opt/other/l\u0000x\u0000" },
+      },
+      {
+        detail: `probe reported "/opt/app-alt/l", which is not below the destination`,
+        name: "a link in a sibling sharing the destination's prefix",
+        response: { code: 0, stdout: `${alternateDestination}/l\u0000x\u0000` },
+      },
+      {
+        detail: 'probe reported "/opt/app/", which is not below the destination',
+        name: "the destination itself",
+        response: { code: 0, stdout: `${destination}/\u0000x\u0000` },
+      },
+    ])(
+      "fails closed before the merge on a listing probe with $name",
+      async ({ detail, response }) => {
+        const run = await applyTarListing([tarFileLine("f")], {
+          responses: { [symlinkListingProbeCommand]: response },
+        })
+
+        expect(extractionSummary(run)).toStrictEqual({
+          error: `Error: [archive.extract] refusing to extract ${src}: symlink listing before the merge failed: ${detail}`,
+          markerWritten: true,
+          status: "failed",
+          tarExtractCalls: [],
+        })
+        expect(run.writes.map(({ remotePath }) => remotePath)).toStrictEqual([containmentFlag])
+        expect(run.mockSsh.calls.some((command) => archiveStageMktempPattern.test(command))).toBe(
+          false
+        )
+        expect(run.mockSsh.execCalls).toContainEqual({
+          command: symlinkListingProbeCommand,
+          options: {
+            ignoreExitCode: true,
+            input: `${destination}\u0000`,
+            maxOutputBytes: ARCHIVE_CAPTURE_LIMIT_BYTES,
+            silent: true,
+          },
+        })
+      }
+    )
+
+    it("still refuses via the post-merge backstop when a host link appears after the listing", async () => {
+      // Issue #219: the pre-merge listing sees no link, so `a/up -> ..` passes.
+      // While the merge runs, the host gains `a/esc -> up/..`; only the
+      // whole-tree check after the merge can see that combination.
+      const hostLinks: HostLinkTree = new Map()
+      const files = new Map<string, string>()
+      const escapingLink = `${destination}/a/esc`
+
+      const run = await applyTarListing([tarDirectoryLine("a/"), tarSymlinkLine("a/up", "..")], {
+        files,
+        hostLinks,
+        injectedOnMerge: [[escapingLink, "up/.."]],
+        owner: "www-data:www-data",
+      })
+
+      expect(extractionSummary(run)).toStrictEqual({
+        error: expect.stringContaining(
+          `[archive.extract] refusing to complete extraction of ${src}: symlink ${JSON.stringify(escapingLink)} resolves to "/opt", outside destination ${JSON.stringify(destination)}`
+        ),
+        markerWritten: true,
+        status: "failed",
+        tarExtractCalls: [stagedTarExtractCommand],
+      })
+      const { calls } = run.mockSsh
+      const listing = calls.indexOf(symlinkListingProbeCommand)
+      const merge = calls.findIndex((command) => archiveStageMovePattern.test(command))
+      const containment = calls.indexOf(symlinkContainmentProbeCommand)
+      expect(listing).toBeGreaterThanOrEqual(0)
+      expect(merge).toBeGreaterThan(listing)
+      expect(containment).toBeGreaterThan(merge)
+      expect(calls).not.toContain(batchedChownCommand)
+      expect(calls).not.toContain(`rm -f -- '${containmentFlag}'`)
+      expect(run.writes.map(({ remotePath }) => remotePath)).toStrictEqual([containmentFlag])
+      expect(run.writes[0]?.callIndex).toBeGreaterThan(containment)
+      expect([...files.keys()]).toStrictEqual([containmentFlag])
     })
 
     it("keeps archive symlink leaves out of the pre-staging probe and the merge guard paths", async () => {
@@ -3048,7 +3518,7 @@ describe("archive.extract — apply", () => {
       },
       [`tar -tvzf '${src}'`]: { code: 0, stdout: driftedTarListing },
       [`test -d '${destination}'`]: { code: 0 },
-      [`test -f '${marker}'`]: { code: 0 },
+      [markerCheckCommand(marker)]: { code: 0 },
       [ownershipProbeCommand("www-data:www-data")]: ownershipReport(
         `${destination}/app/file`,
         "www-data www-data 33 33"
@@ -3077,8 +3547,8 @@ describe("archive.extract — apply", () => {
       [`cat '${membersMarker}'`]: validMembersMarkerResponse(),
       [`cat '${ownerPathsMarker}'`]: { code: 0, stdout: testCase.ownerPaths },
       [`test -d '${destination}'`]: { code: 0 },
-      [`test -f '${marker}'`]: { code: 0 },
       [extractedFileTypeProbe]: memberTypeMatchResponse,
+      [markerCheckCommand(marker)]: { code: 0 },
     })
 
     const result = await archive
@@ -3106,7 +3576,7 @@ describe("archive.extract — apply", () => {
       },
       [`tar -tvzf '${src}'`]: { code: 0, stdout: safeTarListing },
       [`test -d '${destination}'`]: { code: 0 },
-      [`test -f '${marker}'`]: { code: 0 },
+      [markerCheckCommand(marker)]: { code: 0 },
       [ownershipProbeCommand("www-data:www-data")]: ownershipReport(
         `${destination}/app/file`,
         "www-data www-data 33 33"
@@ -3137,7 +3607,7 @@ describe("archive.extract — apply", () => {
         stdout: JSON.stringify([`${destination}/app/file`]),
       },
       [`test -d '${destination}'`]: { code: 0 },
-      [`test -f '${marker}'`]: { code: 0 },
+      [markerCheckCommand(marker)]: { code: 0 },
       // No passwd or group entry for 65532, so GNU coreutils answers UNKNOWN
       // for the name columns; only the numeric columns can match.
       [ownershipProbeCommand("65532:65532")]: ownershipReport(
@@ -3168,7 +3638,7 @@ describe("archive.extract — apply", () => {
         stdout: JSON.stringify([`${destination}/app/file`]),
       },
       [`test -d '${destination}'`]: { code: 0 },
-      [`test -f '${marker}'`]: { code: 0 },
+      [markerCheckCommand(marker)]: { code: 0 },
       [ownershipProbeCommand("065532:065532")]: ownershipReport(
         `${destination}/app/file`,
         "UNKNOWN UNKNOWN 65532 65532"
@@ -3196,7 +3666,7 @@ describe("archive.extract — apply", () => {
         stdout: JSON.stringify([`${destination}/app/file`]),
       },
       [`test -d '${destination}'`]: { code: 0 },
-      [`test -f '${marker}'`]: { code: 0 },
+      [markerCheckCommand(marker)]: { code: 0 },
       [ownershipProbeCommand("65532:65532")]: ownershipReport(
         `${destination}/app/file`,
         "root root 0 0"
@@ -3232,6 +3702,154 @@ describe("archive.extract — apply", () => {
     )
     expect(mockSsh.calls).not.toContain(
       `tar --no-same-owner --no-overwrite-dir -xzf '${src}' -C '${archiveStageDirectory}'`
+    )
+  })
+})
+
+describe("archive.extract containment-failure flag (Issue #219)", () => {
+  const escapingHostLinks = (): HostLinkTree => new Map([[`${destination}/etc`, "/etc"]])
+  const etcRefusal = `[archive.extract] refusing to extract ${src}: symlink "/opt/app/etc" -> "/etc" would resolve outside destination "/opt/app" once this archive is merged; existing symlinks under the destination are checked together with the archive's links before anything is copied`
+
+  it("makes check of an earlier source report needs-apply after a later source was refused, until an apply succeeds", async () => {
+    // Source A ships `a/esc -> up/..` and succeeds. Source B ships `a/up -> ..`,
+    // which would make A's link escape, and is refused before the merge. A's
+    // marker still matches A's archive, so only the destination-keyed flag
+    // keeps `check(A)` from reporting ok after that rollback.
+    const hostLinks: HostLinkTree = new Map()
+    const files = new Map<string, string>()
+    const markerA = markerFor(src)
+    const markerB = markerFor(otherSrc)
+
+    const applyA = await applyTarListing(
+      [tarDirectoryLine("a/"), tarSymlinkLine("a/esc", "up/..")],
+      { files, hostLinks }
+    )
+    expect(extractionSummary(applyA)).toStrictEqual(extractedThroughStaging)
+    expect(markerA).toBe(marker)
+    expect(files.get(markerA)).toBe(archiveSha)
+    await expect(checkAgainstHostFiles(src, files)).resolves.toMatchObject({ result: "ok" })
+
+    const applyB = await applyTarListing([tarDirectoryLine("a/"), tarSymlinkLine("a/up", "..")], {
+      files,
+      hostLinks,
+      source: otherSrc,
+    })
+    expect(applyB.result.status).toBe("failed")
+    expect(applyB.writes.map(({ remotePath }) => remotePath)).toStrictEqual([containmentFlag])
+    expect(files.get(markerA)).toBe(archiveSha)
+    expect(files.has(markerB)).toBe(false)
+    expect(files.has(containmentFlag)).toBe(true)
+
+    const checkAfterRefusal = await checkAgainstHostFiles(src, files)
+    expect(checkAfterRefusal.result).toBe("needs-apply")
+    // The marker content is never read: the combined test already failed.
+    expect(checkAfterRefusal.calls).toContain(markerCheckCommand(markerA))
+    expect(checkAfterRefusal.calls).not.toContain(`cat '${markerA}'`)
+    await expect(checkAgainstHostFiles(otherSrc, files)).resolves.toMatchObject({
+      result: "needs-apply",
+    })
+
+    const reapplyA = await applyTarListing(
+      [tarDirectoryLine("a/"), tarSymlinkLine("a/esc", "up/..")],
+      { files, hostLinks }
+    )
+    expect(extractionSummary(reapplyA)).toStrictEqual(extractedThroughStaging)
+    const flagRemoval = reapplyA.mockSsh.calls.indexOf(`rm -f -- '${containmentFlag}'`)
+    const markerWrites = reapplyA.writes.filter(({ remotePath }) => remotePath.startsWith(markerA))
+    expect(markerWrites.map(({ remotePath }) => remotePath)).toStrictEqual([markerA, membersMarker])
+    for (const write of markerWrites) expect(flagRemoval).toBeGreaterThanOrEqual(write.callIndex)
+    expect(files.has(containmentFlag)).toBe(false)
+
+    await expect(checkAgainstHostFiles(src, files)).resolves.toMatchObject({ result: "ok" })
+  })
+
+  it("leaves an existing flag in place when the apply is refused again", async () => {
+    const files = new Map<string, string>([[containmentFlag, "stale"]])
+    const hostLinks = escapingHostLinks()
+
+    const run = await applyTarListing([tarFileLine("f")], { files, hostLinks })
+
+    expect(run.result.status).toBe("failed")
+    expect(run.mockSsh.calls).not.toContain(`rm -f -- '${containmentFlag}'`)
+    expect(files.has(containmentFlag)).toBe(true)
+  })
+
+  it("writes the flag with the marker mode after creating the flags directory", async () => {
+    const run = await applyTarListing([tarFileLine("f")], { hostLinks: escapingHostLinks() })
+
+    expect(run.result.error?.message).toBe(etcRefusal)
+    expect(run.mockSsh.writeFileCalls).toStrictEqual([])
+    const writeSpy = vi.mocked(run.mockSsh.writeFile)
+    expect(writeSpy.mock.calls).toStrictEqual([
+      [containmentFlag, expect.any(String), { mode: "0644" }],
+    ])
+    const flagDirectory = run.mockSsh.calls.indexOf("mkdir -p '/var/lib/paratix/flags'")
+    expect(flagDirectory).toBeGreaterThan(run.mockSsh.calls.indexOf(symlinkListingProbeCommand))
+    expect(run.writes[0]?.callIndex).toBeGreaterThan(flagDirectory)
+  })
+
+  it("fails a fully extracted apply when the flag cannot be removed", async () => {
+    const run = await applyTarListing([tarFileLine("f")], {
+      responses: {
+        [`rm -f -- '${containmentFlag}'`]: {
+          code: 1,
+          stderr: `rm: cannot remove '${containmentFlag}': Read-only file system`,
+        },
+      },
+    })
+
+    expect(run.result.status).toBe("failed")
+    expect(run.result.error?.message).toBe(
+      `[archive.extract] failed to remove containment-failure flag ${containmentFlag} (exit code 1)\nrm: cannot remove '${containmentFlag}': Read-only file system`
+    )
+    // The removal is the last step: every marker was already written.
+    const flagRemoval = run.mockSsh.calls.indexOf(`rm -f -- '${containmentFlag}'`)
+    expect(run.writes.map(({ remotePath }) => remotePath)).toStrictEqual([marker, membersMarker])
+    for (const write of run.writes) expect(flagRemoval).toBeGreaterThanOrEqual(write.callIndex)
+  })
+
+  it("keeps the containment refusal and appends the reason when the flag write fails", async () => {
+    const run = await applyTarListing([tarFileLine("f")], {
+      failWrite: containmentFlag,
+      hostLinks: escapingHostLinks(),
+    })
+
+    expect(run.result.status).toBe("failed")
+    expect(run.result.error?.message).toBe(
+      `${etcRefusal}; additionally failed to write containment-failure flag ${containmentFlag}: No space left on device`
+    )
+  })
+
+  it("keeps the containment refusal and appends the reason when the flags directory cannot be created", async () => {
+    const run = await applyTarListing([tarFileLine("f")], {
+      hostLinks: escapingHostLinks(),
+      responses: {
+        "mkdir -p '/var/lib/paratix/flags'": {
+          code: 1,
+          stderr: "mkdir: cannot create directory '/var/lib/paratix': Read-only file system",
+        },
+      },
+    })
+
+    expect(run.result.status).toBe("failed")
+    expect(run.result.error?.message).toBe(
+      `${etcRefusal}; additionally failed to create archive marker directory for containment-failure flag ${containmentFlag}: mkdir: cannot create directory '/var/lib/paratix': Read-only file system`
+    )
+    expect(run.writes).toStrictEqual([])
+  })
+
+  it("keeps the backstop refusal and appends the reason when the flag write fails", async () => {
+    const escapingLink = `${destination}/a/esc`
+
+    const run = await applyTarListing([tarDirectoryLine("a/"), tarSymlinkLine("a/up", "..")], {
+      failWrite: containmentFlag,
+      hostLinks: new Map(),
+      injectedOnMerge: [[escapingLink, "up/.."]],
+    })
+
+    expect(run.result.status).toBe("failed")
+    expect(run.result.error?.message).toBe(
+      `[archive.extract] refusing to complete extraction of ${src}: symlink ${JSON.stringify(escapingLink)} resolves to "/opt", outside destination ${JSON.stringify(destination)}; every symlink under the destination is checked after the merge, including links this archive did not ship; additionally failed to write containment-failure flag ${containmentFlag}: No space left on device`
     )
   })
 })

@@ -4,10 +4,22 @@ import type { ModuleResult, SshConnection } from "../types.js"
 
 import { failed, failedCommand } from "../moduleFailure.js"
 import { shellQuote } from "../ssh.js"
-import { archiveSymlinkTargetPrefixes } from "./archiveLinkValidation.js"
-import { type ArchiveMember, normalizeArchiveMemberPath } from "./archiveMemberValidation.js"
+import {
+  archiveSymlinkTargetPrefixes,
+  mergedArchiveSymlinks,
+  type MergedSymlink,
+  type MergedSymlinkViolation,
+  mergedSymlinkViolations,
+  type SymlinkWalkTarget,
+} from "./archiveLinkValidation.js"
+import {
+  ARCHIVE_CAPTURE_LIMIT_BYTES,
+  type ArchiveMember,
+  normalizeArchiveMemberPath,
+} from "./archiveMemberValidation.js"
 import {
   buildSymlinkContainmentProbeScript,
+  buildSymlinkListingProbeScript,
   buildSymlinkProbeScript,
   runBatchedProbe,
 } from "./archiveProbe.js"
@@ -213,15 +225,159 @@ export async function validateNoSymlinkPaths(
 }
 
 /**
+ * Classify a raw host symlink target for the resolver.
+ *
+ * A relative target is walked from the link's parent. An absolute target equal
+ * to or below the canonical destination restarts at the destination root; any
+ * other absolute target counts as escaping, consistent with the post-merge
+ * check's fail-closed stance on pre-existing links that point outside. The
+ * prefix comparison is literal, so an absolute target that reaches the
+ * destination through a non-canonical spelling is judged conservatively as
+ * outside.
+ *
+ * @param destination - The validated, canonical destination directory.
+ * @param target - The target exactly as `readlink` reported it.
+ * @returns How the resolver walks the target: from the link's parent, from the
+ *   destination root, or not at all because it lies outside.
+ */
+function hostSymlinkWalkTarget(destination: string, target: string): SymlinkWalkTarget {
+  if (!target.startsWith("/")) return { anchor: "parent", path: target }
+  if (target === destination) return { anchor: "root", path: "" }
+  if (target.startsWith(`${destination}/`)) {
+    return { anchor: "root", path: target.slice(destination.length + 1) }
+  }
+  return { anchor: "outside" }
+}
+
+/**
+ * Turn the `(link, target)` pairs of the listing probe into host links keyed
+ * by destination-relative path, or explain why the output cannot be trusted.
+ *
+ * @param destination - The validated, canonical destination directory.
+ * @param fields - The decoded probe fields.
+ * @returns The host links, or a reason the framing is broken.
+ */
+function hostSymlinksFromListing(
+  destination: string,
+  fields: readonly string[]
+): Map<string, MergedSymlink> | string {
+  // An odd field count means the pair framing broke somewhere; pairing the
+  // rest anyway could attach a target to the wrong link.
+  if (fields.length % 2 !== 0) {
+    return `probe returned ${String(fields.length)} fields, expected (link, target) pairs`
+  }
+  const prefix = `${destination}/`
+  const links = new Map<string, MergedSymlink>()
+  for (let index = 0; index < fields.length; index += 2) {
+    const link = fields[index]
+    const stored = fields[index + 1]
+    if (!link.startsWith(prefix) || link.length === prefix.length) {
+      return `probe reported ${JSON.stringify(link)}, which is not below the destination`
+    }
+    links.set(link.slice(prefix.length), {
+      stored,
+      target: hostSymlinkWalkTarget(destination, stored),
+    })
+  }
+  return links
+}
+
+/**
+ * Refuse an extraction before the staging merge when the links already under
+ * the destination and the links this archive ships would, together, resolve
+ * outside the destination.
+ *
+ * Issue #219: whether a relative link stays inside depends on the links its
+ * target passes through, and those can come from an earlier run. Run 1 may
+ * ship `a/esc -> up/..` (inside while `a/up` is missing) and run 2
+ * `a/up -> ..` (inside on its own); merged, `a/esc` resolves above the
+ * destination. This check lists every existing symlink with its stored target
+ * in one batched exec ({@link buildSymlinkListingProbeScript}), builds the
+ * combined post-merge link set ({@link mergedArchiveSymlinks}) and resolves
+ * every link of it with the archive resolver. A link that escapes or exceeds
+ * the resolution limit refuses the extraction, so nothing is copied into the
+ * destination. {@link validateSymlinkContainment} stays in place after the
+ * merge as the backstop for host changes that land between this listing and
+ * the merge.
+ *
+ * Host link paths and targets are split on `/` only, so spaces and newlines in
+ * them are handled faithfully. A probe failure (including a `find` traversal
+ * error or an unreadable link), a truncated capture and output that is not
+ * made of `(link, target)` pairs below the destination all fail closed.
+ *
+ * @param conn - The SSH connection.
+ * @param parameters - Check inputs.
+ * @param parameters.destination - The validated, canonical destination directory.
+ * @param parameters.members - The validated archive members.
+ * @param parameters.source - The archive source, for the failure message.
+ * @returns A failure when the merged links would escape or the check could not run, otherwise null.
+ */
+export async function validateMergedSymlinkContainment(
+  conn: SshConnection,
+  parameters: { destination: string; members: readonly ArchiveMember[]; source: string }
+): Promise<ModuleResult | null> {
+  const { destination, members, source } = parameters
+  const prefix = `[archive.extract] refusing to extract ${source}`
+  // The listing grows with the number of links on the host (a `node_modules`
+  // tree has many), not with violations, so it gets the archive capture cap
+  // instead of the 1 MiB default. Truncation still fails closed.
+  const outcome = await runBatchedProbe(conn, {
+    entries: [destination],
+    maxOutputBytes: ARCHIVE_CAPTURE_LIMIT_BYTES,
+    script: buildSymlinkListingProbeScript(),
+  })
+  if (outcome.kind === "failed") {
+    return failed(`${prefix}: symlink listing before the merge failed: ${outcome.detail}`)
+  }
+  const hostLinks = hostSymlinksFromListing(destination, outcome.fields)
+  if (typeof hostLinks === "string") {
+    return failed(`${prefix}: symlink listing before the merge failed: ${hostLinks}`)
+  }
+  const merged = mergedArchiveSymlinks(hostLinks, members)
+  const violations = mergedSymlinkViolations(merged)
+  if (violations.length === 0) return null
+  return failed(`${prefix}: ${mergedSymlinkRefusal({ destination, merged, violations })}`)
+}
+
+/**
+ * Describe the first violation of the combined link set, naming the link by
+ * absolute path with its stored target, plus how many more there are.
+ *
+ * @param parameters - Refusal inputs.
+ * @param parameters.destination - The validated, canonical destination directory.
+ * @param parameters.merged - The combined post-merge link set.
+ * @param parameters.violations - The non-empty violations of `merged`.
+ * @returns The refusal reason without the `[archive.extract]` prefix.
+ */
+function mergedSymlinkRefusal(parameters: {
+  destination: string
+  merged: ReadonlyMap<string, MergedSymlink>
+  violations: readonly MergedSymlinkViolation[]
+}): string {
+  const { destination, merged, violations } = parameters
+  const [{ key, kind }] = violations
+  const linkPath = `${destination}/${key}`
+  const link = `symlink ${JSON.stringify(linkPath)} -> ${JSON.stringify(merged.get(key)?.stored ?? "")}`
+  const violation =
+    kind === "escape"
+      ? `${link} would resolve outside destination ${JSON.stringify(destination)}`
+      : `${link} would exceed the symlink resolution limit`
+  const more = violations.length - 1
+  const suffix = more > 0 ? ` (and ${String(more)} more)` : ""
+  return `${violation} once this archive is merged; existing symlinks under the destination are checked together with the archive's links before anything is copied${suffix}`
+}
+
+/**
  * Refuse to complete an extraction when any symlink below the destination
  * resolves outside it, with one batched probe over the whole tree.
  *
- * Issue #219: the pre-merge probes only see the current archive's link
- * targets, but the merge may replace links an earlier run left behind. This
- * check runs after the merge and covers every symlink under the destination,
- * including links this archive did not ship. A probe failure, an output that
- * is not made of `(link, resolved)` pairs, or a link that could not be
- * resolved all fail closed.
+ * Issue #219: {@link validateMergedSymlinkContainment} already refuses an
+ * escaping combination of host and archive links before the merge. This check
+ * runs after the merge as the backstop: it covers every symlink under the
+ * destination as it actually is, including links this archive did not ship
+ * and links the host changed between the pre-merge listing and the merge. A
+ * probe failure, an output that is not made of `(link, resolved)` pairs, or a
+ * link that could not be resolved all fail closed.
  *
  * @param conn - The SSH connection.
  * @param parameters - Probe inputs.

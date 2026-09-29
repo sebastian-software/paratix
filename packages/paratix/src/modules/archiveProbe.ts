@@ -68,17 +68,21 @@ export type BatchedProbeOutcome =
  * @param conn - The SSH connection.
  * @param parameters - Probe inputs.
  * @param parameters.entries - The NUL-transported entries; an empty list runs nothing.
+ * @param parameters.maxOutputBytes - Optional captured-output cap for probes whose output grows
+ *   with the host tree rather than with violations; the SSH default applies when omitted.
  * @param parameters.script - The remote script to execute.
  * @returns The decoded fields, or a failure with its diagnostic detail.
  */
 export async function runBatchedProbe(
   conn: SshConnection,
-  parameters: { entries: string[]; script: string }
+  parameters: { entries: string[]; maxOutputBytes?: number; script: string }
 ): Promise<BatchedProbeOutcome> {
   if (parameters.entries.length === 0) return { fields: [], kind: "ok" }
+  const { maxOutputBytes } = parameters
   const result = await conn.exec(parameters.script, {
     ...PROBE_EXEC_OPTS,
     input: encodeNulPayload(parameters.entries),
+    ...(maxOutputBytes === undefined ? {} : { maxOutputBytes }),
   })
   if (result.code !== 0) {
     const detail =
@@ -94,7 +98,7 @@ export async function runBatchedProbe(
   // whole transport one rule instead of three accidental ones.
   if (result.stdout.endsWith(CAPTURE_TRUNCATION_MARKER)) {
     return {
-      detail: `probe output exceeded the captured-output cap of ${String(DEFAULT_MAX_OUTPUT_BYTES)} bytes; refusing to evaluate a truncated result`,
+      detail: `probe output exceeded the captured-output cap of ${String(maxOutputBytes ?? DEFAULT_MAX_OUTPUT_BYTES)} bytes; refusing to evaluate a truncated result`,
       kind: "failed",
     }
   }
@@ -172,8 +176,12 @@ const SYMLINK_CONTAINMENT_OUTER_SCRIPT =
  * Issue #219: this checks the whole tree after the merge, including links that
  * earlier runs or the host left there, because a link that was contained when
  * it was written can be redirected by a link a later archive places on its
- * path. It is meant for {@link runBatchedProbe} with the destination as the
- * single entry, so it costs exactly one `exec` regardless of member count.
+ * path. It is the backstop behind the pre-merge check built on
+ * {@link buildSymlinkListingProbeScript}: that check refuses such a combination
+ * before anything is copied, and this one still catches a host change that
+ * lands between the pre-merge listing and the merge. It is meant for
+ * {@link runBatchedProbe} with the destination as the single entry, so it
+ * costs exactly one `exec` regardless of member count.
  *
  * The composed command is `xargs -0 sh -c <outer> sh <inner>`: `xargs` appends
  * the NUL-delimited stdin entries after `<inner>`, so the outer script receives
@@ -188,6 +196,74 @@ const SYMLINK_CONTAINMENT_OUTER_SCRIPT =
  */
 export function buildSymlinkContainmentProbeScript(): string {
   return `xargs -0 sh -c ${shellQuote(SYMLINK_CONTAINMENT_OUTER_SCRIPT)} sh ${shellQuote(SYMLINK_CONTAINMENT_INNER_SCRIPT)}`
+}
+
+/**
+ * Per-batch body of {@link buildSymlinkListingProbeScript}: the arguments are
+ * the symlinks `find` found.
+ *
+ * - Plain `readlink` without `-f` prints the stored target unchanged. It exists
+ *   in GNU coreutils, busybox and the BSDs, and `command -p` looks it up on the
+ *   default system PATH so a hijacked PATH cannot substitute it (R-0000693).
+ * - The `printf x` sentinel keeps a target that ends in newlines intact; only
+ *   the single newline `readlink` itself appends is removed.
+ * - A link whose target cannot be read (it vanished, or `readlink` failed)
+ *   makes the batch exit 1. `find` then exits non-zero, so the listing fails
+ *   closed instead of silently omitting that link.
+ */
+const SYMLINK_LISTING_INNER_SCRIPT = [
+  // `nl` holds one newline; the trailing `x` survives command substitution.
+  "nl=$(printf '\\nx'); ",
+  // `$\{` keeps the shell parameter expansion literal; a bare `${` would be
+  // read as JavaScript interpolation.
+  `nl=$\{nl%x}; `,
+  "for l do ",
+  't=$(command -p readlink -- "$l" && printf x) || exit 1; ',
+  `t=$\{t%x}; t=$\{t%"$nl"}; `,
+  'printf \'%s\\0%s\\0\' "$l" "$t"; done; exit 0',
+].join("")
+
+/**
+ * Outer body of {@link buildSymlinkListingProbeScript}: `$1` is the inner
+ * script, the remaining arguments are the destinations from stdin.
+ *
+ * `find` without `-L` never follows a symlink, so the walk stays inside the
+ * destination tree. A traversal error, or a batch of the inner script that
+ * exited non-zero, makes `find` exit non-zero, which the `|| exit $?` turns
+ * into a failed probe rather than a partial listing read as complete.
+ */
+const SYMLINK_LISTING_OUTER_SCRIPT =
+  'inner=$1; shift; for d do find "$d" -type l -exec sh -c "$inner" sh {} + || exit $?; done; exit 0'
+
+/**
+ * Probe script listing every symlink below a destination together with its
+ * raw stored target.
+ *
+ * Issue #219: the pre-merge containment check needs the links an earlier run
+ * or the host left in the destination, because a link this archive ships can
+ * redirect one of them (or the other way round). With this listing the
+ * combined post-merge link set is resolved before anything is copied, so an
+ * escaping combination is refused instead of being published and detected
+ * only afterwards. It is meant for {@link runBatchedProbe} with the
+ * destination as the single entry, so it costs exactly one `exec` regardless
+ * of member count.
+ *
+ * The composed command is `xargs -0 sh -c <outer> sh <inner>`, built exactly
+ * like {@link buildSymlinkContainmentProbeScript}. Link paths travel as
+ * arguments and results come back NUL-framed, so spaces and newlines in link
+ * names and targets are transported faithfully.
+ *
+ * Failure mode: fail closed. A traversal error, an unreadable link target or
+ * a failing `sh`/`xargs` makes the exec exit non-zero; the caller treats that,
+ * a truncated capture and any output that is not made of `(link, target)`
+ * pairs below the destination as "containment cannot be proven".
+ *
+ * @returns The remote script. Its output is a flat list of `(link, target)`
+ *   field pairs, one pair per symlink, with absolute link paths and the raw
+ *   target exactly as stored. A tree without symlinks produces no output.
+ */
+export function buildSymlinkListingProbeScript(): string {
+  return `xargs -0 sh -c ${shellQuote(SYMLINK_LISTING_OUTER_SCRIPT)} sh ${shellQuote(SYMLINK_LISTING_INNER_SCRIPT)}`
 }
 
 /**

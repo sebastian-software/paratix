@@ -3,11 +3,12 @@ import { describe, expect, it, vi } from "vitest"
 import type { ExecOptions, ExecResult, SshConnection } from "../../src/types.js"
 
 import {
+  buildSymlinkListingProbeScript,
   buildSymlinkProbeScript,
   encodeNulPayload,
   runBatchedProbe,
 } from "../../src/modules/archiveProbe.js"
-import { CAPTURE_TRUNCATION_MARKER } from "../../src/sshHelpers.js"
+import { CAPTURE_TRUNCATION_MARKER, DEFAULT_MAX_OUTPUT_BYTES } from "../../src/sshHelpers.js"
 
 function connectionReturning(result: Partial<ExecResult>): {
   conn: SshConnection
@@ -81,6 +82,45 @@ describe("runBatchedProbe", () => {
       kind: "failed",
     })
   })
+
+  it("passes a captured-output cap to exec only when the caller sets one (Issue #219)", async () => {
+    const { conn, execCalls } = connectionReturning({})
+
+    await runBatchedProbe(conn, { entries: ["/opt/app"], script: buildSymlinkListingProbeScript() })
+    await runBatchedProbe(conn, {
+      entries: ["/opt/app"],
+      maxOutputBytes: 16_777_216,
+      script: buildSymlinkListingProbeScript(),
+    })
+
+    expect(execCalls.map(({ options }) => options)).toStrictEqual([
+      { ignoreExitCode: true, input: "/opt/app\u0000", silent: true },
+      { ignoreExitCode: true, input: "/opt/app\u0000", maxOutputBytes: 16_777_216, silent: true },
+    ])
+  })
+
+  it.each([
+    { cap: DEFAULT_MAX_OUTPUT_BYTES, limit: {} },
+    { cap: 16_777_216, limit: { maxOutputBytes: 16_777_216 } },
+  ])(
+    "names the effective cap of $cap bytes when the output was truncated (Issue #219)",
+    async ({ cap, limit }) => {
+      const { conn } = connectionReturning({
+        stdout: `/opt/app/l\u0000..\u0000${CAPTURE_TRUNCATION_MARKER}`,
+      })
+
+      const outcome = await runBatchedProbe(conn, {
+        entries: ["/opt/app"],
+        ...limit,
+        script: buildSymlinkListingProbeScript(),
+      })
+
+      expect(outcome).toStrictEqual({
+        detail: `probe output exceeded the captured-output cap of ${String(cap)} bytes; refusing to evaluate a truncated result`,
+        kind: "failed",
+      })
+    }
+  )
 
   it("keeps interior empty fields, which the ownership probe emits for an unstattable path", async () => {
     const { conn } = connectionReturning({ stdout: "/opt/gone\u0000\u0000\u0000\u0000\u0000" })
