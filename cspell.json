@@ -226,6 +226,8 @@
     "rpmsave",
     "apfs",
     "casefold",
-    "cifs"
+    "cifs",
+    "unmappable",
+    "venv"
   ]
 }

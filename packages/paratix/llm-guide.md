@@ -198,47 +198,69 @@ export default server({
 `archive.extract` extracts a tar symlink or hardlink only if its target, resolved from the link's
 own directory (hardlinks: from the archive root) and through the archive's own symlinks, stays
 inside `destination`; absolute targets, a link in place of the destination root, members below an
-archive symlink, and zip symlinks are rejected. The archive listing and the host's symlink listings
-are decoded as strict UTF-8, never with replacement characters: a listing with invalid UTF-8, a
-duplicate link path, or U+FFFD in a listed path or target fails closed. A member whose path or link
-target contains a backslash or U+FFFD is rejected, because `tar` prints non-printable bytes (and,
-outside a UTF-8 locale, every non-ASCII byte) as escape sequences, so such names cannot be mapped
-reliably to the extracted names; a UTF-8 locale on the host avoids escaped non-ASCII names. Once the
-archive listing is validated, it writes a per-destination flag before the destination is created or
-validated; an apply that cannot write it stops before the destination is touched. Before anything is
-staged, it then refuses a member whose path or parent directories are existing host symlinks (an
-archive symlink may replace the link at its own path), a file, hardlink or symlink member where the
-host has a real directory, and a directory, including an implied parent directory, where the host
-has a non-directory. Still before copying anything, it resolves the symlinks already under
-`destination` together with the archive's: an archive symlink replaces an existing symlink at the
-same path and existing absolute targets inside `destination` are allowed, while any other type
-combination at a member path, a member below an existing symlink, a link resolving outside
-`destination`, or a link whose target passes through a path that differs from an existing symlink
-(of the archive or already on the host) only by letter case or Unicode normalization (NFC, NFD or
-compatibility forms) refuses the extraction, because a case-insensitive or normalizing filesystem
-may follow that symlink; an existing escaping link must then be removed or pointed inside.
+archive symlink, and zip symlinks are rejected. The archive listing is decoded as strict UTF-8,
+never with replacement characters. A member whose path or link target contains a backslash or
+U+FFFD is rejected, because `tar` prints non-printable bytes (and, outside a UTF-8 locale, every
+non-ASCII byte) as escape sequences, so such names cannot be mapped reliably to the extracted names;
+a UTF-8 locale on the host avoids escaped non-ASCII names. Once the archive listing is validated, it
+writes a per-destination flag before the destination is created or validated; an apply that cannot
+write it stops before the destination is touched. Before anything is staged, it then refuses a
+member whose path or parent directories are existing host symlinks (an archive symlink may replace
+the link at its own path), a file, hardlink or symlink member where the host has a real directory,
+and a directory, including an implied parent directory, where the host has a non-directory. Still
+before copying anything, it resolves the symlinks already under `destination` together with the
+archive's: an archive symlink replaces an existing symlink at the same path and existing absolute
+targets inside `destination` are allowed, while any other type combination at a member path, a
+member below an existing symlink, a link resolving outside `destination`, or a link whose target
+passes through a path that differs from an existing symlink (of the archive or already on the host)
+only by letter case or Unicode normalization (NFC, NFD or compatibility forms) refuses the
+extraction, because a case-insensitive or normalizing filesystem may follow that symlink; an
+existing escaping link must then be removed or pointed inside.
+
+Only the links the archive can affect are judged: the archive's own symlinks and every existing
+symlink whose resolution passes through a path the archive writes (a member path or one of its
+parent directories, compared under the same case and normalization folding), directly or through
+another such link. Any other existing symlink, even one that points outside `destination`, loops or
+has an unusual name (a virtual environment's `bin/python3 -> /usr/bin/python3`, for example), is
+ignored and never changed. An archive without symlinks (every zip archive among them) cannot change
+how any path resolves, so neither this check nor the check after the merge runs a command for it. For
+an archive with symlinks, one command lists every symlink under `destination`, with link paths
+relative to it, up to a captured-output cap of 64 MiB; a destination with more symlinks than that
+fails the check with a message saying it holds too many symlinks to check. The listing sends every
+name outside printable ASCII hex-encoded and decodes it byte for byte: a valid UTF-8 name keeps its
+exact spelling (a literal U+FFFD included), while a judged link whose path or target is not valid
+UTF-8, or that resolves through such a link, cannot be checked and refuses the extraction until it
+is renamed or removed; malformed listing output or a duplicate link path fails closed. With GNU
+`find` on the host, a directory under `destination` that cannot be read or searched is reported
+instead of failing the listing: a judged link that resolves into it, or an archive member at or
+below it, refuses the extraction because it cannot be checked, while the links inside it are not
+judged (a known limit). Without GNU `find` (busybox, the BSDs), any unreadable directory under
+`destination` fails the check.
 
 The host stops the merge with GNU `timeout` after 100 seconds (killing it 10 seconds later), before
 the 120-second command timeout; without `timeout` the merge fails before copying anything. Once the
-merge has started, a check of every symlink under `destination` always runs, also after a failed or
-stopped merge that may have copied entries: it resolves the links like the pre-merge check, without
-asking the host to resolve them, and counts name variants as violations too. It then asks the kernel
-in one batched command (`test -e` and `test -ef`, bounded by the kernel's symlink limit; never
-`realpath` or `readlink -f`) whether each link it judged inside really reaches the resolved path; a
-link the kernel resolves to a different object, or that resolves on one side only (for example a
-target through a missing directory), is a violation, and a cross-check that cannot be completed
-fails the run. A converged tree costs two commands when a symlink under `destination` is judged
-inside and one otherwise, independent of the number of members; a violation adds none. This check
-only reports: it removes, moves or changes nothing. Any violating link (resolving outside, not
-resolvable within the symlink limit such as a loop, a name variant, or a kernel mismatch) fails the
-run with a message that names the first 10 offending links by path, stored target and reason, adds
-`(and N more)` for the rest, and states that nothing was removed or changed. The offending links
-must be removed or pointed inside manually; the flag stays set until an apply then succeeds. On
-failure no extraction marker is written and no `owner` is applied. The flag is removed only after an
-apply succeeds completely, including `owner` and the marker files; a refusal while the destination
-is created or validated, by the checks before staging, by the pre-merge check, by the merge, or by
-the post-merge check leaves it set, and while it exists, `check` reports `needs-apply` for every
-archive extracting into that destination.
+merge has started, a check of the same links (the archive's symlinks and every symlink whose
+resolution passes through a path the archive writes) always runs for an archive with symlinks, also
+after a failed or stopped merge that may have copied entries: it resolves the links like the
+pre-merge check, without asking the host to resolve them, and counts name variants as violations
+too. It then asks the kernel in one batched command (`test -e` and `test -ef`, bounded by the
+kernel's symlink limit; never `realpath` or `readlink -f`) whether each judged link it placed inside
+really reaches the resolved path; a link the kernel resolves to a different object, or that
+resolves on one side only (for example a target through a missing directory), is a violation, and a
+cross-check that cannot be completed fails the run. A converged tree costs two commands when a
+judged symlink is placed inside, one otherwise, and none for an archive without symlinks,
+independent of the number of members; a violation adds none. This check only reports: it removes,
+moves or changes nothing. Any violating link (resolving outside, not resolvable within the symlink
+limit such as a loop, a name variant, a kernel mismatch, or a link that cannot be checked because of
+an unreadable directory or a name that is not valid UTF-8) fails the run with a message that names
+the first 10 offending links by path, stored target and reason, adds `(and N more)` for the rest,
+and states that nothing was removed or changed. The offending links must be removed or pointed
+inside manually; the flag stays set until an apply then succeeds. On failure no extraction marker
+is written and no `owner` is applied. The flag is removed only after an apply succeeds completely,
+including `owner` and the marker files; a refusal while the destination is created or validated, by
+the checks before staging, by the pre-merge check, by the merge, or by the post-merge check leaves
+it set, and while it exists, `check` reports `needs-apply` for every archive extracting into that
+destination.
 
 ### `command`
 

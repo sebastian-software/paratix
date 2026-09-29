@@ -106,6 +106,7 @@ describe("runBatchedProbe", () => {
     expect(outcome).toStrictEqual({
       detail: expect.stringContaining("truncated"),
       kind: "failed",
+      truncated: true,
     })
   })
 
@@ -150,6 +151,7 @@ describe("runBatchedProbe", () => {
       expect(outcome).toStrictEqual({
         detail: `probe output exceeded the captured-output cap of ${String(cap)} bytes; refusing to evaluate a truncated result`,
         kind: "failed",
+        truncated: true,
       })
     }
   )

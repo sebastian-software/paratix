@@ -47,6 +47,7 @@ import {
   preMergeContainmentVerdict,
   symlinkListingEntries,
 } from "../../src/modules/archiveContainmentEnforcement.js"
+import { archiveContainmentScope } from "../../src/modules/archiveContainmentScope.js"
 import {
   archiveMemberGuardPaths,
   destinationPathWithAncestors,
@@ -56,12 +57,18 @@ import {
   buildKernelCrossCheckScript,
   kernelCrossCheckEntry,
 } from "../../src/modules/archiveKernelCrossCheck.js"
+import { mergedSymlinkResolutions } from "../../src/modules/archiveLinkValidation.js"
 import {
   buildPreStagingProbeScript,
   buildSymlinkListingProbeScript,
   encodeNulPayload,
   encodeSymlinkListingEntry,
+  symlinkListingBatchScript,
 } from "../../src/modules/archiveProbe.js"
+import {
+  decodeListingField,
+  hostStateFromListing,
+} from "../../src/modules/archiveSymlinkListing.js"
 import { shellQuote } from "../../src/ssh.js"
 import { localShellConnection } from "../helpers/localShell.js"
 
@@ -176,29 +183,74 @@ function describeTree(root: string, prefix = ""): string[] {
   return lines
 }
 
-type ListingProbeResult = { code: number; pairs: Array<[string, string]>; stderr: string }
+type ListingProbeResult = {
+  code: number
+  /** The `l` records as decoded `(link, target)` pairs, sorted by link. */
+  pairs: Array<[string, string]>
+  stderr: string
+  /** The `u` records, decoded and sorted. */
+  unreadable: string[]
+}
+
+/**
+ * Issue #219: decode one listing field for an assertion.
+ *
+ * @param field - The raw field.
+ * @returns The decoded text, or `<invalid: …>` when it cannot be decoded.
+ */
+function decodedField(field: string | undefined): string {
+  const decoded = decodeListingField(field ?? "<missing>")
+  return typeof decoded === "string" ? `<invalid: ${decoded}>` : decoded.text
+}
 
 /**
  * Issue #219: run the production listing probe the way `runBatchedProbe`
- * does, with the destination as `r` entry NUL-terminated on stdin.
+ * does, with the destination as `r` entry NUL-terminated on stdin. The output
+ * must be valid UTF-8, as `strictUtf8Stdout` demands.
  *
  * @param destination - The canonical destination directory.
- * @returns Exit code, the reported `(link, target)` pairs sorted by link, and stderr.
+ * @returns Exit code, the decoded `l` and `u` records, and stderr.
  */
 function runListingProbe(destination: string): ListingProbeResult {
   const result = spawnSync("/bin/sh", ["-c", buildSymlinkListingProbeScript()], {
-    encoding: "utf8",
     input: encodeNulPayload([encodeSymlinkListingEntry("r", destination)]),
     timeout: 10_000,
   })
-  const fields = result.stdout.split("\0")
+  const stdout = new TextDecoder("utf-8", { fatal: true }).decode(result.stdout)
+  const fields = stdout.split("\0")
   if (fields.at(-1) === "") fields.pop()
   const pairs: Array<[string, string]> = []
-  for (let index = 0; index < fields.length; index += 2) {
-    pairs.push([fields[index] ?? "", fields[index + 1] ?? "<missing>"])
+  const unreadable: string[] = []
+  for (let index = 0; index < fields.length;) {
+    if (fields[index] === "u") {
+      unreadable.push(decodedField(fields[index + 1]))
+      index += 2
+    } else {
+      pairs.push([decodedField(fields[index + 1]), decodedField(fields[index + 2])])
+      index += 3
+    }
   }
   pairs.sort(([left], [right]) => left.localeCompare(right))
-  return { code: result.status ?? -1, pairs, stderr: result.stderr }
+  return {
+    code: result.status ?? -1,
+    pairs,
+    stderr: result.stderr.toString("utf8"),
+    unreadable: unreadable.toSorted(),
+  }
+}
+
+/**
+ * Issue #219: whether `find` is GNU find, which the listing probe detects the
+ * same way (`-readable`) to report unreadable directories instead of failing.
+ *
+ * @returns True when `find . -maxdepth 0 -readable` succeeds.
+ */
+function hasGnuFind(): boolean {
+  const result = spawnSync("/bin/sh", ["-c", "find . -maxdepth 0 -readable"], {
+    encoding: "utf8",
+    timeout: 2000,
+  })
+  return result.status === 0
 }
 
 /**
@@ -243,18 +295,22 @@ function hasCommandPTimeout(): boolean {
 }
 
 const SKIP_PLATFORM = process.platform === "win32"
+const HAS_GNU_FIND = !SKIP_PLATFORM && hasGnuFind()
 const SKIP_NO_GNU_CP = !hasGnuCp()
 const HAS_COMMAND_P_TIMEOUT = !SKIP_PLATFORM && hasCommandPTimeout()
 const SKIP_NO_TRAILING_NEWLINE_READLINK = SKIP_PLATFORM || !readlinkAlwaysAppendsNewline()
 // A privileged user reads directories regardless of their mode.
 const SKIP_AS_ROOT = process.getuid?.() === 0
+// Issue #219: GNU find reports unreadable directories; other finds fail closed.
+const SKIP_UNLESS_UNREADABLE_FAILS = SKIP_AS_ROOT || HAS_GNU_FIND
+const SKIP_UNLESS_UNREADABLE_REPORTED = SKIP_AS_ROOT || !HAS_GNU_FIND
 
 /**
  * Issue #219: the message tail of every post-merge violation: the backstop
  * only reports and says so.
  */
 const BACKSTOP_REPORT_TAIL =
-  "every symlink under the destination is checked after the merge, including links this archive did not ship; nothing was removed or changed; remove the offending symlinks under the destination or point them inside it manually before the next run, the containment flag keeps check at needs-apply until an apply succeeds"
+  "after the merge, the archive's symlinks and every symlink under the destination whose resolution passes through a path the archive writes are checked, including links it did not ship; nothing was removed or changed; remove the offending symlinks under the destination or point them inside it manually before the next run, the containment flag keeps check at needs-apply until an apply succeeds"
 
 describe.skipIf(SKIP_PLATFORM)("archive.extract staging merge shell smoke tests", () => {
   it("refuses a staging entry whose name contains a literal newline", () => {
@@ -561,14 +617,15 @@ describe.skipIf(SKIP_PLATFORM)(
         expect(result).toStrictEqual({
           code: 0,
           pairs: [
-            [join(destination, "a/dangling"), "missing/y/z"],
-            [join(destination, "a/esc"), "up/.."],
-            [join(destination, "a/inside"), "lib/f"],
-            [join(destination, "a/up"), ".."],
-            [join(destination, "absolute-inside"), `${destination}/a/lib`],
-            [join(destination, "etc"), "/etc"],
+            ["a/dangling", "missing/y/z"],
+            ["a/esc", "up/.."],
+            ["a/inside", "lib/f"],
+            ["a/up", ".."],
+            ["absolute-inside", `${destination}/a/lib`],
+            ["etc", "/etc"],
           ].toSorted(([left = ""], [right = ""]) => left.localeCompare(right)),
           stderr: "",
+          unreadable: [],
         })
       } finally {
         rmSync(root, { force: true, recursive: true })
@@ -581,7 +638,12 @@ describe.skipIf(SKIP_PLATFORM)(
         mkdirSync(join(destination, "a"))
         writeFileSync(join(destination, "a/f"), "f\n")
 
-        expect(runListingProbe(destination)).toStrictEqual({ code: 0, pairs: [], stderr: "" })
+        expect(runListingProbe(destination)).toStrictEqual({
+          code: 0,
+          pairs: [],
+          stderr: "",
+          unreadable: [],
+        })
       } finally {
         rmSync(root, { force: true, recursive: true })
       }
@@ -597,8 +659,9 @@ describe.skipIf(SKIP_PLATFORM)(
 
         expect(runListingProbe(destination)).toStrictEqual({
           code: 0,
-          pairs: [[join(destination, "to-elsewhere"), elsewhere]],
+          pairs: [["to-elsewhere", elsewhere]],
           stderr: "",
+          unreadable: [],
         })
       } finally {
         rmSync(root, { force: true, recursive: true })
@@ -617,11 +680,12 @@ describe.skipIf(SKIP_PLATFORM)(
         expect(runListingProbe(destination)).toStrictEqual({
           code: 0,
           pairs: [
-            [join(directory, "link with space"), "target with space"],
-            [join(directory, "trailing space "), "../other dir/f"],
-            [join(directory, "two\nlines"), ".."],
+            ["dir with space/link with space", "target with space"],
+            ["dir with space/trailing space ", "../other dir/f"],
+            ["dir with space/two\nlines", ".."],
           ],
           stderr: "",
+          unreadable: [],
         })
       } finally {
         rmSync(root, { force: true, recursive: true })
@@ -637,10 +701,11 @@ describe.skipIf(SKIP_PLATFORM)(
         expect(runListingProbe(destination)).toStrictEqual({
           code: 0,
           pairs: [
-            [join(destination, "embedded"), "up\n/.."],
-            [join(destination, "leading"), "\nleading"],
+            ["embedded", "up\n/.."],
+            ["leading", "\nleading"],
           ],
           stderr: "",
+          unreadable: [],
         })
       } finally {
         rmSync(root, { force: true, recursive: true })
@@ -661,10 +726,11 @@ describe.skipIf(SKIP_PLATFORM)(
           expect(runListingProbe(destination)).toStrictEqual({
             code: 0,
             pairs: [
-              [join(destination, "one"), "up\n"],
-              [join(destination, "two"), "up\n\n"],
+              ["one", "up\n"],
+              ["two", "up\n\n"],
             ],
             stderr: "",
+            unreadable: [],
           })
         } finally {
           rmSync(root, { force: true, recursive: true })
@@ -684,8 +750,10 @@ describe.skipIf(SKIP_PLATFORM)(
       }
     })
 
-    it.skipIf(SKIP_AS_ROOT)(
-      "fails closed with a non-zero exit when find cannot read a subdirectory",
+    // Issue #219: without GNU find (busybox, the BSDs, macOS) the probe cannot
+    // tell an unreadable directory from any other traversal error.
+    it.skipIf(SKIP_UNLESS_UNREADABLE_FAILS)(
+      "fails closed with a non-zero exit when find cannot read a subdirectory (without GNU find)",
       () => {
         const { destination, root } = makeWorkspace()
         const locked = join(destination, "locked")
@@ -707,6 +775,124 @@ describe.skipIf(SKIP_PLATFORM)(
         }
       }
     )
+
+    it.skipIf(SKIP_UNLESS_UNREADABLE_REPORTED)(
+      "reports an unreadable or unsearchable directory as a u record and lists the rest (GNU find)",
+      () => {
+        const { destination, root } = makeWorkspace()
+        const locked = join(destination, "locked")
+        const unsearchable = join(destination, "unsearchable")
+        try {
+          symlinkSync("..", join(destination, "visible"))
+          mkdirSync(join(locked, "sub"), { recursive: true })
+          symlinkSync("../..", join(locked, "sub/hidden"))
+          mkdirSync(unsearchable)
+          symlinkSync("x", join(unsearchable, "hidden"))
+          chmodSync(locked, 0o000)
+          chmodSync(unsearchable, 0o600)
+
+          expect(runListingProbe(destination)).toStrictEqual({
+            code: 0,
+            pairs: [["visible", ".."]],
+            stderr: "",
+            unreadable: ["locked", "unsearchable"],
+          })
+        } finally {
+          chmodSync(locked, 0o755)
+          chmodSync(unsearchable, 0o755)
+          rmSync(root, { force: true, recursive: true })
+        }
+      }
+    )
+
+    it("hex-encodes names outside printable ASCII so they round-trip exactly", () => {
+      const { destination, root } = makeWorkspace()
+      try {
+        symlinkSync("Þfoo/ü", join(destination, "Þfoo"))
+        symlinkSync("x\u0001y", join(destination, "ctl\u007f"))
+        symlinkSync("t\ufffd", join(destination, "literal-fffd"))
+
+        const result = spawnSync("/bin/sh", ["-c", buildSymlinkListingProbeScript()], {
+          input: encodeNulPayload([encodeSymlinkListingEntry("r", destination)]),
+          timeout: 10_000,
+        })
+
+        // Only printable ASCII, the hex marker and NUL reach stdout.
+        expect([...result.stdout].every((byte) => byte <= 0x7e)).toBe(true)
+        expect(runListingProbe(destination)).toStrictEqual({
+          code: 0,
+          pairs: [
+            ["ctl\u007f", "x\u0001y"],
+            ["literal-fffd", "t\ufffd"],
+            ["Þfoo", "Þfoo/ü"],
+          ].toSorted(([left = ""], [right = ""]) => left.localeCompare(right)),
+          stderr: "",
+          unreadable: [],
+        })
+      } finally {
+        rmSync(root, { force: true, recursive: true })
+      }
+    })
+
+    it("skips a link that vanished between find and readlink", () => {
+      const { destination, root } = makeWorkspace()
+      try {
+        symlinkSync("..", join(destination, "kept"))
+        const result = spawnSync(
+          "/bin/sh",
+          [
+            "-c",
+            symlinkListingBatchScript(),
+            "sh",
+            "l",
+            destination,
+            join(destination, "gone"),
+            join(destination, "kept"),
+          ],
+          { encoding: "utf8", timeout: 10_000 }
+        )
+
+        expect({ code: result.status, stderr: result.stderr, stdout: result.stdout }).toStrictEqual(
+          {
+            code: 0,
+            stderr: "",
+            stdout: "l\u0000kept\u0000..\u0000",
+          }
+        )
+      } finally {
+        rmSync(root, { force: true, recursive: true })
+      }
+    })
+
+    it("fails a batch whose link still exists but cannot be read", () => {
+      const { destination, root } = makeWorkspace()
+      try {
+        symlinkSync("..", join(destination, "kept"))
+        // `command -p` ignores PATH, so a missing `readlink` is simulated by
+        // shadowing `command` with a function that fails like `command -p`
+        // does without `readlink` (127): the batch still sees the link through
+        // `[ -L ]` and must exit 1 instead of skipping it.
+        const result = spawnSync(
+          "/bin/sh",
+          [
+            "-c",
+            `command() { return 127; }; ${symlinkListingBatchScript()}`,
+            "sh",
+            "l",
+            destination,
+            join(destination, "kept"),
+          ],
+          { encoding: "utf8", timeout: 10_000 }
+        )
+
+        expect({ code: result.status, stdout: result.stdout }).toStrictEqual({
+          code: 1,
+          stdout: "",
+        })
+      } finally {
+        rmSync(root, { force: true, recursive: true })
+      }
+    })
   }
 )
 
@@ -857,40 +1043,70 @@ function runProductionMerge(parameters: {
 type BackstopViolation = readonly [key: string, kind: MergedSymlinkViolation["kind"]]
 
 /**
- * Issue #219: the post-merge backstop's verdict on the real tree, computed the
- * production way: the real listing probe with the destination as its only `r`
- * entry, decoded and resolved by `preMergeContainmentVerdict` with no archive
- * members. That is the decoding (`hostStateFromListing` without requested
- * member paths) and the resolver (`mergedSymlinkViolations`) that
- * `enforceSymlinkContainment` uses; nothing on the host resolves a link.
+ * Issue #219: every symlink below `destination` as an archive symlink member,
+ * so a backstop judged with these members judges every link in the tree, as
+ * if the archive had shipped all of them.
  *
  * @param destination - The canonical destination directory.
+ * @param prefix - Path prefix for the recursion.
+ * @returns One symlink member per link, with its stored target.
+ */
+function treeLinksAsMembers(destination: string, prefix = ""): ArchiveMember[] {
+  const members: ArchiveMember[] = []
+  for (const name of readdirSync(join(destination, prefix)).toSorted()) {
+    const relative = prefix === "" ? name : `${prefix}/${name}`
+    const stat = lstatSync(join(destination, relative))
+    if (stat.isDirectory()) members.push(...treeLinksAsMembers(destination, relative))
+    else if (stat.isSymbolicLink()) {
+      members.push(tarMember(relative, readlinkSync(join(destination, relative))))
+    }
+  }
+  return members
+}
+
+/**
+ * Issue #219: the post-merge backstop's verdict on the real tree, computed the
+ * production way: the real listing probe with the destination as its only `r`
+ * entry, decoded by `hostStateFromListing` without requested member paths and
+ * judged by `mergedSymlinkResolutions` with the archive's scope, as
+ * `enforceSymlinkContainment` does; nothing on the host resolves a link. An
+ * archive without symlink members is not judged at all, like in production.
+ *
+ * @param destination - The canonical destination directory.
+ * @param members - The archive members; every link in the tree by default
+ *   (see {@link treeLinksAsMembers}).
  * @returns The violations, sorted by key.
  */
-function backstopViolations(destination: string): BackstopViolation[] {
+function backstopViolations(
+  destination: string,
+  members: readonly ArchiveMember[] = treeLinksAsMembers(destination)
+): BackstopViolation[] {
+  if (!members.some(({ kind }) => kind === "symlink")) return []
   const { code, fields, stderr } = runProbeScript(buildSymlinkListingProbeScript(), [
     encodeSymlinkListingEntry("r", destination),
   ])
   expect({ code, stderr }).toStrictEqual({ code: 0, stderr: "" })
-  const verdict = preMergeContainmentVerdict(destination, fields, [])
-  if (verdict.kind === "ok") return []
-  if (verdict.kind !== "violations") {
-    throw new Error(`unexpected post-merge verdict ${JSON.stringify(verdict)}`)
-  }
-  return verdict.violations
+  const host = hostStateFromListing(destination, fields, new Map())
+  if (typeof host === "string") throw new Error(`unexpected post-merge listing: ${host}`)
+  const { violations } = mergedSymlinkResolutions(host.links, {
+    ...archiveContainmentScope(members),
+    unreadable: host.unreadable,
+  })
+  return violations
     .map(({ key, kind }): BackstopViolation => [key, kind])
     .toSorted(([left], [right]) => left.localeCompare(right))
 }
 
 /**
  * Issue #219: the destination-relative paths of the links the backstop
- * reports, escaping or beyond the resolution limit.
+ * reports for an archive, escaping or beyond the resolution limit.
  *
  * @param destination - The canonical destination directory.
+ * @param members - The archive members.
  * @returns The violating links, sorted.
  */
-function escapingLinks(destination: string): string[] {
-  return backstopViolations(destination).map(([key]) => key)
+function escapingLinks(destination: string, members: readonly ArchiveMember[]): string[] {
+  return backstopViolations(destination, members).map(([key]) => key)
 }
 
 /**
@@ -1005,6 +1221,28 @@ describe.skipIf(SKIP_PLATFORM)(
   }
 )
 
+describe.skipIf(SKIP_PLATFORM)(
+  "archive.extract pre-merge listing of non-ASCII member paths (Issue #219)",
+  () => {
+    it("round-trips a directory hit for a non-ASCII member path into a conflict", () => {
+      const { destination, root } = makeWorkspace()
+      try {
+        buildTree(destination, ["Ümlaut/", "Ümlaut/l/", "Ümlaut/l/f"], destination)
+        const members = ["Ümlaut/", "Ümlaut/l -> f"].map((entry) => specMember(entry))
+
+        expect(modelVerdict(destination, members)).toStrictEqual({
+          key: "Ümlaut/l",
+          kind: "conflict",
+          member: specMember("Ümlaut/l -> f"),
+          reason: "host-directory",
+        })
+      } finally {
+        rmSync(root, { force: true, recursive: true })
+      }
+    })
+  }
+)
+
 describe.skipIf(SKIP_PLATFORM || SKIP_NO_GNU_CP)(
   "archive.extract two-run directory conflict after a real merge (Issue #219, requires GNU cp)",
   () => {
@@ -1019,7 +1257,12 @@ describe.skipIf(SKIP_PLATFORM || SKIP_NO_GNU_CP)(
           staging: firstStaging,
         })
         expect(first).toMatchObject({ code: 0, stderr: "" })
-        expect(escapingLinks(destination)).toStrictEqual([])
+        expect(
+          escapingLinks(
+            destination,
+            twoRunFirstHost.map((entry) => specMember(entry))
+          )
+        ).toStrictEqual([])
         const outsideBefore = readdirSync(root).toSorted()
 
         // Run 2 merged anyway, as it would have been without the refusal.
@@ -1032,24 +1275,27 @@ describe.skipIf(SKIP_PLATFORM || SKIP_NO_GNU_CP)(
         expect(second.code).not.toBe(0)
         expect(lstatSync(join(destination, "a/b")).isDirectory()).toBe(true)
         expect(readlinkSync(join(destination, "a/c/l"))).toBe("../b/hl/..")
-        expect(backstopViolations(destination)).toStrictEqual([["a/c/l", "escape"]])
+        const secondMembers = twoRunSecondArchive.map((entry) => specMember(entry))
+        expect(backstopViolations(destination, secondMembers)).toStrictEqual([["a/c/l", "escape"]])
         // The kernel agrees: `a/c/l` really resolves to the destination's parent.
         expect(realpathSync.native(join(destination, "a/c/l"))).toBe(root)
         expect(physicallyEscapingLinks(destination)).toStrictEqual(["a/c/l"])
 
         const { commands, conn } = localShellConnection()
-        const failure = await enforceSymlinkContainment(conn, { destination, source: "run-2.tar" })
+        const failure = await enforceSymlinkContainment(conn, {
+          destination,
+          members: secondMembers,
+          source: "run-2.tar",
+        })
 
         expect(failure?.status).toBe("failed")
         expect(failure?.error?.message).toBe(
           `[archive.extract] refusing to complete extraction of run-2.tar: symlink ${JSON.stringify(join(destination, "a/c/l"))} -> "../b/hl/.." resolves outside destination ${JSON.stringify(destination)}; ${BACKSTOP_REPORT_TAIL}`
         )
-        // Issue #219: one listing and the kernel cross-check of `a/b/hl`, and
-        // nothing else: the backstop only reports.
-        expect(commands).toStrictEqual([
-          buildSymlinkListingProbeScript(),
-          buildKernelCrossCheckScript(),
-        ])
+        // Issue #219: one listing and nothing else: the backstop only reports.
+        // `a/b/hl` resolves to the destination root without passing through a
+        // path run 2 writes, so it is not judged and needs no cross-check.
+        expect(commands).toStrictEqual([buildSymlinkListingProbeScript()])
         expect(describeTree(destination)).toStrictEqual([
           "d a",
           "d a/b",
@@ -1076,6 +1322,11 @@ type DifferentialCase = {
   escapes: string[]
   /** The host tree below the destination before the merge. */
   host: string[]
+  /**
+   * Issue #219: host links that escape physically but that this archive
+   * cannot affect, so neither check judges them.
+   */
+  ignored: string[]
   /** Whether the real merge exits zero. */
   merge: "failed" | "ok"
   name: string
@@ -1093,6 +1344,7 @@ const differentialCases: DifferentialCase[] = [
     archive: ["a/", "a/b -> q"],
     escapes: [],
     host: ["a/", "a/b/", "a/b/f"],
+    ignored: [],
     merge: "failed",
     name: "archive symlink over a host directory without links below",
     preStaging: "n",
@@ -1102,6 +1354,7 @@ const differentialCases: DifferentialCase[] = [
     archive: twoRunSecondArchive,
     escapes: ["a/c/l"],
     host: twoRunFirstHost,
+    ignored: [],
     merge: "failed",
     name: "archive symlink over a host directory with a link below (two-run case)",
     preStaging: "n",
@@ -1111,6 +1364,7 @@ const differentialCases: DifferentialCase[] = [
     archive: ["b -> a"],
     escapes: [],
     host: ["a/", "b/", "b/f"],
+    ignored: [],
     merge: "failed",
     name: "top-level archive symlink over a host directory",
     preStaging: "n",
@@ -1120,6 +1374,7 @@ const differentialCases: DifferentialCase[] = [
     archive: ["a/", "a/b", "a/c/", "a/c/l -> ../b/l/.."],
     escapes: ["a/c/l"],
     host: ["a/", "a/b/", "a/b/l -> ../.."],
+    ignored: [],
     merge: "failed",
     name: "archive file over a host directory whose link the archive walks through",
     preStaging: "l",
@@ -1129,6 +1384,7 @@ const differentialCases: DifferentialCase[] = [
     archive: ["a/", "a/b/", "a/b/f"],
     escapes: [],
     host: ["a/", "a/b"],
+    ignored: [],
     merge: "failed",
     name: "archive directory over a host file",
     preStaging: "d",
@@ -1138,6 +1394,7 @@ const differentialCases: DifferentialCase[] = [
     archive: ["a/", "a/b/", "a/up -> b"],
     escapes: [],
     host: ["a/", "a/b/", "a/esc -> up/..", "a/up -> .."],
+    ignored: [],
     merge: "ok",
     name: "archive symlink over a host symlink that makes the combination safe",
     preStaging: "clean",
@@ -1147,6 +1404,7 @@ const differentialCases: DifferentialCase[] = [
     archive: ["a/", "a/up -> .."],
     escapes: ["a/esc"],
     host: ["a/", "a/b/", "a/esc -> up/..", "a/up -> b"],
+    ignored: [],
     merge: "ok",
     name: "archive symlink over a host symlink that makes a host link escape",
     preStaging: "clean",
@@ -1156,6 +1414,7 @@ const differentialCases: DifferentialCase[] = [
     archive: ["a/", "a/x -> y"],
     escapes: [],
     host: ["a/", "a/x"],
+    ignored: [],
     merge: "ok",
     name: "archive symlink over a host file",
     preStaging: "clean",
@@ -1165,6 +1424,7 @@ const differentialCases: DifferentialCase[] = [
     archive: ["a/", "a/f"],
     escapes: [],
     host: ["a/", "a/f"],
+    ignored: [],
     merge: "ok",
     name: "archive file over a host file",
     preStaging: "clean",
@@ -1174,6 +1434,7 @@ const differentialCases: DifferentialCase[] = [
     archive: ["a/", "a/up"],
     escapes: [],
     host: ["a/", "a/up -> .."],
+    ignored: [],
     merge: "failed",
     name: "archive file over a host symlink",
     preStaging: "l",
@@ -1183,6 +1444,7 @@ const differentialCases: DifferentialCase[] = [
     archive: ["a/", "a/s/f"],
     escapes: [],
     host: ["a/", "t/", "a/s -> ../t"],
+    ignored: [],
     merge: "failed",
     name: "archive file below a host symlink",
     preStaging: "l",
@@ -1192,6 +1454,7 @@ const differentialCases: DifferentialCase[] = [
     archive: ["a/", "a/d/", "a/d/new -> ../x/f"],
     escapes: [],
     host: ["a/", "a/d/", "a/d/keep -> ../x"],
+    ignored: [],
     merge: "ok",
     name: "nested directory with a symlink merged into a host directory with links",
     preStaging: "clean",
@@ -1201,6 +1464,7 @@ const differentialCases: DifferentialCase[] = [
     archive: ["a/", "a/d/", "a/d/s -> h/.."],
     escapes: ["a/d/s"],
     host: ["a/", "a/d/", "a/d/h -> ../.."],
+    ignored: [],
     merge: "ok",
     name: "nested archive symlink that escapes through a host link in the same directory",
     preStaging: "l",
@@ -1210,6 +1474,7 @@ const differentialCases: DifferentialCase[] = [
     archive: ["a/", "a/up -> .."],
     escapes: ["a/esc"],
     host: ["a/", "a/esc -> up/.."],
+    ignored: [],
     merge: "ok",
     name: "sibling archive link that makes an earlier host link escape",
     preStaging: "clean",
@@ -1219,6 +1484,7 @@ const differentialCases: DifferentialCase[] = [
     archive: ["a/", "a/lib/", "a/lib/f", "a/lib64 -> lib", "a/bin/", "a/bin/f -> ../lib64/f"],
     escapes: [],
     host: [],
+    ignored: [],
     merge: "ok",
     name: "contained archive links on an empty host",
     preStaging: "clean",
@@ -1226,10 +1492,31 @@ const differentialCases: DifferentialCase[] = [
   },
   {
     archive: ["f"],
-    escapes: ["etc"],
+    escapes: [],
     host: ["etc -> /etc"],
+    ignored: ["etc"],
     merge: "ok",
-    name: "host link with an absolute target outside the destination",
+    name: "unrelated host link with an absolute target outside, next to an archive without symlinks",
+    preStaging: "clean",
+    verdict: "ok",
+  },
+  {
+    archive: ["a/", "a/f", "a/l -> f"],
+    escapes: [],
+    host: ["x/", "x/py -> /etc", "x/up -> ../.."],
+    ignored: ["x/py", "x/up"],
+    merge: "ok",
+    name: "unrelated escaping host links next to an archive with symlinks",
+    preStaging: "clean",
+    verdict: "ok",
+  },
+  {
+    archive: ["a/", "a/up -> .."],
+    escapes: ["x/esc"],
+    host: ["a/", "x/", "x/esc -> ../a/up/.."],
+    ignored: [],
+    merge: "ok",
+    name: "host link elsewhere that walks through an archive link",
     preStaging: "clean",
     verdict: "violations",
   },
@@ -1237,6 +1524,7 @@ const differentialCases: DifferentialCase[] = [
     archive: ["a/", "a/f"],
     escapes: [],
     host: ["a/", "abs -> $DEST/a"],
+    ignored: [],
     merge: "ok",
     name: "host link with an absolute target inside the destination",
     preStaging: "clean",
@@ -1259,7 +1547,7 @@ function differentialObservation(run: {
   merge: ShellResult
   preStaging: ReadonlyArray<readonly [string, string]>
   verdict: PreMergeContainmentVerdict
-}): Omit<DifferentialCase, "archive" | "host" | "name"> {
+}): Omit<DifferentialCase, "archive" | "host" | "ignored" | "name"> {
   const firstCheck = run.preStaging.map(([check]) => check).at(0) ?? "clean"
   return {
     escapes: run.escapes,
@@ -1288,7 +1576,7 @@ function differentialObservation(run: {
  * @returns Each property with whether it holds.
  */
 function differentialInvariants(
-  observed: Omit<DifferentialCase, "archive" | "host" | "name">,
+  observed: Omit<DifferentialCase, "archive" | "host" | "ignored" | "name">,
   verdict: PreMergeContainmentVerdict
 ): Record<string, boolean> {
   const refusedBeforeMerge = observed.preStaging !== "clean" || verdict.kind !== "ok"
@@ -1324,10 +1612,13 @@ describe.skipIf(SKIP_PLATFORM || SKIP_NO_GNU_CP)(
         const preStaging = runPreStagingProbe(destination, members)
         const verdict = modelVerdict(destination, members)
         const merge = runProductionMerge({ destination, members, staging })
-        const escapes = escapingLinks(destination)
+        const escapes = escapingLinks(destination, members)
         // Independent of the listing and the resolver: every link the kernel
-        // resolves outside the destination is one the backstop reports.
-        expect(escapes).toStrictEqual(expect.arrayContaining(physicallyEscapingLinks(destination)))
+        // resolves outside the destination is one the backstop reports, or
+        // one the case lists as unrelated to the archive (Issue #219).
+        expect([...escapes, ...testCase.ignored]).toStrictEqual(
+          expect.arrayContaining(physicallyEscapingLinks(destination))
+        )
 
         const observed = differentialObservation({ escapes, merge, preStaging, verdict })
         expect(observed).toStrictEqual({
@@ -1422,9 +1713,15 @@ describe.skipIf(SKIP_PLATFORM)(
     it("reports a link whose name contains a newline under its exact key", () => {
       const { destination, root } = makeWorkspace()
       try {
-        symlinkSync("..", join(destination, "two\nlines"))
+        // Issue #219: archive member paths never contain control characters,
+        // so a host link with a newline is judged through the archive path
+        // `a` its target walks through.
+        mkdirSync(join(destination, "a"))
+        symlinkSync("a/../..", join(destination, "two\nlines"))
 
-        expect(backstopViolations(destination)).toStrictEqual([["two\nlines", "escape"]])
+        expect(
+          backstopViolations(destination, [specMember("a/"), tarMember("a/l", "f")])
+        ).toStrictEqual([["two\nlines", "escape"]])
         expect(physicallyEscapingLinks(destination)).toStrictEqual(["two\nlines"])
       } finally {
         rmSync(root, { force: true, recursive: true })
@@ -1476,6 +1773,7 @@ describe.skipIf(SKIP_PLATFORM)(
 
         const failure = await enforceSymlinkContainment(conn, {
           destination,
+          members: treeLinksAsMembers(destination),
           source: "loop.tar",
         })
 
@@ -1527,7 +1825,11 @@ describe.skipIf(SKIP_PLATFORM)(
         ])
         const { commands, conn } = localShellConnection()
 
-        const failure = await enforceSymlinkContainment(conn, { destination, source: "q2.tar" })
+        const failure = await enforceSymlinkContainment(conn, {
+          destination,
+          members: treeLinksAsMembers(destination),
+          source: "q2.tar",
+        })
 
         const message = failure?.error?.message
         expect(message?.endsWith(`; ${BACKSTOP_REPORT_TAIL}`)).toBe(true)
@@ -1556,6 +1858,7 @@ describe.skipIf(SKIP_PLATFORM)(
 
         const failure = await enforceSymlinkContainment(conn, {
           destination: join(destination, "missing"),
+          members: [tarMember("l", "f")],
           source: "gone.tar",
         })
 
@@ -1568,8 +1871,8 @@ describe.skipIf(SKIP_PLATFORM)(
       }
     })
 
-    it.skipIf(SKIP_AS_ROOT)(
-      "fails closed and removes nothing, not even a visible escaping link, when a subdirectory is unreadable",
+    it.skipIf(SKIP_UNLESS_UNREADABLE_FAILS)(
+      "fails closed and removes nothing, not even a visible escaping link, when a subdirectory is unreadable (without GNU find)",
       async () => {
         const { destination, root } = makeWorkspace()
         const locked = join(destination, "locked")
@@ -1577,11 +1880,13 @@ describe.skipIf(SKIP_PLATFORM)(
           symlinkSync("..", join(destination, "visible"))
           mkdirSync(locked)
           symlinkSync("../..", join(locked, "hidden"))
+          const members = treeLinksAsMembers(destination)
           chmodSync(locked, 0o000)
           const { commands, conn } = localShellConnection()
 
           const failure = await enforceSymlinkContainment(conn, {
             destination,
+            members,
             source: "locked.tar",
           })
 
@@ -1590,6 +1895,47 @@ describe.skipIf(SKIP_PLATFORM)(
           expect(readlinkSync(join(destination, "visible"))).toBe("..")
         } finally {
           chmodSync(locked, 0o755)
+          rmSync(root, { force: true, recursive: true })
+        }
+      }
+    )
+
+    it.skipIf(SKIP_UNLESS_UNREADABLE_REPORTED)(
+      "ignores an unrelated unreadable directory and refuses a judged walk into one (GNU find)",
+      async () => {
+        const { destination, root } = makeWorkspace()
+        const locked = join(destination, "locked")
+        const other = join(destination, "other")
+        try {
+          mkdirSync(join(destination, "a"))
+          writeFileSync(join(destination, "a/f"), "f\n")
+          symlinkSync("f", join(destination, "a/l"))
+          symlinkSync("../locked/f", join(destination, "a/in"))
+          mkdirSync(locked)
+          mkdirSync(other)
+          symlinkSync("../..", join(other, "hidden"))
+          chmodSync(locked, 0o000)
+          chmodSync(other, 0o000)
+          const { conn } = localShellConnection()
+
+          const unrelated = await enforceSymlinkContainment(conn, {
+            destination,
+            members: [tarMember("a/l", "f")],
+            source: "ok.tar",
+          })
+          const judged = await enforceSymlinkContainment(conn, {
+            destination,
+            members: [tarMember("a/l", "f"), tarMember("a/in", "../locked/f")],
+            source: "into-locked.tar",
+          })
+
+          expect(unrelated).toBeNull()
+          expect(judged?.error?.message).toBe(
+            `[archive.extract] refusing to complete extraction of into-locked.tar: symlink ${JSON.stringify(join(destination, "a/in"))} -> "../locked/f" cannot be checked: directory ${JSON.stringify(locked)} is not readable; ${BACKSTOP_REPORT_TAIL}`
+          )
+        } finally {
+          chmodSync(locked, 0o755)
+          chmodSync(other, 0o755)
           rmSync(root, { force: true, recursive: true })
         }
       }
@@ -1862,7 +2208,11 @@ describe.skipIf(SKIP_PLATFORM)(
         symlinkSync("missing/y", join(destination, "a/dangling"))
         const { commands, conn } = localShellConnection()
 
-        const failure = await enforceSymlinkContainment(conn, { destination, source: "ok.tar" })
+        const failure = await enforceSymlinkContainment(conn, {
+          destination,
+          members: treeLinksAsMembers(destination),
+          source: "ok.tar",
+        })
 
         expect(failure).toBeNull()
         expect(commands).toStrictEqual([
@@ -1908,7 +2258,11 @@ describe.skipIf(SKIP_PLATFORM)(
         expect(backstopViolations(destination)).toStrictEqual([["d/esc", "variant"]])
         const { conn } = localShellConnection()
 
-        const failure = await enforceSymlinkContainment(conn, { destination, source: "case.tar" })
+        const failure = await enforceSymlinkContainment(conn, {
+          destination,
+          members: treeLinksAsMembers(destination),
+          source: "case.tar",
+        })
 
         expect(failure?.error?.message).toContain(
           'passes through "d/UP", a name that differs from existing symlink "d/up" only by letter case or Unicode normalization'
@@ -1933,35 +2287,71 @@ describe.skipIf(SKIP_PLATFORM || !ACCEPTS_NON_UTF8_NAMES)(
     // occur across the two cases. The filesystem-independent variant with a
     // fixed listing order is in `archive.test.ts`.
     it.each([
-      { name: "escaping link on <fe>", targets: { fe: "..", ff: "." } },
-      { name: "escaping link on <ff>", targets: { fe: ".", ff: ".." } },
+      { name: "escaping link on <fe>", targets: { fe: "../a/l/../..", ff: "../a/l" } },
+      { name: "escaping link on <ff>", targets: { fe: "../a/l", ff: "../a/l/../.." } },
     ])(
-      "fails closed on two host links whose names differ only in bytes that are not UTF-8 ($name)",
+      "keeps two host links whose names differ only in bytes that are not UTF-8 apart and reports both when judged ($name)",
       async ({ targets }) => {
         const { destination, root } = makeAppWorkspace()
         try {
+          mkdirSync(join(destination, "a"))
+          writeFileSync(join(destination, "a/f"), "f\n")
+          symlinkSync("f", join(destination, "a/l"))
           mkdirSync(join(destination, "d"))
           const base = Buffer.from(`${destination}/d/`)
-          // One link escapes, the other does not. A lossy decode would read both
-          // names as `d/U+FFFD`, so one could hide the other.
+          // Both targets walk through the archive link `a/l`, so both links
+          // are judged; a lossy decode would have read both names as
+          // `d/U+FFFD`, so one could hide the other.
           symlinkSync(targets.fe, Buffer.concat([base, Buffer.from([0xfe])]))
           symlinkSync(targets.ff, Buffer.concat([base, Buffer.from([0xff])]))
           const { commands, conn } = localShellConnection()
 
           const failure = await enforceSymlinkContainment(conn, {
             destination,
+            members: [tarMember("a/l", "f")],
             source: "bytes.tar",
           })
 
-          expect(failure?.error?.message).toContain(
-            "symlink containment check failed: Command stdout is not valid UTF-8"
-          )
-          expect(commands).toStrictEqual([buildSymlinkListingProbeScript()])
+          const message = String(failure?.error?.message)
+          const spelled = ["fe", "ff"].map((byte) => join(destination, "d", `\\x${byte}`))
+          for (const link of spelled)
+            expect(message).toContain(`symlink ${JSON.stringify(link)} -> `)
+          expect(message.match(/its path or target is not valid UTF-8/gv)).toHaveLength(2)
+          // The listing, and the kernel cross-check of the archive link `a/l`.
+          expect(commands).toStrictEqual([
+            buildSymlinkListingProbeScript(),
+            buildKernelCrossCheckScript(),
+          ])
           expect(readdirSync(Buffer.from(join(destination, "d")))).toHaveLength(2)
         } finally {
           rmSync(root, { force: true, recursive: true })
         }
       }
     )
+
+    it("ignores an unrelated host link whose name is not UTF-8", async () => {
+      const { destination, root } = makeAppWorkspace()
+      try {
+        mkdirSync(join(destination, "a"))
+        writeFileSync(join(destination, "a/f"), "f\n")
+        symlinkSync("f", join(destination, "a/l"))
+        symlinkSync("/etc", Buffer.concat([Buffer.from(`${destination}/`), Buffer.from([0xff])]))
+        const { commands, conn } = localShellConnection()
+
+        const failure = await enforceSymlinkContainment(conn, {
+          destination,
+          members: [tarMember("a/l", "f")],
+          source: "bytes.tar",
+        })
+
+        expect(failure).toBeNull()
+        expect(commands).toStrictEqual([
+          buildSymlinkListingProbeScript(),
+          buildKernelCrossCheckScript(),
+        ])
+      } finally {
+        rmSync(root, { force: true, recursive: true })
+      }
+    })
   }
 )

@@ -36,16 +36,53 @@ export type SymlinkWalkTarget = { anchor: "outside" } | { anchor: "parent" | "ro
  * resolved grew past {@link SYMLINK_RESOLUTION_LIMIT}. Only the link at the
  * bottom of that stack is known to fail, so a `depth` outcome is never
  * memoized for the links above it.
+ *
+ * Issue #219: `unmappable` names a link (the resolved one or one it follows)
+ * whose listed path or target is not valid UTF-8 (see
+ * {@link ResolverScope.unmappable}); `unreadable` names an unreadable host
+ * directory the walk reached (see {@link ResolverScope.unreadable}).
  */
 export type SymlinkResolution =
+  | { directory: string; kind: "unreadable" }
   | { hops: number; kind: "resolved"; prefixes: readonly string[]; segments: readonly string[] }
   | { kind: "depth" }
   | { kind: "escape" }
   | { kind: "limit" }
+  | { kind: "unmappable"; link: string }
   | { kind: "variant"; link: string; prefix: string }
 
 /** A resolution that did not end inside the destination. */
 export type SymlinkFailure = Exclude<SymlinkResolution, { kind: "resolved" }>
+
+/**
+ * Issue #219: a resolution together with whether its walk touched a path the
+ * archive writes (see {@link ResolverScope.written}).
+ */
+export type TrackedSymlinkResolution = {
+  resolution: SymlinkResolution
+  /**
+   * True when the walk appended a prefix whose {@link pathNameVariantKey} is
+   * in the written set (including the prefix at which a `variant` failure was
+   * detected, and an ancestor of the link that names a link only after
+   * folding), or followed a link whose own resolution touched it.
+   */
+  touched: boolean
+}
+
+/**
+ * Issue #219: what the resolver needs to know beyond the link targets.
+ */
+export type ResolverScope = {
+  /** Link keys whose listed path or target is not valid UTF-8. */
+  unmappable?: ReadonlySet<string>
+  /** Destination-relative paths of host directories that could not be read. */
+  unreadable?: ReadonlySet<string>
+  /**
+   * {@link pathNameVariantKey} of every path the archive writes: each member
+   * path and each of its proper ancestors.
+   */
+  written?: ReadonlySet<string>
+}
 
 /** The state of one walk: hops spent, visited non-member prefixes, resolved segments. */
 type WalkState = { hops: number; prefixes: string[]; segments: readonly string[] }
@@ -53,6 +90,7 @@ type WalkState = { hops: number; prefixes: string[]; segments: readonly string[]
 const ESCAPE: SymlinkFailure = { kind: "escape" }
 const LIMIT: SymlinkFailure = { kind: "limit" }
 const DEPTH: SymlinkFailure = { kind: "depth" }
+const EMPTY_SET: ReadonlySet<string> = new Set()
 
 /**
  * Issue #219: the key under which two path spellings count as the same name.
@@ -74,6 +112,20 @@ const DEPTH: SymlinkFailure = { kind: "depth" }
  */
 export function pathNameVariantKey(path: string): string {
   return path.normalize("NFKD").toUpperCase().toLowerCase().normalize("NFKD")
+}
+
+/**
+ * Issue #219: the proper ancestors of a normalized path, outermost first.
+ *
+ * @param key - A normalized destination-relative path.
+ * @returns Every proper, non-empty ancestor.
+ */
+function properAncestors(key: string): string[] {
+  const ancestors: string[] = []
+  for (let end = key.indexOf("/"); end !== -1; end = key.indexOf("/", end + 1)) {
+    ancestors.push(key.slice(0, end))
+  }
+  return ancestors
 }
 
 /**
@@ -108,26 +160,63 @@ export function pathNameVariantKey(path: string): string {
  * merge conflict before the resolver runs, and a plain directory or file under
  * another spelling cannot redirect a walk, so the link keys are the complete
  * set of names whose spelling matters.
+ *
+ * Issue #219: the containment checks judge only the links an archive can
+ * affect, so every outcome also records whether its walk touched a path the
+ * archive writes ({@link ResolverScope.written}); see
+ * {@link TrackedSymlinkResolution}. The flag is memoized with the outcome, one
+ * boolean per link, so no per-link set of visited paths is kept even for trees
+ * with hundreds of thousands of links. A walk that follows a link inherits
+ * that link's flag. Two approximations are deliberate: a link re-entered while
+ * it is still being resolved (a cycle) contributes only what the walks on the
+ * stack saw before the cycle closed, which the link that entered the cycle
+ * still sees in full; and a `depth` outcome is not memoized, so its flag is
+ * what the walk saw until it was cut off. Both outcomes are failures, so the
+ * approximation can only drop a report for a link that follows an already
+ * failing chain, never accept a link that resolves.
+ *
+ * A walk that appends an unreadable host directory, or a path below one, ends
+ * as an `unreadable` failure: the listing could not see the links in there.
+ * A link whose listed name or target is not valid UTF-8 resolves to an
+ * `unmappable` failure after its walk (so its flag is still known), and every
+ * link that follows it inherits that failure.
  */
 export class ArchiveSymlinkResolver {
   private readonly inProgress = new Set<string>()
   private readonly memberKeys: ReadonlySet<string>
-  private readonly memo = new Map<string, SymlinkResolution>()
+  private readonly memo = new Map<string, TrackedSymlinkResolution>()
   private readonly targets: ReadonlyMap<string, SymlinkWalkTarget>
+  /**
+   * Issue #219: one touched flag per walk in progress, innermost last; see
+   * {@link TrackedSymlinkResolution}.
+   */
+  private readonly touches: boolean[] = []
+  private readonly unmappable: ReadonlySet<string>
+  /** Issue #219: unreadable directories keyed by {@link pathNameVariantKey}. */
+  private readonly unreadable = new Map<string, string>()
   /** Issue #219: link keys grouped by {@link pathNameVariantKey}. */
   private readonly variants = new Map<string, string[]>()
+  private readonly written: ReadonlySet<string>
 
   /**
    * @param targets - Every symlink by normalized path, with its walk target.
    * @param memberKeys - Normalized paths that are known to exist; any other
    *   visited prefix is collected for the host probe.
+   * @param scope - Issue #219: unmappable links, unreadable directories and
+   *   written paths; each defaults to empty.
    */
   public constructor(
     targets: ReadonlyMap<string, SymlinkWalkTarget>,
-    memberKeys: ReadonlySet<string>
+    memberKeys: ReadonlySet<string>,
+    scope: ResolverScope = {}
   ) {
     this.memberKeys = memberKeys
     this.targets = targets
+    this.unmappable = scope.unmappable ?? EMPTY_SET
+    this.written = scope.written ?? EMPTY_SET
+    for (const directory of scope.unreadable ?? []) {
+      this.unreadable.set(pathNameVariantKey(directory), directory)
+    }
     for (const key of targets.keys()) {
       const variantKey = pathNameVariantKey(key)
       const group = this.variants.get(variantKey)
@@ -143,15 +232,36 @@ export class ArchiveSymlinkResolver {
    * @returns The resolved path segments and hop count, or the failure kind.
    */
   public resolve(key: string): SymlinkResolution {
+    return this.resolveTracked(key).resolution
+  }
+
+  /**
+   * Issue #219: resolve the target of the symlink at `key` and report whether
+   * the walk touched a written path.
+   *
+   * @param key - Normalized path of a symlink.
+   * @returns The resolution with its touched flag.
+   */
+  public resolveTracked(key: string): TrackedSymlinkResolution {
     const known = this.memo.get(key)
     if (known !== undefined) return known
-    if (this.inProgress.has(key)) return LIMIT
-    if (this.inProgress.size >= SYMLINK_RESOLUTION_LIMIT) return DEPTH
+    if (this.inProgress.has(key)) return { resolution: LIMIT, touched: false }
+    if (this.inProgress.size >= SYMLINK_RESOLUTION_LIMIT) {
+      return { resolution: DEPTH, touched: false }
+    }
     this.inProgress.add(key)
-    const resolution = this.walk(key)
+    this.touches.push(false)
+    const walked = this.walk(key)
+    const touched = this.touches.pop() === true
     this.inProgress.delete(key)
-    if (resolution.kind !== "depth") this.memo.set(key, resolution)
-    return resolution
+    // Issue #219: an unmappable link is walked like any other, so whether it
+    // touches a written path is known, but it never counts as resolved.
+    const resolution: SymlinkResolution = this.unmappable.has(key)
+      ? { kind: "unmappable", link: key }
+      : walked
+    const tracked = { resolution, touched }
+    if (resolution.kind !== "depth") this.memo.set(key, tracked)
+    return tracked
   }
 
   /**
@@ -163,9 +273,13 @@ export class ArchiveSymlinkResolver {
    *   after folding, or null.
    */
   private ancestorVariant(key: string): null | SymlinkFailure {
-    for (let end = key.indexOf("/"); end !== -1; end = key.indexOf("/", end + 1)) {
-      const variant = this.variantOf(key.slice(0, end))
-      if (variant !== null) return variant
+    for (const ancestor of properAncestors(key)) {
+      const variantKey = pathNameVariantKey(ancestor)
+      const variant = this.variantOf(ancestor, variantKey)
+      if (variant !== null) {
+        if (this.written.has(variantKey)) this.markTouched()
+        return variant
+      }
     }
     return null
   }
@@ -178,14 +292,30 @@ export class ArchiveSymlinkResolver {
    * @returns The resolution of the archive symlink at `prefix`, or null when it is none.
    */
   private follow(prefix: string, prefixes: string[]): null | SymlinkResolution {
-    const variant = this.variantOf(prefix)
+    const variantKey = pathNameVariantKey(prefix)
+    if (this.written.has(variantKey)) this.markTouched()
+    const unreadable = this.unreadableAt(prefix, variantKey)
+    if (unreadable !== null) return unreadable
+    const variant = this.variantOf(prefix, variantKey)
     if (variant !== null) return variant
-    if (this.targets.has(prefix)) return this.resolve(prefix)
+    if (this.targets.has(prefix)) {
+      const followed = this.resolveTracked(prefix)
+      if (followed.touched) this.markTouched()
+      return followed.resolution
+    }
     // Issue #219: a prefix the archive does not ship already exists on the
     // host or is created by nothing; either way the kernel follows whatever is
     // there, so the host probe has to look at it.
     if (!this.memberKeys.has(prefix)) prefixes.push(prefix)
     return null
+  }
+
+  /**
+   * Issue #219: record that the innermost walk in progress touched a written
+   * path.
+   */
+  private markTouched(): void {
+    this.touches[this.touches.length - 1] = true
   }
 
   /**
@@ -211,13 +341,32 @@ export class ArchiveSymlinkResolver {
   }
 
   /**
+   * Issue #219: report an appended path that is an unreadable directory or
+   * lies below one, compared under {@link pathNameVariantKey}.
+   *
+   * @param prefix - A visited destination-relative path.
+   * @param variantKey - The variant key of `prefix`.
+   * @returns An `unreadable` failure naming the directory, or null.
+   */
+  private unreadableAt(prefix: string, variantKey: string): null | SymlinkFailure {
+    if (this.unreadable.size === 0) return null
+    const keys = [variantKey, ...properAncestors(prefix).map((path) => pathNameVariantKey(path))]
+    for (const key of keys) {
+      const directory = this.unreadable.get(key)
+      if (directory !== undefined) return { directory, kind: "unreadable" }
+    }
+    return null
+  }
+
+  /**
    * Issue #219: report a visited path that names a link only after folding.
    *
    * @param prefix - A visited destination-relative path.
+   * @param variantKey - The variant key of `prefix`.
    * @returns A `variant` failure naming the first such link, or null.
    */
-  private variantOf(prefix: string): null | SymlinkFailure {
-    const group = this.variants.get(pathNameVariantKey(prefix))
+  private variantOf(prefix: string, variantKey: string): null | SymlinkFailure {
+    const group = this.variants.get(variantKey)
     const link = group?.find((candidate) => candidate !== prefix)
     return link === undefined ? null : { kind: "variant", link, prefix }
   }

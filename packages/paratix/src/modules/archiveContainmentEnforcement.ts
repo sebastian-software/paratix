@@ -12,9 +12,20 @@
  *   copied;
  * - after it, `enforceSymlinkContainment` (in `archiveContainmentBackstop.ts`)
  *   lists every link below the destination as it actually is with the same
- *   probe, judges the set with the same resolver, lets the host kernel confirm
- *   every link judged inside and, on a violation, only reports the offending
- *   links and fails the run; it removes and changes nothing on the host.
+ *   probe, judges the links the archive can affect with the same resolver,
+ *   lets the host kernel confirm every such link judged inside and, on a
+ *   violation, only reports the offending links and fails the run; it removes
+ *   and changes nothing on the host.
+ *
+ * Issue #219: both checks judge only the links this archive can affect: its
+ * own symlinks and every link whose resolution passes through a path the
+ * archive writes, directly or through another link (see
+ * `mergedSymlinkResolutions` in `archiveLinkValidation.ts`). A link elsewhere
+ * in the destination — the `bin/python3 -> /usr/bin/python3` of a Python
+ * virtual environment, say — is never judged and never changed, even when it
+ * points outside. An archive
+ * without symlink members cannot change how any path resolves, so for it both
+ * checks run no exec at all.
  *
  * Neither check asks the host to resolve a link in user space; the host only
  * reports stored targets, and the resolver in `archiveSymlinkResolver.ts`
@@ -22,8 +33,10 @@
  * `archiveSymlinkListing.ts`, shared by both checks.
  */
 import type { ModuleResult, SshConnection } from "../types.js"
+import type { ArchiveMember } from "./archiveMemberValidation.js"
 
 import { failed } from "../moduleFailure.js"
+import { archiveContainmentScope, archiveHasSymlinks } from "./archiveContainmentScope.js"
 import {
   ARCHIVE_MEMBER_KIND_LABELS,
   nonDirectoryMemberPaths,
@@ -36,9 +49,14 @@ import {
   mergedSymlinkViolations,
   variantDescription,
 } from "./archiveLinkValidation.js"
-import { ARCHIVE_CAPTURE_LIMIT_BYTES, type ArchiveMember } from "./archiveMemberValidation.js"
-import { buildSymlinkListingProbeScript, runBatchedProbe } from "./archiveProbe.js"
-import { hostStateFromListing, symlinkListingEntries } from "./archiveSymlinkListing.js"
+import {
+  hostStateFromListing,
+  quotedHostPath,
+  runSymlinkListing,
+  symlinkDescription,
+  symlinkListingEntries,
+  unverifiableLinkReason,
+} from "./archiveSymlinkListing.js"
 
 export { enforceSymlinkContainment } from "./archiveContainmentBackstop.js"
 export { symlinkListingEntries } from "./archiveSymlinkListing.js"
@@ -50,11 +68,15 @@ export { symlinkListingEntries } from "./archiveSymlinkListing.js"
  * - `invalid`: the listing output cannot be trusted (broken framing or a path
  *   that is not below the destination); `reason` says why.
  * - `conflict`: a member whose merge is not the modelled replacement (see
- *   {@link mergedArchiveSymlinks}).
- * - `violations`: the combined link set has links that escape, exceed the
- *   resolution limit or pass through a name that differs from a symlink only
- *   by letter case or Unicode normalization.
- * - `ok`: the combined link set stays inside the destination.
+ *   {@link mergedArchiveSymlinks}), including a member at or below a host
+ *   directory the listing could not read.
+ * - `violations`: links of the combined set that this archive can affect
+ *   escape, exceed the resolution limit, pass through a name that differs from
+ *   a symlink only by letter case or Unicode normalization, are or follow a
+ *   host link whose name or target is not valid UTF-8, or reach a host
+ *   directory the listing could not read.
+ * - `ok`: every link of the combined set this archive can affect stays inside
+ *   the destination.
  */
 export type PreMergeContainmentVerdict =
   | { kind: "invalid"; reason: string }
@@ -70,13 +92,17 @@ export type PreMergeContainmentVerdict =
  * Issue #219: judge an archive against the decoded output of the pre-merge
  * listing probe, without any I/O.
  *
- * The listing must be the output of {@link buildSymlinkListingProbeScript} for
+ * The listing must be the output of `buildSymlinkListingProbeScript` for
  * the entries of {@link symlinkListingEntries} with the same destination and
  * members. The verdict is `invalid` when the framing is broken or a reported
  * path is not below the destination (or, for a directory hit, not one of the
  * requested member paths), `conflict` when a member's merge is not the
- * modelled replacement, `violations` when the combined link set escapes or
- * exceeds the resolution limit, and `ok` otherwise.
+ * modelled replacement, `violations` when a link this archive can affect
+ * cannot be shown to stay inside, and `ok` otherwise.
+ *
+ * Issue #219: only the links this archive can affect are judged (see
+ * `mergedSymlinkResolutions`): its own symlinks and every link whose
+ * resolution touches a path it writes. Every other listed link is ignored.
  *
  * @param destination - The validated, canonical destination directory.
  * @param fields - The decoded listing probe fields.
@@ -93,7 +119,10 @@ export function preMergeContainmentVerdict(
   if (typeof host === "string") return { kind: "invalid", reason: host }
   const merged = mergedArchiveSymlinks(host, members)
   if (merged.kind === "conflict") return merged
-  const violations = mergedSymlinkViolations(merged.links)
+  const violations = mergedSymlinkViolations(merged.links, {
+    ...archiveContainmentScope(members),
+    unreadable: host.unreadable,
+  })
   if (violations.length === 0) return { kind: "ok", links: merged.links }
   return { kind: "violations", links: merged.links, violations }
 }
@@ -116,8 +145,34 @@ function mergeConflictRefusal(
     "below-host-symlink": `${member} lies below existing host symlink ${path}`,
     "host-directory": `${member} is a ${kind} but destination path ${path} is an existing directory`,
     "host-symlink": `${member} is a ${kind} but destination path ${path} is an existing symlink`,
+    "unreadable-directory": `${member} cannot be checked: directory ${quotedHostPath(destination, conflict.key)} is not readable`,
   }[conflict.reason]
   return `${detail}; the merge could not put this member in place as the symlink containment check models it, so nothing is copied`
+}
+
+/**
+ * Issue #219: why one link of the combined set cannot be shown to stay inside.
+ *
+ * @param destination - The validated, canonical destination directory.
+ * @param violation - The link's violation of the combined set.
+ * @returns The reason, following the link description.
+ */
+function mergedViolationReason(destination: string, violation: MergedSymlinkViolation): string {
+  switch (violation.kind) {
+    case "escape": {
+      return `would resolve outside destination ${JSON.stringify(destination)} once this archive is merged`
+    }
+    case "limit": {
+      return "would exceed the symlink resolution limit once this archive is merged"
+    }
+    case "unmappable":
+    case "unreadable": {
+      return unverifiableLinkReason(destination, violation)
+    }
+    case "variant": {
+      return `${variantDescription(violation)} once this archive is merged`
+    }
+  }
 }
 
 /**
@@ -137,16 +192,11 @@ function mergedSymlinkRefusal(parameters: {
 }): string {
   const { destination, links, violations } = parameters
   const [first] = violations
-  const linkPath = `${destination}/${first.key}`
-  const link = `symlink ${JSON.stringify(linkPath)} -> ${JSON.stringify(links.get(first.key)?.stored ?? "")}`
-  let violation = `${link} would exceed the symlink resolution limit`
-  if (first.kind === "variant") violation = `${link} ${variantDescription(first)}`
-  else if (first.kind === "escape") {
-    violation = `${link} would resolve outside destination ${JSON.stringify(destination)}`
-  }
+  const link = symlinkDescription(destination, first.key, links.get(first.key)?.stored ?? "")
+  const violation = `${link} ${mergedViolationReason(destination, first)}`
   const more = violations.length - 1
   const suffix = more > 0 ? ` (and ${String(more)} more)` : ""
-  return `${violation} once this archive is merged; existing symlinks under the destination are checked together with the archive's links before anything is copied${suffix}`
+  return `${violation}; the archive's symlinks and the existing symlinks whose resolution passes through a path it writes are checked together before anything is copied${suffix}`
 }
 
 /**
@@ -161,16 +211,36 @@ function mergedSymlinkRefusal(parameters: {
  * `a/up -> ..` (inside on its own); merged, `a/esc` resolves above the
  * destination. This check lists every existing symlink with its stored target,
  * and every non-directory member path that is an existing real directory, in
- * one batched exec ({@link buildSymlinkListingProbeScript}), judges the result
+ * one batched exec (`buildSymlinkListingProbeScript`), judges the result
  * with {@link preMergeContainmentVerdict} and refuses a conflict or a
  * violation, so nothing is copied into the destination.
  * `enforceSymlinkContainment` stays in place after the merge as the
  * backstop for host changes that land between this listing and the merge.
  *
+ * Issue #219: an archive without symlink members skips the listing and runs
+ * no exec. Without an archive symlink the merge cannot change how any path
+ * resolves: a new file or directory matches the lexical model the resolver
+ * already uses (a path the archive does not ship is walked as whatever is
+ * there), a directory member merges into a host directory and keeps its
+ * links, and a non-symlink member over a host symlink, or below one, is
+ * refused by the pre-staging probe and the merge guard. Such archives — every
+ * zip among them — save the listing exec here and the listing and kernel
+ * cross-check execs of the backstop.
+ *
+ * The listing itself stays complete for archives with symlinks: a link the
+ * archive can affect may live anywhere below the destination (host
+ * `x/esc -> ../a/up/..` next to archive `a/up -> ..`), and pruning the
+ * listing by target shape would be unsound because a host link on a relevant
+ * walk can move the walk elsewhere. Which links are judged is decided in
+ * {@link preMergeContainmentVerdict}.
+ *
  * Host link paths and targets are split on `/` only, so spaces and newlines in
- * them are handled faithfully. A probe failure (including a `find` traversal
- * error or an unreadable link), a truncated capture and output that is not
- * made of pairs with paths below the destination all fail closed.
+ * them are handled faithfully; names outside printable ASCII travel
+ * hex-encoded. A probe failure (including a `find` traversal error other than
+ * an unreadable directory with GNU find, or an unreadable target of an
+ * existing link), a truncated capture (the destination holds too many
+ * symlinks to check) and output that is not made of well-formed records all
+ * fail closed.
  *
  * @param conn - The SSH connection.
  * @param parameters - Check inputs.
@@ -185,15 +255,12 @@ export async function validateMergedSymlinkContainment(
   parameters: { destination: string; members: readonly ArchiveMember[]; source: string }
 ): Promise<ModuleResult | null> {
   const { destination, members, source } = parameters
+  if (!archiveHasSymlinks(members)) return null
   const prefix = `[archive.extract] refusing to extract ${source}`
   // The listing grows with the number of links on the host (a `node_modules`
-  // tree has many), not with violations, so it gets the archive capture cap
+  // tree has many), not with violations, so it gets its own capture cap
   // instead of the 1 MiB default. Truncation still fails closed.
-  const outcome = await runBatchedProbe(conn, {
-    entries: symlinkListingEntries(destination, members),
-    maxOutputBytes: ARCHIVE_CAPTURE_LIMIT_BYTES,
-    script: buildSymlinkListingProbeScript(),
-  })
+  const outcome = await runSymlinkListing(conn, symlinkListingEntries(destination, members))
   if (outcome.kind === "failed") {
     return failed(`${prefix}: symlink listing before the merge failed: ${outcome.detail}`)
   }

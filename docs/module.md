@@ -171,56 +171,80 @@ Tar-Symlinks und -Hardlinks werden nur entpackt, wenn ihr Ziel – bei Symlinks 
 Verzeichnis aus, bei Hardlinks vom Archiv-Stamm aus und auch über die Symlinks des Archivs hinweg
 aufgelöst – innerhalb von `destination` bleibt; absolute Ziele, ein Link anstelle des
 Zielverzeichnisses selbst, Einträge unterhalb eines Archiv-Symlinks und Zip-Symlinks werden
-abgelehnt. Die Archivliste und die Symlink-Listen des Hosts werden als striktes UTF-8 gelesen, nie
-mit Ersatzzeichen: Eine Liste mit ungültigem UTF-8, einem doppelten Link-Pfad oder U+FFFD in einem
-aufgeführten Pfad oder Ziel lässt die Prüfung fehlschlagen. Ein Eintrag, dessen Pfad oder Link-Ziel
-einen Backslash oder U+FFFD enthält, wird abgelehnt, weil `tar` nicht druckbare Bytes (und außerhalb
-einer UTF-8-Locale jedes Nicht-ASCII-Byte) als Escape-Sequenz ausgibt und sich solche Namen daher
-nicht zuverlässig den entpackten Namen zuordnen lassen; eine UTF-8-Locale auf dem Host vermeidet
-maskierte Nicht-ASCII-Namen. Ist die Archivliste geprüft, schreibt `archive.extract` ein Flag je
-Zielverzeichnis, noch bevor das Zielverzeichnis angelegt oder geprüft wird – lässt es sich nicht
-schreiben, endet der Durchlauf, bevor das Zielverzeichnis berührt wird. Noch bevor etwas entpackt
-wird, lehnt es dann einen Eintrag ab, dessen Pfad oder übergeordnete Verzeichnisse auf dem Host
-vorhandene Symlinks sind (ein Archiv-Symlink darf den Link an seinem eigenen Pfad ersetzen), eine
-Datei, einen Hardlink oder Symlink dort, wo der Host ein echtes Verzeichnis hat, sowie ein
-Verzeichnis – auch ein implizites Elternverzeichnis – dort, wo der Host kein Verzeichnis hat.
-Weiterhin vor jeder Kopie löst es die bereits unter `destination` vorhandenen Symlinks gemeinsam mit
-denen des Archivs auf: Ein Archiv-Symlink ersetzt einen vorhandenen Symlink am selben Pfad,
-vorhandene absolute Ziele innerhalb von `destination` sind erlaubt; jede andere Typ-Kombination am
-Pfad eines Eintrags, ein Eintrag unterhalb eines vorhandenen Symlinks, ein Link, der außerhalb von
-`destination` auflöst, oder ein Link, dessen Ziel durch einen Pfad führt, der sich von einem
-vorhandenen Symlink (des Archivs oder bereits auf dem Host) nur in Groß- und Kleinschreibung oder
-Unicode-Normalisierung (NFC, NFD oder Kompatibilitätsformen) unterscheidet, verhindert das
-Entpacken, weil ein Dateisystem, das Groß- und Kleinschreibung nicht unterscheidet oder Namen
-normalisiert, diesem Symlink folgen kann – ein vorhandener Link, der nach außen zeigt, muss dann
-entfernt oder nach innen umgelenkt werden.
+abgelehnt. Die Archivliste wird als striktes UTF-8 gelesen, nie mit Ersatzzeichen. Ein Eintrag,
+dessen Pfad oder Link-Ziel einen Backslash oder U+FFFD enthält, wird abgelehnt, weil `tar` nicht
+druckbare Bytes (und außerhalb einer UTF-8-Locale jedes Nicht-ASCII-Byte) als Escape-Sequenz ausgibt
+und sich solche Namen daher nicht zuverlässig den entpackten Namen zuordnen lassen; eine
+UTF-8-Locale auf dem Host vermeidet maskierte Nicht-ASCII-Namen. Ist die Archivliste geprüft,
+schreibt `archive.extract` ein Flag je Zielverzeichnis, noch bevor das Zielverzeichnis angelegt oder
+geprüft wird – lässt es sich nicht schreiben, endet der Durchlauf, bevor das Zielverzeichnis berührt
+wird. Noch bevor etwas entpackt wird, lehnt es dann einen Eintrag ab, dessen Pfad oder übergeordnete
+Verzeichnisse auf dem Host vorhandene Symlinks sind (ein Archiv-Symlink darf den Link an seinem
+eigenen Pfad ersetzen), eine Datei, einen Hardlink oder Symlink dort, wo der Host ein echtes
+Verzeichnis hat, sowie ein Verzeichnis – auch ein implizites Elternverzeichnis – dort, wo der Host
+kein Verzeichnis hat. Weiterhin vor jeder Kopie löst es die bereits unter `destination` vorhandenen
+Symlinks gemeinsam mit denen des Archivs auf: Ein Archiv-Symlink ersetzt einen vorhandenen Symlink
+am selben Pfad, vorhandene absolute Ziele innerhalb von `destination` sind erlaubt; jede andere
+Typ-Kombination am Pfad eines Eintrags, ein Eintrag unterhalb eines vorhandenen Symlinks, ein Link,
+der außerhalb von `destination` auflöst, oder ein Link, dessen Ziel durch einen Pfad führt, der sich
+von einem vorhandenen Symlink (des Archivs oder bereits auf dem Host) nur in Groß- und
+Kleinschreibung oder Unicode-Normalisierung (NFC, NFD oder Kompatibilitätsformen) unterscheidet,
+verhindert das Entpacken, weil ein Dateisystem, das Groß- und Kleinschreibung nicht unterscheidet
+oder Namen normalisiert, diesem Symlink folgen kann – ein vorhandener Link, der nach außen zeigt,
+muss dann entfernt oder nach innen umgelenkt werden.
+
+Geprüft werden nur die Links, auf die das Archiv wirken kann: die Symlinks des Archivs selbst und
+jeder vorhandene Symlink, dessen Auflösung durch einen Pfad führt, den das Archiv schreibt (den Pfad
+eines Eintrags oder eines seiner Elternverzeichnisse, verglichen unter derselben Faltung von Groß-
+und Kleinschreibung und Normalisierung), direkt oder über einen weiteren solchen Link. Jeder andere
+vorhandene Symlink – auch einer, der aus `destination` hinauszeigt, eine Schleife bildet oder einen
+ungewöhnlichen Namen trägt, etwa das `bin/python3 -> /usr/bin/python3` einer virtuellen
+Python-Umgebung – bleibt unbeachtet und unverändert. Ein Archiv ohne Symlinks (darunter jedes
+Zip-Archiv) kann nicht ändern, wie ein Pfad auflöst; für es führen weder diese Prüfung noch die
+Prüfung nach dem Zusammenführen einen Befehl aus. Für ein Archiv mit Symlinks listet ein Befehl alle
+Symlinks unter `destination` mit Pfaden relativ dazu auf, bis zu einer Obergrenze von 64 MiB
+erfasster Ausgabe; ein Zielverzeichnis mit mehr Symlinks lässt die Prüfung mit der Meldung
+fehlschlagen, es enthalte zu viele Symlinks für die Prüfung. Die Liste überträgt jeden Namen
+außerhalb von druckbarem ASCII hexadezimal kodiert und dekodiert ihn Byte für Byte: Ein gültiger
+UTF-8-Name behält seine genaue Schreibweise (auch ein wörtliches U+FFFD), ein geprüfter Link, dessen
+Pfad oder Ziel kein gültiges UTF-8 ist oder der über einen solchen Link auflöst, lässt sich dagegen
+nicht prüfen und verhindert das Entpacken, bis er umbenannt oder entfernt ist; eine fehlerhaft
+aufgebaute Liste oder ein doppelter Link-Pfad lässt die Prüfung fehlschlagen. Mit GNU `find` auf dem
+Host wird ein Verzeichnis unter `destination`, das sich nicht lesen oder durchsuchen lässt, gemeldet,
+statt die Liste scheitern zu lassen: Ein geprüfter Link, der hinein auflöst, oder ein Eintrag des
+Archivs darin oder darunter verhindert das Entpacken, weil er sich nicht prüfen lässt; die Links in
+einem solchen Verzeichnis selbst werden nicht geprüft (eine bekannte Grenze). Ohne GNU `find`
+(busybox, die BSDs) lässt jedes nicht lesbare Verzeichnis unter `destination` die Prüfung
+fehlschlagen.
 
 Der Host bricht das Zusammenführen per GNU `timeout` nach 100 Sekunden ab (10 Sekunden später
 erzwungen), also vor dem Befehls-Timeout von 120 Sekunden; fehlt `timeout`, scheitert das
-Zusammenführen, bevor etwas kopiert wird. Hat das Zusammenführen begonnen, läuft immer eine Prüfung
-aller Symlinks unter `destination`, auch nach einem fehlgeschlagenen oder abgebrochenen
-Zusammenführen, das bereits Einträge kopiert haben kann: Sie löst die Links wie die Prüfung vor dem
-Zusammenführen auf, ohne den Host auflösen zu lassen, und wertet Namensvarianten ebenfalls als
-Verstoß. Danach fragt sie den Kernel in einem gebündelten Befehl (`test -e` und `test -ef`, begrenzt
-durch das Symlink-Limit des Kernels; nie `realpath` oder `readlink -f`), ob jeder Link, den sie als
-innen liegend einstuft, tatsächlich den aufgelösten Pfad erreicht; löst der Kernel einen Link zu
-einem anderen Objekt auf oder nur auf einer Seite (etwa bei einem Ziel durch ein fehlendes
-Verzeichnis), gilt das als Verstoß, und lässt sich dieser Abgleich nicht vollständig durchführen,
-schlägt der Durchlauf fehl. Ein Baum ohne Verstoß kostet zwei Befehle, wenn ein Symlink unter
-`destination` als innen liegend eingestuft wird, sonst einen, unabhängig von der Zahl der Einträge;
-ein Verstoß kostet keinen weiteren. Diese Prüfung meldet nur: Sie entfernt, verschiebt oder ändert
-nichts. Jeder verstoßende Link – einer, der außerhalb auflöst, einer, der sich innerhalb des
-Symlink-Limits nicht auflösen lässt, etwa bei einer Schleife, eine Namensvariante oder eine
-Abweichung des Kernels – lässt den Durchlauf fehlschlagen. Die Meldung nennt die ersten 10
-betroffenen Links mit Pfad, gespeichertem Ziel und Grund, fasst den Rest als `(and N more)` zusammen
-und hält fest, dass nichts entfernt oder geändert wurde. Die betroffenen Links müssen von Hand
-entfernt oder nach innen umgelenkt werden; das Flag bleibt stehen, bis danach ein Durchlauf gelingt.
-Bei einem Fehlschlag wird weder die Marker-Datei geschrieben noch `owner` angewendet. Das Flag wird
-erst entfernt, wenn ein Durchlauf einschließlich `owner` und Marker-Dateien vollständig gelingt;
-eine Ablehnung beim Anlegen oder Prüfen des Zielverzeichnisses, durch die Prüfungen vor dem
-Entpacken, durch die Prüfung vor dem Zusammenführen, beim Zusammenführen oder durch die Prüfung
-danach lässt es stehen, und solange es besteht, meldet `check` für jedes Archiv mit diesem
-Zielverzeichnis `needs-apply`.
+Zusammenführen, bevor etwas kopiert wird. Hat das Zusammenführen begonnen, läuft für ein Archiv mit
+Symlinks immer eine Prüfung derselben Links (der Symlinks des Archivs und jedes Symlinks, dessen
+Auflösung durch einen Pfad führt, den das Archiv schreibt), auch nach einem fehlgeschlagenen oder
+abgebrochenen Zusammenführen, das bereits Einträge kopiert haben kann: Sie löst die Links wie die
+Prüfung vor dem Zusammenführen auf, ohne den Host auflösen zu lassen, und wertet Namensvarianten
+ebenfalls als Verstoß. Danach fragt sie den Kernel in einem gebündelten Befehl (`test -e` und
+`test -ef`, begrenzt durch das Symlink-Limit des Kernels; nie `realpath` oder `readlink -f`), ob
+jeder geprüfte Link, den sie als innen liegend einstuft, tatsächlich den aufgelösten Pfad erreicht;
+löst der Kernel einen Link zu einem anderen Objekt auf oder nur auf einer Seite (etwa bei einem Ziel
+durch ein fehlendes Verzeichnis), gilt das als Verstoß, und lässt sich dieser Abgleich nicht
+vollständig durchführen, schlägt der Durchlauf fehl. Ein Baum ohne Verstoß kostet zwei Befehle, wenn
+ein geprüfter Symlink als innen liegend eingestuft wird, sonst einen und für ein Archiv ohne
+Symlinks keinen, unabhängig von der Zahl der Einträge; ein Verstoß kostet keinen weiteren. Diese
+Prüfung meldet nur: Sie entfernt, verschiebt oder ändert nichts. Jeder verstoßende Link – einer, der
+außerhalb auflöst, einer, der sich innerhalb des Symlink-Limits nicht auflösen lässt, etwa bei einer
+Schleife, eine Namensvariante, eine Abweichung des Kernels oder ein Link, der sich wegen eines nicht
+lesbaren Verzeichnisses oder eines Namens ohne gültiges UTF-8 nicht prüfen lässt – lässt den
+Durchlauf fehlschlagen. Die Meldung nennt die ersten 10 betroffenen Links mit Pfad, gespeichertem
+Ziel und Grund, fasst den Rest als `(and N more)` zusammen und hält fest, dass nichts entfernt oder
+geändert wurde. Die betroffenen Links müssen von Hand entfernt oder nach innen umgelenkt werden; das
+Flag bleibt stehen, bis danach ein Durchlauf gelingt. Bei einem Fehlschlag wird weder die
+Marker-Datei geschrieben noch `owner` angewendet. Das Flag wird erst entfernt, wenn ein Durchlauf
+einschließlich `owner` und Marker-Dateien vollständig gelingt; eine Ablehnung beim Anlegen oder
+Prüfen des Zielverzeichnisses, durch die Prüfungen vor dem Entpacken, durch die Prüfung vor dem
+Zusammenführen, beim Zusammenführen oder durch die Prüfung danach lässt es stehen, und solange es
+besteht, meldet `check` für jedes Archiv mit diesem Zielverzeichnis `needs-apply`.
 
 ---
 

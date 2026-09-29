@@ -2,15 +2,24 @@
  * The post-merge symlink containment backstop of `archive.extract`.
  *
  * Issue #219: after the staging merge, {@link enforceSymlinkContainment} lists
- * every link below the destination as it actually is, judges the set with the
- * resolver the pre-merge check uses and lets the host kernel confirm the
- * resolver's location of every link judged inside. It only detects and
- * reports: on a violation it names the offending links and fails the run, and
- * it never removes, moves or changes anything on the host.
+ * every link below the destination as it actually is, judges the links this
+ * archive can affect with the resolver the pre-merge check uses and lets the
+ * host kernel confirm the resolver's location of every such link judged
+ * inside. It only detects and reports: on a violation it names the offending
+ * links and fails the run, and it never removes, moves or changes anything on
+ * the host.
  */
 import type { ModuleResult, SshConnection } from "../types.js"
+import type { ArchiveMember } from "./archiveMemberValidation.js"
 
 import { failed } from "../moduleFailure.js"
+import {
+  archiveContainmentScope,
+  archiveHasSymlinks,
+  normalizedMemberKeys,
+  unreadableDirectoryAt,
+  unreadableDirectoryIndex,
+} from "./archiveContainmentScope.js"
 import { runKernelCrossCheck } from "./archiveKernelCrossCheck.js"
 import {
   type MergedSymlink,
@@ -18,16 +27,17 @@ import {
   type MergedSymlinkViolation,
   variantDescription,
 } from "./archiveLinkValidation.js"
-import { ARCHIVE_CAPTURE_LIMIT_BYTES } from "./archiveMemberValidation.js"
+import { encodeSymlinkListingEntry } from "./archiveProbe.js"
 import {
-  buildSymlinkListingProbeScript,
-  encodeSymlinkListingEntry,
-  runBatchedProbe,
-} from "./archiveProbe.js"
-import { hostStateFromListing } from "./archiveSymlinkListing.js"
+  hostStateFromListing,
+  quotedHostPath,
+  runSymlinkListing,
+  symlinkDescription,
+  unverifiableLinkReason,
+} from "./archiveSymlinkListing.js"
 
 const CHECKED_AFTER_MERGE =
-  "every symlink under the destination is checked after the merge, including links this archive did not ship"
+  "after the merge, the archive's symlinks and every symlink under the destination whose resolution passes through a path the archive writes are checked, including links it did not ship"
 
 /**
  * Issue #219: what an operator has to do after a post-merge violation. The
@@ -46,16 +56,20 @@ export const POST_MERGE_VIOLATION_REPORT_LIMIT = 10
 
 /**
  * Issue #219: a link the backstop cannot show to stay inside: a violation of
- * the lexical resolver, or a `kernel-mismatch` where the host kernel does not
- * confirm the location the resolver computed (`expected`, absolute).
+ * the lexical resolver, a `kernel-mismatch` where the host kernel does not
+ * confirm the location the resolver computed (`expected`, absolute), or an
+ * `unreadable-member`: an archive member path (`key`) at or below a host
+ * directory the listing could not read, whose links the backstop cannot see.
  */
 export type PostMergeViolation =
-  { expected: string; key: string; kind: "kernel-mismatch" } | MergedSymlinkViolation
+  | { directory: string; key: string; kind: "unreadable-member" }
+  | { expected: string; key: string; kind: "kernel-mismatch" }
+  | MergedSymlinkViolation
 
 /**
  * Issue #219: every symlink below the destination after the merge, keyed by
- * destination-relative path, with the links that cannot be shown to stay
- * inside.
+ * destination-relative path, with the links this archive can affect that
+ * cannot be shown to stay inside.
  */
 type PostMergeSymlinks = {
   kind: "ok"
@@ -67,43 +81,82 @@ type PostMergeSymlinks = {
 type PostMergeSymlinkReading = { detail: string; kind: "failed" } | PostMergeSymlinks
 
 /**
+ * Issue #219: the archive member paths at or below a host directory the
+ * listing could not read. The backstop cannot see the links there, so each is
+ * a violation.
+ *
+ * @param members - The validated archive members.
+ * @param unreadable - The unreadable host directories.
+ * @returns One violation per such member path, in listing order.
+ */
+function unreadableMemberViolations(
+  members: readonly ArchiveMember[],
+  unreadable: ReadonlySet<string> | undefined
+): PostMergeViolation[] {
+  const index = unreadableDirectoryIndex(unreadable)
+  if (index.size === 0) return []
+  const violations: PostMergeViolation[] = []
+  for (const key of normalizedMemberKeys(members)) {
+    const directory = unreadableDirectoryAt(key, index)
+    if (directory !== undefined) violations.push({ directory, key, kind: "unreadable-member" })
+  }
+  return violations
+}
+
+/**
  * Issue #219: read every symlink below the destination as it is now, judge
- * the whole set with the pre-merge resolver and let the kernel confirm it.
+ * the links this archive can affect with the pre-merge resolver and let the
+ * kernel confirm them.
  *
  * One batched exec of `buildSymlinkListingProbeScript` with the destination as
  * its only `r` entry lists each link with its stored target; nothing on the
  * host resolves a link in user space, so a self-extending loop such as
- * `b -> b/..` cannot hang the probe. The pairs are decoded by the same
+ * `b -> b/..` cannot hang the probe. The records are decoded by the same
  * {@link hostStateFromListing} the pre-merge check uses, with no requested
  * member paths, so any directory hit counts as broken framing. The listing
  * grows with the number of links on the host, not with violations, so it gets
- * the archive capture cap; truncation still fails closed.
+ * its own capture cap; truncation still fails closed.
  *
- * Issue #219: the resolver alone is lexical. Every link it judges inside is
- * then handed to {@link runKernelCrossCheck} in one more batched exec, which
- * compares the link with the location the resolver computed by device and
- * inode. A link the kernel resolves elsewhere is a `kernel-mismatch`
- * violation; a cross-check that cannot be completed fails the reading like a
- * failed listing. Without links judged inside, no cross-check runs.
+ * Issue #219: only the links this archive can affect are judged, exactly as
+ * before the merge (see `mergedSymlinkResolutions`): the archive's symlinks
+ * that are present now and every link whose resolution touches a path the
+ * archive writes. An archive member path at or below a directory the listing
+ * could not read is a violation as well, because the links there are
+ * unknown.
+ *
+ * Issue #219: the resolver alone is lexical. Every judged link it places
+ * inside is then handed to {@link runKernelCrossCheck} in one more batched
+ * exec, which compares the link with the location the resolver computed by
+ * device and inode. A link the kernel resolves elsewhere is a
+ * `kernel-mismatch` violation; a cross-check that cannot be completed fails
+ * the reading like a failed listing. Without judged links inside, no
+ * cross-check runs.
  *
  * @param conn - The SSH connection.
- * @param destination - The validated, canonical destination directory.
- * @returns The listed links with their violations, or why the reading cannot
- *   be trusted.
+ * @param parameters - Reading inputs.
+ * @param parameters.destination - The validated, canonical destination directory.
+ * @param parameters.members - The validated archive members.
+ * @returns The listed links with the violations of the judged ones, or why
+ *   the reading cannot be trusted.
  */
 async function readPostMergeSymlinks(
   conn: SshConnection,
-  destination: string
+  parameters: { destination: string; members: readonly ArchiveMember[] }
 ): Promise<PostMergeSymlinkReading> {
-  const outcome = await runBatchedProbe(conn, {
-    entries: [encodeSymlinkListingEntry("r", destination)],
-    maxOutputBytes: ARCHIVE_CAPTURE_LIMIT_BYTES,
-    script: buildSymlinkListingProbeScript(),
-  })
+  const { destination, members } = parameters
+  const outcome = await runSymlinkListing(conn, [encodeSymlinkListingEntry("r", destination)])
   if (outcome.kind === "failed") return outcome
   const host = hostStateFromListing(destination, outcome.fields, new Map())
   if (typeof host === "string") return { detail: host, kind: "failed" }
-  const { inside, violations } = mergedSymlinkResolutions(host.links)
+  const resolutions = mergedSymlinkResolutions(host.links, {
+    ...archiveContainmentScope(members),
+    unreadable: host.unreadable,
+  })
+  const { inside } = resolutions
+  const violations = [
+    ...unreadableMemberViolations(members, host.unreadable),
+    ...resolutions.violations,
+  ]
   if (inside.size === 0) return { kind: "ok", links: host.links, violations }
   const kernel = await runKernelCrossCheck(conn, { destination, inside })
   if (kernel.kind === "failed") {
@@ -131,9 +184,11 @@ function postMergeViolationDescription(
   reading: PostMergeSymlinks,
   violation: PostMergeViolation
 ): string {
+  if (violation.kind === "unreadable-member") {
+    return `archive member path ${quotedHostPath(destination, violation.key)} cannot be checked: directory ${quotedHostPath(destination, violation.directory)} is not readable`
+  }
   const stored = reading.links.get(violation.key)?.stored ?? ""
-  const linkPath = `${destination}/${violation.key}`
-  const link = `symlink ${JSON.stringify(linkPath)} -> ${JSON.stringify(stored)}`
+  const link = symlinkDescription(destination, violation.key, stored)
   switch (violation.kind) {
     case "escape": {
       return `${link} resolves outside destination ${JSON.stringify(destination)}`
@@ -143,6 +198,10 @@ function postMergeViolationDescription(
     }
     case "limit": {
       return `${link} cannot be resolved within the symlink resolution limit`
+    }
+    case "unmappable":
+    case "unreadable": {
+      return `${link} ${unverifiableLinkReason(destination, violation)}`
     }
     case "variant": {
       return `${link} ${variantDescription(violation)}`
@@ -171,15 +230,19 @@ function containmentViolationMessage(destination: string, reading: PostMergeSyml
 
 /**
  * Issue #219: the post-merge backstop. List every symlink below the
- * destination as it actually is, judge the set with the resolver the pre-merge
- * model uses, let the host kernel confirm every link judged inside, and fail
- * the run on any violation.
+ * destination as it actually is, judge the links this archive can affect with
+ * the resolver the pre-merge model uses, let the host kernel confirm every
+ * such link judged inside, and fail the run on any violation.
  *
  * This runs after every merge that started, even a failed one, because a
  * merge that failed half-way may already have published links. It covers
- * links this archive did not ship and host changes between the pre-merge
- * listing and the merge. It never asks the host to resolve a link in user
- * space: the host only lists links with their stored targets (see
+ * links this archive did not ship whose resolution passes through a path it
+ * writes, and host changes between the pre-merge listing and the merge. A
+ * link elsewhere in the destination is not judged, even when it points
+ * outside; the merge cannot have changed where it resolves. An archive
+ * without symlink members runs no exec here at all, for the reason
+ * `validateMergedSymlinkContainment` gives. It never asks the host to resolve
+ * a link in user space: the host only lists links with their stored targets (see
  * `buildSymlinkListingProbeScript`), {@link mergedSymlinkResolutions} resolves
  * them in TypeScript with its hop limit and cycle detection, and the kernel
  * cross-check only compares files with `test -ef`. GNU `realpath`, which the
@@ -203,28 +266,32 @@ function containmentViolationMessage(destination: string, reading: PostMergeSyml
  * must be removed or pointed inside manually before the next run.
  *
  * Cost: a converged tree costs one listing exec plus one kernel cross-check
- * exec when the destination holds a symlink judged inside, one exec otherwise,
- * regardless of member or link count. A violation adds no further exec.
+ * exec when a judged symlink is placed inside, one exec otherwise, and none
+ * for an archive without symlink members, regardless of member or link
+ * count. A violation adds no further exec.
  *
  * A listing that failed (including a missing or unusable `readlink`, a `find`
- * traversal error, a truncated capture and output that is not valid UTF-8),
- * returned broken framing or a duplicate link, or whose kernel cross-check
- * could not be completed fails the run as well.
+ * traversal error other than an unreadable directory with GNU find, and a
+ * truncated capture), returned broken framing or a duplicate link, or whose
+ * kernel cross-check could not be completed fails the run as well.
  *
  * @param conn - The SSH connection.
  * @param parameters - Backstop inputs.
  * @param parameters.destination - The validated, canonical destination directory.
+ * @param parameters.members - The validated archive members; they decide
+ *   which links are judged.
  * @param parameters.source - The archive source, for the failure message.
- * @returns Null when every symlink stays inside, otherwise a failure naming the
- *   offending links, or why the check could not run.
+ * @returns Null when every judged symlink stays inside, otherwise a failure
+ *   naming the offending links, or why the check could not run.
  */
 export async function enforceSymlinkContainment(
   conn: SshConnection,
-  parameters: { destination: string; source: string }
+  parameters: { destination: string; members: readonly ArchiveMember[]; source: string }
 ): Promise<ModuleResult | null> {
-  const { destination, source } = parameters
+  const { destination, members, source } = parameters
+  if (!archiveHasSymlinks(members)) return null
   const prefix = `[archive.extract] refusing to complete extraction of ${source}`
-  const reading = await readPostMergeSymlinks(conn, destination)
+  const reading = await readPostMergeSymlinks(conn, { destination, members })
   if (reading.kind === "failed") {
     return failed(`${prefix}: symlink containment check failed: ${reading.detail}`)
   }

@@ -36,6 +36,9 @@ const XARGS_PREFIX = "xargs -0 sh -c '"
  */
 const TAGGED_ENTRY_DISPATCH = `k=$\{a%%:*}; p=$\{a#*:}; case $k in `
 
+/** Closes the per-entry `case` and loop of a probe script and exits 0. */
+const CASE_LOOP_END = "esac; done; exit 0"
+
 /**
  * Encode entries as a NUL-terminated payload for `xargs -0`.
  *
@@ -62,8 +65,12 @@ function decodeNulFields(stdout: string): string[] {
   return fields
 }
 
+/**
+ * Issue #219: `truncated` marks a failure because the output hit the
+ * captured-output cap, so a caller can say what that means for its probe.
+ */
 export type BatchedProbeOutcome =
-  { detail: string; kind: "failed" } | { fields: string[]; kind: "ok" }
+  { detail: string; kind: "failed"; truncated?: true } | { fields: string[]; kind: "ok" }
 
 /**
  * Run one batched probe and return the reported violations.
@@ -121,6 +128,7 @@ export async function runBatchedProbe(
     return {
       detail: `probe output exceeded the captured-output cap of ${String(maxOutputBytes ?? DEFAULT_MAX_OUTPUT_BYTES)} bytes; refusing to evaluate a truncated result`,
       kind: "failed",
+      truncated: true,
     }
   }
   return { fields: decodeNulFields(result.stdout), kind: "ok" }
@@ -143,33 +151,81 @@ export function buildSymlinkProbeScript(): string {
 }
 
 /**
- * Per-batch body of {@link buildSymlinkListingProbeScript}: the arguments are
- * the symlinks `find` found.
+ * Issue #219: shell function `e` that emits one listing field, NUL-terminated.
  *
+ * A field made only of printable ASCII (0x20–0x7E) is printed unchanged. Any
+ * other field — with a control character, DEL or any byte above 0x7F — is
+ * printed as the marker byte 0x01 followed by the lowercase hex of its bytes,
+ * from one `od` per such field. A plain field never contains 0x01, so the
+ * marker is unambiguous, and the whole output stays printable ASCII plus the
+ * marker and NUL: valid UTF-8 whatever bytes the host names hold, so the probe
+ * keeps `strictUtf8Stdout`. The scripts run under `LC_ALL=C`, so the `case`
+ * test sees bytes, not characters of some locale. `command -p od` is looked up
+ * on the default system PATH like `readlink`; a failing `od` exits 1, which
+ * fails the listing. `$\{` keeps the shell parameter expansion literal.
+ */
+const SYMLINK_LISTING_FIELD_FUNCTION = [
+  "e() { case $1 in ",
+  "*[![:print:]]*) h=$(printf '%s' \"$1\" | command -p od -A n -v -t x1) || exit 1; ",
+  // Unquoted `$h` splits the `od` columns on whitespace; `printf '%s'` joins them.
+  "h=$(printf '%s' $h); printf '\\001%s\\0' \"$h\";; ",
+  "*) printf '%s\\0' \"$1\";; ",
+  "esac; }; ",
+].join("")
+
+/**
+ * Per-batch body of {@link buildSymlinkListingProbeScript}: `$1` is the record
+ * kind (`l` for symlinks, `u` for unreadable directories), `$2` the
+ * destination, and the remaining arguments are the paths `find` found.
+ *
+ * - Issue #219: every path is emitted relative to the destination
+ *   (`$\{l#"$d"/}`), which keeps the listing small; the decoder refuses any
+ *   path that is not a normalized relative path.
  * - Plain `readlink` without `-f` prints the stored target unchanged. It exists
  *   in GNU coreutils, busybox and the BSDs, and `command -p` looks it up on the
  *   default system PATH so a hijacked PATH cannot substitute it (R-0000693).
  * - The `printf x` sentinel keeps a target that ends in newlines intact; only
  *   the single newline `readlink` itself appends is removed.
- * - A link whose target cannot be read (it vanished, or `readlink` failed)
- *   makes the batch exit 1. `find` then exits non-zero, so the listing fails
- *   closed instead of silently omitting that link.
+ * - Issue #219: a link that vanished between `find` and `readlink` (the read
+ *   fails and `[ -L ]` is now false) is skipped: it is no longer there to
+ *   judge. A link whose target cannot be read although it still exists makes
+ *   the batch exit 1; `find` then exits non-zero, so the listing fails closed
+ *   instead of silently omitting that link.
  * - Issue #219: a missing or unusable `readlink` takes the same path: `command
- *   -p` exits 127 when it finds no `readlink`, the substitution fails and the
- *   batch exits 1. The post-merge backstop relies on this, because a link it
- *   never saw is a link it can neither judge nor report.
+ *   -p` exits 127 when it finds no `readlink`, the substitution fails, the link
+ *   still exists and the batch exits 1. The post-merge backstop relies on
+ *   this, because a link it never saw is a link it can neither judge nor
+ *   report.
  */
 const SYMLINK_LISTING_INNER_SCRIPT = [
+  SYMLINK_LISTING_FIELD_FUNCTION,
   // `nl` holds one newline; the trailing `x` survives command substitution.
   "nl=$(printf '\\nx'); ",
   // `$\{` keeps the shell parameter expansion literal; a bare `${` would be
   // read as JavaScript interpolation.
-  `nl=$\{nl%x}; `,
+  `nl=$\{nl%x}; k=$1; d=$2; shift 2; `,
   "for l do ",
-  't=$(command -p readlink -- "$l" && printf x) || exit 1; ',
+  `r=$\{l#"$d"/}; `,
+  "case $k in ",
+  "u) printf 'u\\0'; e \"$r\";; ",
+  "l) ",
+  't=$(command -p readlink -- "$l" && printf x) || { if [ -L "$l" ]; then exit 1; fi; continue; }; ',
   `t=$\{t%x}; t=$\{t%"$nl"}; `,
-  'printf \'%s\\0%s\\0\' "$l" "$t"; done; exit 0',
+  'printf \'l\\0\'; e "$r"; e "$t";; ',
+  '*) echo "unknown symlink listing batch kind" >&2; exit 64;; ',
+  CASE_LOOP_END,
 ].join("")
+
+/**
+ * Issue #219: the per-batch body of {@link buildSymlinkListingProbeScript} on
+ * its own, so a smoke test can run one batch against paths it chooses (for
+ * example a link that vanished after `find` reported it).
+ *
+ * @returns The script `find -exec sh -c <script> sh <kind> <destination> {} +` runs.
+ */
+export function symlinkListingBatchScript(): string {
+  return SYMLINK_LISTING_INNER_SCRIPT
+}
 
 /**
  * Issue #219: the kinds of entry {@link buildSymlinkListingProbeScript} takes.
@@ -208,17 +264,31 @@ export function encodeSymlinkListingEntry(kind: SymlinkListingEntryKind, path: s
  * with an unknown kind exits non-zero as well, so a framing mistake on the
  * sending side fails closed.
  *
- * Issue #219: an `n` entry that is an existing real directory is emitted as
- * the pair `("", path)`. A link path is never empty, so the empty first field
- * tells a directory hit apart from a `(link, target)` pair.
+ * Issue #219: with GNU find — detected in the same exec by `find <dest>
+ * -maxdepth 0 -readable`, which other finds reject as an unknown primary — a
+ * directory below the destination that the probing user cannot read or search
+ * (`! -readable -o ! -executable`) is pruned and reported as a `u` record
+ * instead of failing the whole listing, and `-ignore_readdir_race` keeps an
+ * entry that vanishes during the walk from counting as an error. Without GNU
+ * find (busybox, the BSDs) the listing keeps failing closed on any traversal
+ * error, an unreadable directory included.
+ *
+ * Issue #219: an `n` entry that is an existing real directory is emitted as an
+ * `n` record with the path as it was sent.
  */
 const SYMLINK_LISTING_OUTER_SCRIPT = [
+  "LC_ALL=C; export LC_ALL; ",
+  SYMLINK_LISTING_FIELD_FUNCTION,
   "inner=$1; shift; for a do ",
   TAGGED_ENTRY_DISPATCH,
-  'r) find "$p" -type l -exec sh -c "$inner" sh {} + || exit $?;; ',
-  'n) if [ -d "$p" ] && [ ! -L "$p" ]; then printf \'%s\\0%s\\0\' "" "$p"; fi;; ',
+  'r) if find "$p" -maxdepth 0 -readable >/dev/null 2>&1; then ',
+  'find "$p" -ignore_readdir_race -mindepth 1 ',
+  '-type d \\( ! -readable -o ! -executable \\) -prune -exec sh -c "$inner" sh u "$p" {} + ',
+  '-o -type l -exec sh -c "$inner" sh l "$p" {} + || exit $?; ',
+  'else find "$p" -type l -exec sh -c "$inner" sh l "$p" {} + || exit $?; fi;; ',
+  'n) if [ -d "$p" ] && [ ! -L "$p" ]; then printf \'n\\0\'; e "$p"; fi;; ',
   '*) echo "unknown symlink listing entry kind" >&2; exit 64;; ',
-  "esac; done; exit 0",
+  CASE_LOOP_END,
 ].join("")
 
 /**
@@ -237,7 +307,10 @@ const SYMLINK_LISTING_OUTER_SCRIPT = [
  * host to resolve a link. That matters because GNU `realpath` (in every mode,
  * `readlink -f` included) never terminates on a self-extending loop such as
  * `b -> b/..`, and a merge that failed half-way can leave one behind;
- * `readlink` without `-f` only reads the stored target.
+ * `readlink` without `-f` only reads the stored target. Which of the listed
+ * links are then judged is decided in TypeScript (see
+ * `mergedSymlinkResolutions`): the listing itself is complete, because a link
+ * that the archive can affect may live anywhere below the destination.
  *
  * The directory hits let the model refuse a member that the merge could not
  * put in place: `cp -aT --remove-destination` cannot replace
@@ -256,17 +329,21 @@ const SYMLINK_LISTING_OUTER_SCRIPT = [
  * come back NUL-framed, so spaces and newlines in link names and targets are
  * transported faithfully.
  *
- * Failure mode: fail closed. A traversal error, an unreadable link target, an
- * unknown entry kind or a failing `sh`/`xargs` makes the exec exit non-zero;
- * the caller treats that, a truncated capture and any output that is not made
- * of pairs with paths below the destination as "containment cannot be
- * proven".
+ * Failure mode: fail closed. A traversal error (other than an unreadable
+ * directory with GNU find), an unreadable target of an existing link, an
+ * unknown entry kind or a failing `sh`/`xargs`/`od` makes the exec exit
+ * non-zero; the caller treats that, a truncated capture and any output that
+ * is not made of well-formed records as "containment cannot be proven".
  *
- * @returns The remote script. Its output is a flat list of field pairs: a
- *   `(link, target)` pair per symlink, with the absolute link path and the raw
- *   target exactly as stored, and a `("", path)` pair per `n` entry that is an
- *   existing real directory. A tree without symlinks and without such
- *   directories produces no output.
+ * @returns The remote script. Its output is a flat list of NUL-terminated
+ *   fields forming records: `l, <link>, <target>` per symlink with the link
+ *   path relative to the destination and the raw target exactly as stored,
+ *   `u, <directory>` per unreadable directory relative to the destination
+ *   (GNU find only), and `n, <path>` per `n` entry that is an existing real
+ *   directory, with the path as sent. Every path and target field is plain
+ *   printable ASCII or 0x01 followed by the hex of its bytes. A tree without
+ *   symlinks, unreadable directories and such directory hits produces no
+ *   output.
  */
 export function buildSymlinkListingProbeScript(): string {
   return `xargs -0 sh -c ${shellQuote(SYMLINK_LISTING_OUTER_SCRIPT)} sh ${shellQuote(SYMLINK_LISTING_INNER_SCRIPT)}`
@@ -410,7 +487,7 @@ export function buildPreStagingProbeScript(): string {
     `n) if [ -d "$p" ] && [ ! -L "$p" ]; then ${report} n "$p"; fi ;; `,
     `d) if [ ! -L "$p" ] && [ -e "$p" ] && [ ! -d "$p" ]; then ${report} d "$p"; fi ;; `,
     `*) ${report} "?" "$p" ;; `,
-    "esac; done; exit 0",
+    CASE_LOOP_END,
     "' sh",
   ].join("")
 }

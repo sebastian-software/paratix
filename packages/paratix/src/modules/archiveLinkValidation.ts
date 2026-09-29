@@ -39,6 +39,9 @@
  * combination at a member path or below a host symlink is reported as a
  * conflict, which refuses the extraction instead of guessing what `cp` does.
  */
+import type { MergedSymlinkScope } from "./archiveContainmentScope.js"
+
+import { unreadableDirectoryAt, unreadableDirectoryIndex } from "./archiveContainmentScope.js"
 import { type ArchiveMember, normalizeArchiveMemberPath } from "./archiveMemberValidation.js"
 import {
   ArchiveSymlinkResolver,
@@ -65,6 +68,15 @@ export type MergedSymlink = {
   stored: string
   /** The target as the resolver walks it. */
   target: SymlinkWalkTarget
+  /**
+   * Issue #219: set for a host link whose listed path or target is not valid
+   * UTF-8. Such a name is mapped to a token no real name can produce, so the
+   * model stays exact byte for byte, but name variants of it cannot be
+   * modelled and the kernel cross-check cannot carry it; a relevant link of
+   * this kind is a violation (see `unmappable` in
+   * {@link MergedSymlinkViolation}).
+   */
+  unmappable?: true
 }
 
 /**
@@ -76,12 +88,30 @@ export type MergedSymlink = {
  *   differs from the symlink `link` only by letter case or Unicode
  *   normalization, so a case-folding or normalizing filesystem may follow
  *   `link` where the model walks a plain path.
+ * - `unmappable`: Issue #219: it is, or its resolution follows, the host link
+ *   `link` whose listed path or target is not valid UTF-8.
+ * - `unreadable`: Issue #219: its resolution reaches `directory`, a host
+ *   directory the listing could not read, or a path below it.
  */
 export type MergedSymlinkViolation =
+  | {
+      /** Destination-relative path of the unreadable directory. */
+      directory: string
+      /** Normalized destination-relative path of the link. */
+      key: string
+      kind: "unreadable"
+    }
   | {
       /** Normalized destination-relative path of the link. */
       key: string
       kind: "escape" | "limit"
+    }
+  | {
+      /** Normalized destination-relative path of the link. */
+      key: string
+      kind: "unmappable"
+      /** The link whose listed path or target is not valid UTF-8. */
+      link: string
     }
   | {
       /** Normalized destination-relative path of the link. */
@@ -99,11 +129,12 @@ export type MergedSymlinkViolation =
  */
 export type MergedSymlinkResolutions = {
   /**
-   * Every link that resolves inside the destination, mapped to the normalized
-   * destination-relative path it resolves to (`""` for the destination root).
+   * Every relevant link that resolves inside the destination, mapped to the
+   * normalized destination-relative path it resolves to (`""` for the
+   * destination root).
    */
   inside: Map<string, string>
-  /** The links that cannot be shown to stay inside, in iteration order. */
+  /** The relevant links that cannot be shown to stay inside, in iteration order. */
   violations: MergedSymlinkViolation[]
 }
 
@@ -319,6 +350,11 @@ export type MergeHostState = {
   directories: ReadonlySet<string>
   /** Every symlink below the destination with its target. */
   links: ReadonlyMap<string, MergedSymlink>
+  /**
+   * Issue #219: host directories below the destination the listing could not
+   * read; the links inside them are unknown.
+   */
+  unreadable?: ReadonlySet<string>
 }
 
 /**
@@ -331,8 +367,11 @@ export type MergeHostState = {
  *   merge guard refuses it.
  * - `below-host-symlink`: a member whose proper ancestor is a host symlink;
  *   the merge guard refuses it.
+ * - `unreadable-directory`: Issue #219: a member at or below a host directory
+ *   the listing could not read, so the links there are unknown.
  */
-export type MergeConflictReason = "below-host-symlink" | "host-directory" | "host-symlink"
+export type MergeConflictReason =
+  "below-host-symlink" | "host-directory" | "host-symlink" | "unreadable-directory"
 
 /**
  * Issue #219: the post-merge link model's verdict for one archive.
@@ -370,11 +409,14 @@ function hostSymlinkAncestor(
 /**
  * Decide whether merging one member is the modelled exact-path replacement.
  *
- * @param host - The host state before the merge.
+ * @param host - The host state before the merge, with its unreadable directories indexed.
  * @param entry - The member with its normalized path.
  * @returns The conflict, or null when the member merges as modelled.
  */
-function mergeConflict(host: MergeHostState, entry: KeyedMember): MergeConflict | null {
+function mergeConflict(
+  host: { unreadableIndex: ReadonlyMap<string, string> } & MergeHostState,
+  entry: KeyedMember
+): MergeConflict | null {
   const { key, member } = entry
   const conflict = (reason: MergeConflictReason, at = key): MergeConflict => ({
     key: at,
@@ -382,6 +424,8 @@ function mergeConflict(host: MergeHostState, entry: KeyedMember): MergeConflict 
     member,
     reason,
   })
+  const unreadable = unreadableDirectoryAt(key, host.unreadableIndex)
+  if (unreadable !== undefined) return conflict("unreadable-directory", unreadable)
   if (member.kind !== "directory" && host.directories.has(key)) return conflict("host-directory")
   if (member.kind !== "symlink" && host.links.has(key)) return conflict("host-symlink")
   const ancestor = hostSymlinkAncestor(key, host.links)
@@ -408,7 +452,9 @@ function mergeConflict(host: MergeHostState, entry: KeyedMember): MergeConflict 
  * below it. A non-symlink member at a host symlink, or any member below a host
  * symlink, is refused by the merge guard. Modelling any of these as a
  * replacement could let an escaping link pass, so the caller refuses the
- * extraction before anything is copied.
+ * extraction before anything is copied. Issue #219: a member at or below a
+ * host directory the listing could not read is a conflict as well, because the
+ * links in there are unknown.
  *
  * @param host - The host state before the merge (see {@link MergeHostState}).
  * @param members - The validated archive members, in listing order.
@@ -419,8 +465,9 @@ export function mergedArchiveSymlinks(
   members: readonly ArchiveMember[]
 ): MergedArchiveSymlinks {
   const links = new Map(host.links)
+  const indexed = { ...host, unreadableIndex: unreadableDirectoryIndex(host.unreadable) }
   for (const entry of keyedMembers(members)) {
-    const conflict = mergeConflict(host, entry)
+    const conflict = mergeConflict(indexed, entry)
     if (conflict !== null) return conflict
     const { key, member } = entry
     links.delete(key)
@@ -440,35 +487,72 @@ export function mergedArchiveSymlinks(
  *   `limit`.
  */
 function mergedViolation(key: string, failure: SymlinkFailure): MergedSymlinkViolation {
-  if (failure.kind === "variant") {
-    return { key, kind: "variant", link: failure.link, prefix: failure.prefix }
+  switch (failure.kind) {
+    case "depth":
+    case "limit": {
+      return { key, kind: "limit" }
+    }
+    case "escape": {
+      return { key, kind: "escape" }
+    }
+    case "unmappable": {
+      return { key, kind: "unmappable", link: failure.link }
+    }
+    case "unreadable": {
+      return { directory: failure.directory, key, kind: "unreadable" }
+    }
+    case "variant": {
+      return { key, kind: "variant", link: failure.link, prefix: failure.prefix }
+    }
   }
-  return { key, kind: failure.kind === "escape" ? "escape" : "limit" }
 }
 
 /**
- * Issue #219: resolve every link of a combined link set with the same
- * resolver the archive-level rules use. A link that escapes the destination,
- * exceeds the resolution limit or passes through a name that differs from a
- * symlink only by case or normalization is a violation: it cannot be proven
- * to stay inside. Every other link is reported with the destination-relative
- * path it resolves to, which the post-merge backstop hands to the host kernel
- * as the expected location of the link.
+ * Issue #219: resolve the links of a combined link set with the same resolver
+ * the archive-level rules use. A link that escapes the destination, exceeds
+ * the resolution limit, passes through a name that differs from a symlink
+ * only by case or normalization, is or follows an unmappable link, or reaches
+ * an unreadable directory is a violation: it cannot be proven to stay inside.
+ * Every other link is reported with the destination-relative path it resolves
+ * to, which the post-merge backstop hands to the host kernel as the expected
+ * location of the link.
+ *
+ * Issue #219: with a `scope`, only the links the archive can affect are
+ * judged: the archive's own symlinks present in `links`, and every link whose
+ * walk touched a path the archive writes, directly or through a link it
+ * follows (see `TrackedSymlinkResolution`). A host link whose resolution
+ * passes through an archive link is covered by that archive link's own
+ * resolution, which follows it. Every other link is ignored, even one that
+ * escapes, loops, is unmappable or reaches an unreadable directory: the merge
+ * cannot change where it resolves. Without a `scope`, every link is judged.
  *
  * @param links - The combined link set, e.g. from {@link mergedArchiveSymlinks}.
+ * @param scope - The archive's scope and the unreadable host directories; when
+ *   omitted, every link is judged.
  * @returns The violations in the iteration order of `links`, and the resolved
- *   path of every other link.
+ *   path of every other judged link.
  */
 export function mergedSymlinkResolutions(
-  links: ReadonlyMap<string, MergedSymlink>
+  links: ReadonlyMap<string, MergedSymlink>,
+  scope?: MergedSymlinkScope
 ): MergedSymlinkResolutions {
   const targets = new Map<string, SymlinkWalkTarget>()
-  for (const [key, link] of links) targets.set(key, link.target)
-  const resolver = new ArchiveSymlinkResolver(targets, new Set(targets.keys()))
+  const unmappable = new Set<string>()
+  for (const [key, link] of links) {
+    targets.set(key, link.target)
+    if (link.unmappable === true) unmappable.add(key)
+  }
+  const resolver = new ArchiveSymlinkResolver(targets, new Set(targets.keys()), {
+    unmappable,
+    unreadable: scope?.unreadable,
+    written: scope?.written,
+  })
   const inside = new Map<string, string>()
   const violations: MergedSymlinkViolation[] = []
   for (const key of targets.keys()) {
-    const resolution = resolver.resolve(key)
+    const { resolution, touched } = resolver.resolveTracked(key)
+    const relevant = scope === undefined || touched || scope.archiveLinks.has(key)
+    if (!relevant) continue
     if (resolution.kind === "resolved") inside.set(key, resolution.segments.join("/"))
     else violations.push(mergedViolation(key, resolution))
   }
@@ -479,10 +563,12 @@ export function mergedSymlinkResolutions(
  * Issue #219: the violations of {@link mergedSymlinkResolutions} alone.
  *
  * @param links - The combined link set, e.g. from {@link mergedArchiveSymlinks}.
+ * @param scope - The archive's scope; when omitted, every link is judged.
  * @returns The violations in the iteration order of `links`.
  */
 export function mergedSymlinkViolations(
-  links: ReadonlyMap<string, MergedSymlink>
+  links: ReadonlyMap<string, MergedSymlink>,
+  scope?: MergedSymlinkScope
 ): MergedSymlinkViolation[] {
-  return mergedSymlinkResolutions(links).violations
+  return mergedSymlinkResolutions(links, scope).violations
 }

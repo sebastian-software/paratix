@@ -18,6 +18,7 @@ import {
 import { buildKernelCrossCheckScript } from "../../src/modules/archiveKernelCrossCheck.js"
 import {
   ARCHIVE_CAPTURE_LIMIT_BYTES,
+  type ArchiveMember,
   listArchiveMembers,
 } from "../../src/modules/archiveMemberValidation.js"
 import {
@@ -27,6 +28,7 @@ import {
   buildSymlinkListingProbeScript,
   buildSymlinkProbeScript,
 } from "../../src/modules/archiveProbe.js"
+import { SYMLINK_LISTING_CAPTURE_LIMIT_BYTES } from "../../src/modules/archiveSymlinkListing.js"
 import {
   CAPTURE_TRUNCATION_MARKER,
   collectStreamOutput,
@@ -531,9 +533,36 @@ function taggedEntryPaths(input: string | undefined, kind: string): string[] {
 }
 
 /**
- * Answer the pre-merge listing probe from the host model: one
- * `(link, raw target)` pair for every link below a transported `r` entry. The
- * model has no directories, so `n` entries never report.
+ * Issue #219: one listing field as the probe emits it: printable ASCII as is,
+ * anything else as the marker byte 0x01 followed by the hex of its UTF-8
+ * bytes.
+ *
+ * @param text - A decoded link path or target.
+ * @returns The encoded field.
+ */
+function listingField(text: string): string {
+  return /^[\x20-\x7E]*$/v.test(text) ? text : `\u0001${Buffer.from(text).toString("hex")}`
+}
+
+/**
+ * Issue #219: the NUL-framed `l` records of the listing probe for absolute
+ * `(link, target)` pairs below a root, with link paths relative to the root.
+ *
+ * @param root - The listed destination.
+ * @param links - The absolute link paths with their raw targets.
+ * @returns The probe output.
+ */
+function listingRecords(root: string, links: Iterable<readonly [string, string]>): string {
+  return [...links]
+    .flatMap(([link, target]) => ["l", link.slice(root.length + 1), target])
+    .map((field, index) => `${index % 3 === 0 ? field : listingField(field)}\u0000`)
+    .join("")
+}
+
+/**
+ * Answer the pre-merge listing probe from the host model: one `l` record for
+ * every link below a transported `r` entry. The model has no directories, so
+ * `n` entries never report.
  *
  * @param tree - The host symlinks.
  * @param input - The probe's NUL-terminated tagged entries.
@@ -541,9 +570,12 @@ function taggedEntryPaths(input: string | undefined, kind: string): string[] {
  */
 function listingProbeStdout(tree: ReadonlyMap<string, string>, input: string): string {
   return taggedEntryPaths(input, "r")
-    .flatMap((root) => [...tree].filter(([link]) => link.startsWith(`${root}/`)))
-    .flat()
-    .map((field) => `${field}\u0000`)
+    .map((root) =>
+      listingRecords(
+        root,
+        [...tree].filter(([link]) => link.startsWith(`${root}/`))
+      )
+    )
     .join("")
 }
 
@@ -1600,6 +1632,10 @@ describe("archive.extract — apply", () => {
 
     expect(result.status).toBe("changed")
     expect(mockSsh.calls).toContain(`unzip -o '${zipSrc}' -d '${archiveStageDirectory}'`)
+    // Issue #219: zip symlinks are rejected, so a zip apply never lists the
+    // host's symlinks and never runs the kernel cross-check.
+    expect(mockSsh.calls).not.toContain(symlinkListingProbeCommand)
+    expect(mockSsh.calls).not.toContain(kernelCrossCheckCommand)
   })
 
   it("extracts .tgz archive", async () => {
@@ -1774,7 +1810,8 @@ describe("archive.extract — apply", () => {
     // regression back to per-path probing would push this far past it, which is
     // what makes the assertion worth having.
     const runWith = async (
-      memberCount: number
+      memberCount: number,
+      extraLines: readonly string[] = []
     ): Promise<{
       crossChecks: number
       listingProbes: number
@@ -1789,7 +1826,10 @@ describe("archive.extract — apply", () => {
         [`tar --no-same-owner --no-overwrite-dir -xzf '${src}' -C '${archiveStageDirectory}'`]: {
           code: 0,
         },
-        [`tar -tvzf '${src}'`]: { code: 0, stdout: tarListingForMemberPaths(memberPaths) },
+        [`tar -tvzf '${src}'`]: {
+          code: 0,
+          stdout: [tarListingForMemberPaths(memberPaths), ...extraLines].join("\n"),
+        },
       })
       vi.spyOn(mockSsh, "sha256").mockResolvedValue(archiveSha)
       vi.spyOn(mockSsh, "writeFile").mockResolvedValue()
@@ -1812,20 +1852,35 @@ describe("archive.extract — apply", () => {
 
     const few = await runWith(5)
     const many = await runWith(500)
+    // Issue #219: only an archive with a symlink member needs the listings.
+    const symlinkLine = tarSymlinkLine("app/link", "file-0")
+    const fewWithSymlink = await runWith(5, [symlinkLine])
+    const manyWithSymlink = await runWith(500, [symlinkLine])
 
     expect(many.symlinkProbes).toBe(few.symlinkProbes)
     expect(many.symlinkProbes).toBeLessThanOrEqual(4)
-    // Issue #219: the post-merge backstop lists the whole tree in one exec and
-    // resolves it in TypeScript, so a converged tree adds exactly one round
-    // trip regardless of member count.
-    expect(few.postMergeListings).toBe(1)
-    expect(many.postMergeListings).toBe(1)
-    // Issue #219: the pre-merge listing of host symlinks is one exec as well.
-    expect(few.listingProbes).toBe(1)
-    expect(many.listingProbes).toBe(1)
-    // Issue #219: a tree without symlinks needs no kernel cross-check.
-    expect(few.crossChecks).toBe(0)
-    expect(many.crossChecks).toBe(0)
+    expect(manyWithSymlink.symlinkProbes).toBe(fewWithSymlink.symlinkProbes)
+    // Issue #219: an archive without symlink members cannot change how any
+    // path resolves, so neither the pre-merge listing nor the post-merge
+    // backstop runs an exec for it.
+    expect([few, many].map(({ listingProbes }) => listingProbes)).toStrictEqual([0, 0])
+    expect([few, many].map(({ postMergeListings }) => postMergeListings)).toStrictEqual([0, 0])
+    // Issue #219: with a symlink member, the post-merge backstop lists the
+    // whole tree in one exec and resolves it in TypeScript, and the pre-merge
+    // listing is one exec as well, regardless of member count.
+    expect(
+      [fewWithSymlink, manyWithSymlink].map(({ listingProbes, postMergeListings }) => [
+        listingProbes,
+        postMergeListings,
+      ])
+    ).toStrictEqual([
+      [1, 1],
+      [1, 1],
+    ])
+    // Issue #219: a tree without judged symlinks needs no kernel cross-check.
+    expect(
+      [few, many, fewWithSymlink, manyWithSymlink].map(({ crossChecks }) => crossChecks)
+    ).toStrictEqual([0, 0, 0, 0])
   })
 
   it("R-0000267: returns failed when chown of an extracted member fails", async () => {
@@ -3082,51 +3137,133 @@ describe("archive.extract — apply", () => {
       }
     )
 
+    // Issue #219: an archive without symlink members cannot change where any
+    // host link resolves, so no listing runs and an unrelated host link that
+    // points outside never blocks the apply.
     it.each([
       { link: "etc", target: "/etc" },
       { link: "a/up", target: `${destination}/..` },
       { link: "a/deep-up", target: `${destination}/a/../..` },
       { link: "sibling", target: `${alternateDestination}/x` },
+      { link: "_work/proj/.venv/bin/python3", target: "/usr/bin/python3" },
     ])(
-      "refuses a host link whose absolute target $target leaves the destination before the merge",
+      "accepts an archive without symlinks next to a host link whose absolute target $target leaves the destination, without any listing",
       async ({ link, target }) => {
-        const linkPath = `${destination}/${link}`
-        const hostLinks: HostLinkTree = new Map([[linkPath, target]])
+        const hostLinks: HostLinkTree = new Map([[`${destination}/${link}`, target]])
 
-        const run = await applyTarListing([tarFileLine("f")], { hostLinks })
-
-        expect(extractionSummary(run)).toStrictEqual({
-          error: expect.stringContaining(
-            `[archive.extract] refusing to extract ${src}: symlink ${JSON.stringify(linkPath)} -> ${JSON.stringify(target)} would resolve outside destination ${JSON.stringify(destination)} once this archive is merged`
-          ),
-          markerWritten: true,
-          status: "failed",
-          tarExtractCalls: [],
+        const run = await applyTarListing([tarDirectoryLine("a/"), tarFileLine("a/f")], {
+          hostLinks,
         })
-        expect(run.writes.map(({ remotePath }) => remotePath)).toStrictEqual([containmentFlag])
-        expect(run.mockSsh.calls.some((command) => archiveStageMovePattern.test(command))).toBe(
-          false
-        )
+
+        expect(extractionSummary(run)).toStrictEqual(extractedThroughStaging)
+        expect(run.mockSsh.calls).not.toContain(symlinkListingProbeCommand)
+        expect(run.mockSsh.calls).not.toContain(kernelCrossCheckCommand)
+        expect(run.mockSsh.calls).toContain(`rm -f -- '${containmentFlag}'`)
       }
     )
 
-    it("refuses a host link cycle before the merge with the resolution-limit reason", async () => {
-      const hostLinks: HostLinkTree = new Map([
-        [`${destination}/loop-a`, "loop-b"],
-        [`${destination}/loop-b`, "loop-a"],
-      ])
+    // Issue #219: with a symlink member, the listing runs, but only a host
+    // link whose walk passes through a path the archive writes is judged.
+    // `/opt/app/a/../..` restarts at the destination root and walks through
+    // `a`, which the archive writes; the others escape without touching it.
+    const linkArchive = [tarDirectoryLine("a/"), tarFileLine("a/f"), tarSymlinkLine("a/l", "f")]
 
-      const run = await applyTarListing([tarFileLine("f")], { hostLinks })
+    it.each([
+      { link: "etc", target: "/etc" },
+      { link: "a/up", target: `${destination}/..` },
+      { link: "sibling", target: `${alternateDestination}/x` },
+    ])(
+      "ignores a host link whose absolute target $target leaves the destination without passing through an archive path",
+      async ({ link, target }) => {
+        const hostLinks: HostLinkTree = new Map([[`${destination}/${link}`, target]])
+
+        const run = await applyTarListing(linkArchive, { hostLinks })
+
+        expect(run.mockSsh.calls).toContain(symlinkListingProbeCommand)
+        expect(extractionSummary(run)).toStrictEqual(extractedThroughStaging)
+      }
+    )
+
+    it("refuses a host link whose absolute target walks through an archive path and leaves the destination", async () => {
+      const linkPath = `${destination}/a/deep-up`
+      const target = `${destination}/a/../..`
+      const hostLinks: HostLinkTree = new Map([[linkPath, target]])
+
+      const run = await applyTarListing(linkArchive, { hostLinks })
 
       expect(extractionSummary(run)).toStrictEqual({
         error: expect.stringContaining(
-          `[archive.extract] refusing to extract ${src}: symlink "/opt/app/loop-a" -> "loop-b" would exceed the symlink resolution limit once this archive is merged; existing symlinks under the destination are checked together with the archive's links before anything is copied (and 1 more)`
+          `[archive.extract] refusing to extract ${src}: symlink ${JSON.stringify(linkPath)} -> ${JSON.stringify(target)} would resolve outside destination ${JSON.stringify(destination)} once this archive is merged`
+        ),
+        markerWritten: true,
+        status: "failed",
+        tarExtractCalls: [],
+      })
+    })
+
+    it("accepts an archive with symlinks next to an unrelated virtual environment link, before and after the merge", async () => {
+      // Issue #219: the finding this fixes: a runner's `.venv/bin/python3 ->
+      // /usr/bin/python3` refused every apply into the runner directory.
+      const venvLink = `${destination}/_work/proj/.venv/bin/python3`
+      const files = new Map<string, string>()
+      const hostLinks: HostLinkTree = new Map([[venvLink, "/usr/bin/python3"]])
+
+      const run = await applyTarListing(
+        [
+          tarDirectoryLine("bin/"),
+          tarFileLine("lib/node_modules/npm/bin/npm-cli.js"),
+          tarSymlinkLine("bin/node", "../lib/node_modules/npm/bin/npm-cli.js"),
+        ],
+        { files, hostLinks }
+      )
+
+      expect(extractionSummary(run)).toStrictEqual(extractedThroughStaging)
+      // Both listings ran; the kernel cross-check carried only the archive link.
+      expect(run.postMergeListings).toHaveLength(1)
+      const crossChecks = run.mockSsh.execCalls.filter(
+        ({ command }) => command === kernelCrossCheckCommand
+      )
+      expect(crossChecks.map(({ options }) => crossCheckedLinks(options?.input))).toStrictEqual([
+        [`${destination}/bin/node`],
+      ])
+      expect(files.has(containmentFlag)).toBe(false)
+      expect(hostLinks.get(venvLink)).toBe("/usr/bin/python3")
+    })
+
+    it("refuses a host link cycle through an archive path before the merge with the resolution-limit reason", async () => {
+      const hostLinks: HostLinkTree = new Map([
+        [`${destination}/loop-a`, "a/../loop-b"],
+        [`${destination}/loop-b`, "a/../loop-a"],
+      ])
+
+      const run = await applyTarListing(
+        [tarDirectoryLine("a/"), tarFileLine("a/f"), tarSymlinkLine("a/l", "f")],
+        { hostLinks }
+      )
+
+      expect(extractionSummary(run)).toStrictEqual({
+        error: expect.stringContaining(
+          `[archive.extract] refusing to extract ${src}: symlink "/opt/app/loop-a" -> "a/../loop-b" would exceed the symlink resolution limit once this archive is merged; the archive's symlinks and the existing symlinks whose resolution passes through a path it writes are checked together before anything is copied (and 1 more)`
         ),
         markerWritten: true,
         status: "failed",
         tarExtractCalls: [],
       })
       expect(run.writes.map(({ remotePath }) => remotePath)).toStrictEqual([containmentFlag])
+    })
+
+    it("accepts an archive with symlinks next to an unrelated host link cycle", async () => {
+      const hostLinks: HostLinkTree = new Map([
+        [`${destination}/x/loop-a`, "loop-b"],
+        [`${destination}/x/loop-b`, "loop-a"],
+      ])
+
+      const run = await applyTarListing(
+        [tarDirectoryLine("a/"), tarFileLine("a/f"), tarSymlinkLine("a/l", "f")],
+        { hostLinks }
+      )
+
+      expect(extractionSummary(run)).toStrictEqual(extractedThroughStaging)
     })
 
     it.each([
@@ -3136,37 +3273,50 @@ describe("archive.extract — apply", () => {
         response: { code: 1, stderr: "find: '/opt/app/private': Permission denied" },
       },
       {
-        detail: `probe output exceeded the captured-output cap of ${String(ARCHIVE_CAPTURE_LIMIT_BYTES)} bytes; refusing to evaluate a truncated result`,
+        detail: `the destination holds too many symlinks to check: the symlink listing exceeded its captured-output cap of ${String(SYMLINK_LISTING_CAPTURE_LIMIT_BYTES)} bytes`,
         name: "a truncated capture",
         response: {
           code: 0,
-          stdout: `${destination}/a/up\u0000..\u0000${destination}/a/e${CAPTURE_TRUNCATION_MARKER}`,
+          stdout: `l\u0000a/up\u0000..\u0000l\u0000a/e${CAPTURE_TRUNCATION_MARKER}`,
         },
       },
       {
-        detail: 'probe returned 3 fields, expected (link, target) or ("", directory) pairs',
-        name: "an odd field count",
-        response: { code: 0, stdout: `${destination}/a/up\u0000..\u0000${destination}/b\u0000` },
+        detail: 'probe output ends inside a "l" record',
+        name: "a record cut off at the end",
+        response: { code: 0, stdout: "l\u0000a/up\u0000..\u0000l\u0000b\u0000" },
       },
       {
-        detail: 'probe reported "/opt/other/l", which is not below the destination',
-        name: "a link outside the destination",
-        response: { code: 0, stdout: "/opt/other/l\u0000x\u0000" },
+        detail: 'probe reported unknown record kind "/opt/app/a/up"',
+        name: "the former pair format",
+        response: { code: 0, stdout: `${destination}/a/up\u0000..\u0000` },
       },
       {
-        detail: `probe reported "/opt/app-alt/l", which is not below the destination`,
+        detail:
+          'probe reported symlink "/opt/other/l", which is not a normalized path below the destination',
+        name: "an absolute link path",
+        response: { code: 0, stdout: "l\u0000/opt/other/l\u0000x\u0000" },
+      },
+      {
+        detail:
+          'probe reported symlink "../app-alt/l", which is not a normalized path below the destination',
         name: "a link in a sibling sharing the destination's prefix",
-        response: { code: 0, stdout: `${alternateDestination}/l\u0000x\u0000` },
+        response: { code: 0, stdout: "l\u0000../app-alt/l\u0000x\u0000" },
       },
       {
-        detail: 'probe reported "/opt/app/", which is not below the destination',
+        detail: 'probe reported symlink "", which is not a normalized path below the destination',
         name: "the destination itself",
-        response: { code: 0, stdout: `${destination}/\u0000x\u0000` },
+        response: { code: 0, stdout: "l\u0000\u0000x\u0000" },
+      },
+      {
+        detail:
+          'probe reported field "\u00e9" with characters outside printable ASCII that were not hex-encoded',
+        name: "a non-ASCII field that is not hex-encoded",
+        response: { code: 0, stdout: "l\u0000\u00e9\u0000x\u0000" },
       },
     ])(
       "fails closed before the merge on a listing probe with $name",
       async ({ detail, response }) => {
-        const run = await applyTarListing([tarFileLine("f")], {
+        const run = await applyTarListing([tarFileLine("f"), tarSymlinkLine("l", "f")], {
           responses: { [symlinkListingProbeCommand]: response },
         })
 
@@ -3184,9 +3334,10 @@ describe("archive.extract — apply", () => {
           command: symlinkListingProbeCommand,
           options: {
             ignoreExitCode: true,
-            // Issue #219: the destination as `r` entry, the file member as `n` entry.
-            input: `r:${destination}\u0000n:${destination}/f\u0000`,
-            maxOutputBytes: ARCHIVE_CAPTURE_LIMIT_BYTES,
+            // Issue #219: the destination as `r` entry, the non-directory
+            // members as `n` entries.
+            input: `r:${destination}\u0000n:${destination}/f\u0000n:${destination}/l\u0000`,
+            maxOutputBytes: SYMLINK_LISTING_CAPTURE_LIMIT_BYTES,
             silent: true,
             strictUtf8Stdout: true,
           },
@@ -3211,7 +3362,7 @@ describe("archive.extract — apply", () => {
 
       expect(extractionSummary(run)).toStrictEqual({
         error: expect.stringContaining(
-          `[archive.extract] refusing to complete extraction of ${src}: symlink ${JSON.stringify(escapingLink)} -> "up/.." resolves outside destination ${JSON.stringify(destination)}; every symlink under the destination is checked after the merge, including links this archive did not ship; nothing was removed or changed; remove the offending symlinks under the destination or point them inside it manually before the next run, the containment flag keeps check at needs-apply until an apply succeeds`
+          `[archive.extract] refusing to complete extraction of ${src}: symlink ${JSON.stringify(escapingLink)} -> "up/.." resolves outside destination ${JSON.stringify(destination)}; after the merge, the archive's symlinks and every symlink under the destination whose resolution passes through a path the archive writes are checked, including links it did not ship; nothing was removed or changed; remove the offending symlinks under the destination or point them inside it manually before the next run, the containment flag keeps check at needs-apply until an apply succeeds`
         ),
         markerWritten: true,
         status: "failed",
@@ -4161,8 +4312,11 @@ describe("archive.extract — apply", () => {
 })
 
 describe("archive.extract containment-failure flag (Issue #219)", () => {
-  const escapingHostLinks = (): HostLinkTree => new Map([[`${destination}/etc`, "/etc"]])
-  const etcRefusal = `[archive.extract] refusing to extract ${src}: symlink "/opt/app/etc" -> "/etc" would resolve outside destination "/opt/app" once this archive is merged; existing symlinks under the destination are checked together with the archive's links before anything is copied`
+  // Issue #219: a host link the archive's `a/up -> ..` makes escape; an
+  // unrelated escaping host link would no longer refuse the apply.
+  const escapingHostLinks = (): HostLinkTree => new Map([[`${destination}/a/esc`, "up/.."]])
+  const refusedArchive = [tarDirectoryLine("a/"), tarSymlinkLine("a/up", "..")]
+  const escRefusal = `[archive.extract] refusing to extract ${src}: symlink "/opt/app/a/esc" -> "up/.." would resolve outside destination "/opt/app" once this archive is merged; the archive's symlinks and the existing symlinks whose resolution passes through a path it writes are checked together before anything is copied`
 
   it("makes check of an earlier source report needs-apply after a later source was refused, until an apply succeeds", async () => {
     // Source A ships `a/esc -> up/..` and succeeds. Source B ships `a/up -> ..`,
@@ -4221,7 +4375,7 @@ describe("archive.extract containment-failure flag (Issue #219)", () => {
     const files = new Map<string, string>([[containmentFlag, "stale"]])
     const hostLinks = escapingHostLinks()
 
-    const run = await applyTarListing([tarFileLine("f")], { files, hostLinks })
+    const run = await applyTarListing(refusedArchive, { files, hostLinks })
 
     expect(run.result.status).toBe("failed")
     expect(run.mockSsh.calls).not.toContain(`rm -f -- '${containmentFlag}'`)
@@ -4229,9 +4383,9 @@ describe("archive.extract containment-failure flag (Issue #219)", () => {
   })
 
   it("writes the flag with the marker mode after creating the flags directory", async () => {
-    const run = await applyTarListing([tarFileLine("f")], { hostLinks: escapingHostLinks() })
+    const run = await applyTarListing(refusedArchive, { hostLinks: escapingHostLinks() })
 
-    expect(run.result.error?.message).toBe(etcRefusal)
+    expect(run.result.error?.message).toBe(escRefusal)
     expect(run.mockSsh.writeFileCalls).toStrictEqual([])
     const writeSpy = vi.mocked(run.mockSsh.writeFile)
     expect(writeSpy.mock.calls).toStrictEqual([
@@ -4297,7 +4451,7 @@ describe("archive.extract containment-failure flag (Issue #219)", () => {
   // destination mkdir, the pre-staging probe and anything listed, staged or
   // copied.
   it("refuses before the listing and the merge when the flag write fails", async () => {
-    const run = await applyTarListing([tarFileLine("f")], {
+    const run = await applyTarListing(refusedArchive, {
       failWrite: containmentFlag,
       hostLinks: escapingHostLinks(),
     })
@@ -4314,7 +4468,7 @@ describe("archive.extract containment-failure flag (Issue #219)", () => {
   })
 
   it("refuses before the listing and the merge when the flags directory cannot be created", async () => {
-    const run = await applyTarListing([tarFileLine("f")], {
+    const run = await applyTarListing(refusedArchive, {
       hostLinks: escapingHostLinks(),
       responses: {
         "mkdir -p '/var/lib/paratix/flags'": {
@@ -4421,10 +4575,57 @@ function beyondLimit(link: string, stored: string): string {
   return `symlink ${JSON.stringify(link)} -> ${JSON.stringify(stored)} cannot be resolved within the symlink resolution limit`
 }
 
+/**
+ * Issue #219: an archive member for the backstop's scope.
+ *
+ * @param path - Destination-relative path as the archive listing spells it.
+ * @param linkTarget - Where a symlink member points, or null for a regular file.
+ * @param kind - What the listing reports the entry as; a symlink when `linkTarget` is set, a file otherwise.
+ * @returns A tar member with the mode that matches its kind.
+ */
+function archiveMember(
+  path: string,
+  linkTarget: null | string,
+  kind: ArchiveMember["kind"] = linkTarget === null ? "file" : "symlink"
+): ArchiveMember {
+  const modes: Record<ArchiveMember["kind"], string> = {
+    directory: "drwxr-xr-x",
+    file: "-rw-r--r--",
+    hardlink: "hrw-r--r--",
+    special: "prw-r--r--",
+    symlink: "lrwxrwxrwx",
+  }
+  return { format: "tar", kind, linkTarget, mode: modes[kind], path }
+}
+
+/**
+ * Issue #219: archive symlink members for absolute `(link, target)` pairs
+ * below the destination, so the backstop judges exactly those links.
+ *
+ * @param links - Absolute link paths with their targets.
+ * @returns One symlink member per link.
+ */
+function shippedMembers(links: ReadonlyArray<readonly [string, string]>): ArchiveMember[] {
+  return links.map(([link, target]) => archiveMember(link.slice(destination.length + 1), target))
+}
+
+/**
+ * Issue #219: a hex-encoded listing field.
+ *
+ * @param parts - Text (as UTF-8) and single raw bytes, concatenated.
+ * @returns The marker byte 0x01 followed by the hex of the bytes.
+ */
+function hexListingField(...parts: Array<number | string>): string {
+  const bytes = parts.map((part) =>
+    typeof part === "number" ? Buffer.from([part]) : Buffer.from(part, "utf8")
+  )
+  return `\u0001${Buffer.concat(bytes).toString("hex")}`
+}
+
 describe("enforceSymlinkContainment (Issue #219)", () => {
   const refusal = `[archive.extract] refusing to complete extraction of ${src}: `
   const checkedAfterMerge =
-    "every symlink under the destination is checked after the merge, including links this archive did not ship"
+    "after the merge, the archive's symlinks and every symlink under the destination whose resolution passes through a path the archive writes are checked, including links it did not ship"
   const nothingChanged =
     "nothing was removed or changed; remove the offending symlinks under the destination or point them inside it manually before the next run, the containment flag keeps check at needs-apply until an apply succeeds"
   /** Issue #219: the message tail every post-merge violation ends with. */
@@ -4434,7 +4635,7 @@ describe("enforceSymlinkContainment (Issue #219)", () => {
     options: {
       ignoreExitCode: true,
       input: postMergeListingInput,
-      maxOutputBytes: ARCHIVE_CAPTURE_LIMIT_BYTES,
+      maxOutputBytes: SYMLINK_LISTING_CAPTURE_LIMIT_BYTES,
       silent: true,
       strictUtf8Stdout: true,
     },
@@ -4459,28 +4660,55 @@ describe("enforceSymlinkContainment (Issue #219)", () => {
   const etc = [`${destination}/a/etc`, "/etc"] as const
   const escapesEtc = `symlink "/opt/app/a/etc" -> "/etc" resolves outside destination "/opt/app"`
 
+  /** Issue #219: an archive symlink the listed trees do not contain. */
+  const absentArchiveLink = [archiveMember("zz/l", "f")]
+
+  /**
+   * Issue #219: run the backstop against scripted listing and cross-check
+   * answers.
+   *
+   * @param script - The scripted answers.
+   * @param members - The archive members; by default one symlink that is not
+   *   in the listing, so the backstop runs but judges only links whose walk
+   *   touches `zz` or `zz/l`.
+   * @returns The execs, the failure message and the outcome.
+   */
   async function enforce(
-    script: Parameters<typeof scriptedBackstopConnection>[0]
+    script: Parameters<typeof scriptedBackstopConnection>[0],
+    members: readonly ArchiveMember[] = absentArchiveLink
   ): Promise<{ execCalls: ExecCall[]; message: string | undefined; outcome: ModuleResult | null }> {
     const { conn, execCalls } = scriptedBackstopConnection(script)
-    const outcome = await enforceSymlinkContainment(conn, { destination, source: src })
+    const outcome = await enforceSymlinkContainment(conn, { destination, members, source: src })
     return { execCalls, message: outcome?.error?.message, outcome }
   }
 
+  /**
+   * Issue #219: run the backstop as if the archive shipped every given link,
+   * so each of them is judged.
+   *
+   * @param links - Absolute link paths with their stored targets, listed in order.
+   * @param script - Further scripted answers.
+   * @param script.crossChecks - Answers of the kernel cross-checks.
+   * @returns The execs, the failure message and the outcome.
+   */
+  async function enforceShipped(
+    links: ReadonlyArray<readonly [string, string]>,
+    script: { crossChecks?: Array<Error | Partial<ExecResult>> } = {}
+  ): ReturnType<typeof enforce> {
+    return enforce(
+      { ...script, listings: [{ stdout: listingRecords(destination, links) }] },
+      shippedMembers(links)
+    )
+  }
+
   it("lists the destination, cross-checks the links with the kernel and accepts a tree whose links all stay inside", async () => {
-    const { execCalls, outcome } = await enforce({
-      listings: [
-        {
-          stdout: nulPairs(
-            [`${destination}/a/lib64`, "lib"],
-            [`${destination}/a/up`, ".."],
-            [`${destination}/a/abs`, `${destination}/a/lib`],
-            [`${destination}/a/dangling`, "missing/y/z"],
-            [`${destination}/a/esc`, "up/a"]
-          ),
-        },
-      ],
-    })
+    const { execCalls, outcome } = await enforceShipped([
+      [`${destination}/a/lib64`, "lib"],
+      [`${destination}/a/up`, ".."],
+      [`${destination}/a/abs`, `${destination}/a/lib`],
+      [`${destination}/a/dangling`, "missing/y/z"],
+      [`${destination}/a/esc`, "up/a"],
+    ])
 
     expect(outcome).toBeNull()
     expect(execCalls).toStrictEqual([
@@ -4502,6 +4730,85 @@ describe("enforceSymlinkContainment (Issue #219)", () => {
     expect(execCalls).toStrictEqual([listingCall])
   })
 
+  it("runs no exec at all for an archive without symlink members", async () => {
+    const { execCalls, outcome } = await enforce({ listings: [new Error("never listed")] }, [
+      archiveMember("a/", null, "directory"),
+      archiveMember("a/f", null),
+    ])
+
+    expect(outcome).toBeNull()
+    expect(execCalls).toStrictEqual([])
+  })
+
+  it("ignores unrelated host links, even escaping, looping or unmappable ones, and cross-checks only the judged links", async () => {
+    const shipped = [`${destination}/bin/node`, "../lib/node_modules/npm/bin/npm-cli.js"] as const
+    const unrelated = [
+      [`${destination}/_work/proj/.venv/bin/python3`, "/usr/bin/python3"],
+      [`${destination}/x/loop`, "loop"],
+      [`${destination}/x/up`, "../.."],
+    ] as const
+    const unmappable = `l\u0000${hexListingField("x/", 0xff)}\u0000/etc\u0000`
+    const { execCalls, outcome } = await enforce(
+      {
+        listings: [
+          { stdout: `${listingRecords(destination, [...unrelated, shipped])}${unmappable}` },
+        ],
+      },
+      [...shippedMembers([shipped]), archiveMember("lib/node_modules/npm/bin/npm-cli.js", null)]
+    )
+
+    expect(outcome).toBeNull()
+    expect(execCalls).toStrictEqual([
+      listingCall,
+      crossCheckCall([shipped[0], `${destination}/lib/node_modules/npm/bin/npm-cli.js`]),
+    ])
+  })
+
+  it("reports a host link that walks through an archive link and one that follows it", async () => {
+    const esc = [`${destination}/x/esc`, "../a/up/.."] as const
+    const chained = [`${destination}/y/l`, "../x/esc/f"] as const
+    const { message } = await enforce(
+      {
+        listings: [
+          { stdout: listingRecords(destination, [esc, chained, [`${destination}/a/up`, ".."]]) },
+        ],
+      },
+      [archiveMember("a/", null, "directory"), archiveMember("a/up", "..")]
+    )
+
+    expect(message).toBe(
+      `${refusal}symlink "/opt/app/x/esc" -> "../a/up/.." resolves outside destination "/opt/app"; symlink "/opt/app/y/l" -> "../x/esc/f" resolves outside destination "/opt/app"; ${reportTail}`
+    )
+  })
+
+  it("ignores an unrelated unreadable directory but reports a judged walk into it and an archive member below it", async () => {
+    const intoLocked = [`${destination}/a/l`, "../locked/f"] as const
+    const unrelated = await enforce({ listings: [{ stdout: "u\u0000other\u0000" }] })
+    const judged = await enforce(
+      {
+        listings: [{ stdout: `u\u0000locked\u0000${listingRecords(destination, [intoLocked])}` }],
+      },
+      [...shippedMembers([intoLocked]), archiveMember("locked/f", null)]
+    )
+
+    expect(unrelated.outcome).toBeNull()
+    expect(judged.message).toBe(
+      `${refusal}archive member path "/opt/app/locked/f" cannot be checked: directory "/opt/app/locked" is not readable; symlink "/opt/app/a/l" -> "../locked/f" cannot be checked: directory "/opt/app/locked" is not readable; ${reportTail}`
+    )
+    expect(judged.execCalls).toStrictEqual([listingCall])
+  })
+
+  it("reports a judged link whose name is not UTF-8 with the bytes spelled as escapes", async () => {
+    const { message } = await enforce(
+      { listings: [{ stdout: `l\u0000${hexListingField("zz/", 0xff)}\u0000../zz/l\u0000` }] },
+      absentArchiveLink
+    )
+
+    expect(message).toBe(
+      `${refusal}symlink "/opt/app/zz/\\\\xff" -> "../zz/l" cannot be checked: its path or target is not valid UTF-8; rename or remove that symlink; ${reportTail}`
+    )
+  })
+
   // Issue #219: the success path costs the listing plus one kernel
   // cross-check, two execs, however many links the tree holds.
   it("keeps the success path at exactly two execs however many links the tree holds", async () => {
@@ -4511,9 +4818,7 @@ describe("enforceSymlinkContainment (Issue #219)", () => {
           { length: count },
           (_value, index) => [`${destination}/d${String(index)}/l`, "../f"] as const
         )
-        const { execCalls, outcome } = await enforce({
-          listings: [{ stdout: nulPairs(...links) }],
-        })
+        const { execCalls, outcome } = await enforceShipped(links)
         expect(outcome).toBeNull()
         return execCalls.length
       })
@@ -4534,36 +4839,49 @@ describe("enforceSymlinkContainment (Issue #219)", () => {
       response: { code: 1 },
     },
     {
-      detail: `probe output exceeded the captured-output cap of ${String(ARCHIVE_CAPTURE_LIMIT_BYTES)} bytes; refusing to evaluate a truncated result`,
+      detail: `the destination holds too many symlinks to check: the symlink listing exceeded its captured-output cap of ${String(SYMLINK_LISTING_CAPTURE_LIMIT_BYTES)} bytes`,
       name: "a truncated capture",
       response: {
-        stdout: `${destination}/a/etc\u0000/etc\u0000${destination}/a/e${CAPTURE_TRUNCATION_MARKER}`,
+        stdout: `l\u0000a/etc\u0000/etc\u0000l\u0000a/e${CAPTURE_TRUNCATION_MARKER}`,
       },
     },
     {
-      detail: 'probe returned 3 fields, expected (link, target) or ("", directory) pairs',
-      name: "an odd field count",
-      response: { stdout: `${destination}/a/etc\u0000/etc\u0000${destination}/b\u0000` },
+      detail: 'probe output ends inside a "l" record',
+      name: "a record cut off at the end",
+      response: { stdout: "l\u0000a/etc\u0000/etc\u0000l\u0000b\u0000" },
+    },
+    {
+      detail: 'probe reported unknown record kind "q"',
+      name: "an unknown record kind",
+      response: { stdout: "q\u0000a\u0000" },
     },
     {
       detail: `probe reported directory "${destination}/a", which is not a requested member path below the destination`,
       name: "a directory hit, which the backstop never requests",
-      response: { stdout: nulPairs(["", `${destination}/a`]) },
+      response: { stdout: `n\u0000${destination}/a\u0000` },
     },
     {
-      detail: 'probe reported "/opt/other/l", which is not below the destination',
-      name: "a link outside the destination",
-      response: { stdout: nulPairs(["/opt/other/l", "x"]) },
+      detail:
+        'probe reported symlink "/opt/other/l", which is not a normalized path below the destination',
+      name: "an absolute link path",
+      response: { stdout: "l\u0000/opt/other/l\u0000x\u0000" },
     },
     {
-      detail: `probe reported "${alternateDestination}/l", which is not below the destination`,
+      detail:
+        'probe reported symlink "../app-alt/l", which is not a normalized path below the destination',
       name: "a link in a sibling sharing the destination's prefix",
-      response: { stdout: nulPairs([`${alternateDestination}/l`, "/etc"]) },
+      response: { stdout: "l\u0000../app-alt/l\u0000/etc\u0000" },
     },
     {
-      detail: `probe reported an empty target for symlink "${destination}/l"; readlink output is unusable`,
+      detail: 'probe reported an empty target for symlink "l"; readlink output is unusable',
       name: "an empty stored target",
-      response: { stdout: nulPairs([`${destination}/l`, ""], etc) },
+      response: { stdout: `l\u0000l\u0000\u0000${listingRecords(destination, [etc])}` },
+    },
+    {
+      detail:
+        'probe reported unreadable directory "a/", which is not a normalized path below the destination or was reported more than once',
+      name: "an unreadable directory that is not normalized",
+      response: { stdout: "u\u0000a/\u0000" },
     },
   ])("fails closed and removes nothing on a listing with $name", async ({ detail, response }) => {
     const { execCalls, message } = await enforce({ listings: [response] })
@@ -4574,9 +4892,7 @@ describe("enforceSymlinkContainment (Issue #219)", () => {
 
   it("reports an escaping link and removes nothing: the listing and its cross-check are the only execs", async () => {
     const inside = [`${destination}/a/in`, "f"] as const
-    const { execCalls, message, outcome } = await enforce({
-      listings: [{ stdout: nulPairs(etc, inside) }],
-    })
+    const { execCalls, message, outcome } = await enforceShipped([etc, inside])
 
     expect(outcome?.status).toBe("failed")
     expect(message).toBe(`${refusal}${escapesEtc}; ${reportTail}`)
@@ -4594,7 +4910,7 @@ describe("enforceSymlinkContainment (Issue #219)", () => {
       [`${destination}/y`, "x"],
       [`${destination}/b`, "b/.."],
     ] as const
-    const { execCalls, message } = await enforce({ listings: [{ stdout: nulPairs(...links) }] })
+    const { execCalls, message } = await enforceShipped(links)
 
     expect(message).toBe(
       `${refusal}${links.map(([link, stored]) => beyondLimit(link, stored)).join("; ")}; ${reportTail}`
@@ -4605,9 +4921,7 @@ describe("enforceSymlinkContainment (Issue #219)", () => {
   it("names every violation with its link path, stored target and reason", async () => {
     const root = [`${destination}/a/root`, "../.."] as const
     const loop = [`${destination}/loop`, "loop"] as const
-    const { execCalls, message } = await enforce({
-      listings: [{ stdout: nulPairs(etc, root, loop) }],
-    })
+    const { execCalls, message } = await enforceShipped([etc, root, loop])
 
     expect(message).toBe(
       `${refusal}${escapesEtc}; symlink "/opt/app/a/root" -> "../.." resolves outside destination "/opt/app"; symlink "/opt/app/loop" -> "loop" cannot be resolved within the symlink resolution limit; ${reportTail}`
@@ -4629,7 +4943,7 @@ describe("enforceSymlinkContainment (Issue #219)", () => {
         { length: POST_MERGE_VIOLATION_REPORT_LIMIT + extra },
         (_value, index) => [`${destination}/e${String(index)}`, "/etc"] as const
       )
-      const { execCalls, message } = await enforce({ listings: [{ stdout: nulPairs(...links) }] })
+      const { execCalls, message } = await enforceShipped(links)
 
       const named = links
         .slice(0, POST_MERGE_VIOLATION_REPORT_LIMIT)
@@ -4658,9 +4972,7 @@ describe("enforceSymlinkContainment (Issue #219)", () => {
         { length: inside },
         (_value, index) => [`${destination}/in${String(index)}`, "f"] as const
       )
-      const { execCalls, outcome } = await enforce({
-        listings: [{ stdout: nulPairs(etc, ...links) }],
-      })
+      const { execCalls, outcome } = await enforceShipped([etc, ...links])
 
       expect(outcome?.status).toBe("failed")
       expect(execCalls.map(({ command }) => command)).toStrictEqual(commands)
@@ -4677,9 +4989,8 @@ describe("enforceSymlinkContainment (Issue #219)", () => {
   it("reports a link the kernel resolves elsewhere, names both locations and removes nothing", async () => {
     const up = [`${destination}/d/up`, ".."] as const
     const esc = [`${destination}/d/esc`, "Up2/.."] as const
-    const { execCalls, message } = await enforce({
+    const { execCalls, message } = await enforceShipped([up, esc], {
       crossChecks: [{ stdout: nulPairs([up[0], "same"], [esc[0], "differ"]) }],
-      listings: [{ stdout: nulPairs(up, esc) }],
     })
 
     expect(message).toBe(
@@ -4694,7 +5005,7 @@ describe("enforceSymlinkContainment (Issue #219)", () => {
   it("reports a link that passes through a case variant of another symlink and removes nothing", async () => {
     const up = [`${destination}/d/up`, ".."] as const
     const esc = [`${destination}/d/esc`, "UP/.."] as const
-    const { execCalls, message } = await enforce({ listings: [{ stdout: nulPairs(up, esc) }] })
+    const { execCalls, message } = await enforceShipped([up, esc])
 
     expect(message).toBe(
       `${refusal}symlink "/opt/app/d/esc" -> "UP/.." passes through "d/UP", a name that differs from existing symlink "d/up" only by letter case or Unicode normalization; a case-insensitive or normalizing filesystem may follow that symlink instead; ${reportTail}`
@@ -4711,10 +5022,7 @@ describe("enforceSymlinkContainment (Issue #219)", () => {
     "fails closed and removes nothing when the kernel cross-check has $name",
     async ({ response }) => {
       const inside = [`${destination}/a/in`, "f"] as const
-      const { execCalls, message } = await enforce({
-        crossChecks: [response],
-        listings: [{ stdout: nulPairs(inside) }],
-      })
+      const { execCalls, message } = await enforceShipped([inside], { crossChecks: [response] })
 
       expect(message).toMatch(
         /^\[archive\.extract\] refusing to complete extraction of \/tmp\/app\.tar\.gz: symlink containment check failed: kernel cross-check could not be completed: /v
@@ -4726,18 +5034,29 @@ describe("enforceSymlinkContainment (Issue #219)", () => {
     }
   )
 
-  it("fails closed on a listing that reports the same link twice or a U+FFFD in a name", async () => {
-    const twice = await enforce({ listings: [{ stdout: nulPairs(etc, etc) }] })
-    const replaced = await enforce({
-      listings: [{ stdout: nulPairs([`${destination}/a/\ufffd`, "f"]) }],
-    })
+  it("fails closed on a listing that reports the same link twice or an unencoded non-ASCII name", async () => {
+    const twice = await enforce({ listings: [{ stdout: listingRecords(destination, [etc, etc]) }] })
+    const unencoded = await enforce({ listings: [{ stdout: "l\u0000a/\ufffd\u0000f\u0000" }] })
 
     expect(twice.message).toBe(
-      `${refusal}symlink containment check failed: probe reported symlink "/opt/app/a/etc" more than once`
+      `${refusal}symlink containment check failed: probe reported symlink "a/etc" more than once`
     )
-    expect(replaced.message).toContain("U+FFFD replacement character")
+    expect(unencoded.message).toContain(
+      "with characters outside printable ASCII that were not hex-encoded"
+    )
     expect(twice.execCalls).toStrictEqual([listingCall])
-    expect(replaced.execCalls).toStrictEqual([listingCall])
+    expect(unencoded.execCalls).toStrictEqual([listingCall])
+  })
+
+  it("accepts a hex-encoded literal U+FFFD in a judged link name as an exact name", async () => {
+    const replacement = [`${destination}/a/\ufffd`, "f"] as const
+    const { execCalls, outcome } = await enforceShipped([replacement])
+
+    expect(outcome).toBeNull()
+    expect(execCalls).toStrictEqual([
+      listingCall,
+      crossCheckCall([replacement[0], `${destination}/a/f`]),
+    ])
   })
 })
 
@@ -4781,7 +5100,9 @@ function rawStdoutConnection(stdout: Buffer): { commands: string[]; conn: SshCon
 describe("host symlink names that are not UTF-8 (Issue #219)", () => {
   // `d/<fe> -> ..` escapes, `d/<ff> -> .` stays inside. A lossy decode reads
   // both names as `d/U+FFFD`, so in one listing order the contained link
-  // would hide the escaping one. Both orders must fail closed.
+  // would hide the escaping one. The probe therefore hex-encodes every name
+  // outside printable ASCII; raw bytes that are not UTF-8 can only come from a
+  // broken probe and still fail closed in both orders.
   const linkDirectory = Buffer.from(`${destination}/d/`)
   const escaping = [Buffer.concat([linkDirectory, Buffer.from([0xfe])]), Buffer.from("..")]
   const contained = [Buffer.concat([linkDirectory, Buffer.from([0xff])]), Buffer.from(".")]
@@ -4793,6 +5114,8 @@ describe("host symlink names that are not UTF-8 (Issue #219)", () => {
     { name: "escaping link last", stdout: listing(contained, escaping) },
   ]
   const notUtf8 = `Command stdout is not valid UTF-8 (exit code 0): ${symlinkListingProbeCommand}`
+  /** Issue #219: an archive link in `d`, so the links there are judged. */
+  const members = [archiveMember("d/", null, "directory"), archiveMember("d/l", ".")]
 
   it("would collapse both names into one under the lenient default decode", () => {
     // The premise of the strict decode: different host bytes, same string.
@@ -4801,11 +5124,11 @@ describe("host symlink names that are not UTF-8 (Issue #219)", () => {
   })
 
   it.each(orders)(
-    "fails the post-merge backstop closed and removes nothing ($name)",
+    "fails the post-merge backstop closed and removes nothing on raw bytes ($name)",
     async ({ stdout }) => {
       const { commands, conn } = rawStdoutConnection(stdout)
 
-      const outcome = await enforceSymlinkContainment(conn, { destination, source: src })
+      const outcome = await enforceSymlinkContainment(conn, { destination, members, source: src })
 
       expect(outcome?.error?.message).toBe(
         `[archive.extract] refusing to complete extraction of ${src}: symlink containment check failed: ${notUtf8}`
@@ -4814,12 +5137,12 @@ describe("host symlink names that are not UTF-8 (Issue #219)", () => {
     }
   )
 
-  it.each(orders)("fails the pre-merge check closed ($name)", async ({ stdout }) => {
+  it.each(orders)("fails the pre-merge check closed on raw bytes ($name)", async ({ stdout }) => {
     const { commands, conn } = rawStdoutConnection(stdout)
 
     const outcome = await validateMergedSymlinkContainment(conn, {
       destination,
-      members: [],
+      members,
       source: src,
     })
 
@@ -4828,16 +5151,51 @@ describe("host symlink names that are not UTF-8 (Issue #219)", () => {
     )
     expect(commands).toStrictEqual([symlinkListingProbeCommand])
   })
+
+  const escapingRecord = ["l", hexListingField("d/", 0xfe), "l/../.."]
+  const containedRecord = ["l", hexListingField("d/", 0xff), "l"]
+
+  it.each([
+    { name: "escaping link first", records: [escapingRecord, containedRecord] },
+    { name: "escaping link last", records: [containedRecord, escapingRecord] },
+  ])(
+    "keeps the hex-encoded names apart and reports the judged links as unmappable ($name)",
+    async ({ records: ordered }) => {
+      const records = ordered
+        .flat()
+        .map((field) => `${field}\u0000`)
+        .join("")
+      const { commands, conn } = rawStdoutConnection(Buffer.from(records))
+
+      const outcome = await validateMergedSymlinkContainment(conn, {
+        destination,
+        members,
+        source: src,
+      })
+
+      // Both targets walk through `d/l`, which the archive writes, so both
+      // links are judged, and neither can be checked: their names are not
+      // UTF-8. Two tokens keep the two names apart.
+      expect(outcome?.error?.message).toMatch(
+        /cannot be checked: its path or target is not valid UTF-8; rename or remove that symlink; .* \(and 1 more\)$/v
+      )
+      expect(commands).toStrictEqual([symlinkListingProbeCommand])
+    }
+  )
 })
 
 describe("archive.extract containment flag lifecycle (Issue #219)", () => {
   const owner = "www-data:www-data"
   const flagRemoval = `rm -f -- '${containmentFlag}'`
+  // Issue #219: the archive ships a symlink, so both listings run.
+  const lifecycleLines = [tarDirectoryLine("a/"), tarFileLine("a/f"), tarSymlinkLine("a/l", "f")]
+  /** Issue #219: a host link whose walk passes through `a`, which the archive writes. */
+  const escapesThroughArchive = [`${destination}/x/esc`, "../a/../.."] as const
 
   it("writes the flag before the destination is created or probed, the listing, staging, extract and merge, and clears it last", async () => {
     const files = new Map<string, string>()
 
-    const run = await applyTarListing([tarDirectoryLine("a/"), tarFileLine("a/f")], {
+    const run = await applyTarListing(lifecycleLines, {
       files,
       hostLinks: new Map(),
       owner,
@@ -4865,6 +5223,7 @@ describe("archive.extract containment flag lifecycle (Issue #219)", () => {
       calls.indexOf(stagedTarExtractCommand),
       calls.findIndex((command) => archiveStageMovePattern.test(command)),
       run.postMergeListings[0],
+      calls.indexOf(kernelCrossCheckCommand),
       chown,
     ]
     expect(Math.min(...order)).toBeGreaterThanOrEqual(0)
@@ -4907,7 +5266,7 @@ describe("archive.extract containment flag lifecycle (Issue #219)", () => {
       error: "would resolve outside destination",
       name: "a pre-merge refusal",
       options: (): TarListingApplyOptions => ({
-        hostLinks: new Map([[`${destination}/etc`, "/etc"]]),
+        hostLinks: new Map([escapesThroughArchive]),
       }),
     },
     {
@@ -4935,7 +5294,7 @@ describe("archive.extract containment flag lifecycle (Issue #219)", () => {
       name: "a backstop violation",
       options: (): TarListingApplyOptions => ({
         hostLinks: new Map(),
-        injectedOnMerge: [[`${destination}/a/etc`, "/etc"]],
+        injectedOnMerge: [escapesThroughArchive],
       }),
     },
     {
@@ -4955,7 +5314,7 @@ describe("archive.extract containment flag lifecycle (Issue #219)", () => {
   ])("leaves the flag set after $name", async ({ error, options }) => {
     const files = new Map<string, string>()
 
-    const run = await applyTarListing([tarDirectoryLine("a/"), tarFileLine("a/f")], {
+    const run = await applyTarListing(lifecycleLines, {
       ...options(),
       files,
     })
@@ -5004,16 +5363,20 @@ function callsFromBackstop(run: TarListingApplyRun): string[] {
 }
 
 describe("archive.extract post-merge backstop (Issue #219)", () => {
-  const escapingLink = `${destination}/a/etc`
+  // Issue #219: the backstop judges the archive's links and every link whose
+  // walk passes through a path the archive writes (`a`, `a/f`, `a/l`), so the
+  // escaping links below walk through `a` or the archive link `a/l`.
+  const escapingLink = `${destination}/a/esc`
+  const escapingTarget = "../a/../.."
   const rootLink = `${destination}/a/root`
-  const lines = [tarDirectoryLine("a/"), tarFileLine("a/f")]
+  const lines = [tarDirectoryLine("a/"), tarFileLine("a/f"), tarSymlinkLine("a/l", "f")]
   const backstopRefusal = `[archive.extract] refusing to complete extraction of ${src}: `
   const checkedAfterMerge =
-    "every symlink under the destination is checked after the merge, including links this archive did not ship"
+    "after the merge, the archive's symlinks and every symlink under the destination whose resolution passes through a path the archive writes are checked, including links it did not ship"
   const nothingChanged =
     "nothing was removed or changed; remove the offending symlinks under the destination or point them inside it manually before the next run, the containment flag keeps check at needs-apply until an apply succeeds"
-  const escapesEtc = `symlink ${JSON.stringify(escapingLink)} -> "/etc" resolves outside destination ${JSON.stringify(destination)}`
-  const escapesRoot = `symlink ${JSON.stringify(rootLink)} -> "../.." resolves outside destination ${JSON.stringify(destination)}`
+  const escapesEtc = `symlink ${JSON.stringify(escapingLink)} -> ${JSON.stringify(escapingTarget)} resolves outside destination ${JSON.stringify(destination)}`
+  const escapesRoot = `symlink ${JSON.stringify(rootLink)} -> "l/../../.." resolves outside destination ${JSON.stringify(destination)}`
   const reportedEtc = `${backstopRefusal}${escapesEtc}; ${checkedAfterMerge}; ${nothingChanged}`
   const cpFailure = "cp: cannot overwrite directory '/opt/app/a/b' with non-directory"
 
@@ -5022,7 +5385,7 @@ describe("archive.extract post-merge backstop (Issue #219)", () => {
 
     const run = await applyTarListing(lines, {
       hostLinks,
-      injectedOnMerge: [[escapingLink, "/etc"]],
+      injectedOnMerge: [[escapingLink, escapingTarget]],
       owner: "www-data:www-data",
       responseStubs: [{ command: archiveStageMovePattern, result: { code: 1, stderr: cpFailure } }],
     })
@@ -5040,7 +5403,7 @@ describe("archive.extract post-merge backstop (Issue #219)", () => {
     expect(callsFromBackstop(run)).toStrictEqual([symlinkListingProbeCommand])
     expect(calls).not.toContain(batchedChownCommand)
     expect(run.writes.map(({ remotePath }) => remotePath)).toStrictEqual([containmentFlag])
-    expect([...hostLinks]).toStrictEqual([[escapingLink, "/etc"]])
+    expect([...hostLinks]).toStrictEqual([[escapingLink, escapingTarget]])
   })
 
   it("runs after a merge exec that threw and joins both messages", async () => {
@@ -5048,7 +5411,7 @@ describe("archive.extract post-merge backstop (Issue #219)", () => {
 
     const run = await applyTarListing(lines, {
       hostLinks,
-      injectedOnMerge: [[escapingLink, "/etc"]],
+      injectedOnMerge: [[escapingLink, escapingTarget]],
       throwOn: { command: archiveStageMovePattern, error: new Error("channel closed") },
     })
 
@@ -5064,7 +5427,7 @@ describe("archive.extract post-merge backstop (Issue #219)", () => {
     )
     expect(run.postMergeListings[0]).toBeGreaterThan(cleanup)
     expect(callsFromBackstop(run)).toStrictEqual([symlinkListingProbeCommand])
-    expect([...hostLinks]).toStrictEqual([[escapingLink, "/etc"]])
+    expect([...hostLinks]).toStrictEqual([[escapingLink, escapingTarget]])
   })
 
   it("reports only the merge failure when the backstop after it finds nothing", async () => {
@@ -5089,9 +5452,11 @@ describe("archive.extract post-merge backstop (Issue #219)", () => {
       files,
       hostLinks,
       injectedOnMerge: [
-        [escapingLink, "/etc"],
+        [escapingLink, escapingTarget],
         [insideLink, "../a/f"],
-        [rootLink, "../.."],
+        [rootLink, "l/../../.."],
+        // Issue #219: unrelated to the archive, so neither judged nor reported.
+        [`${destination}/x/etc`, "/etc"],
       ],
     })
 
@@ -5107,7 +5472,14 @@ describe("archive.extract post-merge backstop (Issue #219)", () => {
       kernelCrossCheckCommand,
     ])
     expect([...hostLinks.keys()].toSorted()).toStrictEqual(
-      [escapingLink, insideLink, `${destination}/a/old`, rootLink].toSorted()
+      [
+        escapingLink,
+        insideLink,
+        `${destination}/a/l`,
+        `${destination}/a/old`,
+        rootLink,
+        `${destination}/x/etc`,
+      ].toSorted()
     )
     expect(run.mockSsh.calls).not.toContain(`rm -f -- '${containmentFlag}'`)
     expect(files.has(containmentFlag)).toBe(true)
@@ -5120,14 +5492,21 @@ describe("archive.extract post-merge backstop (Issue #219)", () => {
     )
 
     const run = await applyTarListing(lines, {
-      backstopListings: [{ stdout: links.map((link) => `${link}\u0000/etc\u0000`).join("") }],
+      backstopListings: [
+        {
+          stdout: listingRecords(
+            destination,
+            links.map((link) => [link, "a/../.."] as const)
+          ),
+        },
+      ],
     })
 
     const named = links
       .slice(0, POST_MERGE_VIOLATION_REPORT_LIMIT)
       .map(
         (link) =>
-          `symlink ${JSON.stringify(link)} -> "/etc" resolves outside destination ${JSON.stringify(destination)}`
+          `symlink ${JSON.stringify(link)} -> "a/../.." resolves outside destination ${JSON.stringify(destination)}`
       )
     expect(run.result.error?.message).toBe(
       `${backstopRefusal}${named.join("; ")} (and 3 more); ${checkedAfterMerge}; ${nothingChanged}`
@@ -5136,18 +5515,17 @@ describe("archive.extract post-merge backstop (Issue #219)", () => {
     expect(run.mockSsh.calls).not.toContain(`rm -f -- '${containmentFlag}'`)
   })
 
-  it("reports a listed link whose path is not normalized and changes nothing", async () => {
-    // A listed path below the destination whose key is not normalized is
-    // still judged and named; the backstop never acts on it.
-    const dotted = `${destination}/../etc-link`
-
+  it("fails closed on a listed link whose path is not normalized and changes nothing", async () => {
+    // Issue #219: link paths arrive relative to the destination; one that is
+    // not a normalized relative path cannot be keyed and fails the listing.
     const run = await applyTarListing(lines, {
-      backstopListings: [{ stdout: `${dotted}\u0000/etc-link\u0000` }],
+      backstopListings: [{ stdout: "l\u0000../etc-link\u0000/etc-link\u0000" }],
     })
 
     expect(run.result.status).toBe("failed")
-    expect(run.result.error?.message).toContain(`symlink ${JSON.stringify(dotted)} -> "/etc-link"`)
-    expect(run.result.error?.message).toContain(nothingChanged)
+    expect(run.result.error?.message).toBe(
+      `${backstopRefusal}symlink containment check failed: probe reported symlink "../etc-link", which is not a normalized path below the destination`
+    )
     expect(callsFromBackstop(run)).toStrictEqual([symlinkListingProbeCommand])
   })
 
@@ -5254,23 +5632,28 @@ describe("archive.extract bounded staging merge (Issue #219)", () => {
   ])(
     "reports exit $code of the merge with the right reason and still runs the backstop",
     async ({ code, reason }) => {
-      const escapingLink = `${destination}/a/etc`
+      // Issue #219: the archive ships a symlink, and the escaping link walks
+      // through `a`, which the archive writes, so the backstop judges it.
+      const escapingLink = `${destination}/x/esc`
       const hostLinks: HostLinkTree = new Map()
 
-      const run = await applyTarListing([tarDirectoryLine("a/"), tarFileLine("a/f")], {
-        hostLinks,
-        injectedOnMerge: [[escapingLink, "/etc"]],
-        responseStubs: [
-          { command: archiveStageMovePattern, result: { code, stderr: "Terminated" } },
-        ],
-      })
+      const run = await applyTarListing(
+        [tarDirectoryLine("a/"), tarFileLine("a/f"), tarSymlinkLine("a/l", "f")],
+        {
+          hostLinks,
+          injectedOnMerge: [[escapingLink, "../a/../.."]],
+          responseStubs: [
+            { command: archiveStageMovePattern, result: { code, stderr: "Terminated" } },
+          ],
+        }
+      )
 
       expect(run.result.error?.message).toBe(
-        `[archive.extract] failed to copy extracted files into ${destination}${reason} (exit code ${String(code)})\nTerminated; [archive.extract] refusing to complete extraction of ${src}: symlink ${JSON.stringify(escapingLink)} -> "/etc" resolves outside destination ${JSON.stringify(destination)}; every symlink under the destination is checked after the merge, including links this archive did not ship; nothing was removed or changed; remove the offending symlinks under the destination or point them inside it manually before the next run, the containment flag keeps check at needs-apply until an apply succeeds`
+        `[archive.extract] failed to copy extracted files into ${destination}${reason} (exit code ${String(code)})\nTerminated; [archive.extract] refusing to complete extraction of ${src}: symlink ${JSON.stringify(escapingLink)} -> "../a/../.." resolves outside destination ${JSON.stringify(destination)}; after the merge, the archive's symlinks and every symlink under the destination whose resolution passes through a path the archive writes are checked, including links it did not ship; nothing was removed or changed; remove the offending symlinks under the destination or point them inside it manually before the next run, the containment flag keeps check at needs-apply until an apply succeeds`
       )
       expect(run.postMergeListings).toHaveLength(1)
       expect(callsFromBackstop(run)).toStrictEqual([symlinkListingProbeCommand])
-      expect([...hostLinks]).toStrictEqual([[escapingLink, "/etc"]])
+      expect([...hostLinks]).toStrictEqual([[escapingLink, "../a/../.."]])
     }
   )
 })

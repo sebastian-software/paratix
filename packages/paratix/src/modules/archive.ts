@@ -1024,16 +1024,18 @@ function combineMergeFailures(
  * @param conn - The SSH connection.
  * @param parameters - Backstop inputs.
  * @param parameters.destination - The validated destination directory.
+ * @param parameters.members - Issue #219: the validated archive members; they
+ *   decide which links the backstop judges.
  * @param parameters.source - The source archive path, for the failure message.
- * @returns The backstop failure, or null when every symlink stays inside.
+ * @returns The backstop failure, or null when every judged symlink stays inside.
  */
 async function runContainmentBackstop(
   conn: SshConnection,
-  parameters: { destination: string; source: string }
+  parameters: { destination: string; members: ArchiveMember[]; source: string }
 ): Promise<ModuleResult | null> {
-  const { destination, source } = parameters
+  const { destination, members, source } = parameters
   try {
-    return await enforceSymlinkContainment(conn, { destination, source })
+    return await enforceSymlinkContainment(conn, { destination, members, source })
   } catch (error) {
     const reason = error instanceof Error ? error.message : String(error)
     return failed(
@@ -1044,7 +1046,8 @@ async function runContainmentBackstop(
 
 /**
  * Check the combined host and archive links, run the staged extraction and
- * then enforce that no symlink under the destination resolves outside it.
+ * then enforce that no symlink this archive can affect resolves outside the
+ * destination.
  *
  * Issue #219: the caller has already written the containment flag, before the
  * destination was created or probed. Every failure here — a pre-merge
@@ -1084,12 +1087,14 @@ async function extractAndValidateSymlinkContainment(
   // inside when it was written may resolve outside once a later archive places
   // a link on its path. `validateMergedSymlinkContainment` already refused such
   // a combination before the merge, from a listing of the host's links. This
-  // enforcement over the whole tree after the merge is the backstop for host
-  // changes that landed between that listing and the merge, and for a merge
-  // that failed half-way after copying some entries: it runs whenever the
-  // merge started, reports every escaping link it finds and fails the run.
-  // It removes and changes nothing; the offending links stay until they are
-  // cleaned up manually and an apply succeeds.
+  // enforcement after the merge is the backstop for host changes that landed
+  // between that listing and the merge, and for a merge that failed half-way
+  // after copying some entries: it runs whenever the merge started, judges the
+  // archive's links and every link whose resolution passes through a path the
+  // archive writes, reports every such escaping link and fails the run. An
+  // archive without symlink members cannot change how a path resolves, so it
+  // runs no exec there. It removes and changes nothing; the offending links
+  // stay until they are cleaned up manually and an apply succeeds.
   // The caller runs it before `finalizeExtraction`, so a refused extraction
   // performs no chown and writes no marker file, and the flag stays set.
   // Staging has already been cleaned up here; a leftover staging directory
@@ -1182,7 +1187,7 @@ async function runExtraction(
   if (unsafeMemberPath !== null) return unsafeMemberPath
 
   // Issue #219: the pre-merge check of the combined host and archive links,
-  // the staged merge and the whole-tree symlink containment backstop all run
+  // the staged merge and the post-merge symlink containment backstop all run
   // before `finalizeExtraction`; see `extractAndValidateSymlinkContainment`.
   const stagedFailure = await extractAndValidateSymlinkContainment(conn, {
     destination: validatedDestination.destination,

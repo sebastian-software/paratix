@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest"
 import type { ArchiveMember } from "../../src/modules/archiveMemberValidation.js"
 
 import {
+  type PreMergeContainmentVerdict,
   preMergeContainmentVerdict,
   symlinkListingEntries,
 } from "../../src/modules/archiveContainmentEnforcement.js"
@@ -73,6 +74,32 @@ function member(path: string, kind: ArchiveMember["kind"], linkTarget: null | st
     symlink: "lrwxrwxrwx",
   }
   return { format: "tar", kind, linkTarget, mode: modes[kind], path } satisfies ArchiveMember
+}
+
+/**
+ * Issue #219: the combined link set of an `ok` verdict.
+ *
+ * @param verdict - The verdict, which must be `ok`.
+ * @returns The combined link set.
+ * @throws {Error} When the verdict is not `ok`.
+ */
+function okLinks(verdict: PreMergeContainmentVerdict): ReadonlyMap<string, MergedSymlink> {
+  if (verdict.kind !== "ok") throw new Error(`unexpected verdict ${JSON.stringify(verdict)}`)
+  return verdict.links
+}
+
+/**
+ * Issue #219: a hex-encoded listing field, as the listing probe emits it for
+ * a name outside printable ASCII.
+ *
+ * @param parts - Text (as UTF-8) and single raw bytes, concatenated.
+ * @returns The marker byte 0x01 followed by the hex of the bytes.
+ */
+function hexField(...parts: Array<number | string>): string {
+  const bytes = parts.map((part) =>
+    typeof part === "number" ? Buffer.from([part]) : Buffer.from(part, "utf8")
+  )
+  return `\u0001${Buffer.concat(bytes).toString("hex")}`
 }
 
 /**
@@ -328,28 +355,77 @@ describe("preMergeContainmentVerdict (Issue #219)", () => {
   const members = [member("a/", "directory"), member("a/b", "symlink", "q")]
 
   it("reports a host-directory conflict from a directory hit for a requested member path", () => {
-    const verdict = preMergeContainmentVerdict(destination, ["", "/opt/app/a/b"], members)
+    const verdict = preMergeContainmentVerdict(destination, ["n", "/opt/app/a/b"], members)
 
     expect(verdict).toMatchObject({ key: "a/b", kind: "conflict", reason: "host-directory" })
   })
 
   it.each([
     {
-      fields: ["", "/opt/app/a"],
+      fields: ["n", "/opt/app/a"],
       name: "a directory hit for a path that was not requested",
       reason:
         'probe reported directory "/opt/app/a", which is not a requested member path below the destination',
     },
     {
-      fields: ["", "/opt/app/a/b/"],
+      fields: ["n", "/opt/app/a/b/"],
       name: "a directory hit spelled differently from the request",
       reason:
         'probe reported directory "/opt/app/a/b/", which is not a requested member path below the destination',
     },
     {
-      fields: ["", "/opt/app/a/b", "/opt/app/x"],
-      name: "an odd field count",
-      reason: 'probe returned 3 fields, expected (link, target) or ("", directory) pairs',
+      fields: ["l", "a/x"],
+      name: "a link record cut off at the end",
+      reason: 'probe output ends inside a "l" record',
+    },
+    {
+      fields: ["", "/opt/app/a/b"],
+      name: "a record of the former pair format",
+      reason: 'probe reported unknown record kind ""',
+    },
+    {
+      fields: ["x", "a/b"],
+      name: "an unknown record kind",
+      reason: 'probe reported unknown record kind "x"',
+    },
+    {
+      fields: ["l", "/opt/app/a/x", "."],
+      name: "an absolute link path",
+      reason:
+        'probe reported symlink "/opt/app/a/x", which is not a normalized path below the destination',
+    },
+    {
+      fields: ["l", "a//x", "."],
+      name: "a link path with an empty segment",
+      reason: 'probe reported symlink "a//x", which is not a normalized path below the destination',
+    },
+    {
+      fields: ["l", "a/../x", "."],
+      name: "a link path with a .. segment",
+      reason:
+        'probe reported symlink "a/../x", which is not a normalized path below the destination',
+    },
+    {
+      fields: ["l", "a/x", "t�"],
+      name: "a non-ASCII field that was not hex-encoded",
+      reason:
+        'probe reported field "t�" with characters outside printable ASCII that were not hex-encoded',
+    },
+    {
+      fields: ["l", "a/x", "\u0001abc"],
+      name: "a hex field of odd length",
+      reason: 'probe reported hex field "abc" that is not well-formed hex',
+    },
+    {
+      fields: ["l", "a/x", "\u0001"],
+      name: "an empty hex field",
+      reason: 'probe reported hex field "" that is not well-formed hex',
+    },
+    {
+      fields: ["u", "a", "u", "a"],
+      name: "an unreadable directory listed twice",
+      reason:
+        'probe reported unreadable directory "a", which is not a normalized path below the destination or was reported more than once',
     },
   ])("is invalid for $name", ({ fields, reason }) => {
     expect(preMergeContainmentVerdict(destination, fields, members)).toStrictEqual({
@@ -358,41 +434,62 @@ describe("preMergeContainmentVerdict (Issue #219)", () => {
     })
   })
 
-  // Issue #219: two host links whose names a lossy decode would map to the
-  // same string must never collapse into one entry, in either listing order.
+  // Issue #219: two host links whose names differ only in bytes that are not
+  // UTF-8 stay two links: each is decoded to its own token, so neither can
+  // hide the other, in either listing order.
   it.each([
-    { fields: ["/opt/app/a/\ufffd", "..", "/opt/app/a/\ufffd", "."], name: "escaping first" },
-    { fields: ["/opt/app/a/\ufffd", ".", "/opt/app/a/\ufffd", ".."], name: "escaping last" },
-  ])("is invalid for two links that decode to the same name ($name)", ({ fields }) => {
-    expect(preMergeContainmentVerdict(destination, fields, members)).toMatchObject({
-      kind: "invalid",
-      reason: expect.stringContaining("U+FFFD replacement character"),
-    })
+    { name: "escaping first", targets: ["..", "."] },
+    { name: "escaping last", targets: [".", ".."] },
+  ])("keeps two links whose names differ only in invalid bytes apart ($name)", ({ targets }) => {
+    const verdict = preMergeContainmentVerdict(
+      destination,
+      ["l", hexField("a/", 0xfe), targets[0], "l", hexField("a/", 0xff), targets[1]],
+      [member("a/", "directory"), member("a/c", "symlink", "x")]
+    )
+
+    expect([...okLinks(verdict).keys()]).toStrictEqual(["a/\u0000fe", "a/\u0000ff", "a/c"])
+  })
+
+  it("judges an archive symlink that replaces a host link whose target is not UTF-8 by its own target", () => {
+    const verdict = preMergeContainmentVerdict(
+      destination,
+      ["l", "a/c", hexField(0xff, "/..")],
+      [member("a/", "directory"), member("a/c", "symlink", "x")]
+    )
+
+    expect([...okLinks(verdict)]).toStrictEqual([
+      ["a/c", { stored: "x", target: { anchor: "parent", path: "x" } }],
+    ])
   })
 
   it.each([
-    { fields: ["/opt/app/a/up", "..", "/opt/app/a/up", "."], name: "the same link twice" },
-    {
-      fields: ["/opt/app/a/up", ".", "/opt/app/a/up", ".."],
-      name: "the same link twice, reversed",
-    },
+    { fields: ["l", "a/up", "..", "l", "a/up", "."], name: "the same link twice" },
+    { fields: ["l", "a/up", ".", "l", "a/up", ".."], name: "the same link twice, reversed" },
   ])("is invalid for $name", ({ fields }) => {
     expect(preMergeContainmentVerdict(destination, fields, members)).toStrictEqual({
       kind: "invalid",
-      reason: 'probe reported symlink "/opt/app/a/up" more than once',
+      reason: 'probe reported symlink "a/up" more than once',
     })
   })
 
-  it("is invalid for a U+FFFD in a stored target", () => {
-    expect(
-      preMergeContainmentVerdict(destination, ["/opt/app/a/l", "x\ufffd"], members)
-    ).toMatchObject({ kind: "invalid", reason: expect.stringContaining("U+FFFD") })
+  it("decodes hex fields exactly, a literal U+FFFD in a valid name included", () => {
+    const verdict = preMergeContainmentVerdict(
+      destination,
+      ["l", "\u0001c39e666f6f", "\u000174efbfbd", "l", "a/nl", "\u000175700a2f2e2e"],
+      members
+    )
+
+    expect([...okLinks(verdict)]).toStrictEqual([
+      ["Þfoo", { stored: "t�", target: { anchor: "parent", path: "t�" } }],
+      ["a/nl", { stored: "up\n/..", target: { anchor: "parent", path: "up\n/.." } }],
+      ["a/b", { stored: "q", target: { anchor: "parent", path: "q" } }],
+    ])
   })
 
   it("combines host links and archive links and reports the escaping host link", () => {
     const verdict = preMergeContainmentVerdict(
       destination,
-      ["/opt/app/a/esc", "up/.."],
+      ["l", "a/esc", "up/.."],
       [member("a/", "directory"), member("a/up", "symlink", "..")]
     )
 
@@ -405,11 +502,185 @@ describe("preMergeContainmentVerdict (Issue #219)", () => {
   it("accepts a combined link set that stays inside", () => {
     const verdict = preMergeContainmentVerdict(
       destination,
-      ["/opt/app/a/esc", "up/.."],
+      ["l", "a/esc", "up/.."],
       [member("a/", "directory"), member("a/b/", "directory"), member("a/up", "symlink", "b")]
     )
 
     expect(verdict.kind).toBe("ok")
+  })
+})
+
+describe("scope of the pre-merge verdict (Issue #219)", () => {
+  const destination = "/home/runner/actions-runner"
+  const venvLink = ["l", "_work/proj/.venv/bin/python3", "/usr/bin/python3"]
+  const runnerMembers = [member("./bin/", "directory"), member("./bin/Runner.Listener", "file")]
+
+  it("accepts an archive without symlinks next to an unrelated host link that points outside", () => {
+    expect(preMergeContainmentVerdict(destination, venvLink, runnerMembers)).toMatchObject({
+      kind: "ok",
+    })
+  })
+
+  it("accepts an archive with symlinks next to an unrelated host link that points outside", () => {
+    const verdict = preMergeContainmentVerdict(destination, venvLink, [
+      member("bin/", "directory"),
+      member("lib/node_modules/npm/bin/npm-cli.js", "file"),
+      member("bin/node", "symlink", "../lib/node_modules/npm/bin/npm-cli.js"),
+    ])
+
+    expect(verdict).toMatchObject({ kind: "ok" })
+  })
+
+  it.each([
+    { fields: ["l", "x/loop", "loop"], name: "a loop" },
+    { fields: ["l", "x/v", "UP/f", "l", "x/up", "."], name: "a name variant" },
+    { fields: ["l", hexField("x/", 0xff), "/etc"], name: "a name that is not UTF-8" },
+    { fields: ["u", "locked"], name: "an unreadable directory" },
+    {
+      fields: ["l", "x/in", "../locked/f", "u", "locked"],
+      name: "a walk into an unreadable directory",
+    },
+  ])("ignores an unrelated host link with $name", ({ fields }) => {
+    const verdict = preMergeContainmentVerdict("/opt/app", fields, [
+      member("a/", "directory"),
+      member("a/l", "symlink", "f"),
+    ])
+
+    expect(verdict).toMatchObject({ kind: "ok" })
+  })
+
+  it("refuses host a/esc -> up/.. next to archive a/up -> .. with the host link as violation", () => {
+    const verdict = preMergeContainmentVerdict(
+      "/opt/app",
+      ["l", "a/esc", "up/.."],
+      [member("a/", "directory"), member("a/up", "symlink", "..")]
+    )
+
+    expect(verdict).toMatchObject({
+      kind: "violations",
+      violations: [{ key: "a/esc", kind: "escape" }],
+    })
+  })
+
+  it("refuses the reverse order in the model: host a/up -> .. next to archive a/esc -> up/..", () => {
+    // The pre-staging probe already refuses this archive, because the target
+    // walk of `a/esc` passes through the host symlink `a/up`; the model still
+    // follows that host link and reports the archive link.
+    const verdict = preMergeContainmentVerdict(
+      "/opt/app",
+      ["l", "a/up", ".."],
+      [member("a/", "directory"), member("a/esc", "symlink", "up/..")]
+    )
+
+    expect(verdict).toMatchObject({
+      kind: "violations",
+      violations: [{ key: "a/esc", kind: "escape" }],
+    })
+  })
+
+  it("refuses a host link elsewhere that walks through an archive link: x/esc -> ../a/up/..", () => {
+    const verdict = preMergeContainmentVerdict(
+      "/opt/app",
+      ["l", "x/esc", "../a/up/.."],
+      [member("a/", "directory"), member("a/up", "symlink", "..")]
+    )
+
+    expect(verdict).toMatchObject({
+      kind: "violations",
+      violations: [{ key: "x/esc", kind: "escape" }],
+    })
+  })
+
+  it("refuses a host link that follows an affected host link: y/l -> ../x/esc/f", () => {
+    const verdict = preMergeContainmentVerdict(
+      "/opt/app",
+      ["l", "y/l", "../x/esc/f", "l", "x/esc", "../a/up/.."],
+      [member("a/", "directory"), member("a/up", "symlink", "..")]
+    )
+
+    expect(verdict).toMatchObject({
+      kind: "violations",
+      violations: [
+        { key: "y/l", kind: "escape" },
+        { key: "x/esc", kind: "escape" },
+      ],
+    })
+  })
+
+  it("refuses an absolute host target inside the destination that walks through an archive link", () => {
+    const verdict = preMergeContainmentVerdict(
+      "/opt/app",
+      ["l", "x/abs", "/opt/app/a/up/.."],
+      [member("a/", "directory"), member("a/up", "symlink", "..")]
+    )
+
+    expect(verdict).toMatchObject({
+      kind: "violations",
+      violations: [{ key: "x/abs", kind: "escape" }],
+    })
+  })
+
+  it("refuses a host link that walks through a differently spelled archive path", () => {
+    const verdict = preMergeContainmentVerdict(
+      "/opt/app",
+      ["l", "x/esc", "../A/UP/.."],
+      [member("a/", "directory"), member("a/up", "symlink", "..")]
+    )
+
+    expect(verdict).toMatchObject({ kind: "violations", violations: [{ key: "x/esc" }] })
+  })
+
+  it("refuses a relevant host link whose name is not UTF-8", () => {
+    const verdict = preMergeContainmentVerdict(
+      "/opt/app",
+      ["l", hexField("x/", 0xff), "../a/f"],
+      [member("a/", "directory"), member("a/f", "file"), member("a/l", "symlink", "f")]
+    )
+
+    expect(verdict).toMatchObject({
+      kind: "violations",
+      violations: [{ key: "x/\u0000ff", kind: "unmappable", link: "x/\u0000ff" }],
+    })
+  })
+
+  it("refuses an archive link that follows a host link whose target is not UTF-8", () => {
+    const verdict = preMergeContainmentVerdict(
+      "/opt/app",
+      ["l", "h", hexField(0xff)],
+      [member("a/", "directory"), member("a/l", "symlink", "../h/f")]
+    )
+
+    expect(verdict).toMatchObject({
+      kind: "violations",
+      violations: [{ key: "a/l", kind: "unmappable", link: "h" }],
+    })
+  })
+
+  it("refuses a relevant walk into an unreadable directory", () => {
+    const verdict = preMergeContainmentVerdict(
+      "/opt/app",
+      ["u", "locked"],
+      [member("a/", "directory"), member("a/l", "symlink", "../locked/f")]
+    )
+
+    expect(verdict).toMatchObject({
+      kind: "violations",
+      violations: [{ directory: "locked", key: "a/l", kind: "unreadable" }],
+    })
+  })
+
+  it("refuses an archive member at or below an unreadable directory as a conflict", () => {
+    const verdict = preMergeContainmentVerdict(
+      "/opt/app",
+      ["u", "a/locked"],
+      [member("a/", "directory"), member("a/locked/f", "file"), member("a/l", "symlink", ".")]
+    )
+
+    expect(verdict).toMatchObject({
+      key: "a/locked",
+      kind: "conflict",
+      reason: "unreadable-directory",
+    })
   })
 })
 
@@ -658,7 +929,7 @@ describe("name variants in the merged link set (Issue #219)", () => {
   it("refuses a host link d/up -> .. combined with an archive link d/esc -> UP/..", () => {
     const verdict = preMergeContainmentVerdict(
       destination,
-      ["/opt/app/d/up", ".."],
+      ["l", "d/up", ".."],
       [member("d/", "directory"), member("d/esc", "symlink", "UP/..")]
     )
 
@@ -668,7 +939,7 @@ describe("name variants in the merged link set (Issue #219)", () => {
   it("refuses the reverse: a host link d/esc -> UP/.. combined with an archive link d/up -> ..", () => {
     const verdict = preMergeContainmentVerdict(
       destination,
-      ["/opt/app/d/esc", "UP/.."],
+      ["l", "d/esc", "UP/.."],
       [member("d/", "directory"), member("d/up", "symlink", "..")]
     )
 
