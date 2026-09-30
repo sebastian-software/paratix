@@ -236,6 +236,11 @@
     "fixpoint",
     "unmappable",
     "venv",
-    "Þfoo"
+    "Þfoo",
+    "hinauszeigt",
+    "ignorierbaren",
+    "readlink",
+    "realpath",
+    "repoint"
   ]
 }

@@ -15,6 +15,7 @@
  * `flagLock.shell.smoke.test.ts`.
  */
 import { type ChildProcess, spawn, spawnSync } from "node:child_process"
+import { createHash } from "node:crypto"
 import {
   chmodSync,
   existsSync,
@@ -52,8 +53,16 @@ import {
   symlinkListingEntries,
 } from "../../src/modules/archiveContainmentEnforcement.js"
 import {
+  buildContainmentEstablishScript,
+  clearContainmentEntries,
+  CONTAINMENT_ENTRY_READ_LIMIT,
+  CONTAINMENT_FLAG_BODY_LIMIT_BYTES,
   containmentFlagBody,
-  readContainmentFlag,
+  type ContainmentLedger,
+  type ContainmentPaths,
+  establishContainmentEntry,
+  noContainmentEntriesCommand,
+  parseContainmentEstablishOutput,
 } from "../../src/modules/archiveContainmentFlag.js"
 import { archiveContainmentScope } from "../../src/modules/archiveContainmentScope.js"
 import {
@@ -330,7 +339,7 @@ const SKIP_UNLESS_UNREADABLE_REPORTED = SKIP_AS_ROOT || !HAS_GNU_FIND
  * only reports and says so.
  */
 const BACKSTOP_REPORT_TAIL =
-  "after the merge, the archive's symlinks and every symlink under the destination whose resolution passes through a path the archive writes are checked, including links it did not ship; nothing was removed or changed; while the offending symlinks remain, remove them or point them inside the destination manually; the containment flag keeps check at needs-apply, and a later apply of any source verifies them again (every symlink under the destination when the flag could not record them) and clears the flag only when they pass"
+  "after the merge, the archive's symlinks and every symlink under the destination whose resolution passes through a path the archive writes are checked, including links it did not ship; nothing was removed or changed; while the offending symlinks remain, remove them or point them inside the destination manually; this apply's containment entry records them and keeps check at needs-apply, and a later apply of any source verifies them again (every symlink under the destination when the entry could not record them) and, only when they pass, removes the entries it read that are still unchanged"
 
 describe.skipIf(SKIP_PLATFORM)("archive.extract staging merge shell smoke tests", () => {
   it("refuses a staging entry whose name contains a literal newline", () => {
@@ -3040,115 +3049,762 @@ describe.skipIf(SKIP_PLATFORM || !ACCEPTS_NON_UTF8_NAMES)(
 )
 
 /**
- * Issue #219: run the production flag read against a scratch flags
- * directory whose path needs quoting.
- *
- * @param prepare - Sets up the flag before the read; receives the flags
- *   directory (not yet created) and the flag path.
- * @returns What the read reports, and whether the flags directory exists.
+ * Issue #219: scratch containment paths below a flags directory whose path
+ * needs quoting; the flags directory does not exist yet.
  */
-async function readPreparedFlag(
-  prepare?: (paths: { directory: string; flag: string }) => void
-): Promise<{
-  directoryExists: boolean
-  state: Awaited<ReturnType<typeof readContainmentFlag>>
-}> {
-  const root = mkdtempSync(join(tmpdir(), "paratix-flag-read-"))
-  try {
-    const directory = join(root, "it's flags")
-    const flag = join(directory, "archive-containment-0123.failed")
-    prepare?.({ directory, flag })
-    const { conn } = localShellConnection()
-    const state = await readContainmentFlag(conn, { directory, flag })
-    return { directoryExists: existsSync(directory), state }
-  } finally {
-    rmSync(root, { force: true, recursive: true })
+type ScratchContainment = { paths: ContainmentPaths; root: string }
+
+/**
+ * Issue #219: create a scratch root for the containment scripts.
+ *
+ * @returns The root (to be removed by the caller) and the containment paths.
+ */
+function scratchContainment(): ScratchContainment {
+  const root = mkdtempSync(join(tmpdir(), "paratix-containment-"))
+  const directory = join(root, "it's flags")
+  return {
+    paths: {
+      directory,
+      entryDirectory: join(directory, "archive-containment-0123.d"),
+      legacyFlag: join(directory, "archive-containment-0123.failed"),
+    },
+    root,
   }
 }
 
+/** Issue #219: the own entry name every smoke test establishes. */
+const smokeOwnName = `run-${"1".repeat(32)}`
+
+/**
+ * Issue #219: run the production establish exec against the scratch paths.
+ *
+ * @param scratch - The scratch containment.
+ * @param env - The shell environment; the test runner's when omitted.
+ * @returns The ledger or the refusal, and the commands it ran.
+ */
+async function establishOnDisk(
+  scratch: ScratchContainment,
+  env?: NodeJS.ProcessEnv
+): Promise<{ commands: string[]; outcome: Awaited<ReturnType<typeof establishContainmentEntry>> }> {
+  const { commands, conn } = localShellConnection(env === undefined ? {} : { env })
+  const outcome = await establishContainmentEntry(conn, {
+    ownEntryName: smokeOwnName,
+    paths: scratch.paths,
+    source: "app.tar",
+  })
+  return { commands, outcome }
+}
+
+/**
+ * Issue #219: the sha256 of a file on disk.
+ *
+ * @param path - The file to hash.
+ * @returns The lowercase hex digest.
+ */
+function sha256OfFile(path: string): string {
+  return createHash("sha256").update(readFileSync(path)).digest("hex")
+}
+
+/**
+ * Issue #219: the ledger of an establish outcome; a refusal fails the test.
+ *
+ * @param outcome - The establish outcome.
+ * @returns The carried links, the own entry and the removable entries.
+ */
+function ledgerOf(
+  outcome: Awaited<ReturnType<typeof establishContainmentEntry>>
+): ContainmentLedger {
+  if ("status" in outcome) throw new Error(String(outcome.error?.message))
+  return outcome
+}
+
+/**
+ * Issue #219: an environment whose `PATH` finds the given directory first.
+ *
+ * @param directory - The directory with command shims.
+ * @returns The test runner's environment with that `PATH`.
+ */
+function environmentWithShims(directory: string): NodeJS.ProcessEnv {
+  return { ...process.env, PATH: `${directory}:${process.env.PATH ?? ""}` }
+}
+
+/**
+ * Issue #219: what is at a path, without following a symlink.
+ *
+ * @param path - The path to inspect.
+ * @returns `missing`, `symlink`, `directory`, or `file:` and the content of a
+ *   regular file.
+ */
+function pathState(path: string): string {
+  let stat: ReturnType<typeof lstatSync>
+  try {
+    stat = lstatSync(path)
+  } catch {
+    // `ENOENT`, or `ENOTDIR` for a path below a regular file.
+    return "missing"
+  }
+  if (stat.isSymbolicLink()) return "symlink"
+  return stat.isDirectory() ? "directory" : `file:${readFileSync(path, "utf8")}`
+}
+
+/**
+ * Issue #219: the refusal message of an establish outcome, or undefined for
+ * a ledger.
+ *
+ * @param outcome - The establish outcome.
+ * @returns The message.
+ */
+function refusalOf(
+  outcome: Awaited<ReturnType<typeof establishContainmentEntry>>
+): string | undefined {
+  return "status" in outcome ? outcome.error?.message : undefined
+}
+
+const inProgressBody = containmentFlagBody({ links: [], state: "in-progress" })
+
 describe.skipIf(SKIP_PLATFORM)(
-  "archive.extract containment flag read shell smoke tests (Issue #219)",
+  "archive.extract containment establish shell smoke tests (Issue #219)",
   () => {
-    it("creates the flags directory and reports an absent flag", async () => {
-      await expect(readPreparedFlag()).resolves.toStrictEqual({
-        directoryExists: true,
-        state: { kind: "absent" },
-      })
+    it("creates the flags and entry directories and the own in-progress entry in one exec", async () => {
+      const scratch = scratchContainment()
+      try {
+        const { commands, outcome } = await establishOnDisk(scratch)
+
+        const ownEntry = join(scratch.paths.entryDirectory, smokeOwnName)
+        expect(outcome).toStrictEqual({
+          carried: [],
+          ownEntry,
+          removable: [],
+          verifyWholeDestination: false,
+        })
+        expect(commands).toHaveLength(1)
+        expect(readFileSync(ownEntry, "utf8")).toBe(inProgressBody)
+        expect(lstatSync(ownEntry).mode & 0o777).toBe(0o644)
+        expect(lstatSync(scratch.paths.entryDirectory).isDirectory()).toBe(true)
+      } finally {
+        rmSync(scratch.root, { force: true, recursive: true })
+      }
     })
 
-    it("tells an empty flag apart from an absent one", async () => {
-      const { state } = await readPreparedFlag(({ directory, flag }) => {
-        mkdirSync(directory)
-        writeFileSync(flag, "")
-      })
+    it("reads recorded entries with the hash of their content, and ignores dotfiles and writeFile temp files", async () => {
+      const scratch = scratchContainment()
+      try {
+        const { entryDirectory } = scratch.paths
+        mkdirSync(entryDirectory, { recursive: true })
+        const recorded = join(entryDirectory, `run-${"a".repeat(32)}`)
+        writeFileSync(
+          recorded,
+          containmentFlagBody({ links: ["a/esc", "b/\u0000ff/l"], state: "failed" })
+        )
+        const claim = join(entryDirectory, `run-${"b".repeat(32)}-claim-0`)
+        writeFileSync(claim, containmentFlagBody({ links: ["c/esc"], state: "failed" }))
+        for (const ignored of [".run-hidden", "paratix-write.AbCdEf", ".run-x.paratix.AbCdEf"]) {
+          writeFileSync(join(entryDirectory, ignored), "not json")
+        }
 
-      expect(state).toStrictEqual({
-        kind: "unknown",
-        why: expect.stringContaining("no usable list"),
-      })
+        const { outcome } = await establishOnDisk(scratch)
+
+        expect(outcome).toStrictEqual({
+          carried: ["a/esc", "b/\u0000ff/l", "c/esc"],
+          ownEntry: join(entryDirectory, smokeOwnName),
+          removable: [
+            { path: recorded, sha256: sha256OfFile(recorded) },
+            { path: claim, sha256: sha256OfFile(claim) },
+          ],
+          verifyWholeDestination: false,
+        })
+      } finally {
+        rmSync(scratch.root, { force: true, recursive: true })
+      }
     })
 
-    it("reads a recorded list, including a key with an unmappable-segment token", async () => {
-      const links = ["a/esc", "b/\u0000ff/l"]
-      const { state } = await readPreparedFlag(({ directory, flag }) => {
-        mkdirSync(directory)
-        writeFileSync(flag, containmentFlagBody({ links, state: "failed" }))
-      })
+    it.each([
+      { content: Buffer.from([0x7b, 0xff, 0x7d]), name: "not valid UTF-8" },
+      { content: Buffer.alloc(0), name: "empty" },
+      {
+        content: Buffer.alloc(CONTAINMENT_FLAG_BODY_LIMIT_BYTES + 10, 0x20),
+        name: "larger than the body limit",
+      },
+    ])("reads an entry that is $name as unknown and still removable", async ({ content }) => {
+      const scratch = scratchContainment()
+      try {
+        mkdirSync(scratch.paths.entryDirectory, { recursive: true })
+        const entry = join(scratch.paths.entryDirectory, "run-a")
+        writeFileSync(entry, content)
 
-      expect(state).toStrictEqual({ kind: "recorded", links })
+        const { outcome } = await establishOnDisk(scratch)
+
+        expect(outcome).toMatchObject({
+          carried: [],
+          removable: [{ path: entry, sha256: sha256OfFile(entry) }],
+          verifyWholeDestination: true,
+        })
+      } finally {
+        rmSync(scratch.root, { force: true, recursive: true })
+      }
     })
 
-    it("reads a flag that is not valid UTF-8 as unknown", async () => {
-      const { state } = await readPreparedFlag(({ directory, flag }) => {
-        mkdirSync(directory)
-        writeFileSync(flag, Buffer.from([0x7b, 0xff, 0x7d]))
-      })
+    it("reads the old flag file as a reason for a destination-wide verification", async () => {
+      const scratch = scratchContainment()
+      try {
+        mkdirSync(scratch.paths.directory)
+        writeFileSync(scratch.paths.legacyFlag, "archive apply in progress\n")
 
-      expect(state).toStrictEqual({
-        kind: "unknown",
-        why: expect.stringContaining("not valid UTF-8"),
-      })
+        const { outcome } = await establishOnDisk(scratch)
+
+        expect(outcome).toMatchObject({
+          removable: [
+            { path: scratch.paths.legacyFlag, sha256: sha256OfFile(scratch.paths.legacyFlag) },
+          ],
+          verifyWholeDestination: true,
+        })
+      } finally {
+        rmSync(scratch.root, { force: true, recursive: true })
+      }
+    })
+
+    it("reads only the first entries in full and reports that there are more", async () => {
+      const scratch = scratchContainment()
+      try {
+        mkdirSync(scratch.paths.entryDirectory, { recursive: true })
+        for (let index = 0; index <= CONTAINMENT_ENTRY_READ_LIMIT; index += 1) {
+          writeFileSync(
+            join(scratch.paths.entryDirectory, `run-${String(index).padStart(2, "0")}`),
+            containmentFlagBody({ links: [], state: "failed" })
+          )
+        }
+
+        const { outcome } = await establishOnDisk(scratch)
+
+        expect(outcome).toMatchObject({ verifyWholeDestination: true })
+        expect(ledgerOf(outcome).removable).toHaveLength(CONTAINMENT_ENTRY_READ_LIMIT)
+      } finally {
+        rmSync(scratch.root, { force: true, recursive: true })
+      }
+    })
+
+    // Issue #219: an entry or the old flag file vanishes while the script
+    // looks at it, as when a concurrent clear claims it with `mv` or its
+    // owner removes it. The removal is injected into the production script
+    // right where each guard runs.
+    it.each([
+      {
+        at: String.raw`if [ ! -f "$e" ]`,
+        name: "an entry before its regular-file guard",
+        vanishing: ({ entryDirectory }: ContainmentPaths): string => join(entryDirectory, "run-a"),
+      },
+      {
+        at: String.raw`if [ ! -r "$e" ]`,
+        name: "an entry before its readability guard",
+        vanishing: ({ entryDirectory }: ContainmentPaths): string => join(entryDirectory, "run-a"),
+      },
+      {
+        at: String.raw`if paratix_read "entry $name"`,
+        name: "an entry before it is hashed",
+        vanishing: ({ entryDirectory }: ContainmentPaths): string => join(entryDirectory, "run-a"),
+      },
+      {
+        at: String.raw`if [ -f "$2" ] && ! paratix_read legacy`,
+        name: "the old flag file before it is read",
+        vanishing: ({ legacyFlag }: ContainmentPaths): string => legacyFlag,
+      },
+    ])("skips $name that vanishes instead of refusing", ({ at, vanishing: vanishingPath }) => {
+      const scratch = scratchContainment()
+      try {
+        const { directory, entryDirectory, legacyFlag } = scratch.paths
+        mkdirSync(entryDirectory, { recursive: true })
+        const vanishing = vanishingPath(scratch.paths)
+        const kept = join(entryDirectory, "run-b")
+        writeFileSync(vanishing, inProgressBody)
+        writeFileSync(kept, containmentFlagBody({ links: ["b/esc"], state: "failed" }))
+        const production = buildContainmentEstablishScript()
+        expect(production).toContain(at)
+        // Removed once, the first time the script reaches that point.
+        const removal = `if [ -z "$\{removed:-}" ]; then removed=1; rm -f -- ${shellQuote(vanishing)}; fi; `
+        const ownEntry = join(entryDirectory, smokeOwnName)
+        const result = spawnSync(
+          "/bin/sh",
+          [
+            "-c",
+            production.replace(at, `${removal}${at}`),
+            "sh",
+            directory,
+            legacyFlag,
+            entryDirectory,
+            ownEntry,
+            inProgressBody,
+          ],
+          { encoding: "utf8", timeout: 5000 }
+        )
+
+        // Only the failed redirect of the vanished file may reach stderr.
+        expect(result.status).toBe(0)
+        expect(
+          parseContainmentEstablishOutput(result.stdout, { ...scratch.paths, ownEntry })
+        ).toStrictEqual({
+          carried: ["b/esc"],
+          ownEntry,
+          removable: [{ path: kept, sha256: sha256OfFile(kept) }],
+          verifyWholeDestination: false,
+        })
+        expect(readFileSync(ownEntry, "utf8")).toBe(inProgressBody)
+      } finally {
+        rmSync(scratch.root, { force: true, recursive: true })
+      }
+    })
+
+    it("skips an entry that vanishes while it is hashed, as a concurrent claim does", async () => {
+      // Issue #219: a `sha256sum` shim removes the entry and fails, like a
+      // read of a file that was claimed with `mv` and removed meanwhile.
+      const scratch = scratchContainment()
+      const shims = mkdtempSync(join(tmpdir(), "paratix-sha256sum-shim-"))
+      try {
+        mkdirSync(scratch.paths.entryDirectory, { recursive: true })
+        const vanishing = join(scratch.paths.entryDirectory, "run-a")
+        writeFileSync(vanishing, inProgressBody)
+        writeFileSync(
+          join(shims, "sha256sum"),
+          [
+            "#!/bin/sh",
+            `rm -f -- ${shellQuote(vanishing)}`,
+            "echo 'sha256sum: read error' >&2",
+            "exit 1",
+          ].join("\n"),
+          { mode: 0o755 }
+        )
+
+        const { outcome } = await establishOnDisk(scratch, environmentWithShims(shims))
+
+        expect(outcome).toStrictEqual({
+          carried: [],
+          ownEntry: join(scratch.paths.entryDirectory, smokeOwnName),
+          removable: [],
+          verifyWholeDestination: false,
+        })
+      } finally {
+        rmSync(shims, { force: true, recursive: true })
+        rmSync(scratch.root, { force: true, recursive: true })
+      }
+    })
+
+    it("hashes an entry before it reads its body, so a rename in between never pairs a new body with its own hash", async () => {
+      // Issue #219: a `sha256sum` shim hashes the entry the script opened and
+      // then replaces the entry by a rename, as a concurrent `writeFile` would.
+      const scratch = scratchContainment()
+      const shims = mkdtempSync(join(tmpdir(), "paratix-sha256sum-shim-"))
+      try {
+        mkdirSync(scratch.paths.entryDirectory, { recursive: true })
+        const entry = join(scratch.paths.entryDirectory, "run-a")
+        const oldBody = containmentFlagBody({ links: [], state: "in-progress" })
+        const newBody = containmentFlagBody({ links: ["x/esc"], state: "failed" })
+        writeFileSync(entry, oldBody)
+        const realSha256sum = spawnSync("/bin/sh", ["-c", "command -v sha256sum"], {
+          encoding: "utf8",
+        }).stdout.trim()
+        const replacement = join(shims, "replacement")
+        writeFileSync(replacement, newBody)
+        writeFileSync(
+          join(shims, "sha256sum"),
+          [
+            "#!/bin/sh",
+            `out=$(${shellQuote(realSha256sum)} "$@")`,
+            `if [ -e ${shellQuote(replacement)} ]; then mv ${shellQuote(replacement)} ${shellQuote(entry)}; fi`,
+            String.raw`printf '%s\n' "$out"`,
+          ].join("\n"),
+          { mode: 0o755 }
+        )
+
+        const { outcome } = await establishOnDisk(scratch, environmentWithShims(shims))
+
+        const oldHash = createHash("sha256").update(oldBody).digest("hex")
+        // The body read is the newer record, keyed by the older hash.
+        expect(outcome).toMatchObject({
+          carried: ["x/esc"],
+          removable: [{ path: entry, sha256: oldHash }],
+        })
+        expect(sha256OfFile(entry)).not.toBe(oldHash)
+
+        // Issue #219: so the clear keeps that newer record as a claim entry.
+        const { conn } = localShellConnection()
+        await expect(
+          clearContainmentEntries(conn, {
+            ownEntry: join(scratch.paths.entryDirectory, smokeOwnName),
+            removable: [{ path: entry, sha256: oldHash }],
+          })
+        ).resolves.toBeNull()
+        expect(readdirSync(scratch.paths.entryDirectory)).toStrictEqual([`${smokeOwnName}-claim-0`])
+        expect(
+          readFileSync(join(scratch.paths.entryDirectory, `${smokeOwnName}-claim-0`), "utf8")
+        ).toBe(newBody)
+      } finally {
+        rmSync(shims, { force: true, recursive: true })
+        rmSync(scratch.root, { force: true, recursive: true })
+      }
     })
 
     it.each([
       {
-        name: "a symlink to a recorded flag",
-        prepare({ directory, flag }: { directory: string; flag: string }): void {
-          mkdirSync(directory)
+        name: "a symlink entry to a recorded file",
+        prepare({ entryDirectory }: ContainmentPaths): void {
+          mkdirSync(entryDirectory, { recursive: true })
           writeFileSync(
-            join(directory, "real"),
+            join(entryDirectory, "real"),
             containmentFlagBody({ links: [], state: "failed" })
           )
-          symlinkSync("real", flag)
+          symlinkSync("real", join(entryDirectory, "run-a"))
         },
-        reason: "is a symlink",
+        reason: "/run-a is a symlink; remove it",
       },
       {
-        name: "a dangling symlink",
-        prepare({ directory, flag }: { directory: string; flag: string }): void {
+        name: "a dangling symlink at the own entry name",
+        prepare({ entryDirectory }: ContainmentPaths): void {
+          mkdirSync(entryDirectory, { recursive: true })
+          symlinkSync("created-through-link", join(entryDirectory, smokeOwnName))
+        },
+        reason: `/${smokeOwnName} is a symlink; remove it`,
+      },
+      {
+        name: "a directory entry",
+        prepare({ entryDirectory }: ContainmentPaths): void {
+          mkdirSync(join(entryDirectory, "run-a"), { recursive: true })
+        },
+        reason: "/run-a exists but is not a regular file; remove it",
+      },
+      {
+        name: "an entry name outside the run charset",
+        prepare({ entryDirectory }: ContainmentPaths): void {
+          mkdirSync(entryDirectory, { recursive: true })
+          writeFileSync(join(entryDirectory, "run-a b"), "")
+        },
+        reason: "whose name has characters other than ASCII letters",
+      },
+      {
+        name: "an entry directory that is a symlink",
+        prepare({ directory, entryDirectory }: ContainmentPaths): void {
+          mkdirSync(join(directory, "elsewhere"), { recursive: true })
+          symlinkSync("elsewhere", entryDirectory)
+        },
+        reason: ".d is a symlink; remove it",
+      },
+      {
+        name: "an entry directory that is a regular file",
+        prepare({ directory, entryDirectory }: ContainmentPaths): void {
           mkdirSync(directory)
-          symlinkSync("missing", flag)
+          writeFileSync(entryDirectory, "")
         },
-        reason: "is a symlink",
+        reason: ".d is not a directory and cannot be created; remove it",
       },
       {
-        name: "a directory",
-        prepare({ flag }: { directory: string; flag: string }): void {
-          mkdirSync(flag, { recursive: true })
+        name: "an old flag file that is a dangling symlink",
+        prepare({ directory, legacyFlag }: ContainmentPaths): void {
+          mkdirSync(directory)
+          symlinkSync("missing", legacyFlag)
         },
-        reason: "exists but is not a regular file",
+        reason: ".failed is a symlink; remove it",
+      },
+      {
+        name: "an old flag file that is a directory",
+        prepare({ legacyFlag }: ContainmentPaths): void {
+          mkdirSync(legacyFlag, { recursive: true })
+        },
+        reason: ".failed exists but is not a regular file; remove it",
       },
       {
         name: "a flags directory path that is a regular file",
-        prepare({ directory }: { directory: string; flag: string }): void {
+        prepare({ directory }: ContainmentPaths): void {
           writeFileSync(directory, "")
         },
-        reason: "failed to create archive marker directory for containment-failure flag",
+        reason: "failed to create archive marker directory for containment entries",
       },
-    ])("refuses to read $name", async ({ prepare, reason }) => {
-      const { state } = await readPreparedFlag(prepare)
+    ])("refuses $name without creating the own entry", async ({ prepare, reason }) => {
+      const scratch = scratchContainment()
+      try {
+        prepare(scratch.paths)
 
-      expect(state).toStrictEqual({ kind: "unreadable", reason: expect.stringContaining(reason) })
+        const { outcome } = await establishOnDisk(scratch)
+
+        expect(refusalOf(outcome)).toContain(reason)
+        expect(pathState(join(scratch.paths.entryDirectory, smokeOwnName))).not.toMatch(/^file:/v)
+        // A symlink is never followed: its target is not created.
+        expect(existsSync(join(scratch.paths.entryDirectory, "created-through-link"))).toBe(false)
+      } finally {
+        rmSync(scratch.root, { force: true, recursive: true })
+      }
+    })
+
+    it.each([
+      { expected: "file:kept", injected: "printf 'kept' >", name: "a regular file" },
+      { expected: "symlink", injected: "ln -s created-through-link", name: "a dangling symlink" },
+    ])(
+      "creates the own entry exclusively: $name that appears after the checks is neither replaced nor followed",
+      ({ expected, injected }) => {
+        // Issue #219: the name is taken after the script's own `-e`/`-L`
+        // pre-check, as with a concurrent writer; `set -C` (O_EXCL) still
+        // refuses instead of truncating the file or writing through the link.
+        const scratch = scratchContainment()
+        try {
+          mkdirSync(scratch.paths.entryDirectory, { recursive: true })
+          const ownEntry = join(scratch.paths.entryDirectory, smokeOwnName)
+          const creation = "( set -C;"
+          const production = buildContainmentEstablishScript()
+          expect(production).toContain(creation)
+          const script = production.replace(creation, `${injected} "$4"; ${creation}`)
+          const result = spawnSync(
+            "/bin/sh",
+            [
+              "-c",
+              script,
+              "sh",
+              scratch.paths.directory,
+              scratch.paths.legacyFlag,
+              scratch.paths.entryDirectory,
+              ownEntry,
+              inProgressBody,
+            ],
+            { encoding: "utf8", timeout: 5000 }
+          )
+
+          expect(result.status).toBe(13)
+          expect(result.stdout).not.toContain("done")
+          expect(pathState(ownEntry)).toBe(expected)
+          expect(pathState(join(scratch.paths.entryDirectory, "created-through-link"))).toBe(
+            "missing"
+          )
+        } finally {
+          rmSync(scratch.root, { force: true, recursive: true })
+        }
+      }
+    )
+  }
+)
+
+describe.skipIf(SKIP_PLATFORM)(
+  "archive.extract containment clear shell smoke tests (Issue #219)",
+  () => {
+    it("removes unchanged entries, keeps a changed one as a claim entry, claims the old flag file and removes the own entry last", async () => {
+      const scratch = scratchContainment()
+      try {
+        const { entryDirectory, legacyFlag } = scratch.paths
+        mkdirSync(entryDirectory, { recursive: true })
+        writeFileSync(legacyFlag, "archive apply in progress\n")
+        const unchanged = join(entryDirectory, "run-a")
+        writeFileSync(unchanged, containmentFlagBody({ links: [], state: "failed" }))
+        const changed = join(entryDirectory, "run-b")
+        writeFileSync(changed, inProgressBody)
+        const untouched = join(entryDirectory, "run-c")
+        writeFileSync(untouched, inProgressBody)
+        const established = await establishOnDisk(scratch)
+        const outcome = ledgerOf(established.outcome)
+        writeFileSync(changed, containmentFlagBody({ links: ["x/esc"], state: "failed" }))
+        const removable = [
+          ...outcome.removable.filter(({ path }) => path !== untouched),
+          { path: join(entryDirectory, "run-gone"), sha256: "0".repeat(64) },
+        ]
+        const { commands, conn } = localShellConnection()
+
+        await expect(
+          clearContainmentEntries(conn, { ownEntry: outcome.ownEntry, removable })
+        ).resolves.toBeNull()
+
+        expect(commands).toHaveLength(1)
+        expect(existsSync(legacyFlag)).toBe(false)
+        // Issue #219: the claim of the changed entry keeps its position in
+        // the removable list (`run-b` is the second).
+        expect(readdirSync(entryDirectory).toSorted()).toStrictEqual(
+          [`${smokeOwnName}-claim-1`, "run-c"].toSorted()
+        )
+        expect(readFileSync(join(entryDirectory, `${smokeOwnName}-claim-1`), "utf8")).toBe(
+          containmentFlagBody({ links: ["x/esc"], state: "failed" })
+        )
+      } finally {
+        rmSync(scratch.root, { force: true, recursive: true })
+      }
+    })
+
+    it("keeps an entry replaced by a symlink as a claim entry instead of following it", async () => {
+      const scratch = scratchContainment()
+      try {
+        const { entryDirectory } = scratch.paths
+        mkdirSync(entryDirectory, { recursive: true })
+        const target = join(scratch.root, "target")
+        writeFileSync(target, "")
+        const entry = join(entryDirectory, "run-a")
+        symlinkSync(target, entry)
+        const ownEntry = join(entryDirectory, smokeOwnName)
+        writeFileSync(ownEntry, inProgressBody)
+        const { conn } = localShellConnection()
+
+        await expect(
+          clearContainmentEntries(conn, {
+            ownEntry,
+            removable: [{ path: entry, sha256: sha256OfFile(target) }],
+          })
+        ).resolves.toBeNull()
+
+        expect(lstatSync(join(entryDirectory, `${smokeOwnName}-claim-0`)).isSymbolicLink()).toBe(
+          true
+        )
+        expect(existsSync(target)).toBe(true)
+        expect(existsSync(ownEntry)).toBe(false)
+      } finally {
+        rmSync(scratch.root, { force: true, recursive: true })
+      }
+    })
+
+    it.each([
+      {
+        name: "a regular file",
+        take(claim: string): void {
+          writeFileSync(claim, "")
+        },
+      },
+      {
+        // Issue #219: `-e` alone misses a dangling symlink; the claim must
+        // neither replace it nor write through it.
+        name: "a dangling symlink",
+        take(claim: string): void {
+          symlinkSync("created-through-link", claim)
+        },
+      },
+    ])("fails without removing the own entry when a claim name is $name", async ({ take }) => {
+      const scratch = scratchContainment()
+      try {
+        const { entryDirectory } = scratch.paths
+        mkdirSync(entryDirectory, { recursive: true })
+        const ownEntry = join(entryDirectory, smokeOwnName)
+        writeFileSync(ownEntry, inProgressBody)
+        take(`${ownEntry}-claim-0`)
+        const claimBefore = pathState(`${ownEntry}-claim-0`)
+        const entry = join(entryDirectory, "run-a")
+        writeFileSync(entry, "")
+        const { conn } = localShellConnection()
+
+        const failure = await clearContainmentEntries(conn, {
+          ownEntry,
+          removable: [{ path: entry, sha256: sha256OfFile(entry) }],
+        })
+
+        expect(failure?.error?.message).toContain("(exit code 3)")
+        expect(existsSync(ownEntry)).toBe(true)
+        expect(existsSync(entry)).toBe(true)
+        expect(pathState(`${ownEntry}-claim-0`)).toBe(claimBefore)
+        expect(pathState(join(entryDirectory, "created-through-link"))).toBe("missing")
+      } finally {
+        rmSync(scratch.root, { force: true, recursive: true })
+      }
+    })
+  }
+)
+
+describe.skipIf(SKIP_PLATFORM)(
+  "archive.extract containment check shell smoke tests (Issue #219)",
+  () => {
+    /**
+     * Issue #219: run the `check` part that tests for containment entries.
+     *
+     * @param prepare - Sets up the scratch paths.
+     * @returns Whether the test passed (no entry).
+     */
+    function noEntries(prepare: (paths: ContainmentPaths) => void): boolean {
+      const scratch = scratchContainment()
+      try {
+        mkdirSync(scratch.paths.directory)
+        prepare(scratch.paths)
+        const result = spawnSync("/bin/sh", ["-c", noContainmentEntriesCommand(scratch.paths)], {
+          timeout: 5000,
+        })
+        return result.status === 0
+      } finally {
+        chmodSync(scratch.root, 0o700)
+        if (existsSync(scratch.paths.entryDirectory)) {
+          try {
+            chmodSync(scratch.paths.entryDirectory, 0o755)
+          } catch {
+            // A symlink or file needs no mode change.
+          }
+        }
+        rmSync(scratch.root, { force: true, recursive: true })
+      }
+    }
+
+    it.each([
+      { name: "no entry directory", prepare: (): void => undefined },
+      {
+        name: "an empty entry directory",
+        prepare({ entryDirectory }: ContainmentPaths): void {
+          mkdirSync(entryDirectory)
+        },
+      },
+      {
+        name: "only dotfiles and writeFile temp files",
+        prepare({ entryDirectory }: ContainmentPaths): void {
+          mkdirSync(entryDirectory)
+          writeFileSync(join(entryDirectory, ".run-x.paratix.AbCdEf"), "")
+          writeFileSync(join(entryDirectory, "paratix-write.AbCdEf"), "")
+        },
+      },
+    ])("passes with $name", ({ prepare }) => {
+      expect(noEntries(prepare)).toBe(true)
+    })
+
+    it.each([
+      {
+        name: "an entry",
+        prepare({ entryDirectory }: ContainmentPaths): void {
+          mkdirSync(entryDirectory)
+          writeFileSync(join(entryDirectory, "run-a"), "")
+        },
+      },
+      {
+        name: "a claim entry",
+        prepare({ entryDirectory }: ContainmentPaths): void {
+          mkdirSync(entryDirectory)
+          writeFileSync(join(entryDirectory, `${smokeOwnName}-claim-0`), "")
+        },
+      },
+      {
+        name: "a dangling symlink entry",
+        prepare({ entryDirectory }: ContainmentPaths): void {
+          mkdirSync(entryDirectory)
+          symlinkSync("missing", join(entryDirectory, "run-a"))
+        },
+      },
+      {
+        name: "an entry directory that is a symlink to an empty directory",
+        prepare({ directory, entryDirectory }: ContainmentPaths): void {
+          mkdirSync(join(directory, "empty"))
+          symlinkSync("empty", entryDirectory)
+        },
+      },
+      {
+        name: "an entry directory that is a regular file",
+        prepare({ entryDirectory }: ContainmentPaths): void {
+          writeFileSync(entryDirectory, "")
+        },
+      },
+      {
+        name: "the old flag file",
+        prepare({ legacyFlag }: ContainmentPaths): void {
+          writeFileSync(legacyFlag, "")
+        },
+      },
+      {
+        name: "the old flag file as a dangling symlink",
+        prepare({ legacyFlag }: ContainmentPaths): void {
+          symlinkSync("missing", legacyFlag)
+        },
+      },
+    ])("fails with $name", ({ prepare }) => {
+      expect(noEntries(prepare)).toBe(false)
+    })
+
+    it.skipIf(SKIP_AS_ROOT)("fails with an entry directory it cannot read", () => {
+      expect(
+        noEntries(({ entryDirectory }) => {
+          mkdirSync(entryDirectory)
+          chmodSync(entryDirectory, 0o300)
+        })
+      ).toBe(false)
     })
   }
 )

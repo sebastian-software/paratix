@@ -5,23 +5,34 @@ import type { ExecOptions, ExecResult, SshConnection } from "../../src/types.js"
 
 import { runSymlinkContainmentBackstop } from "../../src/modules/archiveContainmentBackstop.js"
 import {
+  buildContainmentCheckScript,
+  buildContainmentClearScript,
+  buildContainmentEstablishCommand,
+  buildContainmentEstablishScript,
+  clearContainmentEntries,
+  CONTAINMENT_ENTRY_READ_LIMIT,
+  CONTAINMENT_ESTABLISH_CAPTURE_LIMIT_BYTES,
   CONTAINMENT_FLAG_BODY_LIMIT_BYTES,
   CONTAINMENT_FLAG_LINK_LIMIT,
+  containmentEstablishFailure,
   containmentFlagBody,
-  establishContainmentFlag,
+  type ContainmentPaths,
+  establishContainmentEntry,
+  noContainmentEntriesCommand,
+  parseContainmentEntryBytes,
+  parseContainmentEstablishOutput,
   parseContainmentFlag,
-  readContainmentFlag,
-  recordWithoutVerification,
+  recordContainmentFailure,
   TOO_MANY_OFFENDING_LINKS,
-  UNVERIFIED_DESTINATION,
 } from "../../src/modules/archiveContainmentFlag.js"
 import { buildKernelCrossCheckScript } from "../../src/modules/archiveKernelCrossCheck.js"
 import { buildSymlinkListingProbeScript } from "../../src/modules/archiveProbe.js"
-import { CAPTURE_TRUNCATION_MARKER, InvalidUtf8OutputError } from "../../src/sshHelpers.js"
+import { shellQuote } from "../../src/ssh.js"
+import { CAPTURE_TRUNCATION_MARKER } from "../../src/sshHelpers.js"
 
 const destination = "/opt/app"
 const source = "/tmp/app.tar.gz"
-const flag = "/var/lib/paratix/flags/archive-containment-0123.failed"
+const flagBase = "/var/lib/paratix/flags/archive-containment-0123"
 const listingCommand = buildSymlinkListingProbeScript()
 const crossCheckCommand = buildKernelCrossCheckScript()
 
@@ -155,13 +166,15 @@ describe("containment flag body (Issue #219)", () => {
  * rejects with an error.
  *
  * @param answer - The result, or the error to reject with.
- * @returns The connection and its recorded execs.
+ * @returns The connection, its recorded execs and its recorded writes.
  */
 function singleExecConnection(answer: Error | Partial<ExecResult>): {
   conn: SshConnection
   execs: Array<{ command: string; options: ExecOptions | undefined }>
+  writes: Array<[string, string, unknown]>
 } {
   const execs: Array<{ command: string; options: ExecOptions | undefined }> = []
+  const writes: Array<[string, string, unknown]> = []
   const conn = {
     async exec(command: string, options?: ExecOptions): Promise<ExecResult> {
       await Promise.resolve()
@@ -169,100 +182,376 @@ function singleExecConnection(answer: Error | Partial<ExecResult>): {
       if (answer instanceof Error) throw answer
       return { code: 0, stderr: "", stdout: "", ...answer }
     },
+    async writeFile(path: string, content: string, options: unknown): Promise<void> {
+      await Promise.resolve()
+      writes.push([path, content, options])
+    },
   } as unknown as SshConnection
-  return { conn, execs }
+  return { conn, execs, writes }
 }
 
-describe("readContainmentFlag (Issue #219)", () => {
-  const paths = { directory: "/var/lib/paratix/flags", flag }
+const paths: ContainmentPaths = {
+  directory: "/var/lib/paratix/flags",
+  entryDirectory: `${flagBase}.d`,
+  legacyFlag: `${flagBase}.failed`,
+}
+const ownName = `run-${"1".repeat(32)}`
+const ownEntry = `${paths.entryDirectory}/${ownName}`
+const otherName = `run-${"a".repeat(32)}`
+const otherEntry = `${paths.entryDirectory}/${otherName}`
+const hashA = "a".repeat(64)
+const hashB = "b".repeat(64)
 
-  it("reads in one exec with a capture cap just above the body limit and strict UTF-8", async () => {
-    const { conn, execs } = singleExecConnection({ stdout: "" })
+/**
+ * Issue #219: one read line of the establish output.
+ *
+ * @param label - `entry <name>` or `legacy`.
+ * @param sha256 - The printed hash.
+ * @param content - The body, printed as hex.
+ * @returns The line with its newline.
+ */
+function readLine(label: string, sha256: string, content: Buffer | string): string {
+  return `${label} ${sha256} ${Buffer.from(content).toString("hex")}\n`
+}
 
-    await expect(readContainmentFlag(conn, paths)).resolves.toStrictEqual({ kind: "absent" })
+describe("parseContainmentEntryBytes (Issue #219)", () => {
+  it("reads a recorded list", () => {
+    expect(
+      parseContainmentEntryBytes(
+        Buffer.from(containmentFlagBody({ links: ["a/l"], state: "failed" }))
+      )
+    ).toStrictEqual({ kind: "recorded", links: ["a/l"] })
+  })
 
-    expect(execs).toHaveLength(1)
-    expect(execs[0]?.options).toStrictEqual({
-      ignoreExitCode: true,
-      maxOutputBytes: CONTAINMENT_FLAG_BODY_LIMIT_BYTES + 1024,
-      silent: true,
-      strictUtf8Stdout: true,
+  it("reads bytes that are not valid UTF-8 as unknown", () => {
+    expect(parseContainmentEntryBytes(Buffer.from([0x7b, 0xff, 0x7d]))).toStrictEqual({
+      kind: "unknown",
+      why: expect.stringContaining("is not valid UTF-8"),
+    })
+  })
+
+  it("reads one byte past the limit as unknown", () => {
+    expect(
+      parseContainmentEntryBytes(Buffer.alloc(CONTAINMENT_FLAG_BODY_LIMIT_BYTES + 1, 0x20))
+    ).toStrictEqual({
+      kind: "unknown",
+      why: expect.stringContaining(
+        `is larger than ${String(CONTAINMENT_FLAG_BODY_LIMIT_BYTES)} bytes`
+      ),
+    })
+  })
+})
+
+describe("parseContainmentEstablishOutput (Issue #219)", () => {
+  const inputs = { ...paths, ownEntry }
+
+  it("reads an empty entry directory as nothing to verify or remove", () => {
+    expect(parseContainmentEstablishOutput("done\n", inputs)).toStrictEqual({
+      carried: [],
+      ownEntry,
+      removable: [],
+      verifyWholeDestination: false,
+    })
+  })
+
+  it("carries the deduplicated links of recorded entries and makes every entry removable", () => {
+    const stdout = [
+      readLine(
+        `entry ${otherName}`,
+        hashA,
+        containmentFlagBody({ links: ["a/l", "b/l"], state: "failed" })
+      ),
+      readLine("entry run-b", hashB, containmentFlagBody({ links: ["b/l"], state: "failed" })),
+      "done\n",
+    ].join("")
+
+    expect(parseContainmentEstablishOutput(stdout, inputs)).toStrictEqual({
+      carried: ["a/l", "b/l"],
+      ownEntry,
+      removable: [
+        { path: otherEntry, sha256: hashA },
+        { path: `${paths.entryDirectory}/run-b`, sha256: hashB },
+      ],
+      verifyWholeDestination: false,
     })
   })
 
   it.each([
     {
-      answer: { stdout: "present\n" },
-      expected: { kind: "unknown", why: expect.stringContaining("holds no usable list") },
-      name: "an empty flag",
+      name: "an in-progress entry",
+      stdout: readLine(
+        `entry ${otherName}`,
+        hashA,
+        containmentFlagBody({ links: [], state: "in-progress" })
+      ),
     },
+    { name: "an empty entry", stdout: readLine(`entry ${otherName}`, hashA, "") },
     {
-      answer: { stdout: `present\n${containmentFlagBody({ links: ["a/l"], state: "failed" })}` },
-      expected: { kind: "recorded", links: ["a/l"] },
-      name: "a recorded list",
+      name: "an entry that is not valid UTF-8",
+      stdout: readLine(`entry ${otherName}`, hashA, Buffer.from([0xff])),
     },
-    {
-      answer: { stdout: `present\n{"links":["a/l"${CAPTURE_TRUNCATION_MARKER}` },
-      expected: {
-        kind: "unknown",
-        why: `is larger than ${String(CONTAINMENT_FLAG_BODY_LIMIT_BYTES)} bytes and holds no usable list of offending links (it was written by an older paratix version or is damaged)`,
-      },
-      name: "a truncated capture",
-    },
-    {
-      answer: new InvalidUtf8OutputError("Command stdout is not valid UTF-8 (exit code 0): cat"),
-      expected: { kind: "unknown", why: expect.stringContaining("is not valid UTF-8") },
-      name: "stdout that is not valid UTF-8",
-    },
-    {
-      answer: { code: 3 },
-      expected: { kind: "unreadable", reason: `containment-failure flag ${flag} is a symlink` },
-      name: "a symlink at the flag path",
-    },
-    {
-      answer: { code: 4 },
-      expected: {
-        kind: "unreadable",
-        reason: `containment-failure flag ${flag} exists but is not a regular file`,
-      },
-      name: "a directory at the flag path",
-    },
-    {
-      answer: { code: 2, stderr: "mkdir: Read-only file system\n" },
-      expected: {
-        kind: "unreadable",
-        reason: `failed to create archive marker directory for containment-failure flag ${flag}: mkdir: Read-only file system`,
-      },
-      name: "a flags directory that cannot be created",
-    },
-    {
-      answer: { code: 1, stderr: "cat: Permission denied" },
-      expected: {
-        kind: "unreadable",
-        reason: `failed to read containment-failure flag ${flag}: cat: Permission denied`,
-      },
-      name: "a failed cat",
-    },
-    {
-      answer: { stdout: "garbage" },
-      expected: {
-        kind: "unreadable",
-        reason: `failed to read containment-failure flag ${flag}: unexpected output`,
-      },
-      name: "output without the presence line",
-    },
-    {
-      answer: new Error("channel closed"),
-      expected: {
-        kind: "unreadable",
-        reason: `failed to read containment-failure flag ${flag}: channel closed`,
-      },
-      name: "a thrown exec",
-    },
-  ])("reads $name", async ({ answer, expected }) => {
-    const { conn } = singleExecConnection(answer)
+  ])("verifies the whole destination after $name and still lets it be removed", ({ stdout }) => {
+    expect(parseContainmentEstablishOutput(`${stdout}done\n`, inputs)).toStrictEqual({
+      carried: [],
+      ownEntry,
+      removable: [{ path: otherEntry, sha256: hashA }],
+      verifyWholeDestination: true,
+    })
+  })
 
-    await expect(readContainmentFlag(conn, paths)).resolves.toStrictEqual(expected)
+  it("verifies the whole destination for the old flag file, whatever it records, and claims it", () => {
+    const stdout = `${readLine("legacy", hashA, containmentFlagBody({ links: ["a/l"], state: "failed" }))}done\n`
+
+    expect(parseContainmentEstablishOutput(stdout, inputs)).toStrictEqual({
+      carried: ["a/l"],
+      ownEntry,
+      removable: [{ path: paths.legacyFlag, sha256: hashA }],
+      verifyWholeDestination: true,
+    })
+  })
+
+  it("verifies the whole destination when there are more entries than it read", () => {
+    expect(parseContainmentEstablishOutput("more\ndone\n", inputs)).toMatchObject({
+      removable: [],
+      verifyWholeDestination: true,
+    })
+  })
+
+  it("verifies the whole destination and removes nothing else for a truncated capture", () => {
+    const stdout = `entry ${otherName} ${hashA} 7b${CAPTURE_TRUNCATION_MARKER}`
+
+    expect(parseContainmentEstablishOutput(stdout, inputs)).toStrictEqual({
+      carried: [],
+      ownEntry,
+      removable: [],
+      verifyWholeDestination: true,
+    })
+  })
+
+  it.each([
+    { name: "no output", stdout: "" },
+    { name: "a missing done line", stdout: readLine(`entry ${otherName}`, hashA, "") },
+    { name: "a line after done", stdout: "done\nmore\n" },
+    { name: "a done line without its newline", stdout: "done" },
+    { name: "an unknown line", stdout: "present\ndone\n" },
+    { name: "a short hash", stdout: `entry ${otherName} abc 7b\ndone\n` },
+    { name: "an odd hex body", stdout: `entry ${otherName} ${hashA} 7\ndone\n` },
+    { name: "an upper-case hex body", stdout: `entry ${otherName} ${hashA} 7B\ndone\n` },
+    { name: "a name outside the run charset", stdout: `entry run-a.b ${hashA} 7b\ndone\n` },
+    { name: "a name without the run prefix", stdout: `entry x-a ${hashA} 7b\ndone\n` },
+    { name: "a missing field", stdout: `entry ${otherName} ${hashA}\ndone\n` },
+    { name: "the own entry", stdout: `entry ${ownName} ${hashA} 7b\ndone\n` },
+  ])("cannot trust $name", ({ stdout }) => {
+    expect(parseContainmentEstablishOutput(stdout, inputs)).toBeNull()
+  })
+})
+
+describe("containmentEstablishFailure (Issue #219)", () => {
+  it.each([
+    {
+      code: 2,
+      expected: `failed to create archive marker directory for containment entries ${paths.entryDirectory}: mkdir: denied`,
+      stderr: "mkdir: denied\n",
+    },
+    { code: 3, expected: `containment-failure flag ${paths.legacyFlag} is a symlink; remove it` },
+    {
+      code: 4,
+      expected: `containment-failure flag ${paths.legacyFlag} exists but is not a regular file; remove it`,
+    },
+    {
+      code: 5,
+      expected: `containment entry directory ${paths.entryDirectory} is a symlink; remove it`,
+    },
+    {
+      code: 8,
+      expected: `containment entry ${otherEntry} is a symlink; remove it`,
+      stderr: `${otherName}\n`,
+    },
+    {
+      code: 9,
+      expected: `containment entry an entry in ${paths.entryDirectory} exists but is not a regular file; remove it`,
+      stderr: "run-a/../x\n",
+    },
+    {
+      code: 11,
+      expected: `failed to read containment entry ${otherEntry}`,
+      stderr: `sha256sum: Input/output error\n${otherName}\n`,
+    },
+    {
+      code: 13,
+      expected: `failed to create containment entry in ${paths.entryDirectory}: exit code 13`,
+    },
+    {
+      code: 127,
+      expected: `failed to read containment entries in ${paths.entryDirectory}: sh: sha256sum: not found`,
+      stderr: "sh: sha256sum: not found",
+    },
+  ])("names exit code $code", ({ code, expected, stderr = "" }) => {
+    expect(containmentEstablishFailure(paths, { code, stderr })).toBe(expected)
+  })
+})
+
+/**
+ * Issue #219: the message of an establish refusal.
+ *
+ * @param outcome - The establish outcome.
+ * @returns The message, or an empty string for a ledger.
+ */
+function refusalMessage(outcome: Awaited<ReturnType<typeof establishContainmentEntry>>): string {
+  return "status" in outcome ? String(outcome.error?.message) : ""
+}
+
+describe("establishContainmentEntry (Issue #219)", () => {
+  const parameters = { ownEntryName: ownName, paths, source }
+
+  it("reads and creates in one explicit sh -c exec with a capture cap from the bounds", async () => {
+    const { conn, execs, writes } = singleExecConnection({ stdout: "done\n" })
+
+    await expect(establishContainmentEntry(conn, parameters)).resolves.toStrictEqual({
+      carried: [],
+      ownEntry,
+      removable: [],
+      verifyWholeDestination: false,
+    })
+
+    expect(execs).toStrictEqual([
+      {
+        command: buildContainmentEstablishCommand({ ...paths, ownEntry }),
+        options: {
+          ignoreExitCode: true,
+          maxOutputBytes: CONTAINMENT_ESTABLISH_CAPTURE_LIMIT_BYTES,
+          silent: true,
+        },
+      },
+    ])
+    expect(execs[0]?.command.startsWith(`sh -c '`)).toBe(true)
+    expect(writes).toStrictEqual([])
+    // Issue #219: every read entry fits the capture, one past the body limit
+    // as hex, with room for the name, the hash and the other lines.
+    expect(CONTAINMENT_ESTABLISH_CAPTURE_LIMIT_BYTES).toBeGreaterThan(
+      (CONTAINMENT_ENTRY_READ_LIMIT + 1) * 2 * (CONTAINMENT_FLAG_BODY_LIMIT_BYTES + 1)
+    )
+  })
+
+  it("passes the paths, the own entry and its in-progress body as positional parameters", () => {
+    const command = buildContainmentEstablishCommand({ ...paths, ownEntry })
+
+    expect(command).toBe(
+      [
+        "sh -c",
+        shellQuote(buildContainmentEstablishScript()),
+        "sh",
+        `'${paths.directory}'`,
+        `'${paths.legacyFlag}'`,
+        `'${paths.entryDirectory}'`,
+        `'${ownEntry}'`,
+        shellQuote(containmentFlagBody({ links: [], state: "in-progress" })),
+      ].join(" ")
+    )
+  })
+
+  it.each([
+    { answer: { code: 8, stderr: `${otherName}\n` }, reason: "is a symlink" },
+    { answer: new Error("channel closed"), reason: "channel closed" },
+    { answer: { stdout: "garbage\n" }, reason: "unexpected output" },
+  ])("refuses before the destination is touched: $reason", async ({ answer, reason }) => {
+    const { conn, writes } = singleExecConnection(answer)
+
+    const outcome = await establishContainmentEntry(conn, parameters)
+
+    expect(outcome).toMatchObject({ status: "failed" })
+    expect(refusalMessage(outcome)).toContain(reason)
+    expect(refusalMessage(outcome)).toContain(
+      "; the containment entry must be in place before the destination is touched"
+    )
+    expect(writes).toStrictEqual([])
+  })
+})
+
+describe("clearContainmentEntries (Issue #219)", () => {
+  it("claims every removable entry and removes the own entry in one exec, whatever their number", async () => {
+    const removable = Array.from({ length: CONTAINMENT_ENTRY_READ_LIMIT + 1 }, (_value, index) => ({
+      path: `${paths.entryDirectory}/run-${String(index)}`,
+      sha256: hashA,
+    }))
+    const { conn, execs } = singleExecConnection({})
+
+    await expect(clearContainmentEntries(conn, { ownEntry, removable })).resolves.toBeNull()
+
+    expect(execs).toHaveLength(1)
+    expect(execs[0]?.command).toBe(
+      [
+        "sh -c",
+        shellQuote(buildContainmentClearScript()),
+        "sh",
+        `'${ownEntry}'`,
+        ...removable.flatMap(({ path, sha256 }) => [`'${path}'`, sha256]),
+      ].join(" ")
+    )
+    expect(execs[0]?.options).toStrictEqual({ ignoreExitCode: true, silent: true })
+  })
+
+  it("fails with the exec's output when the clear exec fails", async () => {
+    const { conn } = singleExecConnection({ code: 5, stderr: `cannot claim ${otherEntry}\n` })
+
+    const failure = await clearContainmentEntries(conn, {
+      ownEntry,
+      removable: [{ path: otherEntry, sha256: hashA }],
+    })
+
+    expect(failure?.error?.message).toBe(
+      `[archive.extract] failed to remove containment entry ${ownEntry} and the entries it verified (exit code 5)\ncannot claim ${otherEntry}`
+    )
+  })
+})
+
+describe("noContainmentEntriesCommand (Issue #219)", () => {
+  it("tests the old flag file and runs the check script on the entry directory", () => {
+    expect(noContainmentEntriesCommand(paths)).toBe(
+      `test ! -e '${paths.legacyFlag}' && test ! -L '${paths.legacyFlag}' && sh -c ${shellQuote(buildContainmentCheckScript())} sh '${paths.entryDirectory}'`
+    )
+  })
+})
+
+describe("recordContainmentFailure (Issue #219)", () => {
+  it("rewrites only the own entry through writeFile with the marker mode", async () => {
+    const { conn, execs, writes } = singleExecConnection({})
+    const failure = { error: new Error("[archive.extract] boom"), status: "failed" } as const
+
+    await expect(
+      recordContainmentFailure(conn, {
+        failure,
+        ownEntry,
+        record: { links: ["a/l"], state: "failed" },
+      })
+    ).resolves.toBe(failure)
+
+    expect(execs).toStrictEqual([])
+    expect(writes).toStrictEqual([
+      [ownEntry, containmentFlagBody({ links: ["a/l"], state: "failed" }), { mode: "0644" }],
+    ])
+  })
+
+  it("appends a write failure without claiming the entry certainly survives", async () => {
+    const conn = {
+      async writeFile(): Promise<void> {
+        await Promise.resolve()
+        throw new Error("No space left on device")
+      },
+    } as unknown as SshConnection
+    const failure = { error: new Error("[archive.extract] boom"), status: "failed" } as const
+
+    const outcome = await recordContainmentFailure(conn, {
+      failure,
+      ownEntry,
+      record: { links: [], state: "failed" },
+    })
+
+    // Issue #219: a concurrent apply may have verified the destination and
+    // removed the entry meanwhile (race 1).
+    expect(outcome.error?.message).toBe(
+      `[archive.extract] boom; [archive.extract] failed to write containment entry ${ownEntry}: No space left on device; the entry still marks the apply as unfinished, so the next apply verifies the whole destination, unless another apply removed it after verifying the destination`
+    )
   })
 })
 
@@ -428,99 +717,6 @@ describe("runSymlinkContainmentBackstop recorded links (Issue #219)", () => {
 
     expect(outcome.failure?.error?.message).toContain("symlink containment check failed")
     expect(outcome.offendingLinks).toBe("unidentified")
-  })
-})
-
-/**
- * Issue #219: a connection whose flag read answers with a fixed result and
- * whose `writeFile` records every write.
- *
- * @param read - The flag read's result.
- * @returns The connection and the bodies written, by path.
- */
-function flagConnection(read: Partial<ExecResult>): {
-  conn: SshConnection
-  writes: Array<[string, string]>
-} {
-  const writes: Array<[string, string]> = []
-  const conn = {
-    async exec(): Promise<ExecResult> {
-      await Promise.resolve()
-      return { code: 0, stderr: "", stdout: "", ...read }
-    },
-    async writeFile(path: string, content: string): Promise<void> {
-      await Promise.resolve()
-      writes.push([path, content])
-    },
-  } as unknown as SshConnection
-  return { conn, writes }
-}
-
-describe("establishContainmentFlag (Issue #219)", () => {
-  const paths = { directory: "/var/lib/paratix/flags", flag, source }
-
-  it.each([
-    { name: "the fixed text of older versions", stdout: "present\narchive apply in progress\n" },
-    { name: "an empty flag", stdout: "present\n" },
-    {
-      name: "an in-progress body",
-      stdout: `present\n${containmentFlagBody({ links: ["a/esc"], state: "in-progress" })}`,
-    },
-    {
-      name: "an unknown record",
-      stdout: `present\n${containmentFlagBody({ reason: TOO_MANY_OFFENDING_LINKS, state: "unknown" })}`,
-    },
-  ])(
-    "runs the apply after $name and asks for a destination-wide verification",
-    async ({ stdout }) => {
-      const { conn, writes } = flagConnection({ stdout })
-
-      await expect(establishContainmentFlag(conn, paths)).resolves.toStrictEqual({
-        carried: [],
-        verifyWholeDestination: true,
-      })
-      expect(writes).toStrictEqual([
-        [flag, containmentFlagBody({ links: [], state: "in-progress" })],
-      ])
-    }
-  )
-
-  it("carries a recorded list without a destination-wide verification", async () => {
-    const { conn, writes } = flagConnection({
-      stdout: `present\n${containmentFlagBody({ links: ["a/esc"], state: "failed" })}`,
-    })
-
-    await expect(establishContainmentFlag(conn, paths)).resolves.toStrictEqual({
-      carried: ["a/esc"],
-      verifyWholeDestination: false,
-    })
-    expect(writes).toStrictEqual([
-      [flag, containmentFlagBody({ links: ["a/esc"], state: "in-progress" })],
-    ])
-  })
-
-  it("still refuses a symlink at the flag path and writes nothing", async () => {
-    const { conn, writes } = flagConnection({ code: 3 })
-
-    const outcome = await establishContainmentFlag(conn, paths)
-
-    expect(outcome).toMatchObject({ status: "failed" })
-    expect(writes).toStrictEqual([])
-  })
-})
-
-describe("recordWithoutVerification (Issue #219)", () => {
-  it("keeps the carried links when the replaced flag recorded them", () => {
-    expect(
-      recordWithoutVerification({ carried: ["a/esc"], verifyWholeDestination: false })
-    ).toStrictEqual({ links: ["a/esc"], state: "failed" })
-  })
-
-  it("stays unknown, never an empty failed record, when the replaced flag held no usable list", () => {
-    const record = recordWithoutVerification({ carried: [], verifyWholeDestination: true })
-
-    expect(record).toStrictEqual({ reason: UNVERIFIED_DESTINATION, state: "unknown" })
-    expect(parseContainmentFlag(containmentFlagBody(record)).kind).toBe("unknown")
   })
 })
 

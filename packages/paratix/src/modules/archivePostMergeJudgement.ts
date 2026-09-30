@@ -3,8 +3,9 @@
  * judges, and the violations its listing alone shows.
  *
  * Issue #219: split out of `archiveContainmentBackstop.ts`. The backstop
- * judges the links the archive can affect and the links an earlier failed
- * apply recorded in the containment flag; when that flag held no usable list,
+ * judges the links the archive can affect and the links earlier failed
+ * applies recorded in their containment entries; when an entry held no usable
+ * list,
  * it judges every listed link instead, and any directory the listing could not
  * read makes that destination-wide verification incomplete.
  */

@@ -18,10 +18,18 @@ import {
   validateMergedSymlinkContainment,
 } from "../../src/modules/archiveContainmentEnforcement.js"
 import {
-  buildContainmentFlagReadCommand,
+  buildContainmentClearScript,
+  buildContainmentEstablishCommand,
+  buildContainmentEstablishScript,
+  CONTAINMENT_ENTRY_READ_LIMIT,
+  CONTAINMENT_ESTABLISH_CAPTURE_LIMIT_BYTES,
+  CONTAINMENT_FLAG_BODY_LIMIT_BYTES,
   CONTAINMENT_FLAG_LINK_LIMIT,
   containmentFlagBody,
+  type ContainmentPaths,
+  noContainmentEntriesCommand,
   parseContainmentFlag,
+  STOPPED_AFTER_MERGE_STARTED,
   TOO_MANY_OFFENDING_LINKS,
   UNIDENTIFIED_OFFENDING_LINKS,
 } from "../../src/modules/archiveContainmentFlag.js"
@@ -140,46 +148,150 @@ function plainCrossCheckEntry(link: string, target: string): string[] {
 }
 
 /**
- * Issue #219: the destination-keyed flag that records a symlink containment
- * failure, derived independently of the module so a changed key is caught.
- *
- * @param path - The extraction destination.
- * @returns The absolute flag path.
+ * Issue #219: every apply names its own containment entry `run-<32 hex>` from
+ * random bytes. The tests number them per test instead (`run-000…1` for the
+ * first apply, `run-000…2` for the second), so commands and paths are
+ * predictable; see {@link ownEntryName}. The numbering restarts when the
+ * current test name changes, so every test here needs a distinct name.
  */
-function containmentFlagPath(path: string): string {
-  const hash = createHash("sha256").update(path).digest("hex")
-  return `/var/lib/paratix/flags/archive-containment-${hash}.failed`
-}
+const containmentEntryNames = vi.hoisted(() => ({ issued: 0, test: "" }))
 
-const containmentFlag = containmentFlagPath(destination)
+vi.mock("../../src/modules/archiveContainmentFlag.js", async (importOriginal) => {
+  const original: Record<string, unknown> = await importOriginal()
+  const { expect: currentExpect } = await import("vitest")
+  return {
+    ...original,
+    newContainmentEntryName(): string {
+      // Issue #219: the numbering restarts with every test.
+      const test = currentExpect.getState().currentTestName ?? ""
+      if (containmentEntryNames.test !== test) {
+        containmentEntryNames.test = test
+        containmentEntryNames.issued = 0
+      }
+      containmentEntryNames.issued += 1
+      return `run-${String(containmentEntryNames.issued).padStart(32, "0")}`
+    },
+  }
+})
+
+const flagsDirectory = "/var/lib/paratix/flags"
 
 /**
- * Issue #219: the exec that creates the flags directory and reads the
- * destination's containment flag before the apply writes it.
+ * Issue #219: where the containment state of a destination lives, derived
+ * independently of the module so a changed key is caught.
  *
- * @param path - The extraction destination the flag is keyed by.
- * @returns The `mkdir -p` plus guarded `cat` script for that flag.
+ * @param path - The extraction destination.
+ * @returns The flags directory, the entry directory and the old flag file.
  */
-function containmentFlagReadCommand(path = destination): string {
-  return buildContainmentFlagReadCommand({
-    directory: "/var/lib/paratix/flags",
-    flag: containmentFlagPath(path),
+function containmentPathsFor(path: string): ContainmentPaths {
+  const hash = createHash("sha256").update(path).digest("hex")
+  const base = `${flagsDirectory}/archive-containment-${hash}`
+  return { directory: flagsDirectory, entryDirectory: `${base}.d`, legacyFlag: `${base}.failed` }
+}
+
+const containment = containmentPathsFor(destination)
+
+/** Issue #219: the single flag file of older paratix versions. */
+const legacyContainmentFlag = containment.legacyFlag
+
+/**
+ * Issue #219: the name of the own entry of the n-th apply in a test.
+ *
+ * @param run - The apply's position in the test, from 1.
+ * @returns The entry name, `run-` and 32 digits.
+ */
+function ownEntryName(run = 1): string {
+  return `run-${String(run).padStart(32, "0")}`
+}
+
+/**
+ * Issue #219: the own entry of the n-th apply in a test.
+ *
+ * @param run - The apply's position in the test, from 1.
+ * @param path - The extraction destination.
+ * @returns The absolute entry path.
+ */
+function ownEntry(run = 1, path = destination): string {
+  return `${containmentPathsFor(path).entryDirectory}/${ownEntryName(run)}`
+}
+
+/** Issue #219: the entry an earlier (or concurrent) apply left. */
+const earlierEntryName = `run-${"e".repeat(32)}`
+const earlierEntry = `${containment.entryDirectory}/${earlierEntryName}`
+
+/**
+ * Issue #219: the establish exec of the n-th apply in a test: it reads every
+ * containment entry and creates the apply's own entry.
+ *
+ * @param run - The apply's position in the test, from 1.
+ * @param path - The extraction destination.
+ * @returns The `sh -c` command.
+ */
+function containmentEstablishCommand(run = 1, path = destination): string {
+  return buildContainmentEstablishCommand({
+    ...containmentPathsFor(path),
+    ownEntry: ownEntry(run, path),
   })
 }
 
+/** Issue #219: every establish exec starts with its script. */
+const containmentEstablishPrefix = `sh -c ${shellQuote(buildContainmentEstablishScript())} sh `
+
+/** Issue #219: every clear exec starts with its script. */
+const containmentClearPrefix = `sh -c ${shellQuote(buildContainmentClearScript())} sh `
+
 /**
- * Issue #219: the answer of the flag read for a flag with the given body, or
- * for an absent flag.
+ * Issue #219: the clear execs among the issued commands.
  *
- * @param body - The flag body, or undefined when no flag exists.
- * @returns Nothing for an absent flag, else the presence line and the body.
+ * @param calls - The issued commands.
+ * @returns The clear execs, in order.
  */
-function containmentFlagReadStdout(body: string | undefined): string {
-  return body === undefined ? "" : `present\n${body}`
+function containmentClears(calls: readonly string[]): string[] {
+  return calls.filter((command) => command.startsWith(containmentClearPrefix))
 }
 
 /**
- * Issue #219: the flag body a failed apply records for these link keys.
+ * Issue #219: whether a command is the clear exec.
+ *
+ * @param command - The command, if any.
+ * @returns True for the clear exec.
+ */
+function isContainmentClear(command: string | undefined): boolean {
+  return command?.startsWith(containmentClearPrefix) === true
+}
+
+/**
+ * Issue #219: the containment state of the destination in the host files:
+ * every entry by name, and the old flag file as `legacy`.
+ *
+ * @param files - The host marker and containment files.
+ * @returns The bodies, keyed by entry name.
+ */
+function containmentState(files: ReadonlyMap<string, string>): Record<string, string> {
+  const prefix = `${containment.entryDirectory}/`
+  return Object.fromEntries(
+    [...files]
+      .filter(([path]) => path === legacyContainmentFlag || path.startsWith(`${prefix}run-`))
+      .map(
+        ([path, body]) =>
+          [path === legacyContainmentFlag ? "legacy" : path.slice(prefix.length), body] as const
+      )
+      .toSorted(([left], [right]) => left.localeCompare(right))
+  )
+}
+
+/**
+ * Issue #219: whether any containment entry or the old flag file exists.
+ *
+ * @param files - The host marker and containment files.
+ * @returns True while `check` must report needs-apply.
+ */
+function hasContainmentState(files: ReadonlyMap<string, string>): boolean {
+  return Object.keys(containmentState(files)).length > 0
+}
+
+/**
+ * Issue #219: the entry body a failed apply records for these link keys.
  *
  * @param links - Destination-relative link keys.
  * @returns The JSON body.
@@ -200,16 +312,15 @@ function recordedKeys(count: number): string[] {
 }
 
 /**
- * Issue #219: `check` tests the marker and the absence of the containment
- * flag in one `test` call.
+ * Issue #219: `check` tests the marker and the absence of every containment
+ * entry and the old flag file in one exec.
  *
  * @param markerFile - The marker path.
- * @param path - The extraction destination the flag is keyed by.
+ * @param path - The extraction destination the entries are keyed by.
  * @returns The combined test command.
  */
 function markerCheckCommand(markerFile: string, path = destination): string {
-  const flag = containmentFlagPath(path)
-  return `test -f '${markerFile}' && test ! -e '${flag}' && test ! -L '${flag}'`
+  return `test -f '${markerFile}' && ${noContainmentEntriesCommand(containmentPathsFor(path))}`
 }
 const extractedFileTypeProbe = buildMemberTypeProbeScript()
 const batchedChownCommand = "xargs -0 chown -h -- 'www-data:www-data'"
@@ -376,11 +487,9 @@ const archiveApplyResponseStubs: NonNullable<
   // Issue #219: the kernel cross-check; `createMockSsh` answers an empty
   // result with `same` for every link it carries.
   { command: kernelCrossCheckCommand, result: { code: 0, stdout: "" } },
-  // Issue #219: a successful apply clears the containment-failure flag.
-  ...[destination, alternateDestination].map((path) => ({
-    command: `rm -f -- '${containmentFlagPath(path)}'`,
-    result: { code: 0 },
-  })),
+  // Issue #219: a successful apply clears the containment entries in one
+  // exec; the host model applies it when the test models files.
+  { command: /^sh -c 'LC_ALL=C; export LC_ALL; own=\$1;/v, result: { code: 0 } },
   { command: extractedFileTypeProbe, result: { code: 0, stdout: "" } },
   { command: batchedChownCommand, result: { code: 0 } },
   {
@@ -400,12 +509,13 @@ const archiveApplyResponseStubs: NonNullable<
     result: { code: 0, stdout: `${alternateDestination}\n` },
   },
   { command: "mkdir -p '/var/lib/paratix/flags'", result: { code: 0 } },
-  // Issue #219: the containment flag read before the apply writes the flag;
-  // by default no flag exists.
-  ...[destination, alternateDestination].map((path) => ({
-    command: containmentFlagReadCommand(path),
-    result: { code: 0, stdout: "" },
-  })),
+  // Issue #219: the establish exec reads the containment entries and creates
+  // the own entry; by default there is no entry, and the host model answers
+  // from its files when the test models them.
+  {
+    command: /^sh -c 'LC_ALL=C; export LC_ALL; umask 022; paratix_read\(\)/v,
+    result: { code: 0, stdout: "done\n" },
+  },
   { command: archiveStageMktempPattern, result: { code: 0, stdout: archiveStageDirectory } },
   { command: archiveStageMovePattern, result: { code: 0 } },
   { command: archiveStageCleanupPattern, result: { code: 0 } },
@@ -479,11 +589,11 @@ function stubSymlinkViolationFor(mockSsh: MockSsh, path: string): void {
 }
 
 /**
- * Issue #219: every apply that reaches the staging step writes the
- * destination's containment flag first, so the shared mock accepts that write.
+ * Issue #219: a failed apply records its outcome in its own containment
+ * entry through `writeFile`, so the shared mock accepts that write.
  */
 const containmentFlagWritePattern =
-  /^\/var\/lib\/paratix\/flags\/archive-containment-[a-f0-9]{64}\.failed$/v
+  /^\/var\/lib\/paratix\/flags\/archive-containment-[a-f0-9]{64}\.d\/run-[0-9a-f]{32}$/v
 
 const createMockSsh: typeof createBaseMockSsh = (responses, options) => {
   const mockSsh = createBaseMockSsh(responses, {
@@ -527,7 +637,7 @@ function expectNoUnzipExtractCalls(mockSsh: MockSsh): void {
 }
 
 function expectNoArchiveMarkerWrite(mockSsh: MockSsh): void {
-  // Issue #219: the containment flag is written before the merge; it is not a
+  // Issue #219: the own containment entry records a failure; it is not a
   // marker and never lets `check` report ok.
   const markerWrites = mockSsh.writeFileCalls.filter(
     ({ remotePath }) => !containmentFlagWritePattern.test(remotePath)
@@ -616,12 +726,6 @@ type HostLinkTree = Map<string, string>
 
 type HostLinkRun = {
   /**
-   * Issue #219: the marker and flag files on the host, keyed by path. Writes
-   * add them and a successful `rm -f -- <flag file>` removes one, so `check`
-   * can be answered from what earlier runs left behind.
-   */
-  files?: Map<string, string>
-  /**
    * Issue #219: links the host gains while the merge runs, e.g. from a
    * concurrent change after the pre-merge listing. They land even when the
    * merge exec fails or throws, like entries a half-done merge already copied.
@@ -630,8 +734,6 @@ type HostLinkRun = {
   shipped: ReadonlyArray<readonly [string, string]>
   tree: HostLinkTree
 }
-
-const flagFileRemovalPattern = /^rm -f -- '(?<path>\/var\/lib\/paratix\/flags\/[^']+)'$/v
 
 const tarSymlinkLinePrefix = `lrwxrwxrwx ${tarListingLineFields} `
 
@@ -769,16 +871,100 @@ function publishInjectedLinks(host: HostLinkRun): void {
 }
 
 /**
- * Issue #219: answer the containment flag read from the host files, if the
- * harness models them.
+ * Issue #219: the sha256 of a modelled file, as the scripts print it.
  *
- * @param host - The host model.
- * @param result - The mock's answer, kept when the read failed.
- * @returns The mock's answer with the modelled flag as stdout.
+ * @param content - The file content.
+ * @returns The lowercase hex digest.
  */
-function answerContainmentFlagRead(host: HostLinkRun, result: ExecResult): ExecResult {
-  if (host.files === undefined || result.code !== 0) return result
-  return { ...result, stdout: containmentFlagReadStdout(host.files.get(containmentFlag)) }
+function sha256Of(content: string): string {
+  return createHash("sha256").update(content).digest("hex")
+}
+
+/**
+ * Issue #219: the single-quoted arguments of a `sh -c` exec after its script.
+ *
+ * @param command - The exec's full command line.
+ * @param prefix - The `sh -c '<script>' sh ` prefix.
+ * @returns The unquoted arguments and the unquoted hex digests, in order.
+ */
+function scriptArguments(command: string, prefix: string): string[] {
+  return [
+    ...command.slice(prefix.length).matchAll(/'(?<quoted>[^']*)'|(?<digest>[\da-f]{64})/gv),
+  ].map(({ groups }) => groups?.quoted ?? groups?.digest ?? "")
+}
+
+/**
+ * Issue #219: model the establish exec on the host files: print one line per
+ * entry (up to the read limit) and for the old flag file, create the own
+ * entry and print `done`, as the production script does.
+ *
+ * @param files - The host marker and containment files, updated in place.
+ * @param command - The establish exec.
+ * @returns The script's stdout.
+ */
+function modelContainmentEstablish(files: Map<string, string>, command: string): string {
+  const [, legacy = "", entryDirectory = "", own = "", body = ""] = scriptArguments(
+    command,
+    containmentEstablishPrefix
+  )
+  const readLine = (label: string, content: string): string =>
+    `${label} ${sha256Of(content)} ${Buffer.from(content)
+      .subarray(0, CONTAINMENT_FLAG_BODY_LIMIT_BYTES + 1)
+      .toString("hex")}`
+  const entries = [...files.keys()]
+    .filter((path) => path.startsWith(`${entryDirectory}/run-`))
+    .toSorted()
+  const lines = entries
+    .slice(0, CONTAINMENT_ENTRY_READ_LIMIT)
+    .map((path) => readLine(`entry ${posix.basename(path)}`, files.get(path) ?? ""))
+  const legacyContent = files.get(legacy)
+  if (legacyContent !== undefined) lines.push(readLine("legacy", legacyContent))
+  if (entries.length > CONTAINMENT_ENTRY_READ_LIMIT) lines.push("more")
+  files.set(own, body)
+  return `${[...lines, "done"].join("\n")}\n`
+}
+
+/**
+ * Issue #219: model the clear exec on the host files: claim every listed
+ * entry, remove the claim when its content still has the hash that was read,
+ * keep it under its claim name otherwise, then remove the own entry.
+ *
+ * @param files - The host marker and containment files, updated in place.
+ * @param command - The clear exec.
+ */
+function modelContainmentClear(files: Map<string, string>, command: string): void {
+  const [own = "", ...pairs] = scriptArguments(command, containmentClearPrefix)
+  for (let index = 0; index * 2 < pairs.length; index += 1) {
+    const path = pairs[index * 2] ?? ""
+    const content = files.get(path)
+    if (content === undefined) continue
+    files.delete(path)
+    if (sha256Of(content) !== pairs[index * 2 + 1])
+      files.set(`${own}-claim-${String(index)}`, content)
+  }
+  files.delete(own)
+}
+
+/**
+ * Issue #219: apply what a successful containment exec changes on the
+ * modelled host files, and answer the establish exec from them.
+ *
+ * @param files - The host marker and containment files, if the test models them.
+ * @param command - The executed command.
+ * @param result - The mock's answer, kept when the exec failed or no files are modelled.
+ * @returns The answer the module sees.
+ */
+function answerFromHostFiles(
+  files: Map<string, string> | undefined,
+  command: string,
+  result: ExecResult
+): ExecResult {
+  if (files === undefined || result.code !== 0) return result
+  if (command.startsWith(containmentEstablishPrefix)) {
+    return { ...result, stdout: modelContainmentEstablish(files, command) }
+  }
+  if (command.startsWith(containmentClearPrefix)) modelContainmentClear(files, command)
+  return result
 }
 
 function applyHostSideEffects(host: HostLinkRun, command: string): void {
@@ -786,8 +972,6 @@ function applyHostSideEffects(host: HostLinkRun, command: string): void {
     const merged = [...host.shipped, ...(host.injectedOnMerge ?? [])]
     for (const [link, target] of merged) host.tree.set(link, target)
   }
-  const removedFile = flagFileRemovalPattern.exec(command)?.groups?.path
-  if (removedFile !== undefined) host.files?.delete(removedFile)
 }
 
 function answerFromHostLinks(
@@ -801,7 +985,6 @@ function answerFromHostLinks(
   if (command === symlinkListingProbeCommand) {
     return { ...result, stdout: listingProbeStdout(host.tree, input ?? "") }
   }
-  if (command === containmentFlagReadCommand()) return answerContainmentFlagRead(host, result)
   return result
 }
 
@@ -861,6 +1044,8 @@ function scriptedBackstopAnswer(
  */
 type ExecHarness = {
   backstop?: BackstopScript
+  /** Issue #219: the host marker and containment files the containment execs model. */
+  files?: Map<string, string>
   host?: HostLinkRun
   postMergeListings?: number[]
   throwOn?: ThrowingExec
@@ -894,7 +1079,7 @@ async function harnessedExec(
   // Recorded before the exec, so a listing that throws is counted as well.
   if (isPostMergeListing(command, input)) harness.postMergeListings?.push(mockSsh.calls.length)
   rejectMatchingExec(mockSsh, { command, input }, harness)
-  const executed = await originalExec(command, options)
+  const executed = answerFromHostFiles(harness.files, command, await originalExec(command, options))
   const modelled =
     host === undefined ? executed : answerFromHostLinks(host, command, { input, result: executed })
   return scriptedBackstopAnswer(backstop, command, input) ?? modelled
@@ -908,6 +1093,7 @@ async function harnessedExec(
  * @param hostSymlinks - Absolute host paths the probe reports as symlinks.
  * @param harness - Optional host link model and exec to reject.
  * @param harness.backstop - Issue #219: scripted post-merge listing answers.
+ * @param harness.files - Issue #219: host files the containment execs model.
  * @param harness.host - Host link model that the merge updates and both listings read.
  * @param harness.postMergeListings - Issue #219: collects the position in
  *   `mockSsh.calls` of every post-merge backstop listing.
@@ -942,6 +1128,11 @@ function recordSymlinkProbes(
 type TarListingApplyRun = {
   markerWrites: () => number
   mockSsh: MockSsh
+  /**
+   * Issue #219: the own containment entry the establish exec created, or
+   * undefined when the apply never got that far.
+   */
+  ownEntry: string | undefined
   /**
    * Issue #219: the position in `mockSsh.calls` of every post-merge backstop
    * listing, in call order.
@@ -978,6 +1169,35 @@ function markerFor(source: string): string {
   return `/var/lib/paratix/flags/archive-${hash}.sha256`
 }
 
+/**
+ * Issue #219: the own entry the establish exec of a run created.
+ *
+ * @param calls - The run's commands.
+ * @returns The own entry, or undefined when no establish exec ran.
+ */
+function ownEntryOf(calls: readonly string[]): string | undefined {
+  const establish = calls.find((command) => command.startsWith(containmentEstablishPrefix))
+  return establish === undefined
+    ? undefined
+    : scriptArguments(establish, containmentEstablishPrefix)[3]
+}
+
+/**
+ * Issue #219: a run's commands with the establish and clear execs replaced by
+ * placeholders; they differ between runs only in their arguments (the own
+ * entry, the entries to remove).
+ *
+ * @param run - The recorded apply run.
+ * @param run.mockSsh - The mock connection with the recorded commands.
+ * @returns The commands in call order.
+ */
+function commandsWithoutContainmentArguments(run: { mockSsh: MockSsh }): string[] {
+  return run.mockSsh.calls.map((command) => {
+    if (command.startsWith(containmentEstablishPrefix)) return "<establish>"
+    return isContainmentClear(command) ? "<clear>" : command
+  })
+}
+
 type TarListingApplyOptions = {
   /**
    * Issue #219: scripted answers of the post-merge listings; the last one
@@ -991,7 +1211,11 @@ type TarListingApplyOptions = {
    * only the failure record of the containment flag.
    */
   failWriteWhen?: (remotePath: string, content: string) => boolean
-  /** Host marker and flag files (see {@link HostLinkRun}); requires `hostLinks`. */
+  /**
+   * Issue #219: host marker and containment files. Writes add them, and the
+   * establish and clear execs read and change them, so a test can span
+   * several runs on one host and `check` can be answered from them.
+   */
   files?: Map<string, string>
   hostLinks?: HostLinkTree
   hostSymlinks?: readonly string[]
@@ -1043,7 +1267,6 @@ async function applyTarListing(
     hostLinks === undefined
       ? undefined
       : {
-          files,
           injectedOnMerge: options.injectedOnMerge,
           shipped: shippedSymlinks(lines),
           tree: hostLinks,
@@ -1052,6 +1275,7 @@ async function applyTarListing(
   const backstop = { listings: [...(options.backstopListings ?? [])] }
   const probes = recordSymlinkProbes(mockSsh, hostSymlinks, {
     backstop,
+    files,
     host,
     postMergeListings,
     throwOn: options.throwOn,
@@ -1068,6 +1292,7 @@ async function applyTarListing(
   return {
     markerWrites: () => writes.length,
     mockSsh,
+    ownEntry: ownEntryOf(mockSsh.calls),
     postMergeListings,
     probes,
     result,
@@ -1077,9 +1302,10 @@ async function applyTarListing(
 }
 
 /**
- * Issue #219: run `check` for a source against the marker and flag files an
- * earlier apply left in the host model. The combined marker test is answered
- * from the model, so a present containment-failure flag makes it fail.
+ * Issue #219: run `check` for a source against the marker and containment
+ * files an earlier apply left in the host model. The combined marker test is
+ * answered from the model, so any containment entry or old flag file makes
+ * it fail.
  *
  * @param source - The archive path.
  * @param files - The host marker and flag files.
@@ -1096,7 +1322,7 @@ async function checkAgainstHostFiles(
       ? { code: 1, stderr: `cat: ${path}: No such file or directory` }
       : { code: 0, stdout: content }
   }
-  const markerTestPasses = files.has(sourceMarker) && !files.has(containmentFlag)
+  const markerTestPasses = files.has(sourceMarker) && !hasContainmentState(files)
   const mockSsh = createMockSsh({
     [`cat '${sourceMarker}.members'`]: catFile(`${sourceMarker}.members`),
     [`cat '${sourceMarker}'`]: catFile(sourceMarker),
@@ -1146,9 +1372,9 @@ function refusedBeforeExtraction(reason: string): ReturnType<typeof extractionSu
 }
 
 /**
- * Issue #219: the summary of an apply that host state refused after the
- * containment flag was written, before anything was staged: the only write is
- * the flag, which counts as `markerWritten` here.
+ * Issue #219: the summary of an apply that host state refused after it
+ * created its containment entry, before anything was staged: the only write
+ * is the failure record in that entry, which counts as `markerWritten` here.
  *
  * @param reason - The refusal reason after the source.
  * @returns The expected summary.
@@ -1158,23 +1384,23 @@ function refusedAfterContainmentFlag(reason: string): ReturnType<typeof extracti
 }
 
 /**
- * Issue #219: the writes of an apply that failed after it put the
- * containment flag in place: the `in-progress` flag, then the failure record.
+ * Issue #219: the writes of the first apply in a test that failed after it
+ * created its containment entry: only the failure record in that entry; the
+ * establish exec created the entry itself.
  */
-const containmentFlagWritesOfFailedApply = [containmentFlag, containmentFlag]
+const containmentFlagWritesOfFailedApply = [ownEntry()]
 
 /**
- * Issue #219: assert that an apply wrote only the containment flag — the
- * `in-progress` body and then its failure record — and never removed it, so
- * `check` keeps reporting needs-apply.
+ * Issue #219: assert that an apply wrote only its failure record into its own
+ * containment entry and never ran the clear exec, so `check` keeps reporting
+ * needs-apply.
  *
  * @param run - The recorded apply run.
  */
 function expectContainmentFlagKept(run: TarListingApplyRun): void {
-  expect(run.writes.map(({ remotePath }) => remotePath)).toStrictEqual(
-    containmentFlagWritesOfFailedApply
-  )
-  expect(run.mockSsh.calls).not.toContain(`rm -f -- '${containmentFlag}'`)
+  expect(run.ownEntry).toBeDefined()
+  expect(run.writes.map(({ remotePath }) => remotePath)).toStrictEqual([run.ownEntry])
+  expect(containmentClears(run.mockSsh.calls)).toStrictEqual([])
 }
 
 /**
@@ -2502,10 +2728,9 @@ describe("archive.extract — apply", () => {
       [tarListCommand(src)]: { code: 0, stdout: gnuTarListing(safeTarListing) },
     })
     vi.spyOn(mockSsh, "sha256").mockResolvedValue(archiveSha)
-    // Issue #219: the first write is the containment flag before the merge.
-    vi.spyOn(mockSsh, "writeFile")
-      .mockResolvedValueOnce()
-      .mockRejectedValueOnce(new Error("disk full"))
+    // Issue #219: the establish exec creates the containment entry, so the
+    // first write is the content marker.
+    vi.spyOn(mockSsh, "writeFile").mockRejectedValueOnce(new Error("disk full"))
 
     const mod = archive.extract(src, destination)
     const result = await mod.apply(mockSsh, emptyEnv)
@@ -2523,9 +2748,9 @@ describe("archive.extract — apply", () => {
       [tarListCommand(src)]: { code: 0, stdout: gnuTarListing(safeTarListing) },
     })
     vi.spyOn(mockSsh, "sha256").mockResolvedValue(archiveSha)
-    // Issue #219: the first write is the containment flag before the merge.
+    // Issue #219: the establish exec creates the containment entry, so the
+    // first write is the content marker.
     vi.spyOn(mockSsh, "writeFile")
-      .mockResolvedValueOnce()
       .mockResolvedValueOnce()
       .mockRejectedValueOnce(new Error("quota exceeded"))
 
@@ -2546,9 +2771,9 @@ describe("archive.extract — apply", () => {
       [tarListCommand(src)]: { code: 0, stdout: gnuTarListing(safeTarListing) },
     })
     vi.spyOn(mockSsh, "sha256").mockResolvedValue(archiveSha)
-    // Issue #219: the first write is the containment flag before the merge.
+    // Issue #219: the establish exec creates the containment entry, so the
+    // first write is the content marker.
     vi.spyOn(mockSsh, "writeFile")
-      .mockResolvedValueOnce()
       .mockResolvedValueOnce()
       .mockResolvedValueOnce()
       .mockRejectedValueOnce(new Error("read-only file system"))
@@ -3215,12 +3440,11 @@ describe("archive.extract — apply", () => {
       expect(first.writes.map(({ remotePath }) => remotePath)).toStrictEqual(
         expect.arrayContaining([marker, membersMarker])
       )
-      // Issue #219: the containment flag is written before the merge; every
-      // marker write comes after the containment backstop.
-      const firstMarkerWrites = first.writes.filter(
-        ({ remotePath }) => remotePath !== containmentFlag
-      )
-      for (const write of firstMarkerWrites) {
+      // Issue #219: the containment entry is created by the establish exec
+      // before the merge; every marker write comes after the containment
+      // backstop.
+      expect(firstCalls.indexOf(containmentEstablishCommand(1))).toBeLessThan(firstContainment)
+      for (const write of first.writes) {
         expect(write.callIndex).toBeGreaterThan(firstContainment)
       }
 
@@ -3233,7 +3457,8 @@ describe("archive.extract — apply", () => {
         error: expect.stringContaining(
           `[archive.extract] refusing to extract ${src}: symlink ${JSON.stringify(escapingLink)} -> "up/.." would resolve outside destination ${JSON.stringify(destination)} once this archive is merged`
         ),
-        // The only write is the containment-failure flag, not a marker.
+        // The only write is the failure record in the own containment entry,
+        // not a marker.
         markerWritten: true,
         status: "failed",
         tarExtractCalls: [],
@@ -3245,15 +3470,14 @@ describe("archive.extract — apply", () => {
       expect(secondCalls.some((command) => archiveStageMovePattern.test(command))).toBe(false)
       expect(second.postMergeListings).toStrictEqual([])
       expect(secondCalls).not.toContain(batchedChownCommand)
-      expect(second.writes.map(({ remotePath }) => remotePath)).toStrictEqual(
-        containmentFlagWritesOfFailedApply
-      )
-      // Issue #219: the flag is established before the pre-merge listing.
-      const flagDirectory = secondCalls.indexOf(containmentFlagReadCommand())
+      expect(second.writes.map(({ remotePath }) => remotePath)).toStrictEqual([ownEntry(2)])
+      // Issue #219: the containment entry is established before the pre-merge
+      // listing; the failure is recorded after it.
+      const establish = secondCalls.indexOf(containmentEstablishCommand(2))
       const secondListing = secondCalls.indexOf(symlinkListingProbeCommand)
-      expect(flagDirectory).toBeLessThan(secondListing)
-      expect(second.writes[0]?.callIndex).toBeGreaterThan(flagDirectory)
-      expect(second.writes[0]?.callIndex).toBeLessThanOrEqual(secondListing)
+      expect(establish).toBeGreaterThanOrEqual(0)
+      expect(establish).toBeLessThan(secondListing)
+      expect(second.writes[0]?.callIndex).toBeGreaterThan(secondListing)
       // Nothing of run 2 reached the destination.
       expect([...hostLinks]).toStrictEqual([[escapingLink, "up/.."]])
     })
@@ -3299,7 +3523,7 @@ describe("archive.extract — apply", () => {
       expect(second.postMergeListings).toStrictEqual([])
       expect(secondCalls).not.toContain(batchedChownCommand)
       expect([...hostLinks]).toStrictEqual([[upLink, ".."]])
-      expect(files.has(containmentFlag)).toBe(true)
+      expect(hasContainmentState(files)).toBe(true)
       expectContainmentFlagKept(second)
       await expect(checkAgainstHostFiles(src, files)).resolves.toMatchObject({
         result: "needs-apply",
@@ -3376,10 +3600,10 @@ describe("archive.extract — apply", () => {
 
       expect(extractionSummary(run)).toStrictEqual(extractedThroughStaging)
       expect(run.mockSsh.calls).toContain(symlinkListingProbeCommand)
-      // Issue #219: the flag is established before the merge and removed once
-      // the apply has fully succeeded.
-      expect(run.writes.map(({ remotePath }) => remotePath)).toContain(containmentFlag)
-      expect(run.mockSsh.calls).toContain(`rm -f -- '${containmentFlag}'`)
+      // Issue #219: the containment entry is established before the merge and
+      // cleared once the apply has fully succeeded.
+      expect(run.mockSsh.calls).toContain(containmentEstablishCommand())
+      expect(containmentClears(run.mockSsh.calls)).toHaveLength(1)
       expect(Object.fromEntries(hostLinks)).toStrictEqual({
         [`${destination}/a/esc`]: "up/..",
         [`${destination}/a/up`]: "b",
@@ -3450,7 +3674,7 @@ describe("archive.extract — apply", () => {
         expect(extractionSummary(run)).toStrictEqual(extractedThroughStaging)
         expect(run.mockSsh.calls).not.toContain(symlinkListingProbeCommand)
         expect(run.mockSsh.calls).not.toContain(kernelCrossCheckCommand)
-        expect(run.mockSsh.calls).toContain(`rm -f -- '${containmentFlag}'`)
+        expect(containmentClears(run.mockSsh.calls)).toHaveLength(1)
       }
     )
 
@@ -3518,7 +3742,7 @@ describe("archive.extract — apply", () => {
       expect(crossChecks.map(({ options }) => crossCheckedLinks(options?.input))).toStrictEqual([
         [`${destination}/bin/node`],
       ])
-      expect(files.has(containmentFlag)).toBe(false)
+      expect(hasContainmentState(files)).toBe(false)
       expect(hostLinks.get(venvLink)).toBe("/usr/bin/python3")
     })
 
@@ -3658,7 +3882,7 @@ describe("archive.extract — apply", () => {
 
       expect(extractionSummary(run)).toStrictEqual({
         error: expect.stringContaining(
-          `[archive.extract] refusing to complete extraction of ${src}: symlink ${JSON.stringify(escapingLink)} -> "up/.." resolves outside destination ${JSON.stringify(destination)}; after the merge, the archive's symlinks and every symlink under the destination whose resolution passes through a path the archive writes are checked, including links it did not ship; nothing was removed or changed; while the offending symlinks remain, remove them or point them inside the destination manually; the containment flag keeps check at needs-apply, and a later apply of any source verifies them again (every symlink under the destination when the flag could not record them) and clears the flag only when they pass`
+          `[archive.extract] refusing to complete extraction of ${src}: symlink ${JSON.stringify(escapingLink)} -> "up/.." resolves outside destination ${JSON.stringify(destination)}; after the merge, the archive's symlinks and every symlink under the destination whose resolution passes through a path the archive writes are checked, including links it did not ship; nothing was removed or changed; while the offending symlinks remain, remove them or point them inside the destination manually; this apply's containment entry records them and keeps check at needs-apply, and a later apply of any source verifies them again (every symlink under the destination when the entry could not record them) and, only when they pass, removes the entries it read that are still unchanged`
         ),
         markerWritten: true,
         status: "failed",
@@ -3669,21 +3893,22 @@ describe("archive.extract — apply", () => {
       const merge = calls.findIndex((command) => archiveStageMovePattern.test(command))
       // Issue #219: the backstop lists once and only reports.
       expect(run.postMergeListings).toHaveLength(1)
-      const [containment] = run.postMergeListings
+      const [backstopListing] = run.postMergeListings
       expect(listing).toBeGreaterThanOrEqual(0)
-      expect(listing).toBeLessThan(containment)
+      expect(listing).toBeLessThan(backstopListing)
       expect(merge).toBeGreaterThan(listing)
-      expect(containment).toBeGreaterThan(merge)
+      expect(backstopListing).toBeGreaterThan(merge)
       expect(calls).not.toContain(batchedChownCommand)
-      expect(calls).not.toContain(`rm -f -- '${containmentFlag}'`)
+      expect(containmentClears(calls)).toStrictEqual([])
       expect(run.writes.map(({ remotePath }) => remotePath)).toStrictEqual(
         containmentFlagWritesOfFailedApply
       )
-      // Issue #219: the flag is established before the pre-merge listing, and
-      // the backstop leaves the escaping link it found in place: after its
-      // listing only the kernel cross-check of `a/up` runs.
-      expect(run.writes[0]?.callIndex).toBeLessThanOrEqual(listing)
-      expect([...files.keys()]).toStrictEqual([containmentFlag])
+      // Issue #219: the containment entry is established before the pre-merge
+      // listing, and the backstop leaves the escaping link it found in place:
+      // after its listing only the kernel cross-check of `a/up` runs.
+      expect(calls.indexOf(containmentEstablishCommand())).toBeLessThan(listing)
+      expect([...files.keys()]).toStrictEqual([ownEntry()])
+      expect(files.get(ownEntry())).toBe(recordedFlag("a/esc"))
       expect(callsFromBackstop(run)).toStrictEqual([
         symlinkListingProbeCommand,
         kernelCrossCheckCommand,
@@ -4694,12 +4919,10 @@ describe("archive.extract containment-failure flag (Issue #219)", () => {
       source: otherSrc,
     })
     expect(applyB.result.status).toBe("failed")
-    expect(applyB.writes.map(({ remotePath }) => remotePath)).toStrictEqual(
-      containmentFlagWritesOfFailedApply
-    )
+    expect(applyB.writes.map(({ remotePath }) => remotePath)).toStrictEqual([ownEntry(2)])
     expect(files.get(markerA)).toBe(archiveSha)
     expect(files.has(markerB)).toBe(false)
-    expect(files.has(containmentFlag)).toBe(true)
+    expect(hasContainmentState(files)).toBe(true)
 
     const checkAfterRefusal = await checkAgainstHostFiles(src, files)
     expect(checkAfterRefusal.result).toBe("needs-apply")
@@ -4715,96 +4938,101 @@ describe("archive.extract containment-failure flag (Issue #219)", () => {
       { files, hostLinks }
     )
     expect(extractionSummary(reapplyA)).toStrictEqual(extractedThroughStaging)
-    const flagRemoval = reapplyA.mockSsh.calls.indexOf(`rm -f -- '${containmentFlag}'`)
+    const clear = reapplyA.mockSsh.calls.findIndex((command) => isContainmentClear(command))
     const markerWrites = reapplyA.writes.filter(({ remotePath }) => remotePath.startsWith(markerA))
     expect(markerWrites.map(({ remotePath }) => remotePath)).toStrictEqual([markerA, membersMarker])
-    for (const write of markerWrites) expect(flagRemoval).toBeGreaterThanOrEqual(write.callIndex)
-    expect(files.has(containmentFlag)).toBe(false)
+    for (const write of markerWrites) expect(clear).toBeGreaterThanOrEqual(write.callIndex)
+    // Issue #219: the reapply removed B's entry, which it read and verified,
+    // and then its own.
+    expect(hasContainmentState(files)).toBe(false)
 
     await expect(checkAgainstHostFiles(src, files)).resolves.toMatchObject({ result: "ok" })
   })
 
-  it("leaves an existing flag in place when the apply is refused again", async () => {
-    // Issue #219: a usable record, so the apply reaches the pre-merge refusal
-    // instead of refusing the flag itself as unknown.
-    const files = new Map<string, string>([[containmentFlag, recordedFlag()]])
+  it("leaves an existing entry in place when the apply is refused again", async () => {
+    // Issue #219: an earlier apply's entry; a refused apply never touches it
+    // and records its own failure in its own entry.
+    const files = new Map<string, string>([[earlierEntry, recordedFlag()]])
     const hostLinks = escapingHostLinks()
 
     const run = await applyTarListing(refusedArchive, { files, hostLinks })
 
     expect(run.result.error?.message).toBe(escRefusal)
-    expect(run.mockSsh.calls).not.toContain(`rm -f -- '${containmentFlag}'`)
-    expect(files.get(containmentFlag)).toBe(recordedFlag())
+    expect(containmentClears(run.mockSsh.calls)).toStrictEqual([])
+    expect(containmentState(files)).toStrictEqual({
+      [earlierEntryName]: recordedFlag(),
+      [ownEntryName()]: recordedFlag(),
+    })
   })
 
-  it("reads the flag after creating the flags directory, then writes it with the marker mode", async () => {
+  it("establishes the own entry in one exec before the destination is touched, then records the refusal with the marker mode", async () => {
     const run = await applyTarListing(refusedArchive, { hostLinks: escapingHostLinks() })
 
     expect(run.result.error?.message).toBe(escRefusal)
     expect(run.mockSsh.writeFileCalls).toStrictEqual([])
     const writeSpy = vi.mocked(run.mockSsh.writeFile)
-    // Issue #219: the `in-progress` body first, then the record of the
-    // refusal before the merge: no links were carried, so none are recorded.
-    expect(writeSpy.mock.calls).toStrictEqual([
-      [containmentFlag, containmentFlagBody({ links: [], state: "in-progress" }), { mode: "0644" }],
-      [containmentFlag, recordedFlag(), { mode: "0644" }],
-    ])
-    // Issue #219: the flag is read (in the exec that creates the flags
-    // directory) and established after the archive listing and before the
-    // destination is created, resolved or probed, so it precedes the
-    // pre-staging probe and the pre-merge listing as well.
+    // Issue #219: the establish exec created the `in-progress` entry; the only
+    // write is the record of the refusal before the merge, into that entry:
+    // nothing was published, so no links are recorded.
+    expect(writeSpy.mock.calls).toStrictEqual([[ownEntry(), recordedFlag(), { mode: "0644" }]])
+    // Issue #219: the entries are read and the own entry is created, in the
+    // one exec that also creates the flags directory, after the archive
+    // listing and before the destination is created, resolved or probed, so
+    // it precedes the pre-staging probe and the pre-merge listing as well.
     const { calls } = run.mockSsh
     expect(run.mockSsh.execCalls).toContainEqual({
-      command: containmentFlagReadCommand(),
+      command: containmentEstablishCommand(),
       options: {
         ignoreExitCode: true,
-        maxOutputBytes: 65_536 + 1024,
+        maxOutputBytes: CONTAINMENT_ESTABLISH_CAPTURE_LIMIT_BYTES,
         silent: true,
-        strictUtf8Stdout: true,
       },
     })
-    const flagDirectory = calls.indexOf(containmentFlagReadCommand())
+    expect(calls.filter((command) => command.startsWith(containmentEstablishPrefix))).toHaveLength(
+      1
+    )
+    const establish = calls.indexOf(containmentEstablishCommand())
     const archiveListing = calls.indexOf(tarListCommand(src))
     const destinationMkdir = calls.indexOf(guardedArchiveDestinationMkdirCommand(destination))
     const destinationReadlink = calls.indexOf(`readlink -f -- '${destination}'`)
     const preStagingProbe = calls.indexOf(preStagingProbeCommand)
     const listing = calls.indexOf(symlinkListingProbeCommand)
-    expect(archiveListing).toBeLessThan(flagDirectory)
-    expect(run.writes[0]?.callIndex).toBeGreaterThan(flagDirectory)
+    expect(archiveListing).toBeLessThan(establish)
     expect(
       Math.min(destinationMkdir, destinationReadlink, preStagingProbe, listing)
-    ).toBeGreaterThanOrEqual(run.writes[0].callIndex)
+    ).toBeGreaterThan(establish)
   })
 
-  it("fails a fully extracted apply when the flag cannot be removed", async () => {
+  it("fails a fully extracted apply when the entries cannot be cleared", async () => {
+    const clearCommand = `${containmentClearPrefix}'${ownEntry()}'`
     const run = await applyTarListing([tarFileLine("f")], {
       responses: {
-        [`rm -f -- '${containmentFlag}'`]: {
-          code: 1,
-          stderr: `rm: cannot remove '${containmentFlag}': Read-only file system`,
+        [clearCommand]: {
+          code: 6,
+          stderr: `rm: cannot remove '${ownEntry()}': Read-only file system`,
         },
       },
     })
 
     expect(run.result.status).toBe("failed")
     expect(run.result.error?.message).toBe(
-      `[archive.extract] failed to remove containment-failure flag ${containmentFlag} (exit code 1)\nrm: cannot remove '${containmentFlag}': Read-only file system`
+      `[archive.extract] failed to remove containment entry ${ownEntry()} and the entries it verified (exit code 6)\nrm: cannot remove '${ownEntry()}': Read-only file system`
     )
-    // The removal is the last step: every marker was already written. Issue
-    // #219: the flag itself was written first, before the merge; after the
-    // failed removal it records the failure without offending links.
-    const flagRemoval = run.mockSsh.calls.indexOf(`rm -f -- '${containmentFlag}'`)
+    // The clear exec is the last step: every marker was already written.
+    // Issue #219: after the failed clear, the own entry records the failure
+    // without offending links.
+    const clear = run.mockSsh.calls.indexOf(clearCommand)
+    expect(clear).toBe(run.mockSsh.calls.length - 1)
     expect(run.writes.map(({ remotePath }) => remotePath)).toStrictEqual([
-      containmentFlag,
       marker,
       membersMarker,
-      containmentFlag,
+      ownEntry(),
     ])
-    const [flagWrite, markerWrite, membersWrite, recordWrite] = run.writes
-    for (const write of [flagWrite, markerWrite, membersWrite]) {
-      expect(flagRemoval).toBeGreaterThanOrEqual(write.callIndex)
+    const [markerWrite, membersWrite, recordWrite] = run.writes
+    for (const write of [markerWrite, membersWrite]) {
+      expect(clear).toBeGreaterThanOrEqual(write.callIndex)
     }
-    expect(recordWrite.callIndex).toBeGreaterThan(flagRemoval)
+    expect(recordWrite.callIndex).toBeGreaterThan(clear)
     expect(vi.mocked(run.mockSsh.writeFile).mock.calls.at(-1)?.[1]).toBe(recordedFlag())
   })
 
@@ -4821,20 +5049,23 @@ describe("archive.extract containment-failure flag (Issue #219)", () => {
     expect(calls).not.toContain(preStagingProbeCommand)
   }
 
-  // Issue #219: the flag is established before the destination is created or
-  // probed, so a flag that cannot be written stops the apply before the
-  // destination mkdir, the pre-staging probe and anything listed, staged or
-  // copied.
-  it("refuses before the listing and the merge when the flag write fails", async () => {
+  // Issue #219: the own entry is established before the destination is
+  // created or probed, so an entry that cannot be created stops the apply
+  // before the destination mkdir, the pre-staging probe and anything listed,
+  // staged or copied.
+  it("refuses before the listing and the merge when the own entry cannot be created", async () => {
     const run = await applyTarListing(refusedArchive, {
-      failWrite: containmentFlag,
       hostLinks: escapingHostLinks(),
+      responses: {
+        [containmentEstablishCommand()]: { code: 13, stderr: "sh: No space left on device" },
+      },
     })
 
     expect(run.result.status).toBe("failed")
     expect(run.result.error?.message).toBe(
-      `[archive.extract] refusing to extract ${src}: failed to write containment-failure flag ${containmentFlag}: No space left on device; the flag must be in place before the destination is touched`
+      `[archive.extract] refusing to extract ${src}: failed to create containment entry in ${containment.entryDirectory}: sh: No space left on device; the containment entry must be in place before the destination is touched`
     )
+    expect(run.writes).toStrictEqual([])
     expectDestinationUntouched(run)
     expect(run.mockSsh.calls).not.toContain(symlinkListingProbeCommand)
     expect(run.mockSsh.calls.some((command) => archiveStageMktempPattern.test(command))).toBe(false)
@@ -4846,9 +5077,9 @@ describe("archive.extract containment-failure flag (Issue #219)", () => {
     const run = await applyTarListing(refusedArchive, {
       hostLinks: escapingHostLinks(),
       responses: {
-        // Issue #219: the flag read creates the flags directory and exits 2
-        // when that fails.
-        [containmentFlagReadCommand()]: {
+        // Issue #219: the establish exec creates the flags directory and
+        // exits 2 when that fails.
+        [containmentEstablishCommand()]: {
           code: 2,
           stderr: "mkdir: cannot create directory '/var/lib/paratix': Read-only file system",
         },
@@ -4857,7 +5088,7 @@ describe("archive.extract containment-failure flag (Issue #219)", () => {
 
     expect(run.result.status).toBe("failed")
     expect(run.result.error?.message).toBe(
-      `[archive.extract] refusing to extract ${src}: failed to create archive marker directory for containment-failure flag ${containmentFlag}: mkdir: cannot create directory '/var/lib/paratix': Read-only file system; the flag must be in place before the destination is touched`
+      `[archive.extract] refusing to extract ${src}: failed to create archive marker directory for containment entries ${containment.entryDirectory}: mkdir: cannot create directory '/var/lib/paratix': Read-only file system; the containment entry must be in place before the destination is touched`
     )
     expect(run.writes).toStrictEqual([])
     expectDestinationUntouched(run)
@@ -4867,18 +5098,18 @@ describe("archive.extract containment-failure flag (Issue #219)", () => {
     expectNoTarExtractCalls(run.mockSsh)
   })
 
-  it("never reaches the merge or the backstop when the flag write fails", async () => {
+  it("never reaches the merge or the backstop when the own entry cannot be created", async () => {
     const escapingLink = `${destination}/a/esc`
     const hostLinks: HostLinkTree = new Map()
 
     const run = await applyTarListing([tarDirectoryLine("a/"), tarSymlinkLine("a/up", "..")], {
-      failWrite: containmentFlag,
       hostLinks,
       injectedOnMerge: [[escapingLink, "up/.."]],
+      responses: { [containmentEstablishCommand()]: { code: 13 } },
     })
 
     expect(run.result.status).toBe("failed")
-    expect(run.result.error?.message).toContain("failed to write containment-failure flag")
+    expect(run.result.error?.message).toContain("failed to create containment entry")
     expect(run.mockSsh.calls.some((command) => archiveStageMovePattern.test(command))).toBe(false)
     expect(run.mockSsh.calls).not.toContain(symlinkListingProbeCommand)
     expect(run.postMergeListings).toStrictEqual([])
@@ -5003,7 +5234,7 @@ describe("enforceSymlinkContainment (Issue #219)", () => {
   const checkedAfterMerge =
     "after the merge, the archive's symlinks and every symlink under the destination whose resolution passes through a path the archive writes are checked, including links it did not ship"
   const nothingChanged =
-    "nothing was removed or changed; while the offending symlinks remain, remove them or point them inside the destination manually; the containment flag keeps check at needs-apply, and a later apply of any source verifies them again (every symlink under the destination when the flag could not record them) and clears the flag only when they pass"
+    "nothing was removed or changed; while the offending symlinks remain, remove them or point them inside the destination manually; this apply's containment entry records them and keeps check at needs-apply, and a later apply of any source verifies them again (every symlink under the destination when the entry could not record them) and, only when they pass, removes the entries it read that are still unchanged"
   /** Issue #219: the message tail every post-merge violation ends with. */
   const reportTail = `${checkedAfterMerge}; ${nothingChanged}`
   const listingCall: ExecCall = {
@@ -5602,13 +5833,12 @@ describe("host symlink names that are not UTF-8 (Issue #219)", () => {
 
 describe("archive.extract containment flag lifecycle (Issue #219)", () => {
   const owner = "www-data:www-data"
-  const flagRemoval = `rm -f -- '${containmentFlag}'`
   // Issue #219: the archive ships a symlink, so both listings run.
   const lifecycleLines = [tarDirectoryLine("a/"), tarFileLine("a/f"), tarSymlinkLine("a/l", "f")]
   /** Issue #219: a host link whose walk passes through `a`, which the archive writes. */
   const escapesThroughArchive = [`${destination}/x/esc`, "../a/../.."] as const
 
-  it("writes the flag before the destination is created or probed, the listing, staging, extract and merge, and clears it last", async () => {
+  it("establishes the own entry before the destination is created or probed, the listing, staging, extract and merge, and clears it last", async () => {
     const files = new Map<string, string>()
 
     const run = await applyTarListing(lifecycleLines, {
@@ -5619,14 +5849,15 @@ describe("archive.extract containment flag lifecycle (Issue #219)", () => {
 
     expect(extractionSummary(run)).toStrictEqual(extractedThroughStaging)
     const { calls } = run.mockSsh
-    const [flagWrite, ...markerWrites] = run.writes
-    expect(flagWrite.remotePath).toBe(containmentFlag)
+    const markerWrites = run.writes
+    const establish = calls.indexOf(containmentEstablishCommand())
+    expect(establish).toBeGreaterThanOrEqual(0)
     // Issue #219: the pre-merge and the post-merge listing issue the same
     // command; exactly one of each runs on a converged tree.
     expect(run.postMergeListings).toHaveLength(1)
     expect(calls.filter((command) => command === symlinkListingProbeCommand)).toHaveLength(2)
     // Issue #219: the destination mkdir, its `readlink -f` check and the
-    // pre-staging probe all run after the flag write.
+    // pre-staging probe all run after the establish exec.
     const destinationMkdir = calls.indexOf(guardedArchiveDestinationMkdirCommand(destination))
     const listing = calls.indexOf(symlinkListingProbeCommand)
     const chown = calls.indexOf(batchedChownCommand)
@@ -5644,19 +5875,19 @@ describe("archive.extract containment flag lifecycle (Issue #219)", () => {
     ]
     expect(Math.min(...order)).toBeGreaterThanOrEqual(0)
     expect(order).toStrictEqual(order.toSorted((left, right) => left - right))
-    // `callIndex` is the number of calls issued before the write.
-    expect(flagWrite.callIndex).toBeLessThanOrEqual(destinationMkdir)
-    expect(flagWrite.callIndex).toBeLessThanOrEqual(listing)
+    expect(establish).toBeLessThan(destinationMkdir)
+    expect(establish).toBeLessThan(listing)
     expect(markerWrites.map(({ remotePath }) => remotePath)).toStrictEqual(
       expect.arrayContaining([marker, membersMarker])
     )
     for (const write of markerWrites) expect(write.callIndex).toBeGreaterThan(chown)
-    // The flag removal is the very last command, after every marker write.
-    expect(calls.indexOf(flagRemoval)).toBe(calls.length - 1)
+    // The clear exec is the very last command, after every marker write; the
+    // apply read no other entry, so it removes only its own.
+    expect(calls.at(-1)).toBe(`${containmentClearPrefix}'${ownEntry()}'`)
     for (const write of markerWrites) {
-      expect(calls.indexOf(flagRemoval)).toBeGreaterThanOrEqual(write.callIndex)
+      expect(calls.length - 1).toBeGreaterThanOrEqual(write.callIndex)
     }
-    expect(files.has(containmentFlag)).toBe(false)
+    expect(hasContainmentState(files)).toBe(false)
   })
 
   it.each([
@@ -5737,9 +5968,9 @@ describe("archive.extract containment flag lifecycle (Issue #219)", () => {
 
     expect(run.result.status).toBe("failed")
     expect(run.result.error?.message).toContain(error)
-    expect(run.writes[0]?.remotePath).toBe(containmentFlag)
-    expect(run.mockSsh.calls).not.toContain(flagRemoval)
-    expect(files.has(containmentFlag)).toBe(true)
+    expect(run.writes.at(-1)?.remotePath).toBe(ownEntry())
+    expect(containmentClears(run.mockSsh.calls)).toStrictEqual([])
+    expect(hasContainmentState(files)).toBe(true)
     await expect(checkAgainstHostFiles(src, files)).resolves.toMatchObject({
       result: "needs-apply",
     })
@@ -5759,11 +5990,11 @@ describe("archive.extract containment flag lifecycle (Issue #219)", () => {
     expect(run.writes.map(({ remotePath }) => remotePath)).toStrictEqual(
       containmentFlagWritesOfFailedApply
     )
-    expect(calls).not.toContain(flagRemoval)
+    expect(containmentClears(calls)).toStrictEqual([])
     expect(calls.some((command) => archiveStageMovePattern.test(command))).toBe(false)
     // The staging directory is still cleaned up.
     expect(calls.some((command) => archiveStageCleanupPattern.test(command))).toBe(true)
-    expect(files.has(containmentFlag)).toBe(true)
+    expect(hasContainmentState(files)).toBe(true)
   })
 })
 
@@ -5792,7 +6023,7 @@ describe("archive.extract post-merge backstop (Issue #219)", () => {
   const checkedAfterMerge =
     "after the merge, the archive's symlinks and every symlink under the destination whose resolution passes through a path the archive writes are checked, including links it did not ship"
   const nothingChanged =
-    "nothing was removed or changed; while the offending symlinks remain, remove them or point them inside the destination manually; the containment flag keeps check at needs-apply, and a later apply of any source verifies them again (every symlink under the destination when the flag could not record them) and clears the flag only when they pass"
+    "nothing was removed or changed; while the offending symlinks remain, remove them or point them inside the destination manually; this apply's containment entry records them and keeps check at needs-apply, and a later apply of any source verifies them again (every symlink under the destination when the entry could not record them) and, only when they pass, removes the entries it read that are still unchanged"
   const escapesEtc = `symlink ${JSON.stringify(escapingLink)} -> ${JSON.stringify(escapingTarget)} resolves outside destination ${JSON.stringify(destination)}`
   const escapesRoot = `symlink ${JSON.stringify(rootLink)} -> "l/../../.." resolves outside destination ${JSON.stringify(destination)}`
   const reportedEtc = `${backstopRefusal}${escapesEtc}; ${checkedAfterMerge}; ${nothingChanged}`
@@ -5901,8 +6132,8 @@ describe("archive.extract post-merge backstop (Issue #219)", () => {
         `${destination}/x/etc`,
       ].toSorted()
     )
-    expect(run.mockSsh.calls).not.toContain(`rm -f -- '${containmentFlag}'`)
-    expect(files.has(containmentFlag)).toBe(true)
+    expect(containmentClears(run.mockSsh.calls)).toStrictEqual([])
+    expect(hasContainmentState(files)).toBe(true)
   })
 
   it("names at most the report limit of links and counts the rest", async () => {
@@ -5932,7 +6163,7 @@ describe("archive.extract post-merge backstop (Issue #219)", () => {
       `${backstopRefusal}${named.join("; ")} (and 3 more); ${checkedAfterMerge}; ${nothingChanged}`
     )
     expect(callsFromBackstop(run)).toStrictEqual([symlinkListingProbeCommand])
-    expect(run.mockSsh.calls).not.toContain(`rm -f -- '${containmentFlag}'`)
+    expect(containmentClears(run.mockSsh.calls)).toStrictEqual([])
   })
 
   it.each([
@@ -5963,8 +6194,8 @@ describe("archive.extract post-merge backstop (Issue #219)", () => {
         `${backstopRefusal}symlink ${JSON.stringify(listedLink)} -> "../../x" resolves outside destination ${JSON.stringify(destination)}; ${checkedAfterMerge}; ${nothingChanged}`
       )
       expect(callsFromBackstop(run)).toStrictEqual([symlinkListingProbeCommand])
-      expect(run.mockSsh.calls).not.toContain(`rm -f -- '${containmentFlag}'`)
-      expect(files.has(containmentFlag)).toBe(true)
+      expect(containmentClears(run.mockSsh.calls)).toStrictEqual([])
+      expect(hasContainmentState(files)).toBe(true)
       await expect(checkAgainstHostFiles(src, files)).resolves.toMatchObject({
         result: "needs-apply",
       })
@@ -6031,11 +6262,11 @@ describe("archive.extract post-merge backstop (Issue #219)", () => {
       expect(run.result.error?.message).toBe(expected)
       expect(run.postMergeListings).toHaveLength(1)
       expect(run.mockSsh.calls).not.toContain(batchedChownCommand)
-      expect(run.mockSsh.calls).not.toContain(`rm -f -- '${containmentFlag}'`)
+      expect(containmentClears(run.mockSsh.calls)).toStrictEqual([])
       expect(run.writes.map(({ remotePath }) => remotePath)).toStrictEqual(
         containmentFlagWritesOfFailedApply
       )
-      expect(files.has(containmentFlag)).toBe(true)
+      expect(hasContainmentState(files)).toBe(true)
     }
   )
 })
@@ -6058,7 +6289,6 @@ describe("archive.extract containment flag records offending links (Issue #219)"
   // pre-merge check nor the backstop would judge the escaping link for them.
   const linesWithoutSymlinks = [tarDirectoryLine("b/"), tarFileLine("b/g")]
   const linesWithUnrelatedSymlink = [...linesWithoutSymlinks, tarSymlinkLine("b/s", "g")]
-  const flagRemoval = `rm -f -- '${containmentFlag}'`
 
   /**
    * Issue #219: fail an apply of `src` after the merge because a link that
@@ -6081,8 +6311,9 @@ describe("archive.extract containment flag records offending links (Issue #219)"
     expect(run.result.status).toBe("failed")
     expect(run.result.error?.message).toContain("refusing to complete extraction")
     expect(run.result.error?.message).toContain(escapingLink)
-    // Issue #219: the flag records the offending link, not just its presence.
-    expect(files.get(containmentFlag)).toBe(recordedFlag("a/esc"))
+    // Issue #219: the own entry records the offending link, not just its
+    // presence.
+    expect(Object.values(containmentState(files))).toStrictEqual([recordedFlag("a/esc")])
     expect(hostLinks.get(escapingLink)).toBe(escapingTarget)
     return { files, hostLinks }
   }
@@ -6099,20 +6330,27 @@ describe("archive.extract containment flag records offending links (Issue #219)"
     expect(run.thrown).toBeUndefined()
     expect(run.result.status).toBe("failed")
     expect(run.result.error?.message).toContain(escapingLink)
-    expect(run.mockSsh.calls).not.toContain(flagRemoval)
-    // Issue #219: B's own work passed, so the flag still records exactly the
-    // link A left, and B wrote none of its markers.
-    expect(files.get(containmentFlag)).toBe(recordedFlag("a/esc"))
+    expect(containmentClears(run.mockSsh.calls)).toStrictEqual([])
+    // Issue #219: B's own work passed, so A's entry still records exactly the
+    // link A left, B's own entry records the same link, which B re-verified,
+    // and B wrote none of its markers.
+    expect(containmentState(files)).toStrictEqual({
+      [ownEntryName(1)]: recordedFlag("a/esc"),
+      [ownEntryName(2)]: recordedFlag("a/esc"),
+    })
     expect(files.has(markerFor(otherSrc))).toBe(false)
-    // Issue #219: every flag write went through the guarded `writeFile` with
-    // the marker mode; no exec wrote the flag through the shell.
-    const flagWrites = vi
+    // Issue #219: the failure record went through the guarded `writeFile`
+    // with the marker mode, into B's own entry only; the only exec that
+    // touched the entries is the establish exec.
+    const entryWrites = vi
       .mocked(run.mockSsh.writeFile)
-      .mock.calls.filter(([path]) => path === containmentFlag)
-    expect(flagWrites.map((call) => call[2])).toStrictEqual([{ mode: "0644" }, { mode: "0644" }])
-    expect(run.mockSsh.calls.filter((command) => command.includes(containmentFlag))).toStrictEqual([
-      containmentFlagReadCommand(),
+      .mock.calls.filter(([path]) => path.startsWith(containment.entryDirectory))
+    expect(entryWrites.map(([path, , options]) => [path, options])).toStrictEqual([
+      [ownEntry(2), { mode: "0644" }],
     ])
+    expect(
+      run.mockSsh.calls.filter((command) => command.includes(containment.entryDirectory))
+    ).toStrictEqual([containmentEstablishCommand(2)])
     expect(hostLinks.get(escapingLink)).toBe(escapingTarget)
     await expect(checkAgainstHostFiles(otherSrc, files)).resolves.toMatchObject({
       result: "needs-apply",
@@ -6142,8 +6380,8 @@ describe("archive.extract containment flag records offending links (Issue #219)"
       symlinkListingProbeCommand,
       kernelCrossCheckCommand,
     ])
-    expect(run.mockSsh.calls).not.toContain(flagRemoval)
-    expect(files.has(containmentFlag)).toBe(true)
+    expect(containmentClears(run.mockSsh.calls)).toStrictEqual([])
+    expect(hasContainmentState(files)).toBe(true)
     expect(hostLinks.get(escapingLink)).toBe(escapingTarget)
     await expect(checkAgainstHostFiles(otherSrc, files)).resolves.toMatchObject({
       result: "needs-apply",
@@ -6176,8 +6414,8 @@ describe("archive.extract containment flag records offending links (Issue #219)"
       })
 
       expect(run.result.status).toBe("changed")
-      expect(run.mockSsh.calls).toContain(flagRemoval)
-      expect(files.has(containmentFlag)).toBe(false)
+      expect(containmentClears(run.mockSsh.calls)).toHaveLength(1)
+      expect(hasContainmentState(files)).toBe(false)
       await expect(checkAgainstHostFiles(otherSrc, files)).resolves.toMatchObject({
         result: "ok",
       })
@@ -6239,13 +6477,18 @@ describe("archive.extract containment flag records offending links (Issue #219)"
 
   it.each([
     {
-      expectedFlagFor: (): string | undefined => undefined,
+      expectedFlagFor: (): string[] => [],
       hostLinksFor: (): HostLinkTree => new Map(),
       name: "are gone",
       status: "changed",
     },
     {
-      expectedFlagFor: (keys: readonly string[]): string | undefined => recordedFlag(...keys),
+      // Issue #219: the earlier entry stays, and the own entry records every
+      // recorded link that still escapes.
+      expectedFlagFor: (keys: readonly string[]): string[] => [
+        recordedFlag(...keys),
+        recordedFlag(...keys),
+      ],
       hostLinksFor: (keys: readonly string[]): HostLinkTree =>
         new Map(keys.map((key) => [`${destination}/${key}`, "../.."] as const)),
       name: "still escape",
@@ -6258,14 +6501,14 @@ describe("archive.extract containment flag records offending links (Issue #219)"
         linkCount: number
       ): Promise<{
         calls: number
-        flag: string | undefined
+        flag: string[]
         postMergeListings: number
         status: ModuleResult["status"]
       }> => {
         // Issue #219: links an earlier failed apply recorded under `x`, where
         // this archive writes nothing.
         const keys = recordedKeys(linkCount)
-        const files = new Map([[containmentFlag, recordedFlag(...keys)]])
+        const files = new Map([[earlierEntry, recordedFlag(...keys)]])
         const hostLinks = hostLinksFor(keys)
         const run = await applyTarListing(linesWithoutSymlinks, {
           files,
@@ -6274,7 +6517,7 @@ describe("archive.extract containment flag records offending links (Issue #219)"
         })
         return {
           calls: run.mockSsh.calls.length,
-          flag: files.get(containmentFlag),
+          flag: Object.values(containmentState(files)),
           postMergeListings: run.postMergeListings.length,
           status: run.result.status,
         }
@@ -6287,15 +6530,16 @@ describe("archive.extract containment flag records offending links (Issue #219)"
       expect(many.status).toBe(status)
       expect(many.calls).toBe(one.calls)
       expect(many.postMergeListings).toBe(one.postMergeListings)
-      // Issue #219: a clean run clears the flag; a failing one records every
-      // recorded link that still escapes.
-      expect(many.flag).toBe(expectedFlagFor(recordedKeys(200)))
+      // Issue #219: a clean run removes the earlier entry and its own; a
+      // failing one records every recorded link that still escapes.
+      expect(many.flag).toStrictEqual(expectedFlagFor(recordedKeys(200)))
     }
   )
 })
 
 /**
- * Issue #219: the `in-progress` flag body an apply writes first.
+ * Issue #219: the `in-progress` body an apply creates its own entry with; an
+ * older version's in-progress flag may still carry links.
  *
  * @param links - The carried link keys.
  * @returns The JSON body.
@@ -6305,7 +6549,7 @@ function inProgress(...links: string[]): string {
 }
 
 /**
- * Issue #219: the flag body of a failure whose offending links are unknown.
+ * Issue #219: the entry body of a failure whose offending links are unknown.
  *
  * @param reason - Why they are unknown.
  * @returns The JSON body.
@@ -6315,15 +6559,15 @@ function unknownFlag(reason: string): string {
 }
 
 /**
- * Issue #219: whether a write is a containment flag record, i.e. any flag
- * body other than the empty `in-progress` one.
+ * Issue #219: whether a write is a containment record. The establish exec
+ * creates the own entry, so every `writeFile` into the entry directory is a
+ * failure record.
  *
  * @param path - The written path.
- * @param content - The written content.
- * @returns True for a flag record.
+ * @returns True for a containment record.
  */
-function isContainmentFlagRecord(path: string, content: string): boolean {
-  return path === containmentFlag && content !== inProgress()
+function isContainmentFlagRecord(path: string): boolean {
+  return path.startsWith(`${containment.entryDirectory}/run-`)
 }
 
 describe("archive.extract containment flag recording and verification (Issue #219)", () => {
@@ -6333,43 +6577,96 @@ describe("archive.extract containment flag recording and verification (Issue #21
   const escapingTarget = "../a/../.."
   const linesThroughA = [tarDirectoryLine("a/"), tarFileLine("a/f"), tarSymlinkLine("a/l", "f")]
   const linesThroughB = [tarDirectoryLine("b/"), tarFileLine("b/g"), tarSymlinkLine("b/s", "g")]
-  const flagRemoval = `rm -f -- '${containmentFlag}'`
+  const entryDirectory = containment.entryDirectory
 
   /**
-   * Issue #219: the flag bodies an apply wrote, in order.
+   * Issue #219: the entry bodies an apply wrote through `writeFile`, in order.
    *
    * @param run - The recorded apply run.
-   * @returns The contents of every containment flag write.
+   * @returns The contents of every containment record write.
    */
   function flagBodies(run: TarListingApplyRun): string[] {
     return vi
       .mocked(run.mockSsh.writeFile)
-      .mock.calls.filter(([path]) => path === containmentFlag)
+      .mock.calls.filter(([path]) => isContainmentFlagRecord(path))
       .map(([, content]) => content)
   }
 
   it.each([
     {
       answer: { code: 3 },
-      reason: `containment-failure flag ${containmentFlag} is a symlink`,
+      name: "an old flag file that is a symlink",
+      reason: `containment-failure flag ${legacyContainmentFlag} is a symlink; remove it`,
     },
     {
       answer: { code: 4 },
-      reason: `containment-failure flag ${containmentFlag} exists but is not a regular file`,
+      name: "an old flag file that is not a regular file",
+      reason: `containment-failure flag ${legacyContainmentFlag} exists but is not a regular file; remove it`,
     },
     {
-      answer: { code: 1, stderr: "cat: Input/output error" },
-      reason: `failed to read containment-failure flag ${containmentFlag}: cat: Input/output error`,
+      answer: { code: 12, stderr: "sha256sum: Input/output error\n" },
+      name: "an unreadable old flag file",
+      reason: `failed to read containment-failure flag ${legacyContainmentFlag}: sha256sum: Input/output error`,
+    },
+    {
+      answer: { code: 5 },
+      name: "an entry directory that is a symlink",
+      reason: `containment entry directory ${entryDirectory} is a symlink; remove it`,
+    },
+    {
+      answer: { code: 6 },
+      name: "an entry directory that is no directory",
+      reason: `containment entry directory ${entryDirectory} is not a directory and cannot be created; remove it`,
+    },
+    {
+      answer: { code: 7 },
+      name: "an inaccessible entry directory",
+      reason: `containment entry directory ${entryDirectory} is not readable, writable and searchable`,
+    },
+    {
+      answer: { code: 8, stderr: `${earlierEntryName}\n` },
+      name: "a symlink entry",
+      reason: `containment entry ${earlierEntry} is a symlink; remove it`,
+    },
+    {
+      answer: { code: 9, stderr: `${earlierEntryName}\n` },
+      name: "an entry that is not a regular file",
+      reason: `containment entry ${earlierEntry} exists but is not a regular file; remove it`,
+    },
+    {
+      answer: { code: 10 },
+      name: "an entry name outside the run charset",
+      reason: `containment entry directory ${entryDirectory} holds a run-* entry whose name has characters other than ASCII letters, digits and "-"; remove that entry`,
+    },
+    {
+      answer: { code: 11, stderr: `sha256sum: Input/output error\n${earlierEntryName}\n` },
+      name: "an unreadable entry",
+      reason: `failed to read containment entry ${earlierEntry}`,
+    },
+    {
+      answer: { code: 1, stderr: "sh: Input/output error" },
+      name: "a failed exec",
+      reason: `failed to read containment entries in ${entryDirectory}: sh: Input/output error`,
+    },
+    {
+      answer: { code: 0, stdout: "garbage\ndone\n" },
+      name: "output it does not print",
+      reason: `failed to read containment entries in ${entryDirectory}: unexpected output`,
+    },
+    {
+      answer: { code: 0, stdout: "" },
+      name: "no output",
+      reason: `failed to read containment entries in ${entryDirectory}: unexpected output`,
     },
   ])(
-    "refuses and writes nothing when the flag read reports: $reason",
+    "refuses and writes nothing when the establish exec reports $name",
     async ({ answer, reason }) => {
       const run = await applyTarListing(linesThroughA, {
-        responses: { [containmentFlagReadCommand()]: answer },
+        responses: { [containmentEstablishCommand()]: answer },
       })
 
       expect(run.result.error?.message).toBe(
-        `[archive.extract] refusing to extract ${src}: ${reason}; the flag must be in place before the destination is touched`
+        `[archive.extract] refusing to extract ${src}: ${reason}; the containment entry must be in place before the destination is touched`
       )
       expect(run.writes).toStrictEqual([])
       expect(run.mockSsh.calls).not.toContain(guardedArchiveDestinationMkdirCommand(destination))
@@ -6377,27 +6674,25 @@ describe("archive.extract containment flag recording and verification (Issue #21
     }
   )
 
-  it("refuses and writes nothing when the flag read throws", async () => {
-    // Issue #219: a read that fails for any reason other than output that is
-    // not valid UTF-8 leaves the flag unreadable, which still fails closed.
+  it("refuses and writes nothing when the establish exec throws", async () => {
     const run = await applyTarListing(linesThroughA, {
-      throwOn: { command: containmentFlagReadCommand(), error: new Error("channel closed") },
+      throwOn: { command: containmentEstablishCommand(), error: new Error("channel closed") },
     })
 
     expect(run.thrown).toBeUndefined()
     expect(run.result.error?.message).toBe(
-      `[archive.extract] refusing to extract ${src}: failed to read containment-failure flag ${containmentFlag}: channel closed; the flag must be in place before the destination is touched`
+      `[archive.extract] refusing to extract ${src}: failed to read containment entries in ${entryDirectory}: channel closed; the containment entry must be in place before the destination is touched`
     )
     expect(run.writes).toStrictEqual([])
     expect(run.mockSsh.calls).not.toContain(guardedArchiveDestinationMkdirCommand(destination))
     expectNoTarExtractCalls(run.mockSsh)
   })
 
-  it("carries the recorded links into the in-progress body and records them unchanged after a refusal before the merge", async () => {
+  it("records no links in its own entry after a refusal before the merge and leaves the earlier entry alone", async () => {
     // Issue #219: `a/up -> ..` would make the host's `a/esc -> up/..` escape,
-    // so the pre-merge check refuses; nothing is published, and the link
-    // recorded earlier (`x/esc`) still needs verification.
-    const files = new Map([[containmentFlag, recordedFlag("x/esc")]])
+    // so the pre-merge check refuses; nothing is published. The link an
+    // earlier apply recorded (`x/esc`) stays recorded in that apply's entry.
+    const files = new Map([[earlierEntry, recordedFlag("x/esc")]])
     const hostLinks: HostLinkTree = new Map([
       [`${destination}/a/esc`, "up/.."],
       [`${destination}/x/esc`, "../.."],
@@ -6410,12 +6705,15 @@ describe("archive.extract containment flag recording and verification (Issue #21
 
     expect(run.result.error?.message).toContain("would resolve outside destination")
     expect(run.postMergeListings).toStrictEqual([])
-    expect(flagBodies(run)).toStrictEqual([inProgress("x/esc"), recordedFlag("x/esc")])
-    expect(files.get(containmentFlag)).toBe(recordedFlag("x/esc"))
+    expect(flagBodies(run)).toStrictEqual([recordedFlag()])
+    expect(containmentState(files)).toStrictEqual({
+      [earlierEntryName]: recordedFlag("x/esc"),
+      [ownEntryName()]: recordedFlag(),
+    })
   })
 
-  it("records the carried links when an exec throws before the merge, and rethrows", async () => {
-    const files = new Map([[containmentFlag, recordedFlag("x/esc")]])
+  it("records no links when an exec throws before the merge, and rethrows", async () => {
+    const files = new Map([[earlierEntry, recordedFlag("x/esc")]])
 
     const run = await applyTarListing(linesThroughA, {
       files,
@@ -6424,11 +6722,14 @@ describe("archive.extract containment flag recording and verification (Issue #21
     })
 
     expect(run.thrown).toStrictEqual(new Error("channel closed"))
-    expect(files.get(containmentFlag)).toBe(recordedFlag("x/esc"))
+    expect(containmentState(files)).toStrictEqual({
+      [earlierEntryName]: recordedFlag("x/esc"),
+      [ownEntryName()]: recordedFlag(),
+    })
   })
 
   it("records no links when an exec throws after the backstop passed, and rethrows", async () => {
-    const files = new Map([[containmentFlag, recordedFlag("x/esc")]])
+    const files = new Map([[earlierEntry, recordedFlag("x/esc")]])
 
     const run = await applyTarListing(linesThroughA, {
       files,
@@ -6438,9 +6739,13 @@ describe("archive.extract containment flag recording and verification (Issue #21
     })
 
     expect(run.thrown).toStrictEqual(new Error("channel closed"))
-    // The recorded link is gone from the host, so the backstop passed.
+    // The recorded link is gone from the host, so the backstop passed; the
+    // earlier entry is only removed by a fully successful apply.
     expect(run.postMergeListings).toHaveLength(1)
-    expect(files.get(containmentFlag)).toBe(recordedFlag())
+    expect(containmentState(files)).toStrictEqual({
+      [earlierEntryName]: recordedFlag("x/esc"),
+      [ownEntryName()]: recordedFlag(),
+    })
   })
 
   it("records unknown when the backstop listing throws after the merge, and the next apply verifies the destination and clears it", async () => {
@@ -6460,10 +6765,12 @@ describe("archive.extract containment flag recording and verification (Issue #21
     // records that the offending links could not be identified.
     expect(run.thrown).toBeUndefined()
     expect(run.result.status).toBe("failed")
-    expect(files.get(containmentFlag)).toBe(unknownFlag(UNIDENTIFIED_OFFENDING_LINKS))
-    // Issue #219: an unknown flag no longer refuses the next apply; that apply
-    // runs, finds no escaping link anywhere under the destination and clears
-    // the flag.
+    expect(containmentState(files)).toStrictEqual({
+      [ownEntryName()]: unknownFlag(UNIDENTIFIED_OFFENDING_LINKS),
+    })
+    // Issue #219: an unknown entry does not refuse the next apply; that apply
+    // runs, finds no escaping link anywhere under the destination and removes
+    // the unknown entry and its own.
     const next = await applyTarListing(linesThroughB, {
       files,
       hostLinks: new Map(),
@@ -6472,12 +6779,12 @@ describe("archive.extract containment flag recording and verification (Issue #21
     expect(next.result.error).toBeUndefined()
     expect(next.result.status).toBe("changed")
     expect(next.postMergeListings).toHaveLength(1)
-    expect(next.mockSsh.calls).toContain(flagRemoval)
-    expect(files.has(containmentFlag)).toBe(false)
+    expect(containmentClears(next.mockSsh.calls)).toHaveLength(1)
+    expect(hasContainmentState(files)).toBe(false)
   })
 
-  it("drops a recorded link that was fixed and records the new offender when another source fails", async () => {
-    const files = new Map([[containmentFlag, recordedFlag("a/esc")]])
+  it("records the new offender, not the fixed recorded link, when another source fails", async () => {
+    const files = new Map([[earlierEntry, recordedFlag("a/esc")]])
     // The recorded link was pointed back inside.
     const hostLinks: HostLinkTree = new Map([[escapingLink, "f"]])
 
@@ -6491,11 +6798,15 @@ describe("archive.extract containment flag recording and verification (Issue #21
     expect(run.result.status).toBe("failed")
     expect(run.result.error?.message).toContain(`${destination}/b/esc`)
     expect(run.result.error?.message).not.toContain(escapingLink)
-    expect(files.get(containmentFlag)).toBe(recordedFlag("b/esc"))
+    // Issue #219: a failing apply never touches another apply's entry.
+    expect(containmentState(files)).toStrictEqual({
+      [earlierEntryName]: recordedFlag("a/esc"),
+      [ownEntryName()]: recordedFlag("b/esc"),
+    })
   })
 
-  it("keeps a recorded link that still escapes next to a new offender", async () => {
-    const files = new Map([[containmentFlag, recordedFlag("a/esc")]])
+  it("records a recorded link that still escapes next to a new offender", async () => {
+    const files = new Map([[earlierEntry, recordedFlag("a/esc")]])
     const hostLinks: HostLinkTree = new Map([[escapingLink, escapingTarget]])
 
     const run = await applyTarListing(linesThroughB, {
@@ -6508,10 +6819,13 @@ describe("archive.extract containment flag recording and verification (Issue #21
     expect(run.result.error?.message).toContain(
       `symlink ${JSON.stringify(escapingLink)} -> ${JSON.stringify(escapingTarget)}, recorded by an earlier failed apply, resolves outside destination`
     )
-    expect(files.get(containmentFlag)).toBe(recordedFlag("a/esc", "b/esc"))
+    expect(containmentState(files)).toStrictEqual({
+      [earlierEntryName]: recordedFlag("a/esc"),
+      [ownEntryName()]: recordedFlag("a/esc", "b/esc"),
+    })
   })
 
-  it("records unknown when more links offend than the flag can list, and the next apply names them and keeps it unknown", async () => {
+  it("records unknown when more links offend than an entry can list, and the next apply names them and records unknown again", async () => {
     const files = new Map<string, string>()
     const hostLinks: HostLinkTree = new Map()
     const injected = Array.from(
@@ -6526,11 +6840,13 @@ describe("archive.extract containment flag recording and verification (Issue #21
     })
 
     expect(run.result.status).toBe("failed")
-    expect(files.get(containmentFlag)).toBe(unknownFlag(TOO_MANY_OFFENDING_LINKS))
-    expect(parseContainmentFlag(String(files.get(containmentFlag))).kind).toBe("unknown")
+    expect(containmentState(files)).toStrictEqual({
+      [ownEntryName(1)]: unknownFlag(TOO_MANY_OFFENDING_LINKS),
+    })
+    expect(parseContainmentFlag(String(files.get(ownEntry(1)))).kind).toBe("unknown")
     // Issue #219: the next apply of an unrelated source runs, judges every
     // link under the destination, names a bounded number of the offenders and
-    // keeps the flag unknown, because they still do not fit into it.
+    // records unknown in its own entry, because they still do not fit.
     const next = await applyTarListing(linesThroughB, {
       files,
       hostLinks,
@@ -6545,14 +6861,17 @@ describe("archive.extract containment flag recording and verification (Issue #21
       `(and ${String(CONTAINMENT_FLAG_LINK_LIMIT + 1 - POST_MERGE_VIOLATION_REPORT_LIMIT)} more)`
     )
     expect(message).toContain("nothing was removed")
-    expect(files.get(containmentFlag)).toBe(unknownFlag(TOO_MANY_OFFENDING_LINKS))
+    expect(containmentState(files)).toStrictEqual({
+      [ownEntryName(1)]: unknownFlag(TOO_MANY_OFFENDING_LINKS),
+      [ownEntryName(2)]: unknownFlag(TOO_MANY_OFFENDING_LINKS),
+    })
     expect(files.has(markerFor(otherSrc))).toBe(false)
     expect(injected.filter(([link]) => hostLinks.get(link) === escapingTarget)).toStrictEqual(
       injected
     )
   })
 
-  it("keeps the in-progress body and says so when the failure record cannot be written", async () => {
+  it("keeps the in-progress entry and says so when the failure record cannot be written", async () => {
     const files = new Map<string, string>()
 
     const run = await applyTarListing(linesThroughA, {
@@ -6564,18 +6883,73 @@ describe("archive.extract containment flag recording and verification (Issue #21
 
     expect(run.result.error?.message).toContain(escapingLink)
     expect(run.result.error?.message).toContain(
-      `; [archive.extract] failed to write containment-failure flag ${containmentFlag}: No space left on device`
+      `; [archive.extract] failed to write containment entry ${ownEntry()}: No space left on device`
     )
-    // Issue #219: an unfinished flag no longer makes the next apply refuse, so
+    // Issue #219: an unfinished entry does not make the next apply refuse, so
     // the message must not promise that; it names what the next apply does.
     expect(run.result.error?.message).not.toContain("next apply refuses")
     expect(run.result.error?.message).toContain(
-      "the flag still marks the apply as unfinished, so the next apply verifies the whole destination"
+      "the entry still marks the apply as unfinished, so the next apply verifies the whole destination"
     )
-    expect(files.get(containmentFlag)).toBe(inProgress())
+    expect(containmentState(files)).toStrictEqual({ [ownEntryName()]: inProgress() })
   })
 
-  it("verifies the whole destination after an unfinished flag and records the link that still escapes", async () => {
+  it("re-creates the own entry with the failure record when another apply removed it meanwhile", async () => {
+    // Issue #219: race 1: another apply read this apply's `in-progress`
+    // entry, verified the whole destination and removed it. The failure record
+    // goes through `writeFile`, which renames onto the entry path and so
+    // creates the entry again; no other entry is written.
+    const files = new Map<string, string>()
+    const removedBeforeRecord = onFirstWriteOf(ownEntry(), () => {
+      files.delete(ownEntry())
+    })
+
+    const run = await applyTarListing(linesThroughA, {
+      failWriteWhen: removedBeforeRecord.hook,
+      files,
+      hostLinks: new Map(),
+      injectedOnMerge: [[escapingLink, escapingTarget]],
+    })
+
+    expect(run.result.status).toBe("failed")
+    expect(removedBeforeRecord.fired()).toBe(true)
+    expect(run.writes.map(({ remotePath }) => remotePath)).toStrictEqual([ownEntry()])
+    expect(containmentState(files)).toStrictEqual({ [ownEntryName()]: recordedFlag("a/esc") })
+  })
+
+  it("records unknown and re-creates a removed own entry when the apply throws after its merge started", async () => {
+    // Issue #219: the only throw that escapes after the merge started is one
+    // the staging cleanup cannot contain: its warning to a closed stderr
+    // throws again. Meanwhile a concurrent clean apply removed this apply's
+    // `in-progress` entry (race 1); the record must create it again.
+    const files = new Map<string, string>()
+    const stderrWrite = vi.spyOn(process.stderr, "write").mockImplementation(() => {
+      files.delete(ownEntry())
+      throw new Error("write EPIPE")
+    })
+    let run: TarListingApplyRun
+    try {
+      run = await applyTarListing(linesThroughA, {
+        files,
+        hostLinks: new Map(),
+        responseStubs: [
+          { command: archiveStageCleanupPattern, result: { code: 1, stderr: "rm: busy" } },
+        ],
+      })
+    } finally {
+      stderrWrite.mockRestore()
+    }
+
+    expect(run.thrown).toStrictEqual(new Error("write EPIPE"))
+    expect(run.mockSsh.calls.some((command) => archiveStageMovePattern.test(command))).toBe(true)
+    expect(run.postMergeListings).toStrictEqual([])
+    expect(run.writes.map(({ remotePath }) => remotePath)).toStrictEqual([ownEntry()])
+    expect(containmentState(files)).toStrictEqual({
+      [ownEntryName()]: unknownFlag(STOPPED_AFTER_MERGE_STARTED),
+    })
+  })
+
+  it("verifies the whole destination after an unfinished entry and records the link that still escapes", async () => {
     const files = new Map<string, string>()
     const hostLinks: HostLinkTree = new Map()
     await applyTarListing(linesThroughA, {
@@ -6584,15 +6958,18 @@ describe("archive.extract containment flag recording and verification (Issue #21
       hostLinks,
       injectedOnMerge: [[escapingLink, escapingTarget]],
     })
-    expect(files.get(containmentFlag)).toBe(inProgress())
+    expect(containmentState(files)).toStrictEqual({ [ownEntryName(1)]: inProgress() })
 
     // Issue #219: `b` shares nothing with `a/esc`; only the destination-wide
-    // verification an unknown flag requires can find the link.
+    // verification an unknown entry requires can find the link.
     const run = await applyTarListing(linesThroughB, { files, hostLinks, source: otherSrc })
 
     expect(run.result.status).toBe("failed")
     expect(run.result.error?.message).toContain(JSON.stringify(escapingLink))
-    expect(files.get(containmentFlag)).toBe(recordedFlag("a/esc"))
+    expect(containmentState(files)).toStrictEqual({
+      [ownEntryName(1)]: inProgress(),
+      [ownEntryName(2)]: recordedFlag("a/esc"),
+    })
     expect(files.has(markerFor(otherSrc))).toBe(false)
   })
 })
@@ -6632,21 +7009,40 @@ describe("archive.extract unknown containment flag verifies the whole destinatio
     { archive: "with symlinks", lines: linesWithSymlinks },
   ]
   const legacyFlagBody = "archive apply in progress or symlink containment check failed\n"
+  // Issue #219: every case is an entry of another apply, except the first:
+  // the single flag file of older paratix versions, which always forces the
+  // destination-wide verification and is claimed like an entry.
   const unknownFlagBodies = [
-    { content: legacyFlagBody, flag: "the legacy flag body" },
-    { content: "", flag: "an empty flag" },
-    { content: '{"version":1,"state":"failed","links":["a/esc"', flag: "garbled JSON" },
+    { content: legacyFlagBody, flag: "the old flag file", path: legacyContainmentFlag },
+    { content: legacyFlagBody, flag: "the fixed text of older versions", path: earlierEntry },
+    { content: "", flag: "an empty entry", path: earlierEntry },
+    {
+      content: '{"version":1,"state":"failed","links":["a/esc"',
+      flag: "garbled JSON",
+      path: earlierEntry,
+    },
     {
       content: recordedFlag("a/esc").replace('"version":1', '"version":2'),
       flag: "another version",
+      path: earlierEntry,
     },
-    { content: inProgress("a/esc"), flag: "an in-progress body" },
-    { content: unknownFlag(TOO_MANY_OFFENDING_LINKS), flag: "an unknown record" },
+    { content: inProgress("a/esc"), flag: "an in-progress body", path: earlierEntry },
+    // Issue #219: the body another run of this version creates its own entry
+    // with; it carries no links, so only the whole destination can clear it.
+    {
+      content: inProgress(),
+      flag: "the in-progress entry of another run",
+      path: earlierEntry,
+    },
+    {
+      content: unknownFlag(TOO_MANY_OFFENDING_LINKS),
+      flag: "an unknown record",
+      path: earlierEntry,
+    },
   ]
   const flagCases = unknownFlagBodies.flatMap((body) =>
     archives.map((shape) => ({ ...body, ...shape }))
   )
-  const flagRemoval = `rm -f -- '${containmentFlag}'`
   // Issue #219: a host link in a directory no archive here writes, so neither
   // the pre-merge check nor the archive-scoped backstop judges it.
   const escapingElsewhere = `${destination}/elsewhere/esc`
@@ -6704,8 +7100,8 @@ describe("archive.extract unknown containment flag verifies the whole destinatio
 
   it.each(flagCases)(
     "runs the apply and clears $flag on a clean destination for an archive $archive",
-    async ({ content, lines }) => {
-      const files = new Map([[containmentFlag, content]])
+    async ({ content, lines, path }) => {
+      const files = new Map([[path, content]])
 
       const run = await applyTarListing(lines, { files, hostLinks: new Map() })
 
@@ -6715,9 +7111,9 @@ describe("archive.extract unknown containment flag verifies the whole destinatio
       // listing, after the merge.
       expect(run.postMergeListings).toHaveLength(1)
       expect(run.postMergeListings[0]).toBeGreaterThan(mergeIndex(run))
-      expect(run.writes[0]?.remotePath).toBe(containmentFlag)
-      expect(run.mockSsh.calls.at(-1)).toBe(flagRemoval)
-      expect(files.has(containmentFlag)).toBe(false)
+      expect(run.writes.some(({ remotePath }) => isContainmentFlagRecord(remotePath))).toBe(false)
+      expect(isContainmentClear(run.mockSsh.calls.at(-1))).toBe(true)
+      expect(hasContainmentState(files)).toBe(false)
       expect(files.get(marker)).toBe(archiveSha)
       await expect(checkAgainstHostFiles(src, files)).resolves.toMatchObject({ result: "ok" })
     }
@@ -6725,27 +7121,37 @@ describe("archive.extract unknown containment flag verifies the whole destinatio
 
   it.each([
     {
-      name: "a flag read cut at its capture cap",
+      name: "an establish capture cut at its cap",
       options: (): TarListingApplyOptions => ({
         responses: {
-          [containmentFlagReadCommand()]: {
+          [containmentEstablishCommand()]: {
             code: 0,
-            stdout: `present\n{"links":["a/l"${CAPTURE_TRUNCATION_MARKER}`,
+            stdout: `entry ${earlierEntryName} ${"0".repeat(64)} 7b226c${CAPTURE_TRUNCATION_MARKER}`,
           },
         },
       }),
     },
     {
-      name: "a flag that is not valid UTF-8",
+      name: "an entry that is not valid UTF-8",
       options: (): TarListingApplyOptions => ({
-        throwOn: {
-          command: containmentFlagReadCommand(),
-          error: new InvalidUtf8OutputError("Command stdout is not valid UTF-8 (exit code 0)"),
+        responses: {
+          [containmentEstablishCommand()]: {
+            code: 0,
+            stdout: `entry ${earlierEntryName} ${"0".repeat(64)} 7bff7d\ndone\n`,
+          },
+        },
+      }),
+    },
+    {
+      name: "more entries than it reads",
+      options: (): TarListingApplyOptions => ({
+        responses: {
+          [containmentEstablishCommand()]: { code: 0, stdout: "more\ndone\n" },
         },
       }),
     },
   ])(
-    "runs the apply and clears the flag after $name on a clean destination",
+    "runs the apply, verifies the whole destination and clears after $name on a clean destination",
     async ({ options }) => {
       const run = await applyTarListing(linesWithoutSymlinks, {
         ...options(),
@@ -6755,14 +7161,14 @@ describe("archive.extract unknown containment flag verifies the whole destinatio
       expect(run.thrown).toBeUndefined()
       expect(extractionSummary(run)).toStrictEqual(extractedThroughStaging)
       expect(run.postMergeListings).toHaveLength(1)
-      expect(run.mockSsh.calls.at(-1)).toBe(flagRemoval)
+      expect(isContainmentClear(run.mockSsh.calls.at(-1))).toBe(true)
     }
   )
 
   it.each(flagCases)(
     "fails after the merge with $flag and an escaping link elsewhere for an archive $archive, and records exactly that link",
-    async ({ content, lines }) => {
-      const files = new Map([[containmentFlag, content]])
+    async ({ content, lines, path }) => {
+      const files = new Map([[path, content]])
       const hostLinks: HostLinkTree = new Map([[escapingElsewhere, outsideTarget]])
 
       const run = await applyTarListing(lines, { files, hostLinks })
@@ -6776,10 +7182,13 @@ describe("archive.extract unknown containment flag verifies the whole destinatio
       const message = String(run.result.error?.message)
       expect(message).toContain(JSON.stringify(escapingElsewhere))
       expect(message).toContain("nothing was removed")
-      expect(files.get(containmentFlag)).toBe(recordedFlag("elsewhere/esc"))
+      // Issue #219: the unusable entry stays as it was; the own entry records
+      // exactly the link.
+      expect(files.get(path)).toBe(content)
+      expect(files.get(ownEntry())).toBe(recordedFlag("elsewhere/esc"))
       expect(files.has(marker)).toBe(false)
       expect(files.has(membersMarker)).toBe(false)
-      expect(run.mockSsh.calls).not.toContain(flagRemoval)
+      expect(containmentClears(run.mockSsh.calls)).toStrictEqual([])
       expect(hostLinks.get(escapingElsewhere)).toBe(outsideTarget)
       await expect(checkAgainstHostFiles(src, files)).resolves.toMatchObject({
         result: "needs-apply",
@@ -6805,7 +7214,7 @@ describe("archive.extract unknown containment flag verifies the whole destinatio
     "fails with an unknown flag and records the links elsewhere with $name",
     async ({ keys, links }) => {
       const { files, run } = await applyOnHost(linesWithSymlinks, {
-        files: [[containmentFlag, legacyFlagBody]],
+        files: [[legacyContainmentFlag, legacyFlagBody]],
         links,
       })
 
@@ -6813,7 +7222,7 @@ describe("archive.extract unknown containment flag verifies the whole destinatio
       expect(mergeIndex(run)).toBeGreaterThanOrEqual(0)
       expect(run.result.error?.message).toContain(JSON.stringify(links[0][0]))
       expect(run.result.error?.message).toContain("nothing was removed")
-      expect(files.get(containmentFlag)).toBe(recordedFlag(...keys))
+      expect(files.get(ownEntry())).toBe(recordedFlag(...keys))
       expect(files.has(marker)).toBe(false)
     }
   )
@@ -6825,7 +7234,7 @@ describe("archive.extract unknown containment flag verifies the whole destinatio
     )
 
     const { files, run } = await applyOnHost(linesWithoutSymlinks, {
-      files: [[containmentFlag, legacyFlagBody]],
+      files: [[legacyContainmentFlag, legacyFlagBody]],
       links: keys.map((key) => [`${destination}/${key}`, "../../.."] as const),
     })
 
@@ -6834,7 +7243,7 @@ describe("archive.extract unknown containment flag verifies the whole destinatio
     expect(message).toContain(JSON.stringify(`${destination}/elsewhere/e00`))
     expect(message).not.toContain(JSON.stringify(`${destination}/${String(keys.at(-1))}`))
     expect(message).toContain("(and 3 more)")
-    expect(files.get(containmentFlag)).toBe(recordedFlag(...keys))
+    expect(files.get(ownEntry())).toBe(recordedFlag(...keys))
   })
 
   it.each([
@@ -6851,11 +7260,14 @@ describe("archive.extract unknown containment flag verifies the whole destinatio
       name: "pointed back inside the destination",
     },
   ])("clears the flag on the next apply once the link elsewhere was $name", async ({ fix }) => {
-    const files = new Map([[containmentFlag, legacyFlagBody]])
+    const files = new Map([[legacyContainmentFlag, legacyFlagBody]])
     const hostLinks: HostLinkTree = new Map([[escapingElsewhere, outsideTarget]])
     const failing = await applyTarListing(linesWithoutSymlinks, { files, hostLinks })
     expect(failing.result.status).toBe("failed")
-    expect(files.get(containmentFlag)).toBe(recordedFlag("elsewhere/esc"))
+    expect(containmentState(files)).toStrictEqual({
+      legacy: legacyFlagBody,
+      [ownEntryName(1)]: recordedFlag("elsewhere/esc"),
+    })
     fix(hostLinks)
 
     const run = await applyTarListing(linesWithoutSymlinks, {
@@ -6866,8 +7278,8 @@ describe("archive.extract unknown containment flag verifies the whole destinatio
 
     expect(run.result.error).toBeUndefined()
     expect(run.result.status).toBe("changed")
-    expect(run.mockSsh.calls).toContain(flagRemoval)
-    expect(files.has(containmentFlag)).toBe(false)
+    expect(containmentClears(run.mockSsh.calls)).toHaveLength(1)
+    expect(hasContainmentState(files)).toBe(false)
     await expect(checkAgainstHostFiles(otherSrc, files)).resolves.toMatchObject({
       result: "ok",
     })
@@ -6881,7 +7293,7 @@ describe("archive.extract unknown containment flag verifies the whole destinatio
       // longer on the host) and the links the archive can affect, so the same
       // escaping link elsewhere neither fails the apply nor keeps the flag.
       const { files, run } = await applyOnHost(lines, {
-        files: [[containmentFlag, recordedFlag("x/gone")]],
+        files: [[earlierEntry, recordedFlag("x/gone")]],
         links: [[escapingElsewhere, outsideTarget]],
       })
 
@@ -6889,8 +7301,8 @@ describe("archive.extract unknown containment flag verifies the whole destinatio
       expect(extractionSummary(run)).toStrictEqual(extractedThroughStaging)
       expect(run.postMergeListings).toHaveLength(1)
       expect(crossCheckedLinksOf(run)).not.toContain(escapingElsewhere)
-      expect(run.mockSsh.calls.at(-1)).toBe(flagRemoval)
-      expect(files.has(containmentFlag)).toBe(false)
+      expect(isContainmentClear(run.mockSsh.calls.at(-1))).toBe(true)
+      expect(hasContainmentState(files)).toBe(false)
     }
   )
 
@@ -6949,7 +7361,7 @@ describe("archive.extract unknown containment flag verifies the whole destinatio
   it.each(incompleteCases)(
     "fails and records the flag as unknown when the verification meets $name for an archive $archive",
     async ({ detail, lines, options }) => {
-      const files = new Map([[containmentFlag, legacyFlagBody]])
+      const files = new Map([[legacyContainmentFlag, legacyFlagBody]])
 
       const run = await applyTarListing(lines, { ...options(), files, hostLinks: new Map() })
 
@@ -6959,10 +7371,12 @@ describe("archive.extract unknown containment flag verifies the whole destinatio
       expect(mergeIndex(run)).toBeGreaterThanOrEqual(0)
       expect(run.postMergeListings).toHaveLength(1)
       // Issue #219: the verification did not complete, so no list of links is
-      // known to be complete; the flag must not turn into a `failed` record.
-      expect(files.get(containmentFlag)).toMatch(unknownFlagRecordPattern)
+      // known to be complete; the own entry must not record `failed`, and the
+      // old flag file stays.
+      expect(files.get(ownEntry())).toMatch(unknownFlagRecordPattern)
+      expect(files.get(legacyContainmentFlag)).toBe(legacyFlagBody)
       expect(files.has(marker)).toBe(false)
-      expect(run.mockSsh.calls).not.toContain(flagRemoval)
+      expect(containmentClears(run.mockSsh.calls)).toStrictEqual([])
       await expect(checkAgainstHostFiles(src, files)).resolves.toMatchObject({
         result: "needs-apply",
       })
@@ -6986,8 +7400,8 @@ describe("archive.extract unknown containment flag verifies the whole destinatio
         hostLinks: new Map([[`${destination}/x/esc`, "../b/../.."]]),
       }),
     },
-  ])("keeps the flag unknown after $name before the merge", async ({ error, options }) => {
-    const files = new Map([[containmentFlag, legacyFlagBody]])
+  ])("keeps the old flag file unknown after $name before the merge", async ({ error, options }) => {
+    const files = new Map([[legacyContainmentFlag, legacyFlagBody]])
 
     const run = await applyTarListing(linesWithSymlinks, { ...options(), files })
 
@@ -6996,16 +7410,20 @@ describe("archive.extract unknown containment flag verifies the whole destinatio
     expect(run.result.error?.message).toContain(error)
     expect(mergeIndex(run)).toBe(-1)
     // Issue #219: nothing before the merge verified the destination, so the
-    // flag must still read as unknown, never as an empty `failed` record.
-    expect(parseContainmentFlag(String(files.get(containmentFlag))).kind).toBe("unknown")
-    expect(files.get(containmentFlag)).not.toBe(recordedFlag())
+    // old flag file must stay and still read as unknown; the own entry only
+    // records that this apply published nothing.
+    expect(parseContainmentFlag(String(files.get(legacyContainmentFlag))).kind).toBe("unknown")
+    expect(containmentState(files)).toStrictEqual({
+      legacy: legacyFlagBody,
+      [ownEntryName()]: recordedFlag(),
+    })
     await expect(checkAgainstHostFiles(src, files)).resolves.toMatchObject({
       result: "needs-apply",
     })
   })
 
-  it("keeps the flag unknown when an exec throws before the merge, and rethrows", async () => {
-    const files = new Map([[containmentFlag, legacyFlagBody]])
+  it("keeps the old flag file unknown when an exec throws before the merge, and rethrows", async () => {
+    const files = new Map([[legacyContainmentFlag, legacyFlagBody]])
 
     const run = await applyTarListing(linesWithSymlinks, {
       files,
@@ -7015,8 +7433,10 @@ describe("archive.extract unknown containment flag verifies the whole destinatio
 
     expect(run.thrown).toStrictEqual(new Error("channel closed"))
     expect(mergeIndex(run)).toBe(-1)
-    expect(parseContainmentFlag(String(files.get(containmentFlag))).kind).toBe("unknown")
-    expect(files.get(containmentFlag)).not.toBe(recordedFlag())
+    expect(containmentState(files)).toStrictEqual({
+      legacy: legacyFlagBody,
+      [ownEntryName()]: recordedFlag(),
+    })
   })
 
   it.each([
@@ -7051,7 +7471,7 @@ describe("archive.extract unknown containment flag verifies the whole destinatio
           linesFor(String(index))
         ).flat()
         const { run } = await applyOnHost(lines, {
-          files: [[containmentFlag, legacyFlagBody]],
+          files: [[legacyContainmentFlag, legacyFlagBody]],
           links: [insideHostLink],
         })
         const { calls } = run.mockSsh
@@ -7106,18 +7526,23 @@ describe("archive.extract unknown containment flag verifies the whole destinatio
     async ({ crossChecked, extra, hostLinks, lines }) => {
       const absent = await applyOnHost(lines, { files: [], links: hostLinks })
       const unknown = await applyOnHost(lines, {
-        files: [[containmentFlag, legacyFlagBody]],
+        files: [[legacyContainmentFlag, legacyFlagBody]],
         links: hostLinks,
       })
 
       expect(absent.run.result.status).toBe("changed")
       expect(unknown.run.result.status).toBe("changed")
-      expect(unknown.files.has(containmentFlag)).toBe(false)
+      expect(hasContainmentState(unknown.files)).toBe(false)
       // Issue #219: at most the whole-destination listing plus one kernel
       // cross-check more; with an archive symlink both already run.
-      expect(extraCommands(unknown.run.mockSsh.calls, absent.run.mockSsh.calls)).toStrictEqual(
-        extra
-      )
+      // Issue #219: the establish and clear execs differ only in their
+      // arguments; each runs once.
+      expect(
+        extraCommands(
+          commandsWithoutContainmentArguments(unknown.run),
+          commandsWithoutContainmentArguments(absent.run)
+        )
+      ).toStrictEqual(extra)
       expect(unknown.run.mockSsh.calls.length - absent.run.mockSsh.calls.length).toBe(extra.length)
       expect(unknown.run.writes.map(({ remotePath }) => remotePath)).toStrictEqual(
         absent.run.writes.map(({ remotePath }) => remotePath)
@@ -7125,6 +7550,213 @@ describe("archive.extract unknown containment flag verifies the whole destinatio
       // Issue #219: every link the resolver judges inside is confirmed by the
       // kernel, not only the archive's own.
       expect(crossCheckedLinksOf(unknown.run)).toStrictEqual(crossChecked)
+    }
+  )
+})
+
+/**
+ * Issue #219: the own containment entry of a concurrent apply A.
+ */
+const concurrentEntry = earlierEntry
+
+/**
+ * Issue #219: simulate a concurrent apply A to the same destination failing
+ * and recording its offending link in the containment state. This is the only
+ * place that knows how that state is stored (one entry per apply in the
+ * destination's entry directory; A rewrites only its own entry), so a changed
+ * storage layout only needs this helper adapted.
+ *
+ * @param files - The host marker and containment files.
+ * @param links - The destination-relative link keys A records.
+ */
+function recordConcurrentContainmentFailure(files: Map<string, string>, ...links: string[]): void {
+  files.set(concurrentEntry, recordedFlag(...links))
+}
+
+/**
+ * Issue #219: a `failWriteWhen` hook that never fails a write but runs a side
+ * effect once, when the given path is first written, e.g. to simulate a
+ * concurrent apply at that point of the run.
+ *
+ * @param path - The written path that triggers the side effect.
+ * @param sideEffect - What happens on the host at that point.
+ * @returns The hook and whether it fired.
+ */
+function onFirstWriteOf(
+  path: string,
+  sideEffect: () => void
+): { fired: () => boolean; hook: (remotePath: string) => boolean } {
+  let fired = false
+  return {
+    fired: () => fired,
+    hook(remotePath) {
+      if (remotePath === path && !fired) {
+        fired = true
+        sideEffect()
+      }
+      return false
+    },
+  }
+}
+
+describe("archive.extract concurrent applies to one destination (Issue #219)", () => {
+  // Issue #219: A and B extract different sources into the same destination.
+  // A created its `in-progress` entry first; B read it, created its own and,
+  // after its clean post-merge listing, finishes successfully. In between, A
+  // failed and recorded its escaping link `x/esc` in its own entry.
+  const concurrentLinkKey = "x/esc"
+  const concurrentLink = `${destination}/${concurrentLinkKey}`
+  const benignLines = [tarDirectoryLine("b/"), tarFileLine("b/g")]
+
+  it("keeps the failure a concurrent apply recorded after the post-merge listing when this apply succeeds", async () => {
+    const files = new Map([[concurrentEntry, inProgress()]])
+    const hostLinks: HostLinkTree = new Map()
+    const bMarker = markerFor(otherSrc)
+    // Issue #219: B's content marker is written after its post-merge listing
+    // and before it removes the flag, which is where A's failure lands.
+    const concurrentFailure = onFirstWriteOf(bMarker, () => {
+      hostLinks.set(concurrentLink, "../..")
+      recordConcurrentContainmentFailure(files, concurrentLinkKey)
+    })
+
+    const run = await applyTarListing(benignLines, {
+      failWriteWhen: concurrentFailure.hook,
+      files,
+      hostLinks,
+      source: otherSrc,
+    })
+
+    expect(run.thrown).toBeUndefined()
+    expect(run.result.error).toBeUndefined()
+    expect(run.result.status).toBe("changed")
+    expect(run.postMergeListings).toHaveLength(1)
+    expect(concurrentFailure.fired()).toBe(true)
+    expect(files.has(bMarker)).toBe(true)
+    // Issue #219: A's escaping link still sits in the destination, so `check`
+    // must not report B's marker as converged.
+    expect(hostLinks.get(concurrentLink)).toBe("../..")
+    const check = await checkAgainstHostFiles(otherSrc, files)
+    expect(check.result).toBe("needs-apply")
+    // Issue #219: B read A's `in-progress` entry and tried to remove it, but
+    // A's record had replaced it since, so B left it (under B's claim name,
+    // still an entry) and removed only its own.
+    expect(Object.values(containmentState(files))).toStrictEqual([recordedFlag(concurrentLinkKey)])
+  })
+
+  /** Issue #219: the claim name B (run 1) leaves A's rewritten entry under. */
+  const claimedConcurrentEntry = `${ownEntryName(1)}-claim-0`
+
+  /**
+   * Issue #219: B (run 1) succeeds while A fails and records `x/esc` after
+   * B's post-merge listing, as in the reproduction above.
+   *
+   * @param initial - The body of A's entry when B reads it.
+   * @returns The host files and links after B.
+   */
+  async function succeedWhileConcurrentApplyFails(
+    initial: string
+  ): Promise<{ files: Map<string, string>; hostLinks: HostLinkTree }> {
+    const files = new Map([[concurrentEntry, initial]])
+    const hostLinks: HostLinkTree = new Map()
+    const concurrentFailure = onFirstWriteOf(markerFor(otherSrc), () => {
+      hostLinks.set(concurrentLink, "../..")
+      recordConcurrentContainmentFailure(files, concurrentLinkKey)
+    })
+    const run = await applyTarListing(benignLines, {
+      failWriteWhen: concurrentFailure.hook,
+      files,
+      hostLinks,
+      source: otherSrc,
+    })
+    expect(run.result.status).toBe("changed")
+    expect(concurrentFailure.fired()).toBe(true)
+    return { files, hostLinks }
+  }
+
+  it("keeps an entry rewritten after it was read under its claim name, even when it asked for no destination-wide verification", async () => {
+    // Issue #219: A's entry records `failed` without links when B reads it,
+    // so B verifies no link for it and runs no destination-wide listing. The
+    // hash B read still keeps B from removing A's newer record.
+    const { files, hostLinks } = await succeedWhileConcurrentApplyFails(recordedFlag())
+
+    expect(containmentState(files)).toStrictEqual({
+      [claimedConcurrentEntry]: recordedFlag(concurrentLinkKey),
+    })
+    expect(hostLinks.get(concurrentLink)).toBe("../..")
+    await expect(checkAgainstHostFiles(otherSrc, files)).resolves.toMatchObject({
+      result: "needs-apply",
+    })
+  })
+
+  it("fails a later apply of another source that names the concurrent apply's link as recorded while it still escapes", async () => {
+    const { files, hostLinks } = await succeedWhileConcurrentApplyFails(inProgress())
+    expect(containmentState(files)).toStrictEqual({
+      [claimedConcurrentEntry]: recordedFlag(concurrentLinkKey),
+    })
+
+    // Issue #219: C writes only below `c`, far from `x/esc`; the claim entry
+    // alone makes it judge the link.
+    const run = await applyTarListing([tarDirectoryLine("c/"), tarFileLine("c/h")], {
+      files,
+      hostLinks,
+    })
+
+    expect(run.thrown).toBeUndefined()
+    expect(run.result.status).toBe("failed")
+    expect(run.result.error?.message).toContain(
+      `symlink ${JSON.stringify(concurrentLink)} -> "../..", recorded by an earlier failed apply, resolves outside destination`
+    )
+    expect(containmentClears(run.mockSsh.calls)).toStrictEqual([])
+    expect(containmentState(files)).toStrictEqual({
+      [claimedConcurrentEntry]: recordedFlag(concurrentLinkKey),
+      [ownEntryName(2)]: recordedFlag(concurrentLinkKey),
+    })
+    expect(files.has(marker)).toBe(false)
+    await expect(checkAgainstHostFiles(otherSrc, files)).resolves.toMatchObject({
+      result: "needs-apply",
+    })
+  })
+
+  it.each([
+    {
+      fix(hostLinks: HostLinkTree): void {
+        hostLinks.delete(concurrentLink)
+      },
+      name: "removed",
+    },
+    {
+      fix(hostLinks: HostLinkTree): void {
+        hostLinks.set(concurrentLink, "../b/g")
+      },
+      name: "pointed back inside the destination",
+    },
+  ])(
+    "removes the concurrent apply's entry on the next successful apply of any source once its link was $name",
+    async ({ fix }) => {
+      const { files, hostLinks } = await succeedWhileConcurrentApplyFails(inProgress())
+      fix(hostLinks)
+
+      const run = await applyTarListing([tarDirectoryLine("c/"), tarFileLine("c/h")], {
+        files,
+        hostLinks,
+      })
+
+      expect(run.result.error).toBeUndefined()
+      expect(run.result.status).toBe("changed")
+      // Issue #219: the recorded link was re-verified by the one post-merge
+      // listing an archive without symlinks runs only for recorded links.
+      expect(run.postMergeListings).toHaveLength(1)
+      const [clear] = containmentClears(run.mockSsh.calls)
+      expect(scriptArguments(clear, containmentClearPrefix)).toStrictEqual([
+        ownEntry(2),
+        `${containment.entryDirectory}/${claimedConcurrentEntry}`,
+        sha256Of(recordedFlag(concurrentLinkKey)),
+      ])
+      expect(hasContainmentState(files)).toBe(false)
+      await expect(checkAgainstHostFiles(src, files)).resolves.toMatchObject({ result: "ok" })
+      await expect(checkAgainstHostFiles(otherSrc, files)).resolves.toMatchObject({
+        result: "ok",
+      })
     }
   )
 })
@@ -7262,7 +7894,7 @@ describe("archive.extract bounded staging merge (Issue #219)", () => {
       )
 
       expect(run.result.error?.message).toBe(
-        `[archive.extract] failed to copy extracted files into ${destination}${reason} (exit code ${String(code)})\nTerminated; [archive.extract] refusing to complete extraction of ${src}: symlink ${JSON.stringify(escapingLink)} -> "../a/../.." resolves outside destination ${JSON.stringify(destination)}; after the merge, the archive's symlinks and every symlink under the destination whose resolution passes through a path the archive writes are checked, including links it did not ship; nothing was removed or changed; while the offending symlinks remain, remove them or point them inside the destination manually; the containment flag keeps check at needs-apply, and a later apply of any source verifies them again (every symlink under the destination when the flag could not record them) and clears the flag only when they pass`
+        `[archive.extract] failed to copy extracted files into ${destination}${reason} (exit code ${String(code)})\nTerminated; [archive.extract] refusing to complete extraction of ${src}: symlink ${JSON.stringify(escapingLink)} -> "../a/../.." resolves outside destination ${JSON.stringify(destination)}; after the merge, the archive's symlinks and every symlink under the destination whose resolution passes through a path the archive writes are checked, including links it did not ship; nothing was removed or changed; while the offending symlinks remain, remove them or point them inside the destination manually; this apply's containment entry records them and keeps check at needs-apply, and a later apply of any source verifies them again (every symlink under the destination when the entry could not record them) and, only when they pass, removes the entries it read that are still unchanged`
       )
       expect(run.postMergeListings).toHaveLength(1)
       expect(callsFromBackstop(run)).toStrictEqual([symlinkListingProbeCommand])
@@ -7350,6 +7982,17 @@ describe("archive.extract pre-staging type conflicts (Issue #219)", () => {
   })
 })
 
+/**
+ * Issue #219: the name of the n-th entry an earlier apply left; the names sort
+ * in index order and never collide with an own entry of a test.
+ *
+ * @param index - The entry's position, from 0.
+ * @returns `run-e` and the zero-padded index, 36 characters in all.
+ */
+function entryNameAt(index: number): string {
+  return `run-e${String(index).padStart(31, "0")}`
+}
+
 describe("archive.extract round trips (Issue #219)", () => {
   it("keeps the total exec count of an apply constant as the member count grows", async () => {
     const runWith = async (
@@ -7382,5 +8025,84 @@ describe("archive.extract round trips (Issue #219)", () => {
     // Issue #219: the backstop costs two execs on a converged tree with links:
     // one listing and one kernel cross-check, whatever the link count.
     expect(many.crossChecks).toBe(1)
+  })
+
+  it("keeps one establish and one clear exec as the entry count grows, and verifies the whole destination past the read limit", async () => {
+    const lines = [tarDirectoryLine("b/"), tarFileLine("b/g")]
+    const runWith = async (
+      entryCount: number
+    ): Promise<{
+      calls: number
+      clearedEntries: string[]
+      clears: number
+      establishes: number
+      files: Map<string, string>
+      postMergeListings: number
+      status: ModuleResult["status"]
+    }> => {
+      // Issue #219: entries of earlier failed applies without links, so only
+      // their number can make the apply verify the whole destination.
+      const files = new Map(
+        Array.from(
+          { length: entryCount },
+          (_value, index) =>
+            [`${containment.entryDirectory}/${entryNameAt(index)}`, recordedFlag()] as const
+        )
+      )
+      const run = await applyTarListing(lines, { files, hostLinks: new Map() })
+      const { calls } = run.mockSsh
+      const clears = containmentClears(calls)
+      const [, ...pairs] = scriptArguments(clears[0], containmentClearPrefix)
+      return {
+        calls: calls.length,
+        clearedEntries: pairs
+          .filter((_value, index) => index % 2 === 0)
+          .map((path) => posix.basename(path)),
+        clears: clears.length,
+        establishes: calls.filter((command) => command.startsWith(containmentEstablishPrefix))
+          .length,
+        files,
+        postMergeListings: run.postMergeListings.length,
+        status: run.result.status,
+      }
+    }
+    const overLimit = CONTAINMENT_ENTRY_READ_LIMIT + 4
+
+    const one = await runWith(1)
+    const ten = await runWith(10)
+    const many = await runWith(overLimit)
+
+    for (const run of [one, ten, many]) {
+      expect(run).toMatchObject({ clears: 1, establishes: 1, status: "changed" })
+    }
+    expect(one.postMergeListings).toBe(0)
+    expect(ten.calls).toBe(one.calls)
+    expect(ten.postMergeListings).toBe(0)
+    expect(ten.clearedEntries).toStrictEqual(Array.from({ length: 10 }, (_v, i) => entryNameAt(i)))
+    // Issue #219: past the read limit the establish exec reports `more`,
+    // which costs exactly the destination-wide listing; the clear removes
+    // only the entries it read, so the rest keeps `check` at needs-apply.
+    expect(many.postMergeListings).toBe(1)
+    expect(many.calls).toBe(one.calls + 1)
+    expect(many.clearedEntries).toStrictEqual(
+      Array.from({ length: CONTAINMENT_ENTRY_READ_LIMIT }, (_v, i) => entryNameAt(i))
+    )
+    const unread = Array.from({ length: 4 }, (_v, i) =>
+      entryNameAt(CONTAINMENT_ENTRY_READ_LIMIT + i)
+    )
+    expect(Object.keys(containmentState(many.files))).toStrictEqual(unread)
+    await expect(checkAgainstHostFiles(src, many.files)).resolves.toMatchObject({
+      result: "needs-apply",
+    })
+
+    // Issue #219: the next apply reads the rest and converges.
+    const next = await applyTarListing(lines, {
+      files: many.files,
+      hostLinks: new Map(),
+      source: otherSrc,
+    })
+    expect(next.result.status).toBe("changed")
+    expect(hasContainmentState(many.files)).toBe(false)
+    await expect(checkAgainstHostFiles(src, many.files)).resolves.toMatchObject({ result: "ok" })
   })
 })

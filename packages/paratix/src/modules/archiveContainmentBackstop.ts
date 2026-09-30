@@ -10,9 +10,9 @@
  * the host.
  *
  * Issue #219: it also re-verifies the links an earlier failed apply recorded
- * in the containment flag (see `archiveContainmentFlag.ts`), and reports the
- * offending link keys so the caller can record them in turn. When the flag
- * held no usable list, it judges every symlink under the destination from
+ * in their containment entries (see `archiveContainmentFlag.ts`), and reports
+ * the offending link keys so the caller can record them in turn. When an
+ * entry held no usable list, it judges every symlink under the destination from
  * the same listing instead (see {@link runSymlinkContainmentBackstop}).
  */
 import type { ModuleResult, SshConnection } from "../types.js"
@@ -43,23 +43,24 @@ const CHECKED_AFTER_MERGE =
   "after the merge, the archive's symlinks and every symlink under the destination whose resolution passes through a path the archive writes are checked, including links it did not ship"
 
 /**
- * Issue #219: what the backstop checked when the containment flag held no
+ * Issue #219: what the backstop checked when a containment entry held no
  * usable list of offending links.
  */
 const CHECKED_WHOLE_DESTINATION_AFTER_MERGE =
-  "after the merge, every symlink under the destination is checked, because the containment flag left by an earlier apply does not say which links need verification"
+  "after the merge, every symlink under the destination is checked, because a containment entry does not say which links need verification (an unfinished or concurrent apply, an older paratix version's flag file, or too many entries)"
 
 /**
  * Issue #219: what an operator has to do after a post-merge violation. The
  * backstop only reports, so the offending links stay in place until someone
  * removes them or points them inside the destination; that manual step is
- * needed only while they remain. The containment flag records them, or
- * `unknown` when it cannot, and a later apply of any source verifies them
- * again — every symlink under the destination for an `unknown` flag — and
- * clears the flag only when they pass.
+ * needed only while they remain. This apply's containment entry records
+ * them, or `unknown` when it cannot, and a later apply of any source verifies
+ * them again — every symlink under the destination for an `unknown` entry —
+ * and only when they pass removes the entries it read that are still
+ * unchanged.
  */
 const NOTHING_CHANGED_AFTER_MERGE =
-  "nothing was removed or changed; while the offending symlinks remain, remove them or point them inside the destination manually; the containment flag keeps check at needs-apply, and a later apply of any source verifies them again (every symlink under the destination when the flag could not record them) and clears the flag only when they pass"
+  "nothing was removed or changed; while the offending symlinks remain, remove them or point them inside the destination manually; this apply's containment entry records them and keeps check at needs-apply, and a later apply of any source verifies them again (every symlink under the destination when the entry could not record them) and, only when they pass, removes the entries it read that are still unchanged"
 
 /** Issue #219: how a violation names a link an earlier failed apply recorded. */
 const RECORDED_NOTE = ", recorded by an earlier failed apply,"
@@ -313,7 +314,7 @@ function containmentViolationMessage(destination: string, reading: PostMergeSyml
 
 /**
  * Issue #219: what the post-merge backstop found: its failure, if any, and
- * the offending link keys to record in the containment flag — every violating
+ * the offending link keys to record in the own containment entry — every violating
  * link, or `unidentified` when the reading failed or an archive member lies
  * in a directory the listing could not read, so links there are unknown. In a
  * destination-wide verification any directory the listing could not read
@@ -376,10 +377,10 @@ function offendingLinkKeys(
  * Issue #219: the backstop only detects and reports. It never removes, moves
  * or rewrites a link, because another writer can change the tree between any
  * check and any change the backstop could make. On a violation the run fails,
- * so the containment flag the caller wrote before the merge stays set and
+ * so the containment entry the caller created before the merge stays and
  * `check` keeps reporting needs-apply. The caller records the offending links
- * in the flag, and a later apply of any source clears it only after this
- * backstop re-verified them — or, when the flag could not record them, after
+ * in that entry, and a later apply of any source removes it only after this
+ * backstop re-verified them — or, when the entry could not record them, after
  * it verified the whole destination. The message
  * names the first {@link POST_MERGE_VIOLATION_REPORT_LIMIT} violations by
  * absolute link path, stored target and reason, adds `(and N more)` for the
@@ -394,7 +395,7 @@ function offendingLinkKeys(
  * they cost that listing (and the cross-check when one is judged inside)
  * instead of nothing.
  *
- * Issue #219: with `verifyWholeDestination` — the containment flag held no
+ * Issue #219: with `verifyWholeDestination` — a containment entry held no
  * usable list of offending links, so any link under the destination may be
  * one an unfinished or unrecorded apply published — every symlink the same
  * listing reports is judged, not only those this archive can affect, and
@@ -417,11 +418,11 @@ function offendingLinkKeys(
  * @param parameters.destination - The validated, canonical destination directory.
  * @param parameters.members - The validated archive members; they decide
  *   which links are judged.
- * @param parameters.recordedLinks - Issue #219: the links an earlier failed
- *   apply recorded in the containment flag; they are judged as well.
+ * @param parameters.recordedLinks - Issue #219: the links earlier failed
+ *   applies recorded in their containment entries; they are judged as well.
  * @param parameters.source - The archive source, for the failure message.
  * @param parameters.verifyWholeDestination - Issue #219: judge every symlink
- *   under the destination, because the containment flag held no usable list
+ *   under the destination, because a containment entry held no usable list
  *   of offending links; off when omitted.
  * @returns The failure (null when every judged symlink stays inside) and the
  *   offending link keys, see {@link ContainmentBackstopOutcome}.

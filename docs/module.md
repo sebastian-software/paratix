@@ -182,25 +182,28 @@ zurückübersetzter Name kein gültiges UTF-8 ist oder der eine andere Escape-Se
 abgelehnt, weil er sich nicht dem entpackten Namen zuordnen lässt. Ein Eintrag, dessen Pfad oder
 Link-Ziel einen Backslash oder U+FFFD enthält, wird in jeder Liste abgelehnt – auch nach dem
 Zurückübersetzen –, weil ein anderes `tar` (etwa BusyBox) und `unzip` Escape-Sequenzen und echte
-Backslashes gleich ausgeben. Ist die Archivliste geprüft, schreibt `archive.extract` ein Flag je
-Zielverzeichnis, noch bevor das Zielverzeichnis angelegt oder geprüft wird – lässt es sich nicht
-schreiben, endet der Durchlauf, bevor das Zielverzeichnis berührt wird. Ist der Pfad des Flags ein
-Symlink oder keine reguläre Datei oder lässt sich das Flag nicht lesen, verweigert der Durchlauf,
-bevor das Zielverzeichnis berührt wird; ein Flag ohne verwertbare Liste betroffener Links verweigert
-dagegen nicht (siehe unten). Noch bevor etwas entpackt wird, lehnt es dann einen Eintrag ab, dessen
-Pfad oder übergeordnete Verzeichnisse auf dem Host vorhandene Symlinks sind (ein Archiv-Symlink darf
-den Link an seinem eigenen Pfad ersetzen), eine Datei, einen Hardlink oder Symlink dort, wo der Host
-ein echtes Verzeichnis hat, sowie ein Verzeichnis – auch ein implizites Elternverzeichnis – dort, wo
-der Host kein Verzeichnis hat. Weiterhin vor jeder Kopie löst es die bereits unter `destination`
-vorhandenen Symlinks gemeinsam mit denen des Archivs auf: Ein Archiv-Symlink ersetzt einen
-vorhandenen Symlink am selben Pfad, vorhandene absolute Ziele innerhalb von `destination` sind
-erlaubt; jede andere Typ-Kombination am Pfad eines Eintrags, ein Eintrag unterhalb eines vorhandenen
-Symlinks, ein Link, der außerhalb von `destination` auflöst, oder ein Link, dessen Ziel durch einen
-Pfad führt, der sich von einem vorhandenen Symlink (des Archivs oder bereits auf dem Host) nur in
-Groß- und Kleinschreibung (U+1E9E, das große ẞ, zählt wie `ß` als `ss`), Unicode-Normalisierung
-(NFC, NFD oder Kompatibilitätsformen) oder ignorierbaren Zeichen wie U+200D, U+200C, U+FEFF oder
-U+00AD unterscheidet, verhindert das Entpacken, weil ein Dateisystem, das Groß- und Kleinschreibung
-nicht unterscheidet oder Namen normalisiert, diesem Symlink folgen kann. Die Link-Regeln des Archivs
+Backslashes gleich ausgeben. Ist die Archivliste geprüft, liest `archive.extract` noch vor dem
+Anlegen oder Prüfen des Zielverzeichnisses in einem Befehl alle Containment-Einträge dieses
+Zielverzeichnisses und legt seinen eigenen Eintrag `in-progress` an (siehe unten) – lässt er sich
+nicht anlegen, endet der Durchlauf, bevor das Zielverzeichnis berührt wird. Ist das
+Containment-Verzeichnis ein Symlink oder kein Verzeichnis, ist ein Containment-Eintrag oder die alte
+Flag-Datei ein Symlink oder keine reguläre Datei oder lässt sich ein Containment-Eintrag oder die
+alte Flag-Datei nicht lesen, verweigert der Durchlauf, bevor das Zielverzeichnis berührt wird; ein
+Containment-Eintrag ohne verwertbare Liste betroffener Links verweigert dagegen nicht (siehe unten).
+Noch bevor etwas entpackt wird, lehnt es dann einen Eintrag ab, dessen Pfad oder übergeordnete
+Verzeichnisse auf dem Host vorhandene Symlinks sind (ein Archiv-Symlink darf den Link an seinem
+eigenen Pfad ersetzen), eine Datei, einen Hardlink oder Symlink dort, wo der Host ein echtes
+Verzeichnis hat, sowie ein Verzeichnis – auch ein implizites Elternverzeichnis – dort, wo der Host
+kein Verzeichnis hat. Weiterhin vor jeder Kopie löst es die bereits unter `destination` vorhandenen
+Symlinks gemeinsam mit denen des Archivs auf: Ein Archiv-Symlink ersetzt einen vorhandenen Symlink
+am selben Pfad, vorhandene absolute Ziele innerhalb von `destination` sind erlaubt; jede andere
+Typ-Kombination am Pfad eines Eintrags, ein Eintrag unterhalb eines vorhandenen Symlinks, ein Link,
+der außerhalb von `destination` auflöst, oder ein Link, dessen Ziel durch einen Pfad führt, der sich
+von einem vorhandenen Symlink (des Archivs oder bereits auf dem Host) nur in Groß- und
+Kleinschreibung (U+1E9E, das große ẞ, zählt wie `ß` als `ss`), Unicode-Normalisierung (NFC, NFD oder
+Kompatibilitätsformen) oder ignorierbaren Zeichen wie U+200D, U+200C, U+FEFF oder U+00AD
+unterscheidet, verhindert das Entpacken, weil ein Dateisystem, das Groß- und Kleinschreibung nicht
+unterscheidet oder Namen normalisiert, diesem Symlink folgen kann. Die Link-Regeln des Archivs
 selbst (außer der Regel für den Stamm) vergleichen die Pfade der Einträge unter derselben Faltung:
 Der Symlink `x/L -> y` verhindert den Eintrag `x/l/f`, der Symlink `a/b/S -> ../../x` einen Hardlink
 `h` auf `a/b/s` und der Symlink `Foo -> bar` eine Datei `foo`; mehrfache Einträge ohne Symlink, etwa
@@ -218,15 +221,16 @@ vorhandener Symlink, dessen Pfad sich von einem Symlink des Archivs nur in Groß
 Kleinschreibung, Unicode-Normalisierung oder ignorierbaren Zeichen unterscheidet (etwa wenn der Host
 das `a/s` des Archivs als `A/S` auflistet), wird vor und nach dem Zusammenführen wie dieser Link des
 Archivs geprüft: Zeigt er nach außen, verhindert er das Entpacken, nach dem Zusammenführen lässt er
-den Durchlauf fehlschlagen, und das Flag bleibt stehen. Da dieser Vergleich lexikalisch ist, prüft
-er auf Hosts mit Unterscheidung von Groß- und Kleinschreibung womöglich auch einen unbeteiligten
-Link – das verweigert nur mehr, nie weniger. Jeder andere vorhandene Symlink – auch einer, der aus
-`destination` hinauszeigt, eine Schleife bildet oder einen ungewöhnlichen Namen trägt, etwa das
-`bin/python3 -> /usr/bin/python3` einer virtuellen Python-Umgebung – bleibt unbeachtet (außer von
-der unten beschriebenen Prüfung des ganzen Zielverzeichnisses) und unverändert. Ein Archiv ohne
-Symlinks (darunter jedes Zip-Archiv) kann nicht ändern, wie ein Pfad auflöst; für es führt diese
-Prüfung keinen Befehl aus, und die Prüfung nach dem Zusammenführen läuft nur, solange das Flag des
-Zielverzeichnisses gesetzt ist (siehe unten). Für ein Archiv mit Symlinks listet ein Befehl alle
+den Durchlauf fehlschlagen, und der Containment-Eintrag des Durchlaufs hält ihn fest. Da dieser
+Vergleich lexikalisch ist, prüft er auf Hosts mit Unterscheidung von Groß- und Kleinschreibung
+womöglich auch einen unbeteiligten Link – das verweigert nur mehr, nie weniger. Jeder andere
+vorhandene Symlink – auch einer, der aus `destination` hinauszeigt, eine Schleife bildet oder einen
+ungewöhnlichen Namen trägt, etwa das `bin/python3 -> /usr/bin/python3` einer virtuellen
+Python-Umgebung – bleibt unbeachtet (außer von der unten beschriebenen Prüfung des ganzen
+Zielverzeichnisses) und unverändert. Ein Archiv ohne Symlinks (darunter jedes Zip-Archiv) kann nicht
+ändern, wie ein Pfad auflöst; für es führt diese Prüfung keinen Befehl aus, und die Prüfung nach dem
+Zusammenführen läuft nur, solange Containment-Einträge des Zielverzeichnisses Links festhalten oder
+keine verwertbare Liste enthalten (siehe unten). Für ein Archiv mit Symlinks listet ein Befehl alle
 Symlinks unter `destination` mit Pfaden relativ dazu auf, bis zu einer Obergrenze von 64 MiB
 erfasster Ausgabe; ein Zielverzeichnis mit mehr Symlinks lässt die Prüfung mit der Meldung
 fehlschlagen, es enthalte zu viele Symlinks für die Prüfung. Die Liste überträgt jeden Namen
@@ -245,74 +249,107 @@ fehlschlagen.
 Der Host bricht das Zusammenführen per GNU `timeout` nach 100 Sekunden ab (10 Sekunden später
 erzwungen), also vor dem Befehls-Timeout von 120 Sekunden; fehlt `timeout`, scheitert das
 Zusammenführen, bevor etwas kopiert wird. Hat das Zusammenführen begonnen, läuft für ein Archiv mit
-Symlinks – und, solange das Flag gesetzt ist (siehe unten), für jedes Archiv – immer eine Prüfung
-derselben Links (der Symlinks des Archivs und jedes Symlinks, dessen Auflösung durch einen Pfad
-führt, den das Archiv schreibt), auch nach einem fehlgeschlagenen oder abgebrochenen Zusammenführen,
-das bereits Einträge kopiert haben kann: Sie löst die Links wie die Prüfung vor dem Zusammenführen
-auf, ohne den Host auflösen zu lassen, und wertet Namensvarianten ebenfalls als Verstoß. Danach
-fragt sie den Kernel in einem gebündelten Befehl (`test -e` und `test -ef`, begrenzt durch das
-Symlink-Limit des Kernels; nie `realpath` oder `readlink -f`), ob jeder geprüfte Link, den sie als
-innen liegend einstuft, tatsächlich den aufgelösten Pfad erreicht. Ein Link, der ein vorhandenes
-Objekt erreicht, muss genau diesen Pfad erreichen. Ein Link, der nichts erreicht, gilt deshalb
-allein noch nicht als unbedenklich, denn wer durch ihn schreibt, legt den fehlenden Namen dort an,
-wohin der Kernel den Rest seines Ziels auflöst: Die Prüfung geht den Zielpfad des Links von seiner
-vollen Länge zurück bis zum Verzeichnis des Links und vergleicht den ersten Punkt, der auf dem Host
-oder im Modell existiert, mit der Stelle, an die das Modell denselben Punkt legt; beide müssen
-existieren und dasselbe Objekt sein. Löst der Kernel einen Link zu einem anderen Objekt auf, weicht
-der nächste vorhandene Punkt ab oder existiert er nur auf einer Seite (etwa bei einem Ziel, das mit
-`..` aus einem fehlenden Verzeichnis heraussteigt, auch wenn sich durch den Link noch nichts
-schreiben lässt), oder existiert kein Punkt seines Zielpfads, gilt das als Verstoß. Lässt sich
-dieser Abgleich nicht vollständig durchführen, schlägt der Durchlauf fehl – auch dann, wenn der
-Eintrag eines geprüften Links für den Abgleich größer als 64 KiB würde (ein Ziel mit sehr vielen
-Segmenten). Ein Baum ohne Verstoß kostet zwei Befehle, wenn ein geprüfter Symlink als innen liegend
-eingestuft wird, sonst einen und für ein Archiv ohne Symlinks keinen (solange das Flag gesetzt ist:
-eine Liste und höchstens einen Abgleich), unabhängig von der Zahl der Einträge; ein Verstoß kostet
-keinen weiteren, die erneute Prüfung festgehaltener Links oder des ganzen Zielverzeichnisses für ein
-Archiv mit Symlinks ebenfalls nicht. Diese Prüfung meldet nur: Sie entfernt, verschiebt oder ändert
-nichts. Jeder verstoßende Link – einer, der außerhalb auflöst, einer, der sich innerhalb des
-Symlink-Limits nicht auflösen lässt, etwa bei einer Schleife, eine Namensvariante, eine Abweichung
-des Kernels oder ein Link, der sich wegen eines nicht lesbaren Verzeichnisses oder eines Namens ohne
-gültiges UTF-8 nicht prüfen lässt – lässt den Durchlauf fehlschlagen. Die Meldung nennt die ersten
-10 betroffenen Links mit Pfad, gespeichertem Ziel und Grund, fasst den Rest als `(and N more)`
-zusammen und hält fest, dass nichts entfernt oder geändert wurde. Die betroffenen Links müssen von
-Hand entfernt oder nach innen umgelenkt werden. Schlägt ein Durchlauf fehl, nachdem das
-Zusammenführen begonnen hat, hält das Flag die Links fest, die die Prüfung danach ermittelt hat,
-relativ zu `destination` (höchstens 256); ein Fehlschlag, bevor das Zusammenführen begonnen hat,
-hält nichts fest und behält die zuvor festgehaltenen Links. Ein späterer Durchlauf mit beliebiger
-Quelle für dieses Zielverzeichnis prüft die festgehaltenen Links in seiner eigenen Prüfung nach dem
-Zusammenführen erneut, mit derselben lexikalischen Auflösung und demselben Abgleich durch den
-Kernel: Jeder muss verschwunden sein oder nun innerhalb von `destination` auflösen, sonst schlägt
-der Durchlauf mit seinem Namen fehl, und das Flag bleibt stehen. Enthält das Flag keine verwertbare
-Liste – weil ein früherer Durchlauf nicht zu Ende kam (er wurde unterbrochen oder konnte sein
-Ergebnis nicht festhalten, oder ein anderer Durchlauf für dieses Zielverzeichnis läuft noch), seine
-Prüfung die Links nicht ermitteln konnte (etwa bei einer gescheiterten Liste oder einem Eintrag des
-Archivs in einem nicht lesbaren Verzeichnis), es für das Festhalten zu viele waren (mehr als 256
-Links oder 64 KiB) oder eine ältere paratix-Version es geschrieben hat oder es beschädigt ist –,
-läuft der Durchlauf trotzdem normal. Seine Prüfung nach dem Zusammenführen prüft dann das ganze
-Zielverzeichnis: Jeder Symlink unter `destination`, nicht nur die, auf die das Archiv wirken kann,
-muss mit derselben lexikalischen Auflösung und demselben Abgleich durch den Kernel innerhalb davon
-auflösen, bevor `owner` angewendet und die Marker-Dateien geschrieben werden; erst dann wird das
-Flag entfernt. Findet die Prüfung Links, die nach außen zeigen oder sich nicht auflösen lassen,
-schlägt der Durchlauf fehl und nennt sie wie oben, entfernt nichts, und das Flag hält genau diese
-Links fest, sodass der nächste Durchlauf nur sie erneut prüft. Lässt sich die Prüfung nicht
-vollständig durchführen (eine gescheiterte Liste, ein nicht lesbares Verzeichnis oder zu viele
-Symlinks), schlägt der Durchlauf mit dem Grund fehl, das Flag enthält weiterhin keine verwertbare
-Liste, und der nächste Durchlauf prüft wieder das ganze Zielverzeichnis. Diese Prüfung nutzt die
-Liste und den Abgleich der Prüfung nach dem Zusammenführen mit: Solange das Flag keine verwertbare
-Liste enthält, kostet sie für ein Archiv ohne Symlinks höchstens eine Liste und einen Abgleich
-zusätzlich, für ein Archiv mit Symlinks keinen weiteren Befehl. Nach einem unterbrochenen Durchlauf
-oder dem Aktualisieren von paratix ist deshalb nichts von Hand zu tun. Ein Zielverzeichnis, das
-absichtlich einen nach außen zeigenden Symlink enthält, besteht diese Prüfung nicht, solange das
-Flag keine verwertbare Liste enthält. Bleiben Verstöße bestehen, sind die betroffenen Links zu
-entfernen oder umzulenken, optional das Flag
-`/var/lib/paratix/flags/archive-containment-<sha256>.failed` zu löschen (die Meldung nennt den
-genauen Pfad) und der Durchlauf zu wiederholen. Bei einem Fehlschlag wird weder die Marker-Datei
-geschrieben noch `owner` angewendet. Das Flag wird erst entfernt, wenn ein Durchlauf einschließlich
-der erneuten Prüfung festgehaltener Links oder des ganzen Zielverzeichnisses, `owner` und
-Marker-Dateien vollständig gelingt; eine Ablehnung beim Anlegen oder Prüfen des Zielverzeichnisses,
-durch die Prüfungen vor dem Entpacken, durch die Prüfung vor dem Zusammenführen, beim Zusammenführen
-oder durch die Prüfung danach lässt es stehen, und solange es besteht, meldet `check` für jedes
-Archiv mit diesem Zielverzeichnis `needs-apply`.
+Symlinks – und, solange Containment-Einträge Links festhalten oder keine verwertbare Liste enthalten
+(siehe unten), für jedes Archiv – immer eine Prüfung derselben Links (der Symlinks des Archivs und
+jedes Symlinks, dessen Auflösung durch einen Pfad führt, den das Archiv schreibt), auch nach einem
+fehlgeschlagenen oder abgebrochenen Zusammenführen, das bereits Einträge kopiert haben kann: Sie
+löst die Links wie die Prüfung vor dem Zusammenführen auf, ohne den Host auflösen zu lassen, und
+wertet Namensvarianten ebenfalls als Verstoß. Danach fragt sie den Kernel in einem gebündelten
+Befehl (`test -e` und `test -ef`, begrenzt durch das Symlink-Limit des Kernels; nie `realpath` oder
+`readlink -f`), ob jeder geprüfte Link, den sie als innen liegend einstuft, tatsächlich den
+aufgelösten Pfad erreicht. Ein Link, der ein vorhandenes Objekt erreicht, muss genau diesen Pfad
+erreichen. Ein Link, der nichts erreicht, gilt deshalb allein noch nicht als unbedenklich, denn wer
+durch ihn schreibt, legt den fehlenden Namen dort an, wohin der Kernel den Rest seines Ziels
+auflöst: Die Prüfung geht den Zielpfad des Links von seiner vollen Länge zurück bis zum Verzeichnis
+des Links und vergleicht den ersten Punkt, der auf dem Host oder im Modell existiert, mit der
+Stelle, an die das Modell denselben Punkt legt; beide müssen existieren und dasselbe Objekt sein.
+Löst der Kernel einen Link zu einem anderen Objekt auf, weicht der nächste vorhandene Punkt ab oder
+existiert er nur auf einer Seite (etwa bei einem Ziel, das mit `..` aus einem fehlenden Verzeichnis
+heraussteigt, auch wenn sich durch den Link noch nichts schreiben lässt), oder existiert kein Punkt
+seines Zielpfads, gilt das als Verstoß. Lässt sich dieser Abgleich nicht vollständig durchführen,
+schlägt der Durchlauf fehl – auch dann, wenn der Eintrag eines geprüften Links für den Abgleich
+größer als 64 KiB würde (ein Ziel mit sehr vielen Segmenten). Ein Baum ohne Verstoß kostet zwei
+Befehle, wenn ein geprüfter Symlink als innen liegend eingestuft wird, sonst einen und für ein
+Archiv ohne Symlinks keinen (solange Containment-Einträge Links festhalten oder keine verwertbare
+Liste enthalten: eine Liste und höchstens einen Abgleich), unabhängig von der Zahl der Einträge; ein
+Verstoß kostet keinen weiteren, die erneute Prüfung festgehaltener Links oder des ganzen
+Zielverzeichnisses für ein Archiv mit Symlinks ebenfalls nicht. Diese Prüfung meldet nur: Sie
+entfernt, verschiebt oder ändert nichts. Jeder verstoßende Link – einer, der außerhalb auflöst,
+einer, der sich innerhalb des Symlink-Limits nicht auflösen lässt, etwa bei einer Schleife, eine
+Namensvariante, eine Abweichung des Kernels oder ein Link, der sich wegen eines nicht lesbaren
+Verzeichnisses oder eines Namens ohne gültiges UTF-8 nicht prüfen lässt – lässt den Durchlauf
+fehlschlagen. Die Meldung nennt die ersten 10 betroffenen Links mit Pfad, gespeichertem Ziel und
+Grund, fasst den Rest als `(and N more)` zusammen und hält fest, dass nichts entfernt oder geändert
+wurde. Die betroffenen Links müssen von Hand entfernt oder nach innen umgelenkt werden.
+
+Jeder Durchlauf hält sein Ergebnis in seinem eigenen Containment-Eintrag fest, einer Datei
+`run-<hex>` mit 32 Hex-Ziffern im Containment-Verzeichnis des Zielverzeichnisses,
+`/var/lib/paratix/flags/archive-containment-<sha256>.d/` (`<sha256>` ist der SHA-256-Hash des
+normalisierten Zielpfads). Er legt diesen Eintrag als `in-progress` an, bevor er das Zielverzeichnis
+berührt, ohne dabei einen vorhandenen Namen zu ersetzen, und er schreibt nur seinen eigenen Eintrag
+neu, nie den eines anderen Durchlaufs. Schlägt ein Durchlauf fehl, nachdem das Zusammenführen
+begonnen hat, hält sein Eintrag die Links fest, die die Prüfung danach ermittelt hat, relativ zu
+`destination` (höchstens 256); ein Fehlschlag, bevor das Zusammenführen begonnen hat, hat nichts
+veröffentlicht und hält eine leere Liste fest, während die Links, die andere Einträge festhalten, in
+diesen Einträgen bleiben. Ein späterer Durchlauf mit beliebiger Quelle für dieses Zielverzeichnis
+liest alle Einträge, bevor er das Zielverzeichnis berührt, und prüft die Links, die sie alle
+festhalten, in seiner eigenen Prüfung nach dem Zusammenführen erneut, mit derselben lexikalischen
+Auflösung und demselben Abgleich durch den Kernel: Jeder muss verschwunden sein oder nun innerhalb
+von `destination` auflösen, sonst schlägt der Durchlauf mit seinem Namen fehl, und sein eigener
+Eintrag hält ihn fest. Enthält ein Eintrag keine verwertbare Liste – weil ein früherer Durchlauf
+nicht zu Ende kam (er wurde unterbrochen oder konnte sein Ergebnis nicht festhalten, oder ein
+anderer Durchlauf für dieses Zielverzeichnis läuft noch), seine Prüfung die Links nicht ermitteln
+konnte (etwa bei einer gescheiterten Liste oder einem Eintrag des Archivs in einem nicht lesbaren
+Verzeichnis), es für das Festhalten zu viele waren (mehr als 256 Links oder 64 KiB) oder er
+beschädigt ist –, und ebenso, wenn die einzelne Flag-Datei `archive-containment-<sha256>.failed`
+älterer paratix-Versionen besteht oder es mehr als 16 Einträge gibt, läuft der Durchlauf trotzdem
+normal. Seine Prüfung nach dem Zusammenführen prüft dann das ganze Zielverzeichnis: Jeder Symlink
+unter `destination`, nicht nur die, auf die das Archiv wirken kann, muss mit derselben lexikalischen
+Auflösung und demselben Abgleich durch den Kernel innerhalb davon auflösen, bevor `owner` angewendet
+und die Marker-Dateien geschrieben werden. Findet die Prüfung Links, die nach außen zeigen oder sich
+nicht auflösen lassen, schlägt der Durchlauf fehl und nennt sie wie oben, entfernt nichts, und sein
+eigener Eintrag hält genau diese Links fest; die gelesenen Einträge bleiben ebenfalls stehen, sodass
+der nächste Durchlauf diese Links und wieder das ganze Zielverzeichnis prüft. Lässt sich die Prüfung
+nicht vollständig durchführen (eine gescheiterte Liste, ein nicht lesbares Verzeichnis oder zu viele
+Symlinks), schlägt der Durchlauf mit dem Grund fehl, sein Eintrag enthält keine verwertbare Liste,
+und der nächste Durchlauf prüft wieder das ganze Zielverzeichnis. Diese Prüfung nutzt die Liste und
+den Abgleich der Prüfung nach dem Zusammenführen mit: Solange ein Eintrag keine verwertbare Liste
+enthält, kostet sie für ein Archiv ohne Symlinks höchstens eine Liste und einen Abgleich zusätzlich,
+für ein Archiv mit Symlinks keinen weiteren Befehl. Das Lesen der Einträge und das Anlegen des
+eigenen kosten einen Befehl, das Entfernen nach einem Erfolg einen weiteren, unabhängig von der Zahl
+der Einträge. Nach einem unterbrochenen Durchlauf oder dem Aktualisieren von paratix ist deshalb
+nichts von Hand zu tun: Die alte Flag-Datei wird wie ein Eintrag ohne verwertbare Liste gelesen, und
+das ganze Zielverzeichnis wird geprüft, bevor sie entfernt wird. Ein Zielverzeichnis, das
+absichtlich einen nach außen zeigenden Symlink enthält, besteht diese Prüfung nicht, solange ein
+Eintrag keine verwertbare Liste enthält. Bleiben Verstöße bestehen, sind die betroffenen Links zu
+entfernen oder umzulenken, optional nach der Prüfung dieser Links die `run-*`-Einträge im
+Containment-Verzeichnis und, falls noch vorhanden, die alte Flag-Datei zu löschen und der Durchlauf
+zu wiederholen. Bei einem Fehlschlag wird weder die Marker-Datei geschrieben noch `owner`
+angewendet.
+
+Nur ein Durchlauf, der einschließlich der erneuten Prüfung festgehaltener Links oder des ganzen
+Zielverzeichnisses, `owner` und Marker-Dateien vollständig gelingt, entfernt Einträge, und zwar in
+einem letzten Befehl: jeden Eintrag, den er gelesen hat und dessen Inhalt sich seitdem nicht
+geändert hat (er übernimmt jeden per atomarem Umbenennen und vergleicht dessen SHA-256 mit dem
+gelesenen), die alte Flag-Datei eingeschlossen, und danach seinen eigenen. Ein Eintrag, der
+inzwischen neu geschrieben wurde, bleibt stehen, und der nächste Durchlauf liest ihn. Eine Ablehnung
+beim Anlegen oder Prüfen des Zielverzeichnisses, durch die Prüfungen vor dem Entpacken, durch die
+Prüfung vor dem Zusammenführen, beim Zusammenführen oder durch die Prüfung danach lässt den Eintrag
+des Durchlaufs stehen. Solange ein Eintrag oder die alte Flag-Datei besteht, und solange das
+Containment-Verzeichnis ein Symlink, kein Verzeichnis oder nicht lesbar ist, meldet `check` für
+jedes Archiv mit diesem Zielverzeichnis `needs-apply`.
+
+Gleichzeitige Durchläufe für ein Zielverzeichnis behalten bekannte Wettläufe. Ein
+`in-progress`-Eintrag eines Durchlaufs, der noch läuft, lässt sich nicht von einem unterscheiden,
+den ein unterbrochener Durchlauf hinterlassen hat; ein anderer Durchlauf, dessen Prüfung des ganzen
+Zielverzeichnisses sauber ist, kann ihn deshalb entfernen. Schlägt der laufende Durchlauf danach
+fehl, legt er seinen Eintrag mit seinem Ergebnis neu an; wird er dagegen abgebrochen, prüft niemand
+die Links, die sein Zusammenführen nach dieser Prüfung veröffentlicht hat. Einen Eintrag, der
+entsteht, nachdem ein Durchlauf die Einträge gelesen hat, fasst dieser Durchlauf nie an. Stürzt ein
+Durchlauf beim Entfernen der Einträge ab, bleibt ein Eintrag `run-…-claim-<n>` zurück, der ein
+gewöhnlicher Eintrag ist und `check` bei `needs-apply` hält. Ältere und neuere paratix-Versionen,
+die gleichzeitig für ein Zielverzeichnis laufen, stimmen sich nicht ab, weil ältere Versionen
+weiterhin die einzelne Flag-Datei verwenden.
 
 ---
 
