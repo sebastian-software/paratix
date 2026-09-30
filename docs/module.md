@@ -205,7 +205,14 @@ oder nach innen umgelenkt werden.
 Geprüft werden nur die Links, auf die das Archiv wirken kann: die Symlinks des Archivs selbst und
 jeder vorhandene Symlink, dessen Auflösung durch einen Pfad führt, den das Archiv schreibt (den Pfad
 eines Eintrags oder eines seiner Elternverzeichnisse, verglichen unter derselben Faltung von Groß-
-und Kleinschreibung und Normalisierung), direkt oder über einen weiteren solchen Link. Jeder andere
+und Kleinschreibung und Normalisierung), direkt oder über einen weiteren solchen Link. Ein
+vorhandener Symlink, dessen Pfad sich von einem Symlink des Archivs nur in Groß- und
+Kleinschreibung, Unicode-Normalisierung oder ignorierbaren Zeichen unterscheidet (etwa wenn der Host
+das `a/s` des Archivs als `A/S` auflistet), wird vor und nach dem Zusammenführen wie dieser Link des
+Archivs geprüft: Zeigt er nach außen, verhindert er das Entpacken, nach dem Zusammenführen lässt er
+den Durchlauf fehlschlagen, und das Flag bleibt stehen. Da dieser Vergleich lexikalisch ist, prüft
+er auf Hosts mit Unterscheidung von Groß- und Kleinschreibung womöglich auch einen unbeteiligten
+Link – das verweigert nur mehr, nie weniger. Jeder andere
 vorhandene Symlink – auch einer, der aus `destination` hinauszeigt, eine Schleife bildet oder einen
 ungewöhnlichen Namen trägt, etwa das `bin/python3 -> /usr/bin/python3` einer virtuellen
 Python-Umgebung – bleibt unbeachtet und unverändert. Ein Archiv ohne Symlinks (darunter jedes

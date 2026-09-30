@@ -7,6 +7,7 @@ import {
   preMergeContainmentVerdict,
   symlinkListingEntries,
 } from "../../src/modules/archiveContainmentEnforcement.js"
+import { archiveContainmentScope } from "../../src/modules/archiveContainmentScope.js"
 import {
   archiveLinkUnsafeReason,
   archiveSymlinkTargetPrefixes,
@@ -1066,6 +1067,50 @@ describe("name variants in the merged link set (Issue #219)", () => {
         ["d/up", ""],
       ])
     )
+  })
+})
+
+describe("archive links listed under another spelling (Issue #219)", () => {
+  // Issue #219: a case-preserving or normalizing filesystem can list the
+  // archive's own link under the spelling it keeps on disk, e.g. `A/S` for the
+  // member `a/s`, or NFD for an NFC member. Such a link is the archive's link
+  // and is judged even when its walk touches no written path.
+  const nfcE = "é"
+  const nfdE = "é"
+
+  it.each([
+    { listed: "a/s", name: "the literal member path", parent: "a" },
+    { listed: "A/S", name: "a different letter case", parent: "a" },
+    { listed: `${nfdE}/s`, name: "NFD for an NFC member path", parent: nfcE },
+  ])("judges the archive link a/s listed as $name", ({ listed, parent }) => {
+    const members = [member(`${parent}/`, "directory"), member(`${parent}/s`, "symlink", "t")]
+    // Walking `../../x` from the listed parent reaches the destination root,
+    // which the archive does not write, and then escapes.
+    const links = relativeLinks([
+      [listed, "../../x"],
+      // Issue #219: unrelated to the archive, so ignored although it escapes.
+      ["x/up", "../../y"],
+    ])
+
+    expect(mergedSymlinkViolations(links, archiveContainmentScope(members))).toStrictEqual([
+      { key: listed, kind: "escape" },
+    ])
+  })
+
+  it("refuses a host link A/S that escapes before an archive ships a/s", () => {
+    // Issue #219: on a case-insensitive host the listing shows the name the
+    // host keeps, so the model cannot tell whether `A/S` is the path the
+    // archive link replaces; the escaping link is judged, not ignored.
+    const verdict = preMergeContainmentVerdict(
+      "/opt/app",
+      ["l", "A/S", "../../x"],
+      [member("a/", "directory"), member("a/s", "symlink", "t")]
+    )
+
+    expect(verdict).toMatchObject({
+      kind: "violations",
+      violations: [{ key: "A/S", kind: "escape" }],
+    })
   })
 })
 

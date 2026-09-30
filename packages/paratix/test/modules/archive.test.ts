@@ -5772,6 +5772,42 @@ describe("archive.extract post-merge backstop (Issue #219)", () => {
     expect(run.mockSsh.calls).not.toContain(`rm -f -- '${containmentFlag}'`)
   })
 
+  it.each([
+    { listed: "a/s", name: "the literal member path", parent: "a" },
+    { listed: "A/S", name: "a different letter case", parent: "a" },
+    { listed: "é/s", name: "NFD for an NFC member path", parent: "é" },
+  ])(
+    "reports the archive's own link listed as $name after the merge and keeps the flag",
+    async ({ listed, parent }) => {
+      // Issue #219: the archive ships `<parent>/s -> t`, but the host changes
+      // the link during the merge and lists it only under the spelling it
+      // keeps on disk. Walking `../../x` from that parent touches no written
+      // path, yet the link is the archive's own and escapes.
+      const files = new Map<string, string>()
+      const listedLink = `${destination}/${listed}`
+
+      const run = await applyTarListing(
+        [tarDirectoryLine(`${parent}/`), tarSymlinkLine(`${parent}/s`, "t")],
+        {
+          backstopListings: [{ stdout: listingRecords(destination, [[listedLink, "../../x"]]) }],
+          files,
+          hostLinks: new Map(),
+        }
+      )
+
+      expect(run.result.status).toBe("failed")
+      expect(run.result.error?.message).toBe(
+        `${backstopRefusal}symlink ${JSON.stringify(listedLink)} -> "../../x" resolves outside destination ${JSON.stringify(destination)}; ${checkedAfterMerge}; ${nothingChanged}`
+      )
+      expect(callsFromBackstop(run)).toStrictEqual([symlinkListingProbeCommand])
+      expect(run.mockSsh.calls).not.toContain(`rm -f -- '${containmentFlag}'`)
+      expect(files.has(containmentFlag)).toBe(true)
+      await expect(checkAgainstHostFiles(src, files)).resolves.toMatchObject({
+        result: "needs-apply",
+      })
+    }
+  )
+
   it("fails closed on a listed link whose path is not normalized and changes nothing", async () => {
     // Issue #219: link paths arrive relative to the destination; one that is
     // not a normalized relative path cannot be keyed and fails the listing.

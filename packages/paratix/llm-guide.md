@@ -228,7 +228,12 @@ escaping link must then be removed or pointed inside.
 Only the links the archive can affect are judged: the archive's own symlinks and every existing
 symlink whose resolution passes through a path the archive writes (a member path or one of its
 parent directories, compared under the same case and normalization folding), directly or through
-another such link. Any other existing symlink, even one that points outside `destination`, loops or
+another such link. An existing symlink whose path differs from one of the archive's symlinks only by
+letter case, Unicode normalization or default-ignorable characters (the host listing the archive's
+`a/s` as `A/S`, for example) is judged like that archive link, before and after the merge: if it
+escapes, it refuses the extraction, or after the merge fails the run and keeps the flag set; being
+lexical, this may also judge an unrelated link on a case-sensitive host, which only refuses more.
+Any other existing symlink, even one that points outside `destination`, loops or
 has an unusual name (a virtual environment's `bin/python3 -> /usr/bin/python3`, for example), is
 ignored and never changed. An archive without symlinks (every zip archive among them) cannot change
 how any path resolves, so neither this check nor the check after the merge runs a command for it. For

@@ -35,7 +35,7 @@ function keyedMembers(
  * {@link archiveContainmentScope}.
  */
 export type ArchiveContainmentScope = {
-  /** Normalized paths of the archive's symlink members. */
+  /** {@link pathNameVariantKey} of the archive's symlink member paths. */
   archiveLinks: ReadonlySet<string>
   /**
    * {@link pathNameVariantKey} of every non-empty member path and of each of
@@ -96,10 +96,13 @@ export function unreadableDirectoryAt(
  * Every non-empty normalized member path and each of its non-empty proper
  * ancestors is written; they are kept by {@link pathNameVariantKey}, so a
  * host link that walks a differently spelled name of a written path counts
- * as touching it.
+ * as touching it. The archive's symlink member paths are kept by the same
+ * key: a host listing can report an archive link under its preserved or
+ * canonical spelling, e.g. `A/S` for member `a/s` or the NFD form of an NFC
+ * member, and that link must still be judged as the archive's own.
  *
  * @param members - The validated archive members.
- * @returns The archive's symlink keys and the variant keys of written paths.
+ * @returns The variant keys of the archive's symlinks and of written paths.
  */
 export function archiveContainmentScope(
   members: readonly ArchiveMember[]
@@ -108,7 +111,7 @@ export function archiveContainmentScope(
   const written = new Set<string>()
   for (const { key, member } of keyedMembers(members)) {
     if (key === "") continue
-    if (member.kind === "symlink") archiveLinks.add(key)
+    if (member.kind === "symlink") archiveLinks.add(pathNameVariantKey(key))
     written.add(pathNameVariantKey(key))
     for (let end = key.indexOf("/"); end !== -1; end = key.indexOf("/", end + 1)) {
       written.add(pathNameVariantKey(key.slice(0, end)))

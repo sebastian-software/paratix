@@ -45,6 +45,7 @@ import { unreadableDirectoryAt, unreadableDirectoryIndex } from "./archiveContai
 import { type ArchiveMember, normalizeArchiveMemberPath } from "./archiveMemberValidation.js"
 import {
   ArchiveSymlinkResolver,
+  pathNameVariantKey,
   type SymlinkFailure,
   type SymlinkTrailSource,
   type SymlinkWalkTarget,
@@ -528,7 +529,12 @@ function mergedViolation(key: string, failure: SymlinkFailure): MergedSymlinkVio
  * Issue #219: with a `scope`, only the links the archive can affect are
  * judged: the archive's own symlinks present in `links`, and every link whose
  * walk touched a path the archive writes, directly or through a link it
- * follows (see `TrackedSymlinkResolution`). A host link whose resolution
+ * follows (see `TrackedSymlinkResolution`). The archive's own symlinks are
+ * matched under `pathNameVariantKey`, like written paths, so a host that
+ * lists the archive's link under a case- or normalization-variant spelling
+ * still has it judged. On a case-sensitive host this also judges an unrelated
+ * host link whose path only folds to an archive link's path, which refuses
+ * more, never less. A host link whose resolution
  * passes through an archive link is covered by that archive link's own
  * resolution, which follows it. Every other link is ignored, even one that
  * escapes, loops, is unmappable or reaches an unreadable directory: the merge
@@ -559,7 +565,8 @@ export function mergedSymlinkResolutions(
   const violations: MergedSymlinkViolation[] = []
   for (const key of targets.keys()) {
     const { resolution, touched } = resolver.resolveTracked(key)
-    const relevant = scope === undefined || touched || scope.archiveLinks.has(key)
+    const relevant =
+      scope === undefined || touched || scope.archiveLinks.has(pathNameVariantKey(key))
     if (!relevant) continue
     if (resolution.kind === "resolved") inside.set(key, resolution.segments.join("/"))
     else violations.push(mergedViolation(key, resolution))
