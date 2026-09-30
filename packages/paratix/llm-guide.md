@@ -198,32 +198,37 @@ export default server({
 `archive.extract` extracts a tar symlink or hardlink only if its target, resolved from the link's
 own directory (hardlinks: from the archive root) and through the archive's own symlinks, stays
 inside `destination`; absolute targets, a link in place of the destination root, members below an
-archive symlink, and zip symlinks are rejected. The archive listing is decoded as strict UTF-8,
-never with replacement characters. `tar` lists the archive under a UTF-8 C locale (`C.UTF-8` or
-`C.utf8`) when the host has one and under `LC_ALL=C` otherwise (bsdtar always under `LC_ALL=C`); for
-GNU tar and bsdtar the escape sequences of the listing (`\NNN`, `\\` and the single-letter control
-escapes) are decoded back to the stored bytes, so non-ASCII names are accepted whatever locale the
-SSH session has. A member whose decoded name is not valid UTF-8, or whose name contains any other
-escape sequence, is rejected because it cannot be mapped to the extracted name. A member whose path
-or link target contains a backslash or U+FFFD is rejected in every listing, also after decoding,
-because another `tar` (such as BusyBox) and `unzip` print escape sequences and real backslashes
-alike. Once the archive listing is validated, it
-writes a per-destination flag before the destination is created or validated; an apply that cannot
-write it stops before the destination is touched. Before anything is staged, it then refuses a
-member whose path or parent directories are existing host symlinks (an archive symlink may replace
-the link at its own path), a file, hardlink or symlink member where the host has a real directory,
-and a directory, including an implied parent directory, where the host has a non-directory. Still
-before copying anything, it resolves the symlinks already under `destination` together with the
-archive's: an archive symlink replaces an existing symlink at the same path and existing absolute
-targets inside `destination` are allowed, while any other type combination at a member path, a
-member below an existing symlink, a link resolving outside `destination`, or a link whose target
-passes through a path that differs from an existing symlink (of the archive or already on the host)
-only by letter case (U+1E9E, the capital sharp s, counts as `ss`, like `ß`), Unicode normalization
-(NFC, NFD or compatibility forms) or default-ignorable characters such as U+200D, U+200C, U+FEFF or
-U+00AD refuses the extraction, because a case-insensitive or normalizing filesystem may follow that
-symlink; this comparison is purely lexical, so it refuses the same archives on case-sensitive hosts,
-and it may group more spellings than a given filesystem does, which only refuses more. An existing
-escaping link must then be removed or pointed inside.
+archive symlink, hardlinks to or through an archive symlink, a path that occurs more than once with
+a symlink among its occurrences and conflicting types or targets, and zip symlinks are rejected. The
+archive listing is decoded as strict UTF-8, never with replacement characters. `tar` lists the
+archive under a UTF-8 C locale (`C.UTF-8` or `C.utf8`) when the host has one and under `LC_ALL=C`
+otherwise (bsdtar always under `LC_ALL=C`); for GNU tar and bsdtar the escape sequences of the
+listing (`\NNN`, `\\` and the single-letter control escapes) are decoded back to the stored bytes,
+so non-ASCII names are accepted whatever locale the SSH session has. A member whose decoded name is
+not valid UTF-8, or whose name contains any other escape sequence, is rejected because it cannot be
+mapped to the extracted name. A member whose path or link target contains a backslash or U+FFFD is
+rejected in every listing, also after decoding, because another `tar` (such as BusyBox) and `unzip`
+print escape sequences and real backslashes alike. Once the archive listing is validated, it writes
+a per-destination flag before the destination is created or validated; an apply that cannot write it
+stops before the destination is touched. Before anything is staged, it then refuses a member whose
+path or parent directories are existing host symlinks (an archive symlink may replace the link at
+its own path), a file, hardlink or symlink member where the host has a real directory, and a
+directory, including an implied parent directory, where the host has a non-directory. Still before
+copying anything, it resolves the symlinks already under `destination` together with the archive's:
+an archive symlink replaces an existing symlink at the same path and existing absolute targets
+inside `destination` are allowed, while any other type combination at a member path, a member below
+an existing symlink, a link resolving outside `destination`, or a link whose target passes through a
+path that differs from an existing symlink (of the archive or already on the host) only by letter
+case (U+1E9E, the capital sharp s, counts as `ss`, like `ß`), Unicode normalization (NFC, NFD or
+compatibility forms) or default-ignorable characters such as U+200D, U+200C, U+FEFF or U+00AD
+refuses the extraction, because a case-insensitive or normalizing filesystem may follow that
+symlink. The archive's own link rules above (except the root-link rule) compare member paths under
+the same folding: symlink `x/L -> y` refuses member `x/l/f`, symlink `a/b/S -> ../../x` refuses a
+hardlink `h` to `a/b/s`, and symlink `Foo -> bar` refuses a file `foo`, while duplicates without a
+symlink, such as regular files `Makefile` and `makefile`, stay accepted. This comparison is purely
+lexical, so it refuses the same archives on case-sensitive hosts, and it may group more spellings
+than a given filesystem does, which only refuses more. An existing escaping link must then be
+removed or pointed inside.
 
 Only the links the archive can affect are judged: the archive's own symlinks and every existing
 symlink whose resolution passes through a path the archive writes (a member path or one of its

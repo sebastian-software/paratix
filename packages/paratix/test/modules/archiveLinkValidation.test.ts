@@ -961,8 +961,11 @@ describe("name variants in the archive-level check (Issue #219)", () => {
       member("d/esc", "symlink", "up/x"),
     ])
 
-    expect(reason).toContain('member "d/esc"')
-    expect(reason).toContain('existing symlink "d/UP"')
+    // Issue #219: the duplicate rule groups by `pathNameVariantKey`, so the two
+    // spellings with different targets are refused before any walk.
+    expect(reason).toBe(
+      'member "d/up" occurs more than once with conflicting link types or targets (also spelled "d/UP")'
+    )
   })
 
   it("refuses a symlink whose own parent path is a case variant of a symlink", () => {
@@ -972,8 +975,9 @@ describe("name variants in the archive-level check (Issue #219)", () => {
       member("D/esc", "symlink", "x"),
     ])
 
-    expect(reason).toContain('member "D/esc"')
-    expect(reason).toContain('passes through "D"')
+    // Issue #219: the ancestor rule compares by `pathNameVariantKey`, so
+    // `D/esc` is refused as a member below the symlink `d` before any walk.
+    expect(reason).toBe('member "D/esc" is below archive symlink "d"')
   })
 
   it("accepts an ordinary archive whose names differ by case only where no symlink is involved", () => {
@@ -1010,6 +1014,411 @@ describe("name variants in the archive-level check (Issue #219)", () => {
         member("d/esc", "symlink", "UP/x"),
       ])
     ).toStrictEqual([])
+  })
+})
+
+/** Issue #219: the wording of every conflicting-duplicate refusal. */
+const CONFLICTING_DUPLICATE_WORDING = "occurs more than once with conflicting link types or targets"
+
+/**
+ * Issue #219: the members of a Node.js binary distribution as `tar -t` lists
+ * them, with its launcher symlinks into `lib/node_modules`.
+ *
+ * @returns The members in listing order.
+ */
+function nodeDistributionMembers(): ArchiveMember[] {
+  return [
+    member("node-v22/", "directory"),
+    member("node-v22/bin/", "directory"),
+    member("node-v22/bin/node", "file"),
+    member("node-v22/bin/corepack", "symlink", "../lib/node_modules/corepack/dist/corepack.js"),
+    member("node-v22/bin/npm", "symlink", "../lib/node_modules/npm/bin/npm-cli.js"),
+    member("node-v22/bin/npx", "symlink", "../lib/node_modules/npm/bin/npx-cli.js"),
+    member("node-v22/include/", "directory"),
+    member("node-v22/include/node/", "directory"),
+    member("node-v22/include/node/node.h", "file"),
+    member("node-v22/lib/", "directory"),
+    member("node-v22/lib/node_modules/", "directory"),
+    member("node-v22/lib/node_modules/corepack/", "directory"),
+    member("node-v22/lib/node_modules/corepack/dist/", "directory"),
+    member("node-v22/lib/node_modules/corepack/dist/corepack.js", "file"),
+    member("node-v22/lib/node_modules/npm/", "directory"),
+    member("node-v22/lib/node_modules/npm/bin/", "directory"),
+    member("node-v22/lib/node_modules/npm/bin/npm-cli.js", "file"),
+    member("node-v22/lib/node_modules/npm/bin/npx-cli.js", "file"),
+    member("node-v22/share/", "directory"),
+    member("node-v22/share/man/", "directory"),
+    member("node-v22/share/man/man1/", "directory"),
+    member("node-v22/share/man/man1/node.1", "file"),
+    member("node-v22/CHANGELOG.md", "file"),
+    member("node-v22/LICENSE", "file"),
+    member("node-v22/README.md", "file"),
+  ]
+}
+
+/**
+ * Issue #219: the members of a JDK image with its `legal/` symlinks between
+ * modules and the `man/ja` locale alias.
+ *
+ * @returns The members in listing order.
+ */
+function jdkImageMembers(): ArchiveMember[] {
+  return [
+    member("jdk/", "directory"),
+    member("jdk/bin/", "directory"),
+    member("jdk/bin/java", "file"),
+    member("jdk/legal/", "directory"),
+    member("jdk/legal/java.base/", "directory"),
+    member("jdk/legal/java.base/ADDITIONAL_LICENSE_INFO", "file"),
+    member("jdk/legal/java.base/LICENSE", "file"),
+    member("jdk/legal/java.desktop/", "directory"),
+    member(
+      "jdk/legal/java.desktop/ADDITIONAL_LICENSE_INFO",
+      "symlink",
+      "../java.base/ADDITIONAL_LICENSE_INFO"
+    ),
+    member("jdk/legal/java.desktop/LICENSE", "symlink", "../java.base/LICENSE"),
+    member("jdk/man/", "directory"),
+    member("jdk/man/ja", "symlink", "ja_JP.UTF-8"),
+    member("jdk/man/ja_JP.UTF-8/", "directory"),
+    member("jdk/man/ja_JP.UTF-8/man1/", "directory"),
+    member("jdk/man/ja_JP.UTF-8/man1/java.1", "file"),
+    member("jdk/man/man1/", "directory"),
+    member("jdk/man/man1/java.1", "file"),
+  ]
+}
+
+/**
+ * Issue #219: the members of a packed Python virtual environment with its
+ * `lib64` and interpreter symlinks.
+ *
+ * @returns The members in listing order.
+ */
+function pythonVenvMembers(): ArchiveMember[] {
+  return [
+    member("venv/", "directory"),
+    member("venv/bin/", "directory"),
+    member("venv/bin/activate", "file"),
+    member("venv/bin/python", "symlink", "python3.12"),
+    member("venv/bin/python3", "symlink", "python3.12"),
+    member("venv/bin/python3.12", "file"),
+    member("venv/include/", "directory"),
+    member("venv/lib/", "directory"),
+    member("venv/lib/python3.12/", "directory"),
+    member("venv/lib/python3.12/site-packages/", "directory"),
+    member("venv/lib/python3.12/site-packages/x.py", "file"),
+    member("venv/lib64", "symlink", "lib"),
+    member("venv/pyvenv.cfg", "file"),
+  ]
+}
+
+/**
+ * Issue #219: the members of a Go distribution, whose `src/` holds names that
+ * start with differently cased prefixes (`Make.dist`, `make.bash`).
+ *
+ * @returns The members in listing order.
+ */
+function goDistributionMembers(): ArchiveMember[] {
+  return [
+    member("go/", "directory"),
+    member("go/bin/", "directory"),
+    member("go/bin/go", "file"),
+    member("go/bin/gofmt", "file"),
+    member("go/misc/", "directory"),
+    member("go/misc/wasm/", "directory"),
+    member("go/misc/wasm/wasm_exec.js", "file"),
+    member("go/src/", "directory"),
+    member("go/src/Make.dist", "file"),
+    member("go/src/make.bash", "file"),
+    member("go/src/make.bat", "file"),
+    member("go/src/make.rc", "file"),
+    member("go/VERSION", "file"),
+  ]
+}
+
+// Issue #219: the relationship rules (duplicate, ancestor, hardlink through a
+// symlink, hardlink to a symlink) compare member paths under
+// `pathNameVariantKey`, like the resolution rule, because a case-folding or
+// normalizing filesystem stores both spellings as one entry. The rules are
+// lexical, so they refuse on case-sensitive hosts too.
+describe("name variants in the archive relationship rules (Issue #219)", () => {
+  describe("ancestor rule", () => {
+    it("refuses a member below a case variant of an archive symlink", () => {
+      const reason = archiveLinkUnsafeReason([
+        member("x/", "directory"),
+        member("x/L", "symlink", "y"),
+        member("y/", "directory"),
+        member("x/l/f", "file"),
+      ])
+
+      expect(reason).toBe('member "x/l/f" is below archive symlink "x/L"')
+    })
+
+    it("refuses a member below the NFD spelling of an NFC archive symlink", () => {
+      const reason = archiveLinkUnsafeReason([
+        member("x/", "directory"),
+        member("x/é", "symlink", "y"),
+        member("y/", "directory"),
+        member("x/é/f", "file"),
+      ])
+
+      expect(reason).toBe('member "x/é/f" is below archive symlink "x/é"')
+    })
+
+    it("refuses a member below the NFC spelling of an NFD archive symlink", () => {
+      const reason = archiveLinkUnsafeReason([
+        member("x/", "directory"),
+        member("x/é", "symlink", "y"),
+        member("y/", "directory"),
+        member("x/é/f", "file"),
+      ])
+
+      expect(reason).toBe('member "x/é/f" is below archive symlink "x/é"')
+    })
+
+    it("refuses a member below a spelling of an archive symlink with a default-ignorable character", () => {
+      const reason = archiveLinkUnsafeReason([
+        member("x/", "directory"),
+        member("x/L", "symlink", "y"),
+        member("y/", "directory"),
+        member("x/L‍/f", "file"),
+      ])
+
+      expect(reason).toBe('member "x/L‍/f" is below archive symlink "x/L"')
+    })
+
+    it("refuses a directory member below a case variant of an archive symlink", () => {
+      const reason = archiveLinkUnsafeReason([
+        member("x/", "directory"),
+        member("x/L", "symlink", "y"),
+        member("y/", "directory"),
+        member("X/L/sub/", "directory"),
+      ])
+
+      expect(reason).toBe('member "X/L/sub/" is below archive symlink "x/L"')
+    })
+
+    it("refuses a hardlink member below a case variant of an archive symlink", () => {
+      const reason = archiveLinkUnsafeReason([
+        member("x/", "directory"),
+        member("x/L", "symlink", "y"),
+        member("y/", "directory"),
+        member("y/f", "file"),
+        member("x/l/h", "hardlink", "y/f"),
+      ])
+
+      expect(reason).toBe('member "x/l/h" is below archive symlink "x/L"')
+    })
+
+    it.each([
+      ["x/L", "x/l"],
+      ["x/l", "x/L"],
+    ])(
+      "reports the first listed spelling when symlinks %j and %j collide with the same target",
+      (first, second) => {
+        // Issue #219: identical targets pass the duplicate rule, so the ancestor
+        // rule reports the spelling listed first, even though the member's own
+        // parent matches the second spelling byte for byte.
+        const reason = archiveLinkUnsafeReason([
+          member("x/", "directory"),
+          member(first, "symlink", "../y"),
+          member(second, "symlink", "../y"),
+          member("y/", "directory"),
+          member(`${second}/f`, "file"),
+        ])
+
+        expect(reason).toBe(`member "${second}/f" is below archive symlink "${first}"`)
+      }
+    )
+
+    it("accepts a member below an unrelated name next to an archive symlink", () => {
+      expect(
+        archiveLinkUnsafeReason([
+          member("x/", "directory"),
+          member("x/L", "symlink", "y"),
+          member("y/", "directory"),
+          member("x/M/", "directory"),
+          member("x/M/f", "file"),
+        ])
+      ).toBeNull()
+    })
+
+    it("accepts a member below a longer name that starts with an archive symlink's name", () => {
+      expect(
+        archiveLinkUnsafeReason([
+          member("x/", "directory"),
+          member("x/L", "symlink", "y"),
+          member("y/", "directory"),
+          member("x/Lx/", "directory"),
+          member("x/Lx/f", "file"),
+        ])
+      ).toBeNull()
+    })
+  })
+
+  describe("hardlink through a symlink", () => {
+    it("refuses a hardlink whose target passes through a case variant of an archive symlink", () => {
+      const reason = archiveLinkUnsafeReason([
+        member("a/", "directory"),
+        member("a/b/", "directory"),
+        member("a/b/S", "symlink", "../../x"),
+        member("x/", "directory"),
+        member("x/f", "file"),
+        member("h", "hardlink", "a/b/s/f"),
+      ])
+
+      expect(reason).toBe('member "h" hardlinks to archive symlink "a/b/S"')
+    })
+
+    it("refuses a hardlink whose target passes through the NFD spelling of an NFC archive symlink", () => {
+      const reason = archiveLinkUnsafeReason([
+        member("a/", "directory"),
+        member("a/é", "symlink", "../x"),
+        member("x/", "directory"),
+        member("x/f", "file"),
+        member("h", "hardlink", "a/é/f"),
+      ])
+
+      expect(reason).toBe('member "h" hardlinks to archive symlink "a/é"')
+    })
+  })
+
+  describe("hardlink to a symlink", () => {
+    it("refuses a hardlink to a case variant of an archive symlink", () => {
+      const reason = archiveLinkUnsafeReason([
+        member("a/", "directory"),
+        member("a/b/", "directory"),
+        member("a/b/S", "symlink", "../../x"),
+        member("x", "file"),
+        member("h", "hardlink", "a/b/s"),
+      ])
+
+      expect(reason).toBe('member "h" hardlinks to archive symlink "a/b/S"')
+    })
+
+    it("refuses a hardlink to the NFD spelling of an NFC archive symlink", () => {
+      const reason = archiveLinkUnsafeReason([
+        member("a/", "directory"),
+        member("a/é", "symlink", "../x"),
+        member("x", "file"),
+        member("h", "hardlink", "a/é"),
+      ])
+
+      expect(reason).toBe('member "h" hardlinks to archive symlink "a/é"')
+    })
+
+    it("refuses a hardlink to the NFC spelling of an NFD archive symlink", () => {
+      const reason = archiveLinkUnsafeReason([
+        member("a/", "directory"),
+        member("a/é", "symlink", "../x"),
+        member("x", "file"),
+        member("h", "hardlink", "a/é"),
+      ])
+
+      expect(reason).toBe('member "h" hardlinks to archive symlink "a/é"')
+    })
+
+    it("accepts a hardlink to a regular file whose name matches an unrelated symlink elsewhere only by case", () => {
+      expect(
+        archiveLinkUnsafeReason([
+          member("a/", "directory"),
+          member("a/Readme", "symlink", "../b/Readme"),
+          member("b/", "directory"),
+          member("b/Readme", "file"),
+          member("b/readme", "file"),
+          member("h", "hardlink", "b/readme"),
+        ])
+      ).toBeNull()
+    })
+  })
+
+  describe("duplicates", () => {
+    it("refuses a symlink and a regular file whose names differ only by case", () => {
+      const reason = archiveLinkUnsafeReason([
+        member("Foo", "symlink", "bar"),
+        member("foo", "file"),
+        member("bar", "file"),
+      ])
+
+      expect(reason).toStrictEqual(expect.stringContaining(CONFLICTING_DUPLICATE_WORDING))
+      expect(reason).toStrictEqual(expect.stringContaining('member "Foo"'))
+    })
+
+    it("refuses a directory and a symlink whose names differ only by case", () => {
+      const reason = archiveLinkUnsafeReason([
+        member("D/", "directory"),
+        member("d", "symlink", "x"),
+        member("x", "file"),
+      ])
+
+      expect(reason).toStrictEqual(expect.stringContaining(CONFLICTING_DUPLICATE_WORDING))
+      expect(reason).toStrictEqual(expect.stringContaining('member "D/"'))
+    })
+
+    it("refuses NFC and NFD spellings of a symlink with different targets", () => {
+      const reason = archiveLinkUnsafeReason([
+        member("é", "symlink", "a"),
+        member("é", "symlink", "b"),
+        member("a", "file"),
+        member("b", "file"),
+      ])
+
+      expect(reason).toStrictEqual(expect.stringContaining(CONFLICTING_DUPLICATE_WORDING))
+      expect(reason).toStrictEqual(expect.stringContaining('member "é"'))
+    })
+
+    it("accepts plain files whose names differ only by case (Makefile, makefile)", () => {
+      expect(
+        archiveLinkUnsafeReason([member("Makefile", "file"), member("makefile", "file")])
+      ).toBeNull()
+    })
+
+    it("accepts Linux headers whose names differ only by case (xt_DSCP.h, xt_dscp.h)", () => {
+      expect(
+        archiveLinkUnsafeReason([
+          member("include/", "directory"),
+          member("include/xt_DSCP.h", "file"),
+          member("include/xt_dscp.h", "file"),
+        ])
+      ).toBeNull()
+    })
+
+    it("accepts identical duplicate symlinks", () => {
+      expect(
+        archiveLinkUnsafeReason([
+          member("l", "symlink", "t"),
+          member("l", "symlink", "t"),
+          member("t", "file"),
+        ])
+      ).toBeNull()
+    })
+  })
+
+  describe("root link rule", () => {
+    it.each([
+      ["symlink", "x"],
+      ["hardlink", "x"],
+    ] as const)(
+      "does not treat a %s named only with a default-ignorable character as a link at the destination root",
+      (kind, linkTarget) => {
+        // Issue #219: the name folds to "" but is not the destination root; the
+        // root-link rule stays literal. Another rule may still refuse it.
+        const reason = archiveLinkUnsafeReason([member("x", "file"), member("‍", kind, linkTarget)])
+
+        expect(reason).not.toStrictEqual(expect.stringContaining("destination root"))
+      }
+    )
+  })
+
+  describe("realistic archives", () => {
+    it.each([
+      ["a Node.js distribution", nodeDistributionMembers],
+      ["a JDK image", jdkImageMembers],
+      ["a Python virtual environment", pythonVenvMembers],
+      ["a Go distribution", goDistributionMembers],
+    ] as const)("accepts %s", (_name, members) => {
+      expect(archiveLinkUnsafeReason(members())).toBeNull()
+    })
   })
 })
 

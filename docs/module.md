@@ -170,33 +170,39 @@ laufen nur mit `allowInsecureHttp: true`.
 Tar-Symlinks und -Hardlinks werden nur entpackt, wenn ihr Ziel – bei Symlinks vom eigenen
 Verzeichnis aus, bei Hardlinks vom Archiv-Stamm aus und auch über die Symlinks des Archivs hinweg
 aufgelöst – innerhalb von `destination` bleibt; absolute Ziele, ein Link anstelle des
-Zielverzeichnisses selbst, Einträge unterhalb eines Archiv-Symlinks und Zip-Symlinks werden
-abgelehnt. Die Archivliste wird als striktes UTF-8 gelesen, nie mit Ersatzzeichen. `tar` listet das
-Archiv unter einer UTF-8-C-Locale (`C.UTF-8` oder `C.utf8`), wenn der Host eine hat, sonst unter
-`LC_ALL=C` (bsdtar immer unter `LC_ALL=C`); bei GNU tar und bsdtar werden die Escape-Sequenzen der
-Liste (`\NNN`, `\\` und die Ein-Buchstaben-Escapes für Steuerzeichen) in die gespeicherten Bytes
-zurückübersetzt, sodass Nicht-ASCII-Namen unabhängig von der Locale der SSH-Sitzung akzeptiert
-werden. Ein Eintrag, dessen zurückübersetzter Name kein gültiges UTF-8 ist oder der eine andere
-Escape-Sequenz enthält, wird abgelehnt, weil er sich nicht dem entpackten Namen zuordnen lässt. Ein
-Eintrag, dessen Pfad oder Link-Ziel einen Backslash oder U+FFFD enthält, wird in jeder Liste
-abgelehnt – auch nach dem Zurückübersetzen –, weil ein anderes `tar` (etwa BusyBox) und `unzip`
-Escape-Sequenzen und echte Backslashes gleich ausgeben. Ist die Archivliste geprüft,
-schreibt `archive.extract` ein Flag je Zielverzeichnis, noch bevor das Zielverzeichnis angelegt oder
-geprüft wird – lässt es sich nicht schreiben, endet der Durchlauf, bevor das Zielverzeichnis berührt
-wird. Noch bevor etwas entpackt wird, lehnt es dann einen Eintrag ab, dessen Pfad oder übergeordnete
-Verzeichnisse auf dem Host vorhandene Symlinks sind (ein Archiv-Symlink darf den Link an seinem
-eigenen Pfad ersetzen), eine Datei, einen Hardlink oder Symlink dort, wo der Host ein echtes
-Verzeichnis hat, sowie ein Verzeichnis – auch ein implizites Elternverzeichnis – dort, wo der Host
-kein Verzeichnis hat. Weiterhin vor jeder Kopie löst es die bereits unter `destination` vorhandenen
-Symlinks gemeinsam mit denen des Archivs auf: Ein Archiv-Symlink ersetzt einen vorhandenen Symlink
-am selben Pfad, vorhandene absolute Ziele innerhalb von `destination` sind erlaubt; jede andere
-Typ-Kombination am Pfad eines Eintrags, ein Eintrag unterhalb eines vorhandenen Symlinks, ein Link,
-der außerhalb von `destination` auflöst, oder ein Link, dessen Ziel durch einen Pfad führt, der sich
-von einem vorhandenen Symlink (des Archivs oder bereits auf dem Host) nur in Groß- und
-Kleinschreibung (U+1E9E, das große ẞ, zählt wie `ß` als `ss`), Unicode-Normalisierung (NFC, NFD
-oder Kompatibilitätsformen) oder ignorierbaren Zeichen wie U+200D, U+200C, U+FEFF oder U+00AD
+Zielverzeichnisses selbst, Einträge unterhalb eines Archiv-Symlinks, Hardlinks auf oder durch einen
+Archiv-Symlink, ein mehrfach vorkommender Pfad mit einem Symlink unter seinen Vorkommen und
+abweichenden Typen oder Zielen sowie Zip-Symlinks werden abgelehnt. Die Archivliste wird als
+striktes UTF-8 gelesen, nie mit Ersatzzeichen. `tar` listet das Archiv unter einer UTF-8-C-Locale
+(`C.UTF-8` oder `C.utf8`), wenn der Host eine hat, sonst unter `LC_ALL=C` (bsdtar immer unter
+`LC_ALL=C`); bei GNU tar und bsdtar werden die Escape-Sequenzen der Liste (`\NNN`, `\\` und die
+Ein-Buchstaben-Escapes für Steuerzeichen) in die gespeicherten Bytes zurückübersetzt, sodass
+Nicht-ASCII-Namen unabhängig von der Locale der SSH-Sitzung akzeptiert werden. Ein Eintrag, dessen
+zurückübersetzter Name kein gültiges UTF-8 ist oder der eine andere Escape-Sequenz enthält, wird
+abgelehnt, weil er sich nicht dem entpackten Namen zuordnen lässt. Ein Eintrag, dessen Pfad oder
+Link-Ziel einen Backslash oder U+FFFD enthält, wird in jeder Liste abgelehnt – auch nach dem
+Zurückübersetzen –, weil ein anderes `tar` (etwa BusyBox) und `unzip` Escape-Sequenzen und echte
+Backslashes gleich ausgeben. Ist die Archivliste geprüft, schreibt `archive.extract` ein Flag je
+Zielverzeichnis, noch bevor das Zielverzeichnis angelegt oder geprüft wird – lässt es sich nicht
+schreiben, endet der Durchlauf, bevor das Zielverzeichnis berührt wird. Noch bevor etwas entpackt
+wird, lehnt es dann einen Eintrag ab, dessen Pfad oder übergeordnete Verzeichnisse auf dem Host
+vorhandene Symlinks sind (ein Archiv-Symlink darf den Link an seinem eigenen Pfad ersetzen), eine
+Datei, einen Hardlink oder Symlink dort, wo der Host ein echtes Verzeichnis hat, sowie ein
+Verzeichnis – auch ein implizites Elternverzeichnis – dort, wo der Host kein Verzeichnis hat.
+Weiterhin vor jeder Kopie löst es die bereits unter `destination` vorhandenen Symlinks gemeinsam mit
+denen des Archivs auf: Ein Archiv-Symlink ersetzt einen vorhandenen Symlink am selben Pfad,
+vorhandene absolute Ziele innerhalb von `destination` sind erlaubt; jede andere Typ-Kombination am
+Pfad eines Eintrags, ein Eintrag unterhalb eines vorhandenen Symlinks, ein Link, der außerhalb von
+`destination` auflöst, oder ein Link, dessen Ziel durch einen Pfad führt, der sich von einem
+vorhandenen Symlink (des Archivs oder bereits auf dem Host) nur in Groß- und Kleinschreibung
+(U+1E9E, das große ẞ, zählt wie `ß` als `ss`), Unicode-Normalisierung (NFC, NFD oder
+Kompatibilitätsformen) oder ignorierbaren Zeichen wie U+200D, U+200C, U+FEFF oder U+00AD
 unterscheidet, verhindert das Entpacken, weil ein Dateisystem, das Groß- und Kleinschreibung nicht
-unterscheidet oder Namen normalisiert, diesem Symlink folgen kann. Dieser Vergleich ist rein
+unterscheidet oder Namen normalisiert, diesem Symlink folgen kann. Die Link-Regeln des Archivs
+selbst (außer der Regel für den Stamm) vergleichen die Pfade der Einträge unter derselben Faltung:
+Der Symlink `x/L -> y` verhindert den Eintrag `x/l/f`, der Symlink `a/b/S -> ../../x` einen Hardlink
+`h` auf `a/b/s` und der Symlink `Foo -> bar` eine Datei `foo`; mehrfache Einträge ohne Symlink, etwa
+die regulären Dateien `Makefile` und `makefile`, bleiben erlaubt. Dieser Vergleich ist rein
 lexikalisch, verweigert also auf Hosts mit Unterscheidung von Groß- und Kleinschreibung dieselben
 Archive, und er fasst womöglich mehr Schreibweisen zusammen als ein bestimmtes Dateisystem – das
 verweigert nur mehr, nie weniger. Ein vorhandener Link, der nach außen zeigt, muss dann entfernt

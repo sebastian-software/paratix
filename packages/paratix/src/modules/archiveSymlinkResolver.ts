@@ -206,6 +206,76 @@ function properAncestors(key: string): string[] {
 }
 
 /**
+ * Issue #219: the archive's symlinks indexed by {@link pathNameVariantKey}, so
+ * the archive-level relationship rules can find a symlink under any spelling a
+ * case-folding or normalizing filesystem treats as the same name.
+ *
+ * Meant to live for one `archiveLinkUnsafeReason` call. It memoizes the variant
+ * key of every path it is asked about, because the rules ask about every proper
+ * ancestor of every member and siblings share those prefixes, and it answers
+ * lookups without computing any key while the archive has no symlink.
+ */
+export class SymlinkVariantIndex {
+  private readonly keys = new Map<string, string>()
+  private readonly symlinks = new Map<string, string>()
+
+  /**
+   * @param symlinkKeys - Normalized destination-relative symlink paths, in
+   *   listing order; each variant key keeps the first literal path.
+   */
+  public constructor(symlinkKeys: Iterable<string>) {
+    for (const key of symlinkKeys) {
+      const variantKey = this.variantKey(key)
+      if (!this.symlinks.has(variantKey)) this.symlinks.set(variantKey, key)
+    }
+  }
+
+  /**
+   * Find the outermost proper ancestor of a path that names an indexed
+   * symlink, so `x/l/f` is below the symlink `x/L`.
+   *
+   * @param key - A normalized destination-relative path.
+   * @returns The symlink's literal path, or undefined when no proper ancestor
+   *   names a symlink.
+   */
+  public symlinkAncestor(key: string): string | undefined {
+    if (this.symlinks.size === 0) return undefined
+    for (const ancestor of properAncestors(key)) {
+      const symlink = this.symlinks.get(this.variantKey(ancestor))
+      if (symlink !== undefined) return symlink
+    }
+    return undefined
+  }
+
+  /**
+   * Find the indexed symlink a path names, so `a/b/s` names the symlink
+   * `a/b/S`.
+   *
+   * @param key - A normalized destination-relative path.
+   * @returns The symlink's literal path, or undefined when the path names none.
+   */
+  public symlinkAt(key: string): string | undefined {
+    if (this.symlinks.size === 0) return undefined
+    return this.symlinks.get(this.variantKey(key))
+  }
+
+  /**
+   * {@link pathNameVariantKey}, memoized for the lifetime of this index.
+   *
+   * @param path - A normalized destination-relative path.
+   * @returns The path's variant key.
+   */
+  public variantKey(path: string): string {
+    let variantKey = this.keys.get(path)
+    if (variantKey === undefined) {
+      variantKey = pathNameVariantKey(path)
+      this.keys.set(path, variantKey)
+    }
+    return variantKey
+  }
+}
+
+/**
  * Issue #219: resolves symlink targets through the archive's own symlinks.
  *
  * A walk starts from the segments of the link's parent and applies the

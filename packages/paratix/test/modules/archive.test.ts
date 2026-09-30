@@ -2916,6 +2916,35 @@ describe("archive.extract — apply", () => {
       )
     })
 
+    // Issue #219: a case-folding or normalizing filesystem stores `x/L` and
+    // `x/l` as one entry, so `x/l/f` would be written through the symlink.
+    it("rejects a member below a case variant of an archive symlink", async () => {
+      const run = await applyTarListing([
+        tarDirectoryLine("x/"),
+        tarSymlinkLine("x/L", "y"),
+        tarDirectoryLine("x/y/"),
+        tarFileLine("x/l/f"),
+      ])
+
+      expect(extractionSummary(run)).toStrictEqual(
+        refusedBeforeExtraction('member "x/l/f" is below archive symlink "x/L"')
+      )
+    })
+
+    it("rejects a hardlink to a case variant of an archive symlink member", async () => {
+      const run = await applyTarListing([
+        tarDirectoryLine("a/"),
+        tarDirectoryLine("a/b/"),
+        tarSymlinkLine("a/b/S", "../../x"),
+        tarFileLine("x"),
+        tarHardlinkLine("h", "a/b/s"),
+      ])
+
+      expect(extractionSummary(run)).toStrictEqual(
+        refusedBeforeExtraction('member "h" hardlinks to archive symlink "a/b/S"')
+      )
+    })
+
     // Issue #219: bsdtar lists a hardlink whose header mode field carries
     // S_IFREG bits with `-`, yet prints ` link to TARGET`, and `tar -x` makes
     // `h` a second name for the symlink `a/b/s -> ../../x`, which then reads

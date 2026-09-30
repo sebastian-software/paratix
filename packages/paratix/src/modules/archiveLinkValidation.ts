@@ -28,7 +28,13 @@
  *
  * Rules 3 and 4 make every archive symlink a leaf whose parent contains no
  * archive symlink, which is what lets rule 5 start each walk from the literal
- * parent path.
+ * parent path. Issue #219: rules 2, 3 and 4 compare paths by
+ * `pathNameVariantKey`, because a case-folding or normalizing filesystem
+ * stores `x/L` and `x/l` as one entry and tar would write through, or
+ * hardlink, the symlink under the other spelling. The comparison is lexical,
+ * so it refuses the same archives on case-sensitive hosts; it only ever
+ * refuses more. Rule 1 stays literal: a name made only of default-ignorable
+ * characters folds to `""` but is not the destination root.
  *
  * The same resolver also judges the combined post-merge link set — the links
  * already on the host plus the links this archive ships — before the staging
@@ -48,6 +54,7 @@ import {
   pathNameVariantKey,
   type SymlinkFailure,
   type SymlinkTrailSource,
+  SymlinkVariantIndex,
   type SymlinkWalkTarget,
   variantDescription,
 } from "./archiveSymlinkResolver.js"
@@ -173,65 +180,65 @@ function hardlinkTargetKey(member: ArchiveMember): null | string {
   return normalizeArchiveMemberPath(member.linkTarget)
 }
 
-/**
- * Find the outermost proper ancestor of a normalized path that is a symlink
- * member.
- *
- * @param key - A normalized archive path.
- * @param symlinkKeys - Normalized paths of all symlink members.
- * @returns The ancestor, or undefined when no proper ancestor is a symlink.
- */
-function symlinkAncestor(key: string, symlinkKeys: ReadonlySet<string>): string | undefined {
-  for (let end = key.indexOf("/"); end !== -1; end = key.indexOf("/", end + 1)) {
-    const ancestor = key.slice(0, end)
-    if (symlinkKeys.has(ancestor)) return ancestor
-  }
-  return undefined
-}
-
 function rootLinkReason(entries: readonly KeyedMember[]): null | string {
   const rootLink = entries.find(({ key, member }) => key === "" && isLink(member))
   if (rootLink === undefined) return null
   return `member ${JSON.stringify(rootLink.member.path)} is a link at the destination root`
 }
 
-function conflictingDuplicate(group: readonly ArchiveMember[]): ArchiveMember | undefined {
+function conflictingDuplicate(group: readonly KeyedMember[]): KeyedMember | undefined {
   if (group.length < 2) return undefined
   const [first] = group
-  if (!group.some((member) => member.kind === "symlink")) return undefined
+  if (!group.some(({ member }) => member.kind === "symlink")) return undefined
   const conflicts = group.some(
-    (member) => member.kind !== first.kind || member.linkTarget !== first.linkTarget
+    ({ member }) =>
+      member.kind !== first.member.kind || member.linkTarget !== first.member.linkTarget
   )
   return conflicts ? first : undefined
 }
 
-function duplicateReason(entries: readonly KeyedMember[]): null | string {
-  const groups = new Map<string, ArchiveMember[]>()
-  for (const { key, member } of entries) {
-    const group = groups.get(key)
-    if (group === undefined) groups.set(key, [member])
-    else group.push(member)
+/**
+ * Issue #219: members are grouped by `pathNameVariantKey`, so a symlink `Foo`
+ * and a file `foo` conflict. Only a group with a symlink can conflict, which
+ * keeps plain files like `Makefile` and `makefile` acceptable; link targets
+ * are still compared literally.
+ *
+ * @param entries - The members with their normalized paths.
+ * @param symlinks - The archive's symlinks, whose variant keys are memoized.
+ * @returns The reason naming the group's first member, or null.
+ */
+function duplicateReason(
+  entries: readonly KeyedMember[],
+  symlinks: SymlinkVariantIndex
+): null | string {
+  const groups = new Map<string, KeyedMember[]>()
+  for (const entry of entries) {
+    const variantKey = symlinks.variantKey(entry.key)
+    const group = groups.get(variantKey)
+    if (group === undefined) groups.set(variantKey, [entry])
+    else group.push(entry)
   }
   for (const group of groups.values()) {
     const duplicate = conflictingDuplicate(group)
-    if (duplicate !== undefined) {
-      return `member ${JSON.stringify(duplicate.path)} occurs more than once with conflicting link types or targets`
-    }
+    if (duplicate === undefined) continue
+    const other = group.find(({ key }) => key !== duplicate.key)?.member.path
+    const spelling = other === undefined ? "" : ` (also spelled ${JSON.stringify(other)})`
+    return `member ${JSON.stringify(duplicate.member.path)} occurs more than once with conflicting link types or targets${spelling}`
   }
   return null
 }
 
 function ancestorReason(
   entries: readonly KeyedMember[],
-  symlinkKeys: ReadonlySet<string>
+  symlinks: SymlinkVariantIndex
 ): null | string {
   for (const { key, member } of entries) {
-    const ancestor = symlinkAncestor(key, symlinkKeys)
+    const ancestor = symlinks.symlinkAncestor(key)
     if (ancestor !== undefined) {
       return `member ${JSON.stringify(member.path)} is below archive symlink ${JSON.stringify(ancestor)}`
     }
     const targetKey = hardlinkTargetKey(member)
-    const targetAncestor = targetKey === null ? undefined : symlinkAncestor(targetKey, symlinkKeys)
+    const targetAncestor = targetKey === null ? undefined : symlinks.symlinkAncestor(targetKey)
     if (targetAncestor !== undefined) {
       return `member ${JSON.stringify(member.path)} hardlinks to archive symlink ${JSON.stringify(targetAncestor)}`
     }
@@ -241,12 +248,14 @@ function ancestorReason(
 
 function hardlinkToSymlinkReason(
   entries: readonly KeyedMember[],
-  symlinkKeys: ReadonlySet<string>
+  symlinks: SymlinkVariantIndex
 ): null | string {
   for (const { member } of entries) {
     const targetKey = hardlinkTargetKey(member)
-    if (targetKey !== null && symlinkKeys.has(targetKey)) {
-      return `member ${JSON.stringify(member.path)} hardlinks to archive symlink ${JSON.stringify(targetKey)}`
+    // Issue #219: `h link to a/b/s` names the symlink `a/b/S` on a case-folding filesystem.
+    const symlink = targetKey === null ? undefined : symlinks.symlinkAt(targetKey)
+    if (symlink !== undefined) {
+      return `member ${JSON.stringify(member.path)} hardlinks to archive symlink ${JSON.stringify(symlink)}`
     }
   }
   return null
@@ -288,15 +297,17 @@ function resolutionReason(
   return null
 }
 
-function symlinkKeySet(entries: readonly KeyedMember[]): Set<string> {
-  return new Set(entries.filter(({ member }) => member.kind === "symlink").map(({ key }) => key))
-}
-
 /**
  * Issue #219: return why the links of an archive are unsafe as a whole, or
  * null when they may be extracted. Runs the root-link, duplicate, ancestor,
  * hardlink-to-symlink and resolution rules in that order and reports the first
  * offending member of the first failing rule.
+ *
+ * The duplicate, ancestor and hardlink-to-symlink rules compare member paths
+ * by `pathNameVariantKey`, because case-folding or normalizing filesystems
+ * store variant spellings as one entry. That comparison is lexical, so the
+ * same archives are refused on case-sensitive hosts too, which only refuses
+ * more. The root-link rule stays literal.
  *
  * Expects members that already passed `archiveMemberUnsafeReason`, so absolute
  * targets, control characters and zip symlinks never reach these rules.
@@ -306,12 +317,14 @@ function symlinkKeySet(entries: readonly KeyedMember[]): Set<string> {
  */
 export function archiveLinkUnsafeReason(members: readonly ArchiveMember[]): null | string {
   const entries = keyedMembers(members)
-  const symlinkKeys = symlinkKeySet(entries)
+  const symlinks = new SymlinkVariantIndex(
+    entries.filter(({ member }) => member.kind === "symlink").map(({ key }) => key)
+  )
   return (
     rootLinkReason(entries) ??
-    duplicateReason(entries) ??
-    ancestorReason(entries, symlinkKeys) ??
-    hardlinkToSymlinkReason(entries, symlinkKeys) ??
+    duplicateReason(entries, symlinks) ??
+    ancestorReason(entries, symlinks) ??
+    hardlinkToSymlinkReason(entries, symlinks) ??
     resolutionReason(entries, archiveResolver(entries))
   )
 }
