@@ -2198,17 +2198,24 @@ function runMergeExec(parameters: {
  * case can stop the merge while `find` runs.
  *
  * @param workspace - The workspace from {@link makeGuardTransportWorkspace}.
+ * @param sleepSeconds - How long the stand-in sleeps before it exits with 0.
  * @returns The environment that puts the stand-in first on PATH and uses the
  *   workspace `TMPDIR`, and the start marker file.
  */
-function sleepingFindShim(workspace: ReturnType<typeof makeGuardTransportWorkspace>): {
+function sleepingFindShim(
+  workspace: ReturnType<typeof makeGuardTransportWorkspace>,
+  sleepSeconds = 30
+): {
   env: NodeJS.ProcessEnv
   started: string
 } {
   const bin = join(workspace.root, "bin")
   const started = join(workspace.root, "find-started")
   mkdirSync(bin)
-  writeFileSync(join(bin, "find"), `#!/bin/sh\n: > ${shellQuote(started)}\nexec sleep 30\n`)
+  writeFileSync(
+    join(bin, "find"),
+    `#!/bin/sh\n: > ${shellQuote(started)}\nexec sleep ${String(sleepSeconds)}\n`
+  )
   chmodSync(join(bin, "find"), 0o755)
   const path = [bin, process.env.PATH].filter((entry) => entry !== undefined).join(":")
   return { env: { ...process.env, PATH: path, TMPDIR: workspace.tmp }, started }
@@ -2228,6 +2235,54 @@ function signalProcessGroup(child: ChildProcess, signal: NodeJS.Signals): void {
   } catch {
     // Already gone.
   }
+}
+
+/** Issue #219: how a stopped merge shell exited. */
+type MergeExit = {
+  code: null | number
+  signal: NodeJS.Signals | null
+}
+
+/**
+ * Issue #219: start the command and stdin of `buildStagingMergeExec` in its
+ * own process group, like the one GNU `timeout` creates, with the `find`
+ * stand-in from {@link sleepingFindShim}, so a case can stop the merge while
+ * `find` runs.
+ *
+ * Issue #219: the child runs `exec` + the command, so the detached child is
+ * the merge shell itself. dash (Ubuntu's `/bin/sh`) keeps a trap-less wrapper
+ * shell for `sh -c` with a single command, where bash replaces itself with
+ * that command; a signal then stops the wrapper at once, and the case would
+ * observe its exit while the merge shell still runs its `TERM`/`EXIT` traps.
+ * Production runs the merge shell directly under `timeout`, which execs `sh`.
+ *
+ * @param workspace - The workspace from {@link makeGuardTransportWorkspace}.
+ * @param findSeconds - How long the `find` stand-in sleeps.
+ * @returns The detached child, a promise of its exit, and the stand-in's start
+ *   marker file.
+ */
+function spawnDetachedMerge(
+  workspace: ReturnType<typeof makeGuardTransportWorkspace>,
+  findSeconds?: number
+): { child: ChildProcess; exited: Promise<MergeExit>; started: string } {
+  const { env, started } = sleepingFindShim(workspace, findSeconds)
+  const { command, input } = buildStagingMergeExec({
+    destination: workspace.destination,
+    guardPaths: syntheticGuardPaths(workspace.destination, 10),
+    staging: workspace.staging,
+  })
+  const child = spawn("/bin/sh", ["-c", `exec ${command}`], {
+    detached: true,
+    env,
+    stdio: ["pipe", "ignore", "ignore"],
+  })
+  const exited = new Promise<MergeExit>((resolve) => {
+    child.on("exit", (code, signal) => {
+      resolve({ code, signal })
+    })
+  })
+  child.stdin.end(input)
+  return { child, exited, started }
 }
 
 /**
@@ -2339,44 +2394,50 @@ describe.skipIf(SKIP_PLATFORM)(
       }
     })
 
-    it("removes the guard file when the merge is stopped with SIGTERM", async () => {
-      const workspace = makeGuardTransportWorkspace()
-      const { env, started } = sleepingFindShim(workspace)
-      const { command, input } = buildStagingMergeExec({
-        destination: workspace.destination,
-        guardPaths: syntheticGuardPaths(workspace.destination, 10),
-        staging: workspace.staging,
-      })
-      // Its own process group, like the one GNU `timeout` creates, so the
-      // signal reaches the outer shell and `find` together.
-      const child = spawn("/bin/sh", ["-c", command], {
-        detached: true,
-        env,
-        stdio: ["pipe", "ignore", "ignore"],
-      })
-      const exited = new Promise<{ code: null | number; signal: NodeJS.Signals | null }>(
-        (resolve) => {
-          child.on("exit", (code, signal) => {
-            resolve({ code, signal })
-          })
+    // The signal reaches the merge shell and `find` together, as the host
+    // timeout sends it, so `find` returns at once and the trap runs.
+    it.each<[NodeJS.Signals, number]>([
+      ["SIGHUP", 129],
+      ["SIGINT", 130],
+      ["SIGTERM", 143],
+    ])(
+      "removes the guard file when the merge is stopped with %s: exit %i",
+      async (signal, code) => {
+        const workspace = makeGuardTransportWorkspace()
+        const { child, exited, started } = spawnDetachedMerge(workspace)
+        try {
+          expect(await appeared(started)).toBe(true)
+          expect(readdirSync(workspace.tmp)).toHaveLength(1)
+
+          signalProcessGroup(child, signal)
+
+          expect(await exited).toStrictEqual({ code, signal: null })
+          expect(readdirSync(workspace.tmp)).toStrictEqual([])
+        } finally {
+          signalProcessGroup(child, "SIGKILL")
+          rmSync(workspace.root, { force: true, recursive: true })
         }
-      )
+      },
+      15_000
+    )
+
+    it("removes the guard file once find returns when only the merge shell gets SIGTERM: exit 143", async () => {
+      const workspace = makeGuardTransportWorkspace()
+      // Issue #219: the shell defers the trap until the foreground `find`
+      // returns. The stand-in sleeps 3 s, long enough that the signal
+      // arrives while it runs even on a loaded runner, so the merge cannot
+      // finish with exit 0 first, and the shell visibly waits at least 1 s.
+      const { child, exited, started } = spawnDetachedMerge(workspace, 3)
       try {
-        child.stdin.end(input)
         expect(await appeared(started)).toBe(true)
         expect(readdirSync(workspace.tmp)).toHaveLength(1)
 
-        signalProcessGroup(child, "SIGTERM")
+        // `kill` signals the merge shell alone, not its process group.
+        const signalled = Date.now()
+        child.kill("SIGTERM")
 
-        // Issue #219: shells report the stop differently. Observed: bash and
-        // macOS dash exit with 143 from `trap 'exit 143' TERM`, while dash on
-        // Ubuntu is reported as terminated by SIGTERM. Either way the shell
-        // has exited, so the EXIT trap must already have removed the file.
-        const { code, signal } = await exited
-        expect([
-          { code: 143, signal: null },
-          { code: null, signal: "SIGTERM" },
-        ]).toContainEqual({ code, signal })
+        expect(await exited).toStrictEqual({ code: 143, signal: null })
+        expect(Date.now() - signalled).toBeGreaterThanOrEqual(1000)
         expect(readdirSync(workspace.tmp)).toStrictEqual([])
       } finally {
         signalProcessGroup(child, "SIGKILL")

@@ -339,6 +339,17 @@ export function buildStagingMergeScript(): string {
  * harmless root-owned list of destination paths that the next run does not
  * read. `find` is not the last command (`; exit $?`), so the shell cannot
  * `exec` it and skip the trap.
+ *
+ * Issue #219: a signal sent to the merge shell alone takes effect only after
+ * the running foreground command (normally `find`) returns, because a shell
+ * runs a trap only once the foreground command it waits for has completed.
+ * The process-group signal of the host timeout also reaches `find` and its
+ * `sh -c`/`cp` children, so there the traps run promptly. `find` deliberately
+ * stays in the foreground instead of `find … & wait`: as an asynchronous
+ * command of a non-interactive shell it would start with `SIGINT` and
+ * `SIGQUIT` ignored, so an `INT` to the process group would no longer stop it
+ * or its children, and once the shell had exited, the timeout would see its
+ * child gone and stop signalling the group, leaving `find` copying unbounded.
  */
 const STAGING_MERGE_GUARD_FILE_SCRIPT = [
   String.raw`guard_file=; `,
