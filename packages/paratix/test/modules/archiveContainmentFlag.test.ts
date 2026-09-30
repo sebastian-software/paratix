@@ -8,10 +8,12 @@ import {
   CONTAINMENT_FLAG_BODY_LIMIT_BYTES,
   CONTAINMENT_FLAG_LINK_LIMIT,
   containmentFlagBody,
+  establishContainmentFlag,
   parseContainmentFlag,
   readContainmentFlag,
+  recordWithoutVerification,
   TOO_MANY_OFFENDING_LINKS,
-  unknownContainmentStateRefusal,
+  UNVERIFIED_DESTINATION,
 } from "../../src/modules/archiveContainmentFlag.js"
 import { buildKernelCrossCheckScript } from "../../src/modules/archiveKernelCrossCheck.js"
 import { buildSymlinkListingProbeScript } from "../../src/modules/archiveProbe.js"
@@ -145,14 +147,6 @@ describe("containment flag body (Issue #219)", () => {
       kind: "unknown",
       why: "records a failed apply whose offending links are not known (too many offending links)",
     })
-  })
-
-  it("names the destination, the flag and the manual steps in the refusal", () => {
-    expect(
-      unknownContainmentStateRefusal({ destination, flag, source, why: "holds nothing usable" })
-    ).toBe(
-      `[archive.extract] refusing to extract ${source}: the symlink containment state of ${destination} is unknown: containment flag ${flag} holds nothing usable; check the symlinks under ${destination} manually, remove any that resolve outside it or point them inside, then remove the flag with rm -f -- '${flag}' and run the apply again`
-    )
   })
 })
 
@@ -295,12 +289,17 @@ function fileMember(path: string): ArchiveMember {
 
 /**
  * Issue #219: a connection that answers the backstop listing with fixed
- * records and confirms every link the kernel cross-check carries.
+ * records and gives every link the kernel cross-check carries one verdict.
  *
  * @param listing - The listing's NUL-framed records.
+ * @param verdict - The cross-check verdict for every link: `same` confirms
+ *   the resolver, `differ` (at level 0) contradicts it.
  * @returns The connection and the commands it ran.
  */
-function backstopConnection(listing: string): { commands: string[]; conn: SshConnection } {
+function backstopConnection(
+  listing: string,
+  verdict: "differ" | "same" = "same"
+): { commands: string[]; conn: SshConnection } {
   const commands: string[] = []
   const conn = {
     async exec(command: string, options?: ExecOptions): Promise<ExecResult> {
@@ -311,7 +310,7 @@ function backstopConnection(listing: string): { commands: string[]; conn: SshCon
       const stdout = (options?.input ?? "")
         .split("\u0000")
         .filter((entry) => entry !== "")
-        .map((entry) => `${entry.slice(0, entry.indexOf("//"))}\u0000same\u00000\u0000`)
+        .map((entry) => `${entry.slice(0, entry.indexOf("//"))}\u0000${verdict}\u00000\u0000`)
         .join("")
       return { code: 0, stderr: "", stdout }
     },
@@ -425,6 +424,192 @@ describe("runSymlinkContainmentBackstop recorded links (Issue #219)", () => {
       members: [fileMember("f")],
       recordedLinks: ["a/esc"],
       source,
+    })
+
+    expect(outcome.failure?.error?.message).toContain("symlink containment check failed")
+    expect(outcome.offendingLinks).toBe("unidentified")
+  })
+})
+
+/**
+ * Issue #219: a connection whose flag read answers with a fixed result and
+ * whose `writeFile` records every write.
+ *
+ * @param read - The flag read's result.
+ * @returns The connection and the bodies written, by path.
+ */
+function flagConnection(read: Partial<ExecResult>): {
+  conn: SshConnection
+  writes: Array<[string, string]>
+} {
+  const writes: Array<[string, string]> = []
+  const conn = {
+    async exec(): Promise<ExecResult> {
+      await Promise.resolve()
+      return { code: 0, stderr: "", stdout: "", ...read }
+    },
+    async writeFile(path: string, content: string): Promise<void> {
+      await Promise.resolve()
+      writes.push([path, content])
+    },
+  } as unknown as SshConnection
+  return { conn, writes }
+}
+
+describe("establishContainmentFlag (Issue #219)", () => {
+  const paths = { directory: "/var/lib/paratix/flags", flag, source }
+
+  it.each([
+    { name: "the fixed text of older versions", stdout: "present\narchive apply in progress\n" },
+    { name: "an empty flag", stdout: "present\n" },
+    {
+      name: "an in-progress body",
+      stdout: `present\n${containmentFlagBody({ links: ["a/esc"], state: "in-progress" })}`,
+    },
+    {
+      name: "an unknown record",
+      stdout: `present\n${containmentFlagBody({ reason: TOO_MANY_OFFENDING_LINKS, state: "unknown" })}`,
+    },
+  ])(
+    "runs the apply after $name and asks for a destination-wide verification",
+    async ({ stdout }) => {
+      const { conn, writes } = flagConnection({ stdout })
+
+      await expect(establishContainmentFlag(conn, paths)).resolves.toStrictEqual({
+        carried: [],
+        verifyWholeDestination: true,
+      })
+      expect(writes).toStrictEqual([
+        [flag, containmentFlagBody({ links: [], state: "in-progress" })],
+      ])
+    }
+  )
+
+  it("carries a recorded list without a destination-wide verification", async () => {
+    const { conn, writes } = flagConnection({
+      stdout: `present\n${containmentFlagBody({ links: ["a/esc"], state: "failed" })}`,
+    })
+
+    await expect(establishContainmentFlag(conn, paths)).resolves.toStrictEqual({
+      carried: ["a/esc"],
+      verifyWholeDestination: false,
+    })
+    expect(writes).toStrictEqual([
+      [flag, containmentFlagBody({ links: ["a/esc"], state: "in-progress" })],
+    ])
+  })
+
+  it("still refuses a symlink at the flag path and writes nothing", async () => {
+    const { conn, writes } = flagConnection({ code: 3 })
+
+    const outcome = await establishContainmentFlag(conn, paths)
+
+    expect(outcome).toMatchObject({ status: "failed" })
+    expect(writes).toStrictEqual([])
+  })
+})
+
+describe("recordWithoutVerification (Issue #219)", () => {
+  it("keeps the carried links when the replaced flag recorded them", () => {
+    expect(
+      recordWithoutVerification({ carried: ["a/esc"], verifyWholeDestination: false })
+    ).toStrictEqual({ links: ["a/esc"], state: "failed" })
+  })
+
+  it("stays unknown, never an empty failed record, when the replaced flag held no usable list", () => {
+    const record = recordWithoutVerification({ carried: [], verifyWholeDestination: true })
+
+    expect(record).toStrictEqual({ reason: UNVERIFIED_DESTINATION, state: "unknown" })
+    expect(parseContainmentFlag(containmentFlagBody(record)).kind).toBe("unknown")
+  })
+})
+
+describe("runSymlinkContainmentBackstop destination-wide verification (Issue #219)", () => {
+  const whole = { destination, source, verifyWholeDestination: true } as const
+
+  it("runs the listing alone for an archive without symlinks on a destination without links", async () => {
+    const { commands, conn } = backstopConnection("")
+
+    await expect(
+      runSymlinkContainmentBackstop(conn, { ...whole, members: [fileMember("f")] })
+    ).resolves.toStrictEqual({ failure: null, offendingLinks: [] })
+    expect(commands).toStrictEqual([listingCommand])
+  })
+
+  it("judges an escaping link the archive cannot affect and says the whole destination was checked", async () => {
+    // Issue #219: the same link passes the archive-scoped backstop, see
+    // "does not judge unrelated links for an archive without symlinks".
+    const { conn } = backstopConnection("l\u0000b/esc\u0000../..\u0000")
+
+    const outcome = await runSymlinkContainmentBackstop(conn, {
+      ...whole,
+      members: [fileMember("a/f")],
+    })
+
+    expect(outcome.offendingLinks).toStrictEqual(["b/esc"])
+    expect(outcome.failure?.error?.message).toContain(
+      'symlink "/opt/app/b/esc" -> "../.." resolves outside destination "/opt/app"; after the merge, every symlink under the destination is checked'
+    )
+  })
+
+  it("carries every link judged inside, unrelated ones included, in one cross-check", async () => {
+    const execs: Array<{ command: string; input: string | undefined }> = []
+    const { conn: inner } = backstopConnection(
+      "l\u0000a/l\u0000f\u0000l\u0000x/in\u0000f\u0000l\u0000y/in\u0000../a/f\u0000"
+    )
+    const conn = {
+      async exec(command: string, options?: ExecOptions): Promise<ExecResult> {
+        execs.push({ command, input: options?.input })
+        return inner.exec(command, options)
+      },
+    } as unknown as SshConnection
+
+    await expect(
+      runSymlinkContainmentBackstop(conn, { ...whole, members: [symlinkMember("a/l", "f")] })
+    ).resolves.toStrictEqual({ failure: null, offendingLinks: [] })
+
+    expect(execs.map(({ command }) => command)).toStrictEqual([listingCommand, crossCheckCommand])
+    const carried = String(execs[1]?.input)
+    for (const link of ["/opt/app/a/l", "/opt/app/x/in", "/opt/app/y/in"]) {
+      expect(carried).toContain(link)
+    }
+  })
+
+  it("identifies no links when any directory is unreadable, even with no member below it", async () => {
+    const { conn } = backstopConnection("u\u0000locked\u0000l\u0000b/esc\u0000../..\u0000")
+
+    const outcome = await runSymlinkContainmentBackstop(conn, {
+      ...whole,
+      members: [fileMember("a/f")],
+    })
+
+    expect(outcome.offendingLinks).toBe("unidentified")
+    expect(outcome.failure?.error?.message).toContain(
+      'directory "/opt/app/locked" is not readable, so the symlinks below it cannot be checked'
+    )
+  })
+
+  it("reports the offending links in listing order, kernel mismatches included", async () => {
+    // Issue #219: the kernel disagrees about `m/in`, which the listing reports
+    // between two escaping links; the resolver finds those first.
+    const listing =
+      "l\u0000z/esc\u0000../..\u0000l\u0000m/in\u0000f\u0000l\u0000a/esc\u0000/etc\u0000"
+    const { conn } = backstopConnection(listing, "differ")
+
+    const outcome = await runSymlinkContainmentBackstop(conn, {
+      ...whole,
+      members: [fileMember("f")],
+    })
+
+    expect(outcome.offendingLinks).toStrictEqual(["z/esc", "m/in", "a/esc"])
+  })
+
+  it("identifies no links when the listing cannot be trusted", async () => {
+    const { conn } = backstopConnection("x\u0000")
+
+    const outcome = await runSymlinkContainmentBackstop(conn, {
+      ...whole,
+      members: [fileMember("f")],
     })
 
     expect(outcome.failure?.error?.message).toContain("symlink containment check failed")

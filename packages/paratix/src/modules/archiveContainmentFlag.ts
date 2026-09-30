@@ -22,8 +22,12 @@
  * A later apply of any source re-verifies the recorded links in its post-merge
  * backstop and clears the flag only after they and everything else passed.
  * Without a usable list — an unknown or in-progress record, a flag written by
- * an older paratix version, anything damaged — the apply refuses before it
- * touches the destination and asks for a manual check.
+ * an older paratix version, anything damaged — the apply still runs, but its
+ * post-merge backstop judges every symlink under the destination, not only
+ * the ones the archive can affect, and clears the flag only when that
+ * destination-wide verification is complete and finds no violation. A flag
+ * path that is a symlink or not a regular file, or a read that fails, still
+ * refuses the apply before it touches the destination.
  */
 import type { ModuleResult, SshConnection } from "../types.js"
 
@@ -60,6 +64,13 @@ export const TOO_MANY_OFFENDING_LINKS = "too many offending links"
 /** Issue #219: the `unknown` reason when the backstop could not identify the offending links. */
 export const UNIDENTIFIED_OFFENDING_LINKS =
   "the symlink containment check could not identify the offending links"
+
+/**
+ * Issue #219: the `unknown` reason when an apply that started from a flag
+ * without a usable list failed before its backstop verified the destination.
+ */
+export const UNVERIFIED_DESTINATION =
+  "an earlier apply left no usable list of offending links, and the destination has not been verified since"
 
 /**
  * Issue #219: the outcome an apply records in the flag when it fails.
@@ -262,8 +273,9 @@ function flagReadFailure(flag: string, result: { code: number; stderr: string })
 /**
  * Issue #219: read the containment flag in one exec, creating the flags
  * directory first. Output that is not valid UTF-8 or exceeds the capture cap
- * holds no usable list; an exec that fails or throws otherwise leaves the
- * flag unreadable, which the caller refuses.
+ * holds no usable list, which makes the caller verify the whole destination;
+ * an exec that fails or throws otherwise leaves the flag unreadable, which the
+ * caller refuses.
  *
  * @param conn - The SSH connection.
  * @param parameters - Paths.
@@ -335,70 +347,80 @@ async function writeContainmentFlag(
 }
 
 /**
- * Issue #219: the refusal for a flag without a usable list of offending links.
+ * Issue #219: what an apply learned from the flag it replaced.
  *
- * @param parameters - Refusal inputs.
- * @param parameters.destination - The destination the flag belongs to.
- * @param parameters.flag - The containment flag path.
- * @param parameters.source - The archive source.
- * @param parameters.why - Why the flag holds no usable list.
- * @returns The refusal message, with the manual steps that clear the flag.
+ * - `carried`: the links a failed apply recorded; the post-merge backstop
+ *   re-verifies them. Empty for an absent flag or one without a usable list.
+ * - `verifyWholeDestination`: the flag held no usable list, so the post-merge
+ *   backstop judges every symlink under the destination.
  */
-export function unknownContainmentStateRefusal(parameters: {
-  destination: string
-  flag: string
-  source: string
-  why: string
-}): string {
-  const { destination, flag, source, why } = parameters
-  return `[archive.extract] refusing to extract ${source}: the symlink containment state of ${destination} is unknown: containment flag ${flag} ${why}; check the symlinks under ${destination} manually, remove any that resolve outside it or point them inside, then remove the flag with rm -f -- ${shellQuote(flag)} and run the apply again`
+export type ContainmentFlagPrior = {
+  carried: readonly string[]
+  verifyWholeDestination: boolean
 }
 
 /**
  * Issue #219: read the flag and put the `in-progress` body in place before
  * the destination is touched.
  *
- * A flag without a usable list refuses the apply before anything is written
- * and leaves the flag as it is. A flag that cannot be read, or an
- * `in-progress` body that cannot be written, refuses the apply as well.
- * Otherwise the recorded links (none for an absent flag) are carried into the
- * new body and returned, so the post-merge backstop can re-verify them.
+ * A flag that cannot be read — a symlink or other non-regular file at the
+ * flag path, a flags directory that cannot be created, a read that fails or
+ * throws — refuses the apply before anything is written, and so does an
+ * `in-progress` body that cannot be written. A flag without a usable list of
+ * offending links does not refuse: the apply runs and verifies the whole
+ * destination after its merge. Otherwise the recorded links (none for an
+ * absent flag) are carried into the new body and returned, so the post-merge
+ * backstop can re-verify them.
  *
  * @param conn - The SSH connection.
  * @param parameters - Flag inputs.
- * @param parameters.destination - The validated destination directory.
  * @param parameters.directory - The flags directory.
  * @param parameters.flag - The containment flag path.
  * @param parameters.source - The archive source, for failure messages.
- * @returns The carried links, or the refusal.
+ * @returns What the replaced flag said, see {@link ContainmentFlagPrior}, or
+ *   the refusal.
  */
 export async function establishContainmentFlag(
   conn: SshConnection,
-  parameters: { destination: string; directory: string; flag: string; source: string }
-): Promise<{ carried: readonly string[] } | ModuleResult> {
-  const { destination, flag, source } = parameters
+  parameters: { directory: string; flag: string; source: string }
+): Promise<ContainmentFlagPrior | ModuleResult> {
+  const { flag, source } = parameters
   const refusal = (reason: string): ModuleResult =>
     failed(
       `[archive.extract] refusing to extract ${source}: ${reason}; the flag must be in place before the destination is touched`
     )
   const state = await readContainmentFlag(conn, parameters)
   if (state.kind === "unreadable") return refusal(state.reason)
-  if (state.kind === "unknown") {
-    return failed(unknownContainmentStateRefusal({ destination, flag, source, why: state.why }))
-  }
   const carried = state.kind === "recorded" ? state.links : []
   const writeFailure = await writeContainmentFlag(conn, flag, {
     links: carried,
     state: "in-progress",
   })
   if (writeFailure !== null) return refusal(writeFailure)
-  return { carried }
+  return { carried, verifyWholeDestination: state.kind === "unknown" }
+}
+
+/**
+ * Issue #219: what a failure records when the apply's backstop has not
+ * verified the destination — before the merge, or after a throw before it.
+ * Nothing was published, so the flag keeps saying what it said before: the
+ * carried links, or `unknown` when the replaced flag held no usable list; an
+ * empty `failed` list would claim a verification that never happened.
+ *
+ * @param prior - What the replaced flag said.
+ * @returns The `failed` record of the carried links, or an `unknown` record.
+ */
+export function recordWithoutVerification(prior: ContainmentFlagPrior): ContainmentFlagRecord {
+  return prior.verifyWholeDestination
+    ? { reason: UNVERIFIED_DESTINATION, state: "unknown" }
+    : { links: prior.carried, state: "failed" }
 }
 
 /**
  * Issue #219: record a failed apply's outcome in the flag, best effort. When
- * the write fails, the `in-progress` body stays, which reads as unknown, and
- * the write failure is appended to the apply's failure.
+ * the write fails, the `in-progress` body stays, which reads as unknown, so
+ * the next apply verifies the whole destination; the write failure is
+ * appended to the apply's failure.
  *
  * @param conn - The SSH connection.
  * @param parameters - Record inputs.
@@ -416,7 +438,7 @@ export async function recordContainmentFailure(
   if (recordFailure === null) return failure
   const message = failure.error?.message ?? "[archive.extract] apply failed"
   return failed(
-    `${message}; [archive.extract] ${recordFailure}; the flag still marks the apply as unfinished, so the next apply refuses until the symlinks are checked manually`
+    `${message}; [archive.extract] ${recordFailure}; the flag still marks the apply as unfinished, so the next apply verifies the whole destination`
   )
 }
 

@@ -330,7 +330,7 @@ const SKIP_UNLESS_UNREADABLE_REPORTED = SKIP_AS_ROOT || !HAS_GNU_FIND
  * only reports and says so.
  */
 const BACKSTOP_REPORT_TAIL =
-  "after the merge, the archive's symlinks and every symlink under the destination whose resolution passes through a path the archive writes are checked, including links it did not ship; nothing was removed or changed; remove the offending symlinks under the destination or point them inside it manually before the next run; the containment flag records them and keeps check at needs-apply, and a later apply of any source clears it only after re-verifying them"
+  "after the merge, the archive's symlinks and every symlink under the destination whose resolution passes through a path the archive writes are checked, including links it did not ship; nothing was removed or changed; while the offending symlinks remain, remove them or point them inside the destination manually; the containment flag keeps check at needs-apply, and a later apply of any source verifies them again (every symlink under the destination when the flag could not record them) and clears the flag only when they pass"
 
 describe.skipIf(SKIP_PLATFORM)("archive.extract staging merge shell smoke tests", () => {
   it("refuses a staging entry whose name contains a literal newline", () => {
