@@ -51,6 +51,10 @@ import {
   preMergeContainmentVerdict,
   symlinkListingEntries,
 } from "../../src/modules/archiveContainmentEnforcement.js"
+import {
+  containmentFlagBody,
+  readContainmentFlag,
+} from "../../src/modules/archiveContainmentFlag.js"
 import { archiveContainmentScope } from "../../src/modules/archiveContainmentScope.js"
 import {
   archiveMemberGuardPaths,
@@ -326,7 +330,7 @@ const SKIP_UNLESS_UNREADABLE_REPORTED = SKIP_AS_ROOT || !HAS_GNU_FIND
  * only reports and says so.
  */
 const BACKSTOP_REPORT_TAIL =
-  "after the merge, the archive's symlinks and every symlink under the destination whose resolution passes through a path the archive writes are checked, including links it did not ship; nothing was removed or changed; remove the offending symlinks under the destination or point them inside it manually before the next run, the containment flag keeps check at needs-apply until an apply succeeds"
+  "after the merge, the archive's symlinks and every symlink under the destination whose resolution passes through a path the archive writes are checked, including links it did not ship; nothing was removed or changed; remove the offending symlinks under the destination or point them inside it manually before the next run; the containment flag records them and keeps check at needs-apply, and a later apply of any source clears it only after re-verifying them"
 
 describe.skipIf(SKIP_PLATFORM)("archive.extract staging merge shell smoke tests", () => {
   it("refuses a staging entry whose name contains a literal newline", () => {
@@ -3031,6 +3035,120 @@ describe.skipIf(SKIP_PLATFORM || !ACCEPTS_NON_UTF8_NAMES)(
       } finally {
         rmSync(root, { force: true, recursive: true })
       }
+    })
+  }
+)
+
+/**
+ * Issue #219: run the production flag read against a scratch flags
+ * directory whose path needs quoting.
+ *
+ * @param prepare - Sets up the flag before the read; receives the flags
+ *   directory (not yet created) and the flag path.
+ * @returns What the read reports, and whether the flags directory exists.
+ */
+async function readPreparedFlag(
+  prepare?: (paths: { directory: string; flag: string }) => void
+): Promise<{
+  directoryExists: boolean
+  state: Awaited<ReturnType<typeof readContainmentFlag>>
+}> {
+  const root = mkdtempSync(join(tmpdir(), "paratix-flag-read-"))
+  try {
+    const directory = join(root, "it's flags")
+    const flag = join(directory, "archive-containment-0123.failed")
+    prepare?.({ directory, flag })
+    const { conn } = localShellConnection()
+    const state = await readContainmentFlag(conn, { directory, flag })
+    return { directoryExists: existsSync(directory), state }
+  } finally {
+    rmSync(root, { force: true, recursive: true })
+  }
+}
+
+describe.skipIf(SKIP_PLATFORM)(
+  "archive.extract containment flag read shell smoke tests (Issue #219)",
+  () => {
+    it("creates the flags directory and reports an absent flag", async () => {
+      await expect(readPreparedFlag()).resolves.toStrictEqual({
+        directoryExists: true,
+        state: { kind: "absent" },
+      })
+    })
+
+    it("tells an empty flag apart from an absent one", async () => {
+      const { state } = await readPreparedFlag(({ directory, flag }) => {
+        mkdirSync(directory)
+        writeFileSync(flag, "")
+      })
+
+      expect(state).toStrictEqual({
+        kind: "unknown",
+        why: expect.stringContaining("no usable list"),
+      })
+    })
+
+    it("reads a recorded list, including a key with an unmappable-segment token", async () => {
+      const links = ["a/esc", "b/\u0000ff/l"]
+      const { state } = await readPreparedFlag(({ directory, flag }) => {
+        mkdirSync(directory)
+        writeFileSync(flag, containmentFlagBody({ links, state: "failed" }))
+      })
+
+      expect(state).toStrictEqual({ kind: "recorded", links })
+    })
+
+    it("reads a flag that is not valid UTF-8 as unknown", async () => {
+      const { state } = await readPreparedFlag(({ directory, flag }) => {
+        mkdirSync(directory)
+        writeFileSync(flag, Buffer.from([0x7b, 0xff, 0x7d]))
+      })
+
+      expect(state).toStrictEqual({
+        kind: "unknown",
+        why: expect.stringContaining("not valid UTF-8"),
+      })
+    })
+
+    it.each([
+      {
+        name: "a symlink to a recorded flag",
+        prepare({ directory, flag }: { directory: string; flag: string }): void {
+          mkdirSync(directory)
+          writeFileSync(
+            join(directory, "real"),
+            containmentFlagBody({ links: [], state: "failed" })
+          )
+          symlinkSync("real", flag)
+        },
+        reason: "is a symlink",
+      },
+      {
+        name: "a dangling symlink",
+        prepare({ directory, flag }: { directory: string; flag: string }): void {
+          mkdirSync(directory)
+          symlinkSync("missing", flag)
+        },
+        reason: "is a symlink",
+      },
+      {
+        name: "a directory",
+        prepare({ flag }: { directory: string; flag: string }): void {
+          mkdirSync(flag, { recursive: true })
+        },
+        reason: "exists but is not a regular file",
+      },
+      {
+        name: "a flags directory path that is a regular file",
+        prepare({ directory }: { directory: string; flag: string }): void {
+          writeFileSync(directory, "")
+        },
+        reason: "failed to create archive marker directory for containment-failure flag",
+      },
+    ])("refuses to read $name", async ({ prepare, reason }) => {
+      const { state } = await readPreparedFlag(prepare)
+
+      expect(state).toStrictEqual({ kind: "unreadable", reason: expect.stringContaining(reason) })
     })
   }
 )

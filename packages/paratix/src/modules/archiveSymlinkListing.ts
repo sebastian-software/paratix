@@ -219,12 +219,12 @@ type ListingState = {
 /**
  * Issue #219: whether a listed path is a normalized, non-empty path relative
  * to the destination: no leading or trailing `/`, no empty, `.` or `..`
- * segment.
+ * segment. The containment flag validates its recorded links with it too.
  *
  * @param path - The decoded path.
  * @returns True when the path may be used as a key.
  */
-function isNormalizedRelativePath(path: string): boolean {
+export function isNormalizedRelativePath(path: string): boolean {
   return path.split("/").every((segment) => segment !== "" && segment !== "." && segment !== "..")
 }
 
