@@ -321,4 +321,176 @@ describe("listArchiveMembers with the listing mode line (Issue #219)", () => {
       members: [{ path: "paratix-tar-listing gnu C" }, { path: "app/\\303\\236" }],
     })
   })
+
+  // Issue #219: bsdtar prints ` link to TARGET` for every hardlink entry but
+  // takes the mode character from the type bits of the header's mode field, so
+  // a hardlink whose mode field carries S_IFREG, S_IFLNK or S_IFDIR lists with
+  // `-`, `l` or `d` instead of `h`. Deciding link-ness from the mode character
+  // alone let such a hardlink to a symlink bypass the hardlink rules.
+  it.each([
+    { mode: "hrw-r--r--", name: "the hardlink mode character" },
+    { mode: "-rw-r--r--", name: "a regular-file mode character" },
+    { mode: "lrw-r--r--", name: "a symlink mode character" },
+    { mode: "drw-r--r--", name: "a directory mode character" },
+  ])("reads a bsdtar ` link to ` line with $name as a hardlink", async ({ mode }) => {
+    const result = await listMocked(
+      `paratix-tar-listing bsd C\n${mode}  ${bsdFields} h link to a/b/s\n`
+    )
+
+    expect(result).toStrictEqual({
+      members: [{ format: "tar", kind: "hardlink", linkTarget: "a/b/s", mode, path: "h" }],
+    })
+  })
+
+  it("reads a bsdtar regular file named `notes link to readme` as a hardlink to readme", async () => {
+    // Issue #219: bsdtar lists this regular file exactly like a hardlink
+    // `notes` whose mode field carries S_IFREG, so the listing cannot tell them
+    // apart; the parser reads the hardlink, whose rules are the stricter ones.
+    const result = await listMocked(
+      `paratix-tar-listing bsd C\n-rw-r--r--  ${bsdFields} notes link to readme\n`
+    )
+
+    expect(result).toStrictEqual({
+      members: [
+        {
+          format: "tar",
+          kind: "hardlink",
+          linkTarget: "readme",
+          mode: "-rw-r--r--",
+          path: "notes",
+        },
+      ],
+    })
+  })
+
+  it("keeps a bsdtar special file with ` link to ` in its name a special file", async () => {
+    // Issue #219: a device named `dev link to x` lists like a hardlink with a
+    // character-device mode field, so it stays refused as a special file.
+    const result = await listMocked(
+      ["paratix-tar-listing bsd C", `crw-r--r--  ${bsdFields} dev link to x`, ""].join("\n")
+    )
+
+    expect(result).toMatchObject({ members: [{ kind: "special", mode: "crw-r--r--" }] })
+    expect(archiveMemberUnsafeReason(listedMembers(result)[0])).toContain("is a special file")
+  })
+
+  it.each([
+    {
+      line: `-rw-r--r--  ${bsdFields} f -> g`,
+      member: { kind: "file", linkTarget: null, mode: "-rw-r--r--", path: "f -> g" },
+      name: "a bsdtar regular file named f -> g",
+    },
+    {
+      line: `lrwxrwxrwx  ${bsdFields} l -> t`,
+      member: { kind: "symlink", linkTarget: "t", mode: "lrwxrwxrwx", path: "l" },
+      name: "a bsdtar symlink",
+    },
+  ])("keeps $name as listed", async ({ line, member }) => {
+    // Issue #219: libarchive always lists symlink entries with `l`, so on a
+    // bsdtar line with another mode character ` -> ` is part of the name.
+    const result = await listMocked(`paratix-tar-listing bsd C\n${line}\n`)
+
+    expect(result).toStrictEqual({ members: [{ format: "tar", ...member }] })
+  })
+
+  it("keeps a GNU tar regular file whose name contains ` link to ` a regular file", async () => {
+    // Issue #219: GNU tar derives the mode character from the typeflag, lists
+    // every hardlink with `h` and prints ` link to ` only for hardlinks.
+    const result = await listMocked(
+      `paratix-tar-listing gnu C\n-rw-r--r-- ${fields} name link to y\n`
+    )
+
+    expect(result).toStrictEqual({
+      members: [
+        {
+          format: "tar",
+          kind: "file",
+          linkTarget: null,
+          mode: "-rw-r--r--",
+          path: "name link to y",
+        },
+      ],
+    })
+  })
+
+  it.each([
+    { name: "the BusyBox ` -> ` separator", separator: " -> " },
+    { name: "the ` link to ` separator", separator: " link to " },
+  ])("reads a regular-file line of another tar with $name as a hardlink", async ({ separator }) => {
+    // Issue #219: BusyBox tar marks hardlinks as regular files and lists them
+    // as `name -> target`; extracting such an entry makes a hard link.
+    const result = await listMocked(
+      `paratix-tar-listing other C.UTF-8\n-rw-r--r-- ${fields} h${separator}a/b/s\n`
+    )
+
+    expect(result).toStrictEqual({
+      members: [
+        { format: "tar", kind: "hardlink", linkTarget: "a/b/s", mode: "-rw-r--r--", path: "h" },
+      ],
+    })
+  })
+
+  it("keeps a symlink line of another tar a symlink", async () => {
+    const result = await listMocked(
+      `paratix-tar-listing other C.UTF-8\nlrwxrwxrwx ${fields} l -> t\n`
+    )
+
+    expect(result).toStrictEqual({
+      members: [{ format: "tar", kind: "symlink", linkTarget: "t", mode: "lrwxrwxrwx", path: "l" }],
+    })
+  })
+
+  // Issue #219: once a separator marks a hardlink regardless of the mode
+  // character, a remainder that carries it twice, or carries both separators,
+  // has no recoverable name/target split and fails closed.
+  it.each([
+    {
+      detail: 'link separator " link to " occurs more than once',
+      line: `-rw-r--r--  ${bsdFields} a link to b link to c`,
+      mode: "bsd C",
+      name: "bsdtar `-` line a link to b link to c",
+    },
+    {
+      detail: 'hardlink contains both " -> " and " link to "',
+      line: `-rw-r--r--  ${bsdFields} a -> b link to c`,
+      mode: "bsd C",
+      name: "bsdtar `-` line a -> b link to c",
+    },
+    {
+      detail: 'hardlink contains both " -> " and " link to "',
+      line: `-rw-r--r--  ${bsdFields} a link to b -> c`,
+      mode: "bsd C",
+      name: "bsdtar `-` line a link to b -> c",
+    },
+    {
+      detail: 'hardlink contains both " -> " and " link to "',
+      line: `lrwxrwxrwx  ${bsdFields} a -> b link to c`,
+      mode: "bsd C",
+      name: "bsdtar `l` line a -> b link to c",
+    },
+    {
+      detail: 'hardlink contains both " -> " and " link to "',
+      line: `drw-r--r--  ${bsdFields} a link to b -> c`,
+      mode: "bsd C",
+      name: "bsdtar `d` line a link to b -> c",
+    },
+    {
+      detail: 'link separator " -> " occurs more than once',
+      line: `-rw-r--r-- ${fields} a -> b -> c`,
+      mode: "other C.UTF-8",
+      name: "another tar: `-` line a -> b -> c",
+    },
+    {
+      detail: 'hardlink contains both " -> " and " link to "',
+      line: `-rw-r--r-- ${fields} a -> b link to c`,
+      mode: "other C.UTF-8",
+      name: "another tar: `-` line a -> b link to c",
+    },
+  ])("refuses the ambiguous $name", async ({ detail, line, mode }) => {
+    const result = await listMocked(`paratix-tar-listing ${mode}\n${line}\n`)
+
+    expect(result).toStrictEqual({
+      failureReason: `ambiguous tar listing line (${detail}): ${JSON.stringify(line)}`,
+    })
+  })
 })

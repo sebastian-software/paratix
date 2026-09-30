@@ -249,6 +249,9 @@ const gnuTarListingModeLine = "paratix-tar-listing gnu C.UTF-8\n"
 /** Issue #219: the mode line for a tar whose names are used as listed. */
 const otherTarListingModeLine = "paratix-tar-listing other C.UTF-8\n"
 
+/** Issue #219: the mode line the listing script prints for bsdtar. */
+const bsdTarListingModeLine = "paratix-tar-listing bsd C\n"
+
 /**
  * Issue #219: mock stdout of the listing script on a host with GNU tar and a
  * UTF-8 C locale: the mode line, then the `tar -tv` output.
@@ -523,6 +526,21 @@ function tarSymlinkLine(path: string, target: string): string {
 
 function tarHardlinkLine(path: string, target: string): string {
   return `hrw-r--r-- ${tarListingLineFields} ${path} link to ${target}`
+}
+
+// Issue #219: the bsdtar `-tv` layout (`ls -l` columns: mode, link count,
+// user, group, size, month, day, year) for listings under the bsd mode line.
+const bsdTarListingLineFields = "0 root   wheel       0 Jan  1  1970"
+
+/**
+ * Issue #219: one bsdtar `-tv` listing line.
+ *
+ * @param mode - The ten-character symbolic mode as bsdtar prints it.
+ * @param rest - The name, with any ` -> ` or ` link to ` suffix.
+ * @returns The listing line.
+ */
+function bsdTarLine(mode: string, rest: string): string {
+  return `${mode}  ${bsdTarListingLineFields} ${rest}`
 }
 
 type SymlinkProbeRecord = { callIndex: number; entries: string[] }
@@ -899,6 +917,11 @@ type TarListingApplyOptions = {
   hostLinks?: HostLinkTree
   hostSymlinks?: readonly string[]
   injectedOnMerge?: ReadonlyArray<readonly [string, string]>
+  /**
+   * Issue #219: the listing mode line before the lines; GNU tar in C.UTF-8
+   * when omitted.
+   */
+  listingModeLine?: string
   owner?: string
   /** Exact command responses that take priority over the shared stubs. */
   responses?: NonNullable<Parameters<typeof createBaseMockSsh>[0]>
@@ -917,7 +940,10 @@ async function applyTarListing(
   const mockSsh = createMockSsh(
     {
       [stagedTarExtractCommandFor(source)]: { code: 0 },
-      [tarListCommand(source)]: { code: 0, stdout: gnuTarListing(`${lines.join("\n")}\n`) },
+      [tarListCommand(source)]: {
+        code: 0,
+        stdout: `${options.listingModeLine ?? gnuTarListingModeLine}${lines.join("\n")}\n`,
+      },
       ...options.responses,
     },
     { responseStubs: options.responseStubs }
@@ -2887,6 +2913,69 @@ describe("archive.extract — apply", () => {
 
       expect(extractionSummary(run)).toStrictEqual(
         refusedBeforeExtraction('member "h" hardlinks to archive symlink "a/b/s"')
+      )
+    })
+
+    // Issue #219: bsdtar lists a hardlink whose header mode field carries
+    // S_IFREG bits with `-`, yet prints ` link to TARGET`, and `tar -x` makes
+    // `h` a second name for the symlink `a/b/s -> ../../x`, which then reads
+    // `../../x` from the archive root. BusyBox tar lists every hardlink as a
+    // regular file `name -> target`. Both must meet the hardlink rules.
+    it.each([
+      {
+        lines: [
+          bsdTarLine("drwxr-xr-x", "a/"),
+          bsdTarLine("drwxr-xr-x", "a/b/"),
+          bsdTarLine("lrwxrwxrwx", "a/b/s -> ../../x"),
+          bsdTarLine("-rw-r--r--", "x"),
+          bsdTarLine("-rw-r--r--", "h link to a/b/s"),
+        ],
+        listingModeLine: bsdTarListingModeLine,
+        name: "a bsdtar hardlink listed with a regular-file mode",
+      },
+      {
+        lines: [
+          tarDirectoryLine("a/"),
+          tarDirectoryLine("a/b/"),
+          tarSymlinkLine("a/b/s", "../../x"),
+          tarFileLine("x"),
+          `-rw-r--r-- ${tarListingLineFields} h -> a/b/s`,
+        ],
+        listingModeLine: otherTarListingModeLine,
+        name: "a BusyBox hardlink listed as a regular file h -> a/b/s",
+      },
+    ])("rejects $name to an archive symlink member", async ({ lines, listingModeLine }) => {
+      const run = await applyTarListing(lines, { listingModeLine })
+
+      expect(extractionSummary(run)).toStrictEqual(
+        refusedBeforeExtraction('member "h" hardlinks to archive symlink "a/b/s"')
+      )
+    })
+
+    it("extracts a bsdtar hardlink listed with a regular-file mode to a regular file", async () => {
+      const run = await applyTarListing(
+        [
+          bsdTarLine("drwxr-xr-x", "a/"),
+          bsdTarLine("drwxr-xr-x", "b/"),
+          bsdTarLine("-rw-r--r--", "b/f"),
+          bsdTarLine("-rw-r--r--", "a/h link to b/f"),
+        ],
+        { listingModeLine: bsdTarListingModeLine }
+      )
+
+      expect(extractionSummary(run)).toStrictEqual(extractedThroughStaging)
+    })
+
+    it("reads a bsdtar regular file named `notes link to ../x` as an escaping hardlink", async () => {
+      // Issue #219: bsdtar lists this regular file exactly like the hardlink
+      // `notes` to `../x` with S_IFREG mode bits, so it is judged as that
+      // hardlink, whose archive-root-relative target leaves the destination.
+      const run = await applyTarListing([bsdTarLine("-rw-r--r--", "notes link to ../x")], {
+        listingModeLine: bsdTarListingModeLine,
+      })
+
+      expect(extractionSummary(run)).toStrictEqual(
+        refusedBeforeExtraction('member "notes" -> "../x" would escape destination')
       )
     })
 

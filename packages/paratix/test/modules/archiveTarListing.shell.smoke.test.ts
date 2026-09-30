@@ -13,6 +13,7 @@ import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { describe, expect, it } from "vitest"
 
+import { archiveLinkUnsafeReason } from "../../src/modules/archiveLinkValidation.js"
 import {
   type ArchiveMember,
   archiveMemberUnsafeReason,
@@ -25,8 +26,12 @@ const SKIP_PLATFORM = process.platform === "win32"
 const USTAR_BLOCK = 512
 const GO_MEMBER = "go/test/fixedbugs/issue27836.dir/Þfoo.go"
 
-/** A ustar member: a regular file (`0`), a directory (`5`) or a symlink (`2`). */
-type UstarMember = { linkName?: Buffer; name: Buffer; type: "0" | "2" | "5" }
+/**
+ * A ustar member: a regular file (`0`), a hardlink (`1`), a symlink (`2`) or a
+ * directory (`5`). Issue #219: `mode` overrides the octal mode field, e.g. to
+ * set file-type bits that bsdtar prints as the mode character.
+ */
+type UstarMember = { linkName?: Buffer; mode?: string; name: Buffer; type: "0" | "1" | "2" | "5" }
 
 /**
  * Write an ASCII field into a ustar header.
@@ -48,7 +53,7 @@ function writeField(header: Buffer, offset: number, value: string): void {
 function ustarHeader(member: UstarMember): Buffer {
   const header = Buffer.alloc(USTAR_BLOCK)
   member.name.copy(header, 0)
-  writeField(header, 100, member.type === "5" ? "0000755\0" : "0000644\0")
+  writeField(header, 100, `${member.mode ?? (member.type === "5" ? "0000755" : "0000644")}\0`)
   writeField(header, 108, "0000000\0")
   writeField(header, 116, "0000000\0")
   writeField(header, 124, "00000000000\0")
@@ -246,3 +251,53 @@ describe.skipIf(SKIP_UNDECODED_TAR)(
     )
   }
 )
+
+/**
+ * Issue #219: whether a `tar` is on the PATH of the local shell.
+ *
+ * @returns True when `command -v tar` finds one.
+ */
+function hasTar(): boolean {
+  return spawnSync("/bin/sh", ["-c", "command -v tar"], { timeout: 5000 }).status === 0
+}
+
+const SKIP_NO_TAR = SKIP_PLATFORM || !hasTar()
+
+describe.skipIf(SKIP_NO_TAR)("tar listing of hardlink members (Issue #219)", () => {
+  // Issue #219: bsdtar takes the mode character of a hardlink from the type
+  // bits of its mode field (none: `h`, S_IFREG: `-`) but prints ` link to
+  // TARGET` for every hardlink; `tar -x` makes `h` a second name for the
+  // symlink `a/b/s -> ../../x`, which then escapes from the archive root.
+  it.each([
+    { mode: "0000644", name: "no file-type bits" },
+    { mode: "0100644", name: "S_IFREG file-type bits" },
+  ])(
+    "lists a hardlink to an archive symlink whose mode field has $name as a hardlink",
+    async ({ mode }) => {
+      await withScratch(async (root) => {
+        const archivePath = join(root, "hardlink.tar")
+        writeUstar(archivePath, [
+          { name: Buffer.from("a/"), type: "5" },
+          { name: Buffer.from("a/b/"), type: "5" },
+          { linkName: Buffer.from("../../x"), name: Buffer.from("a/b/s"), type: "2" },
+          file("x"),
+          { linkName: Buffer.from("a/b/s"), mode, name: Buffer.from("h"), type: "1" },
+        ])
+        const { conn } = localShellConnection()
+
+        const members = listedMembers(
+          await listArchiveMembers(conn, { archivePath, source: archivePath })
+        )
+
+        expect(members.find((member) => member.path.startsWith("h"))).toMatchObject({
+          kind: "hardlink",
+          linkTarget: "a/b/s",
+          path: "h",
+        })
+        expect(archiveLinkUnsafeReason(members)).toBe(
+          'member "h" hardlinks to archive symlink "a/b/s"'
+        )
+      })
+    }
+  )
+})

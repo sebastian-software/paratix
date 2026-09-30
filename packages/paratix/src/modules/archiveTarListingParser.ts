@@ -13,6 +13,7 @@ import {
   decodeTarListingName,
   splitTarListingModeLine,
   tarListingDecodesNames,
+  type TarListingFlavor,
   type TarListingMode,
 } from "./archiveTarListing.js"
 
@@ -40,10 +41,15 @@ export type ArchiveMemberParseResult =
  * Blank lines are ignored. Non-empty lines that do not match this shape are
  * rejected so the safety guard fails closed before extraction. Link lines
  * whose remainder contains the link separator (`->` for non-file members,
- * `link to` for hardlinks) more than once are rejected as ambiguous, because
- * the split between member name and link target cannot be recovered. For the
- * same reason a hardlink line whose remainder contains both `->` and
+ * `link to` or `->` for hardlinks) more than once are rejected as ambiguous,
+ * because the split between member name and link target cannot be recovered.
+ * For the same reason a hardlink line whose remainder contains both `->` and
  * `link to` is rejected (Issue #219).
+ *
+ * Issue #219: which lines are hardlinks depends on the listing flavor (see
+ * {@link tarListingMemberKind}): GNU tar marks every hardlink `h`, bsdtar
+ * prints `link to` for every hardlink whatever its mode character, and
+ * BusyBox tar lists hardlinks as regular files `name -> target`.
  *
  * @param line - A single line from `tar -tv…f` output.
  * @returns The parsed member, an ignored marker or an invalid-line reason.
@@ -72,6 +78,45 @@ export function archiveMemberKindFromMode(mode: string): ArchiveMember["kind"] {
   if (mode.startsWith("h")) return "hardlink"
   if (!mode.startsWith("-")) return "special"
   return "file"
+}
+
+/**
+ * Issue #219: the member kind of a listing line, from its mode character and,
+ * where the listing flavor requires it, from its link separator.
+ *
+ * - `gnu`: the mode character alone; GNU tar derives it from the typeflag,
+ *   lists every hardlink `h` and prints `link to` only for hardlinks.
+ * - `bsd`: bsdtar prints `link to TARGET` for every hardlink but takes the
+ *   mode character from the type bits of the mode field (none: `h`, S_IFREG:
+ *   `-`, S_IFLNK: `l`, S_IFDIR: `d`). A remainder containing `link to` is
+ *   therefore a hardlink whatever that character. A regular file or directory
+ *   whose name contains `link to` lists exactly like such a hardlink, so it is
+ *   read as that hardlink: the stricter reading, because the name before the
+ *   separator must then pass every member-path rule and the rest every
+ *   hardlink-target rule (archive-root-relative, not an archive symlink, not
+ *   through one). Lines whose split is not unique fail closed in
+ *   {@link parseTarLinkRemainder}. Special files stay special, so a device
+ *   named with `link to` is still refused as a special file.
+ * - `other`: BusyBox tar lists a hardlink as a regular file `name -> target`,
+ *   so a `-` line containing `->` or `link to` is a hardlink.
+ *
+ * @param mode - The ten-character symbolic mode string.
+ * @param rest - The listing remainder after the date/time columns.
+ * @param flavor - The `tar` implementation reported by the mode line.
+ * @returns The member kind the line is validated as.
+ */
+function tarListingMemberKind(
+  mode: string,
+  rest: string,
+  flavor: TarListingFlavor
+): ArchiveMember["kind"] {
+  const kind = archiveMemberKindFromMode(mode)
+  if (flavor === "bsd" && kind !== "special" && rest.includes(TAR_HARDLINK_TARGET)) {
+    return "hardlink"
+  }
+  const hasSeparator = rest.includes(TAR_LINK_ARROW) || rest.includes(TAR_HARDLINK_TARGET)
+  if (flavor === "other" && kind === "file" && hasSeparator) return "hardlink"
+  return kind
 }
 
 /**
@@ -137,6 +182,11 @@ function parseTarLinkMember(
  * symlinks and other non-file members at `->`, hardlinks at `->` or
  * `link to`. Plain files never carry a link target.
  *
+ * Issue #219: `kind` is the flavor-aware kind of
+ * {@link tarListingMemberKind}, so a bsdtar `link to` line with a `-`, `l` or
+ * `d` mode character and a BusyBox `-` line with `->` or `link to` arrive
+ * here as hardlinks and meet the hardlink ambiguity rules below.
+ *
  * Issue #219: a hardlink remainder that contains both `->` and `link to` is
  * ambiguous. GNU tar prints the hardlink `a -> b` to `d/e/c` as
  * `a -> b link to d/e/c`; splitting at `->` first would validate it as `a`
@@ -146,7 +196,7 @@ function parseTarLinkMember(
  * closed instead of guessing which separator is the real one.
  *
  * @param parts - The parsed listing line parts.
- * @param parts.kind - The member kind inferred from the mode.
+ * @param parts.kind - The member kind from {@link tarListingMemberKind}.
  * @param parts.line - The trimmed listing line, quoted in failure reasons.
  * @param parts.mode - The ten-character symbolic mode string.
  * @param parts.rest - The listing remainder after the date/time columns.
@@ -248,8 +298,8 @@ function parseListedTarVerboseLine(
     }
   }
   const mode = match.groups.mode
-  const kind = archiveMemberKindFromMode(mode)
   const rest = match.groups.rest
+  const kind = tarListingMemberKind(mode, rest, listingMode.flavor)
   const linkMember = parseTarLinkRemainder({ kind, line: trimmed, mode, rest })
   if (linkMember !== null) return linkMember
   return {
