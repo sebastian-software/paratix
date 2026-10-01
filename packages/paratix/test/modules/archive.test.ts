@@ -16,6 +16,9 @@ import {
 } from "../../src/modules/archiveContainmentEnforcement.js"
 import {
   buildContainmentClearScript,
+  noContainmentEntriesCommand,
+} from "../../src/modules/archiveContainmentEntries.js"
+import {
   buildContainmentEstablishCommand,
   buildContainmentEstablishScript,
   CONTAINMENT_ENTRY_READ_LIMIT,
@@ -24,7 +27,6 @@ import {
   CONTAINMENT_FLAG_LINK_LIMIT,
   containmentFlagBody,
   type ContainmentPaths,
-  noContainmentEntriesCommand,
   parseContainmentFlag,
   STOPPED_AFTER_MERGE_STARTED,
   TOO_MANY_OFFENDING_LINKS,

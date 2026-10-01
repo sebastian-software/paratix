@@ -47,15 +47,17 @@ import {
   symlinkListingEntries,
 } from "../../src/modules/archiveContainmentEnforcement.js"
 import {
-  buildContainmentEstablishScript,
   clearContainmentEntries,
+  noContainmentEntriesCommand,
+} from "../../src/modules/archiveContainmentEntries.js"
+import {
+  buildContainmentEstablishScript,
   CONTAINMENT_ENTRY_READ_LIMIT,
   CONTAINMENT_FLAG_BODY_LIMIT_BYTES,
   containmentFlagBody,
   type ContainmentLedger,
   type ContainmentPaths,
   establishContainmentEntry,
-  noContainmentEntriesCommand,
   parseContainmentEstablishOutput,
 } from "../../src/modules/archiveContainmentFlag.js"
 import { archiveContainmentScope } from "../../src/modules/archiveContainmentScope.js"

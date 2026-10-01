@@ -7,9 +7,13 @@ import { runSymlinkContainmentBackstop } from "../../src/modules/archiveContainm
 import {
   buildContainmentCheckScript,
   buildContainmentClearScript,
+  clearContainmentEntries,
+  noContainmentEntriesCommand,
+  recordContainmentFailure,
+} from "../../src/modules/archiveContainmentEntries.js"
+import {
   buildContainmentEstablishCommand,
   buildContainmentEstablishScript,
-  clearContainmentEntries,
   CONTAINMENT_ENTRY_READ_LIMIT,
   CONTAINMENT_ESTABLISH_CAPTURE_LIMIT_BYTES,
   CONTAINMENT_FLAG_BODY_LIMIT_BYTES,
@@ -18,11 +22,9 @@ import {
   containmentFlagBody,
   type ContainmentPaths,
   establishContainmentEntry,
-  noContainmentEntriesCommand,
   parseContainmentEntryBytes,
   parseContainmentEstablishOutput,
   parseContainmentFlag,
-  recordContainmentFailure,
   TOO_MANY_OFFENDING_LINKS,
 } from "../../src/modules/archiveContainmentFlag.js"
 import { buildKernelCrossCheckScript } from "../../src/modules/archiveKernelCrossCheck.js"

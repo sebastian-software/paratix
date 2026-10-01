@@ -3,9 +3,11 @@
  * extracted members, their owner and the archive hash with what the last successful apply recorded.
  */
 
+import type { ContainmentPaths } from "./archiveContainmentFlag.js"
+
 import { shellQuote } from "../ssh.js"
 import { NEEDS_APPLY, type SshConnection } from "../types.js"
-import { type ContainmentPaths, noContainmentEntriesCommand } from "./archiveContainmentFlag.js"
+import { noContainmentEntriesCommand } from "./archiveContainmentEntries.js"
 import {
   archiveMemberDestinationPaths,
   validateExistingExtractDestination,

@@ -16,12 +16,14 @@ import {
 } from "./archiveContainedExtraction.js"
 import {
   clearContainmentEntries,
+  recordContainmentFailure,
+  recordContainmentFailureAfterThrow,
+} from "./archiveContainmentEntries.js"
+import {
   type ContainmentFlagRecord,
   type ContainmentLedger,
   establishContainmentEntry,
   newContainmentEntryName,
-  recordContainmentFailure,
-  recordContainmentFailureAfterThrow,
 } from "./archiveContainmentFlag.js"
 import {
   archiveMemberDestinationPaths,
