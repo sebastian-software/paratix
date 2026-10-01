@@ -48,7 +48,7 @@ const CHECKED_AFTER_MERGE =
  * usable list of offending links.
  */
 const CHECKED_WHOLE_DESTINATION_AFTER_MERGE =
-  "after the merge, every symlink under the destination is checked, because a containment entry does not say which links need verification (an unfinished or concurrent apply, an older paratix version's flag file, or too many entries)"
+  "after the merge, every symlink under the destination is checked, because a containment entry does not say which links need verification (an apply that stopped without finishing or lost its extract lock, a concurrent apply or the flag file of an older paratix version, or too many entries)"
 
 /**
  * Issue #219: what an operator has to do after a post-merge violation. The
@@ -77,12 +77,32 @@ const NOTHING_CHANGED_AFTER_MERGE =
  * passes without that state. Naming both concrete paths keeps the step
  * copyable; it is not a recommendation to clear entries blindly.
  *
- * @param entryDirectory - The destination's containment entry directory.
- * @param legacyFlag - The destination's containment flag from older versions.
+ * Issue #224: applies to one destination are serialized by its extract lock,
+ * so the hint names the lock directory: while it exists an apply runs or was
+ * interrupted. A lock an interrupted apply left is reclaimed by the next
+ * apply once its holder marker is stale; removing it by hand is safe only
+ * when no apply for the destination runs anywhere, because a live holder
+ * would then lose its lock to the next apply.
+ *
+ * @param paths - The destination's containment state paths.
+ * @param paths.entryDirectory - The destination's containment entry directory.
+ * @param paths.legacyFlag - The destination's containment flag from older versions.
+ * @param paths.lockPath - Issue #224: the destination's extract lock directory;
+ *   omitted, the hint does not name it.
  * @returns The sentence appended to a post-merge violation message.
  */
-function intendedLinksHint(entryDirectory: string, legacyFlag: string): string {
-  return `if the offending symlinks are intended (for example a virtualenv's interpreter link), they keep failing this check: first stop or wait for all archive.extract applies to this destination to finish and prevent new applies until inspection and state clearing are complete; then check the destination yourself and, before retrying, clear its containment state with rm -f -- ${shellQuote(entryDirectory)}/run-* ${shellQuote(legacyFlag)}`
+function intendedLinksHint(paths: {
+  entryDirectory: string
+  legacyFlag: string
+  lockPath?: string
+}): string {
+  const { entryDirectory, legacyFlag, lockPath } = paths
+  const holder = lockPath === undefined ? "" : shellQuote(`${lockPath}/holder`)
+  const lock =
+    lockPath === undefined
+      ? ""
+      : ` (while the extract lock ${shellQuote(lockPath)} exists, an apply to this destination runs or was interrupted; the next apply reclaims an interrupted apply's lock once it is stale, and removing it by hand with rm -f -- ${holder} && rmdir -- ${shellQuote(lockPath)} is safe only when no apply for this destination runs anywhere)`
+  return `if the offending symlinks are intended (for example a virtualenv's interpreter link), they keep failing this check: first stop or wait for all archive.extract applies to this destination to finish and prevent new applies until inspection and state clearing are complete${lock}; then check the destination yourself and, before retrying, clear its containment state with rm -f -- ${shellQuote(entryDirectory)}/run-* ${shellQuote(legacyFlag)}`
 }
 
 /** Issue #219: how a violation names a link an earlier failed apply recorded. */
@@ -359,15 +379,17 @@ function linkViolationReason(
  *   directory, needed for a complete {@link intendedLinksHint}.
  * @param paths.legacyFlag - The destination's old containment flag; the hint needs
  *   both paths and a passing current archive scope after clearing state.
+ * @param paths.lockPath - Issue #224: the destination's extract lock directory,
+ *   named by the hint when given.
  * @returns The violation text without the `[archive.extract]` prefix, with the
  *   `(and N more)` suffix after the listed links when there are more.
  */
 function containmentViolationMessage(
   destination: string,
   reading: PostMergeSymlinks,
-  paths: { entryDirectory?: string; legacyFlag?: string }
+  paths: { entryDirectory?: string; legacyFlag?: string; lockPath?: string }
 ): string {
-  const { entryDirectory, legacyFlag } = paths
+  const { entryDirectory, legacyFlag, lockPath } = paths
   const listed = reading.violations
     .slice(0, POST_MERGE_VIOLATION_REPORT_LIMIT)
     .map((violation) => postMergeViolationDescription(destination, reading, violation))
@@ -378,7 +400,7 @@ function containmentViolationMessage(
     : CHECKED_AFTER_MERGE
   const hint =
     reading.clearingStateWouldPass && entryDirectory !== undefined && legacyFlag !== undefined
-      ? `; ${intendedLinksHint(entryDirectory, legacyFlag)}`
+      ? `; ${intendedLinksHint({ entryDirectory, legacyFlag, lockPath })}`
       : ""
   return `${listed.join("; ")}${suffix}; ${checked}; ${NOTHING_CHANGED_AFTER_MERGE}${hint}`
 }
@@ -494,6 +516,9 @@ function offendingLinkKeys(
  *   Omitted, the message stays without that hint.
  * @param parameters.legacyFlag - The destination's old containment flag;
  *   omitted, the message stays without the state-clearing hint.
+ * @param parameters.lockPath - Issue #224: the destination's extract lock
+ *   directory, named by the state-clearing hint; omitted, the hint does not
+ *   name it.
  * @param parameters.members - The validated archive members; they decide
  *   which links are judged.
  * @param parameters.recordedLinks - Issue #219: the links earlier failed
@@ -511,6 +536,7 @@ export async function runSymlinkContainmentBackstop(
     destination: string
     entryDirectory?: string
     legacyFlag?: string
+    lockPath?: string
     members: readonly ArchiveMember[]
     recordedLinks?: readonly string[]
     source: string
