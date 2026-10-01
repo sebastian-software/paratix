@@ -337,7 +337,10 @@ post-merge check leaves the apply's entry in place. While any entry or the old f
 while the entry directory is a symlink, not a directory or unreadable, `check` reports `needs-apply`
 for every archive extracting into that destination.
 
-Concurrent applies to one destination keep known races. An `in-progress` entry of an apply that is
+Running more than one `archive.extract` against the same destination at the same time is not
+supported: run at most one apply per destination at a time; parallel applies to different
+destinations are fine. If it happens anyway, known races remain.
+An `in-progress` entry of an apply that is
 still running cannot be told apart from one an interrupted apply left, so another apply whose
 whole-destination verification is clean may remove it; if the running apply then fails, it creates
 its entry again with its record, but if it is killed, links its merge published after that

@@ -339,7 +339,10 @@ des Durchlaufs stehen. Solange ein Eintrag oder die alte Flag-Datei besteht, und
 Containment-Verzeichnis ein Symlink, kein Verzeichnis oder nicht lesbar ist, meldet `check` für
 jedes Archiv mit diesem Zielverzeichnis `needs-apply`.
 
-Gleichzeitige Durchläufe für ein Zielverzeichnis behalten bekannte Wettläufe. Ein
+Mehr als ein `archive.extract` gleichzeitig für dasselbe Zielverzeichnis wird nicht unterstützt:
+Pro Zielverzeichnis darf höchstens ein Durchlauf zur selben Zeit laufen; parallele Durchläufe für
+verschiedene Zielverzeichnisse sind unproblematisch. Geschieht es trotzdem, bleiben bekannte
+Wettläufe. Ein
 `in-progress`-Eintrag eines Durchlaufs, der noch läuft, lässt sich nicht von einem unterscheiden,
 den ein unterbrochener Durchlauf hinterlassen hat; ein anderer Durchlauf, dessen Prüfung des ganzen
 Zielverzeichnisses sauber ist, kann ihn deshalb entfernen. Schlägt der laufende Durchlauf danach
