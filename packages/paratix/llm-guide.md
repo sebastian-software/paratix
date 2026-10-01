@@ -325,12 +325,16 @@ removed. A destination that deliberately contains a symlink pointing outside it 
 while an entry holds no usable list, for example a virtualenv interpreter link into `/usr/bin` in a
 runner work tree after an interrupted apply. If violations persist, remove or repoint the offending
 links and run again. If the offending links are intended and outside the scope the archive can
-affect, clearing the containment state after checking the destination yourself can allow a retry
-to pass. The failure message offers this step only after a fully readable whole-destination check
-when the current archive's normal scope would pass without recorded links, including the kernel
-cross-check. Then delete its `run-*` entries and the old flag file with
-`rm -f -- '/var/lib/paratix/flags/archive-containment-<sha256>.d'/run-* '/var/lib/paratix/flags/archive-containment-<sha256>.failed'`
-and run again. Replace `<sha256>` with the SHA-256 of the normalized destination path before use;
+affect, clearing the containment state can allow a retry to pass. The failure message offers this
+step only after a fully readable whole-destination check when the current archive's normal scope
+would pass without recorded links, including the kernel
+cross-check. First stop or wait for all `archive.extract` applies to this destination to finish.
+Prevent new applies until both your inspection and state clearing are complete. An active apply
+can still publish more contents, so its entry must not be deleted through `run-*` while it is
+running. Only then check the destination yourself and delete its `run-*` entries and the old flag
+file with
+`rm -f -- '/var/lib/paratix/flags/archive-containment-<sha256>.d'/run-* '/var/lib/paratix/flags/archive-containment-<sha256>.failed'`.
+Then run again. Replace `<sha256>` with the SHA-256 of the normalized destination path before use;
 the failure message names the exact command. Clearing state cannot resolve violations within the
 current archive's scope. On failure no extraction marker is written and no `owner` is applied.
 

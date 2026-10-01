@@ -325,13 +325,17 @@ Eintrag keine verwertbare Liste enthält, etwa ein Interpreter-Link eines virtua
 im Arbeitsverzeichnis eines Runners nach einem unterbrochenen Durchlauf. Bleiben Verstöße bestehen,
 sind die betroffenen Links zu entfernen oder umzulenken und der Durchlauf zu wiederholen. Sind die
 betroffenen Links gewollt und liegen außerhalb des Bereichs, auf den das Archiv wirken kann,
-kann das Löschen des Containment-Zustands nach eigener Prüfung des Zielverzeichnisses die
-Wiederholung ermöglichen. Die Fehlermeldung nennt diesen Schritt nur bei einer vollständig
-lesbaren Prüfung des ganzen Zielverzeichnisses, wenn die normale Prüfung des aktuellen Archivs
+kann das Löschen des Containment-Zustands die Wiederholung ermöglichen. Die Fehlermeldung nennt
+diesen Schritt nur bei einer vollständig lesbaren Prüfung des ganzen Zielverzeichnisses, wenn die
+normale Prüfung des aktuellen Archivs
 ohne festgehaltene Links einschließlich des Abgleichs durch den Kernel bestehen würde. Dann sind
-seine `run-*`-Einträge und die alte Flag-Datei mit
+zuerst alle `archive.extract`-Durchläufe für dieses Zielverzeichnis anzuhalten oder ihr Ende
+abzuwarten. Neue Durchläufe sind zu verhindern, bis sowohl die eigene Prüfung als auch das Löschen
+des Zustands abgeschlossen sind. Ein laufender Durchlauf kann noch weitere Inhalte veröffentlichen;
+sein Eintrag darf deshalb nicht über `run-*` gelöscht werden, solange er noch aktiv ist. Erst dann
+ist das Zielverzeichnis selbst zu prüfen und sind seine `run-*`-Einträge und die alte Flag-Datei mit
 `rm -f -- '/var/lib/paratix/flags/archive-containment-<sha256>.d'/run-* '/var/lib/paratix/flags/archive-containment-<sha256>.failed'`
-zu löschen und der Durchlauf zu wiederholen. Vor der Verwendung ist `<sha256>` durch den
+zu löschen. Danach ist der Durchlauf zu wiederholen. Vor der Verwendung ist `<sha256>` durch den
 SHA-256-Hash des normalisierten Zielpfads zu ersetzen; die Fehlermeldung nennt den genauen Befehl.
 Verstöße im Bereich des aktuellen Archivs lassen sich durch das Löschen des Zustands nicht
 beheben. Bei einem Fehlschlag wird weder die Marker-Datei geschrieben noch `owner` angewendet.

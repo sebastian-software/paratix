@@ -67,18 +67,22 @@ const NOTHING_CHANGED_AFTER_MERGE =
  * Issue #219: the way out when the offending links are intended, for example
  * a virtualenv interpreter link that points into `/usr/bin` after an
  * interrupted apply forced a whole-destination check. Such a link fails every
- * later check, so the operator has to clear the destination's containment
- * entries and legacy flag after checking the tree. This hint is offered only
- * when the current archive's normal scope passes without that state. Naming
- * both concrete paths keeps the step copyable; it is not a recommendation to
- * clear entries blindly.
+ * later check, so the operator first has to stop or wait for all applies to
+ * this destination to finish, with no new applies until inspection and state
+ * clearing are complete. No apply may be active when inspection begins: the
+ * tree must stay unchanged while it is checked, and clearing state must not
+ * remove a live apply's in-progress entry. The operator can then check the
+ * tree, clear the destination's containment entries and legacy flag, and
+ * retry. This hint is offered only when the current archive's normal scope
+ * passes without that state. Naming both concrete paths keeps the step
+ * copyable; it is not a recommendation to clear entries blindly.
  *
  * @param entryDirectory - The destination's containment entry directory.
  * @param legacyFlag - The destination's containment flag from older versions.
  * @returns The sentence appended to a post-merge violation message.
  */
 function intendedLinksHint(entryDirectory: string, legacyFlag: string): string {
-  return `if the offending symlinks are intended (for example a virtualenv's interpreter link), they keep failing this check: after checking the destination yourself, clear its containment state with rm -f -- ${shellQuote(entryDirectory)}/run-* ${shellQuote(legacyFlag)}`
+  return `if the offending symlinks are intended (for example a virtualenv's interpreter link), they keep failing this check: first stop or wait for all archive.extract applies to this destination to finish and prevent new applies until inspection and state clearing are complete; then check the destination yourself and, before retrying, clear its containment state with rm -f -- ${shellQuote(entryDirectory)}/run-* ${shellQuote(legacyFlag)}`
 }
 
 /** Issue #219: how a violation names a link an earlier failed apply recorded. */

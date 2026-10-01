@@ -199,7 +199,7 @@ const containment = containmentPathsFor(destination)
  * how to clear the destination's containment entries when the offending links
  * are intended.
  */
-const intendedLinksHint = `; if the offending symlinks are intended (for example a virtualenv's interpreter link), they keep failing this check: after checking the destination yourself, clear its containment state with rm -f -- '${containment.entryDirectory}'/run-* '${containment.legacyFlag}'`
+const intendedLinksHint = `; if the offending symlinks are intended (for example a virtualenv's interpreter link), they keep failing this check: first stop or wait for all archive.extract applies to this destination to finish and prevent new applies until inspection and state clearing are complete; then check the destination yourself and, before retrying, clear its containment state with rm -f -- '${containment.entryDirectory}'/run-* '${containment.legacyFlag}'`
 
 /** Issue #219: the single flag file of older paratix versions. */
 const legacyContainmentFlag = containment.legacyFlag
