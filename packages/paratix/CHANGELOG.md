@@ -1,5 +1,21 @@
 # Changelog
 
+## [0.21.0](https://github.com/sebastian-software/paratix/compare/paratix-v0.20.0...paratix-v0.21.0) (2026-10-01)
+
+
+### Features
+
+* **paratix:** add purge option to package.absent ([#221](https://github.com/sebastian-software/paratix/issues/221)) ([8d003d3](https://github.com/sebastian-software/paratix/commit/8d003d3cc730dff701f2fe45f594a07868a828bd)), closes [#216](https://github.com/sebastian-software/paratix/issues/216)
+
+
+### Bug Fixes
+
+* **deps:** align vitest and coverage on 4.1.11 ([#225](https://github.com/sebastian-software/paratix/issues/225)) ([cf52af4](https://github.com/sebastian-software/paratix/commit/cf52af46b836e398dcca34842b7be6e795e3c765))
+* **paratix:** accept archive symlinks into sibling directories ([#219](https://github.com/sebastian-software/paratix/issues/219)) ([#223](https://github.com/sebastian-software/paratix/issues/223)) ([abec54d](https://github.com/sebastian-software/paratix/commit/abec54d96fbafee638f16b9d5855d2962d7df9d2))
+* **paratix:** make missing service teardown idempotent ([#226](https://github.com/sebastian-software/paratix/issues/226)) ([28c66e1](https://github.com/sebastian-software/paratix/commit/28c66e18e150dc89ec46932f00bafc65faa1e137))
+* **paratix:** make mount.present idempotent for bind mounts ([#220](https://github.com/sebastian-software/paratix/issues/220)) ([a7e7c06](https://github.com/sebastian-software/paratix/commit/a7e7c06263f97942b2f5250465f70eb4bf51b4a6))
+* **paratix:** name how to clear intended outward links after an archive containment failure ([#228](https://github.com/sebastian-software/paratix/issues/228)) ([238f1c1](https://github.com/sebastian-software/paratix/commit/238f1c151e70e7ddba4f27864b9d6cfa70a91f7b))
+
 ## [0.20.0](https://github.com/sebastian-software/paratix/compare/paratix-v0.19.0...paratix-v0.20.0) (2026-09-23)
 
 
