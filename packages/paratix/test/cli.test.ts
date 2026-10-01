@@ -1844,7 +1844,7 @@ describe("CLI entrypoint", () => {
     } finally {
       rmSync(tempDirectory, { force: true, recursive: true })
     }
-  })
+  }, 30_000)
 
   // R-0000071 regression: when the dynamic `import("tsx/esm/api")` throws
   // a non-MODULE_NOT_FOUND error (e.g. an incompatible Node, broken

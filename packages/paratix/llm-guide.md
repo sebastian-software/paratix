@@ -195,6 +195,161 @@ export default server({
 | ----------------- | ----------------------------------------------------------------------------------------------- | ----------------- |
 | `archive.extract` | `(source: string, destination: string, options?: { owner?: string; upload?: boolean }): Module` | Yes (SHA256 flag) |
 
+`archive.extract` extracts a tar symlink or hardlink only if its target, resolved from the link's
+own directory (hardlinks: from the archive root) and through the archive's own symlinks, stays
+inside `destination`; absolute targets, a link in place of the destination root, members below an
+archive symlink, hardlinks to or through an archive symlink, a path that occurs more than once with
+a symlink among its occurrences and conflicting types or targets, and zip symlinks are rejected. The
+archive listing is decoded as strict UTF-8, never with replacement characters. `tar` lists the
+archive under a UTF-8 C locale (`C.UTF-8` or `C.utf8`) when the host has one and under `LC_ALL=C`
+otherwise (bsdtar always under `LC_ALL=C`); for GNU tar and bsdtar the escape sequences of the
+listing (`\NNN`, `\\` and the single-letter control escapes) are decoded back to the stored bytes,
+so non-ASCII names are accepted whatever locale the SSH session has. A member whose decoded name is
+not valid UTF-8, or whose name contains any other escape sequence, is rejected because it cannot be
+mapped to the extracted name. A member whose path or link target contains a backslash or U+FFFD is
+rejected in every listing, also after decoding, because another `tar` (such as BusyBox) and `unzip`
+print escape sequences and real backslashes alike. Once the archive listing is validated, and before
+the destination is created or validated, one command reads every containment entry of the
+destination and creates the apply's own `in-progress` entry (see below); an apply that cannot create
+it stops before the destination is touched. An entry directory that is a symlink or not a directory,
+an entry or an old flag file that is a symlink or not a regular file, or an entry or old flag file
+that cannot be read makes the apply refuse before the destination is touched; an entry without a
+usable record of offending links does not (see below). Before anything is staged, it then refuses a
+member whose path or parent directories are existing host symlinks (an archive symlink may replace
+the link at its own path), a file, hardlink or symlink member where the host has a real directory,
+and a directory, including an implied parent directory, where the host has a non-directory. Still
+before copying anything, it resolves the symlinks already under `destination` together with the
+archive's: an archive symlink replaces an existing symlink at the same path and existing absolute
+targets inside `destination` are allowed, while any other type combination at a member path, a
+member below an existing symlink, a link resolving outside `destination`, or a link whose target
+passes through a path that differs from an existing symlink (of the archive or already on the host)
+only by letter case (U+1E9E, the capital sharp s, counts as `ss`, like `ß`), Unicode normalization
+(NFC, NFD or compatibility forms) or default-ignorable characters such as U+200D, U+200C, U+FEFF or
+U+00AD refuses the extraction, because a case-insensitive or normalizing filesystem may follow that
+symlink. The archive's own link rules above (except the root-link rule) compare member paths under
+the same folding: symlink `x/L -> y` refuses member `x/l/f`, symlink `a/b/S -> ../../x` refuses a
+hardlink `h` to `a/b/s`, and symlink `Foo -> bar` refuses a file `foo`, while duplicates without a
+symlink, such as regular files `Makefile` and `makefile`, stay accepted. This comparison is purely
+lexical, so it refuses the same archives on case-sensitive hosts, and it may group more spellings
+than a given filesystem does, which only refuses more. An existing escaping link must then be
+removed or pointed inside.
+
+Only the links the archive can affect are judged: the archive's own symlinks and every existing
+symlink whose resolution passes through a path the archive writes (a member path or one of its
+parent directories, compared under the same case and normalization folding), directly or through
+another such link. An existing symlink whose path differs from one of the archive's symlinks only by
+letter case, Unicode normalization or default-ignorable characters (the host listing the archive's
+`a/s` as `A/S`, for example) is judged like that archive link, before and after the merge: if it
+escapes, it refuses the extraction, or after the merge fails the run and is recorded in the apply's
+containment entry; being lexical, this may also judge an unrelated link on a case-sensitive host,
+which only refuses more. Any other existing symlink, even one that points outside `destination`,
+loops or has an unusual name (a virtual environment's `bin/python3 -> /usr/bin/python3`, for
+example), is ignored (except by the whole-destination check described below) and never changed. An
+archive without symlinks (every zip archive among them) cannot change how any path resolves, so this
+check runs no command for it, and the check after the merge runs only while containment entries of
+the destination record links or hold no usable list (see below). For an archive with symlinks, one
+command lists every symlink under `destination`, with link paths relative to it, up to a
+captured-output cap of 64 MiB; a destination with more symlinks than that fails the check with a
+message saying it holds too many symlinks to check. The listing sends every name outside printable
+ASCII hex-encoded and decodes it byte for byte: a valid UTF-8 name keeps its exact spelling (a
+literal U+FFFD included), while a judged link whose path or target is not valid UTF-8, or that
+resolves through such a link, cannot be checked and refuses the extraction until it is renamed or
+removed; malformed listing output or a duplicate link path fails closed. With GNU `find` on the
+host, a directory under `destination` that cannot be read or searched is reported instead of failing
+the listing: a judged link that resolves into it, or an archive member at or below it, refuses the
+extraction because it cannot be checked, while the links inside it are not judged (a known limit).
+Without GNU `find` (busybox, the BSDs), any unreadable directory under `destination` fails the
+check.
+
+The host stops the merge with GNU `timeout` after 100 seconds (killing it 10 seconds later), before
+the 120-second command timeout; without `timeout` the merge fails before copying anything. Once the
+merge has started, a check of the same links (the archive's symlinks and every symlink whose
+resolution passes through a path the archive writes) always runs for an archive with symlinks, and
+for any archive while containment entries record links or hold no usable list (see below), also
+after a failed or stopped merge that may have copied entries: it resolves the links like the
+pre-merge check, without asking the host to resolve them, and counts name variants as violations
+too. It then asks the kernel in one batched command (`test -e` and `test -ef`, bounded by the
+kernel's symlink limit; never `realpath` or `readlink -f`) whether each judged link it placed inside
+really reaches the resolved path. A link that reaches an existing object must reach exactly that
+path. A link that reaches nothing is not trusted for that alone, because writing through it would
+create the missing name wherever the kernel resolves the rest of its target: the check walks the
+link's target path from its full length back towards the link's directory and compares the first
+point that exists on the host or in the model with the model's location of the same point, and both
+must exist and be the same object. A link the kernel resolves to a different object, whose nearest
+existing point differs or exists on one side only (for example a target that climbs with `..` out of
+a missing directory, even though nothing can be written through it yet), or of whose target path no
+point exists at all is a violation. A cross-check that cannot be completed fails the run, including
+a judged link whose cross-check entry would exceed 64 KiB (a target with very many segments). A
+converged tree costs two commands when a judged symlink is placed inside, one otherwise, and none
+for an archive without symlinks (one listing plus at most one cross-check while containment entries
+record links or hold no usable list), independent of the number of members; neither a violation nor
+re-verifying recorded links or the whole destination for an archive with symlinks adds one. This
+check only reports: it removes, moves or changes nothing. Any violating link (resolving outside, not
+resolvable within the symlink limit such as a loop, a name variant, a kernel mismatch, or a link
+that cannot be checked because of an unreadable directory or a name that is not valid UTF-8) fails
+the run with a message that names the first 10 offending links by path, stored target and reason,
+adds `(and N more)` for the rest, and states that nothing was removed or changed. The offending
+links must be removed or pointed inside manually.
+
+Every apply records its outcome in its own containment entry, a file `run-<32 hex digits>` in the
+destination's entry directory `/var/lib/paratix/flags/archive-containment-<sha256>.d/` (`<sha256>`
+is the SHA-256 of the normalized destination path). It creates that entry as `in-progress` before it
+touches the destination, never replacing an existing name, and it only ever rewrites its own entry,
+never another apply's. When an apply fails after its merge started, its entry records the links its
+post-merge check identified, relative to `destination` (at most 256); a failure before the merge
+started published nothing and records an empty list, while the links other entries record stay in
+those entries. A later apply of any source into that destination reads every entry before it touches
+the destination and re-verifies the links all of them record in its own post-merge check, with the
+same lexical resolution and kernel cross-check: each must be gone or now resolve inside
+`destination`, otherwise the apply fails naming it and its own entry records it. If an entry holds
+no usable list, because an earlier apply did not finish (it was interrupted or could not record its
+outcome, or another apply to this destination is still running), its check could not identify the
+links (a failed listing or an archive member in an unreadable directory, for example), there were
+too many to record (more than 256 links or 64 KiB), or it is damaged, and likewise when the single
+flag file `archive-containment-<sha256>.failed` of older paratix versions exists or there are more
+than 16 entries, the apply still runs normally. Its post-merge check then verifies the whole
+destination: every symlink under `destination`, not only those the archive can affect, must resolve
+inside it, with the same lexical resolution and kernel cross-check, before `owner` is applied and
+the marker files are written. If the check finds links that escape or cannot be resolved, the apply
+fails naming them as above, removes nothing, and its own entry records exactly those links; the
+entries it read stay as well, so the next apply verifies those links and the whole destination
+again. If the check cannot complete (a failed listing, an unreadable directory or too many
+symlinks), the apply fails with the reason, its entry holds no usable list, and the next apply
+verifies the whole destination again. This check reuses the post-merge listing and cross-check:
+while an entry holds no usable list, it adds at most one listing and one cross-check for an archive
+without symlinks and no command for an archive with symlinks. Reading the entries and creating the
+own one costs one command, and removing them after a success one more, whatever the number of
+entries. No manual step is needed after an interrupted apply or an upgrade: the old flag file is
+read like an entry without a usable list, and the whole destination is verified before it is
+removed. A destination that deliberately contains a symlink pointing outside it fails this check
+while an entry holds no usable list. If violations persist, remove or repoint the offending links,
+optionally, once those links are checked, delete the `run-*` entries in the entry directory and the
+old flag file if it still exists, and run again. On failure no extraction marker is written and no
+`owner` is applied.
+
+Only an apply that succeeds completely, including the re-verification of recorded links or of the
+whole destination, `owner` and the marker files, removes entries, in one last command: every entry
+it read whose content is unchanged since it read it (it claims each by an atomic rename and compares
+its SHA-256 with the one it read), the old flag file included, and then its own. An entry that was
+rewritten in the meantime stays, and the next apply reads it. A refusal while the destination is
+created or validated, by the checks before staging, by the pre-merge check, by the merge, or by the
+post-merge check leaves the apply's entry in place. While any entry or the old flag file exists, and
+while the entry directory is a symlink, not a directory or unreadable, `check` reports `needs-apply`
+for every archive extracting into that destination.
+
+Running more than one `archive.extract` against the same destination at the same time is not
+supported: run at most one apply per destination at a time; parallel applies to different
+destinations are fine. If it happens anyway, known races remain.
+An `in-progress` entry of an apply that is
+still running cannot be told apart from one an interrupted apply left, so another apply whose
+whole-destination verification is clean may remove it; if the running apply then fails, it creates
+its entry again with its record, but if it is killed, links its merge published after that
+verification are checked by nobody. An entry created after an apply read the entries is never
+touched by that apply. An apply that crashes while removing entries leaves a `run-…-claim-<n>`
+entry, which is an ordinary entry and keeps `check` at `needs-apply`. Older and newer paratix
+versions running at the same time on one destination do not coordinate, because older versions still
+use the single flag file.
+
 ### `command`
 
 | Method          | Signature                                                                                                  | Idempotent        |
@@ -749,9 +904,14 @@ Methods available on the `ssh` parameter:
   maxOutputBytes?: number            // Cap stored stdout/stderr bytes
   secrets?: string[]                 // Strings to mask in error output
   silent?: boolean                   // Suppress stdout/stderr
+  strictUtf8Stdout?: boolean         // Reject invalid UTF-8 on stdout instead of substituting U+FFFD
   timeout?: number                   // Abort after N milliseconds
 }
 ```
+
+With `strictUtf8Stdout: true`, stdout is decoded as strict UTF-8 and the command rejects with an
+error named `InvalidUtf8OutputError` instead of substituting U+FFFD, so different host bytes cannot
+decode to the same string. stderr is always decoded leniently; the default (`false`) is unchanged.
 
 Prefer `input` for secret payloads instead of shell arguments, so values do not
 leak through process lists, `/proc/<pid>/cmdline`, or SSH logs. Add the same

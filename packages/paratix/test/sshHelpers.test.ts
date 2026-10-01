@@ -8,6 +8,7 @@ import {
   CommandError,
   createStreamMasker,
   DEFAULT_MAX_OUTPUT_BYTES,
+  InvalidUtf8OutputError,
   maskSecrets,
   MAX_OUTPUT_LENGTH,
   shellQuote,
@@ -1488,5 +1489,124 @@ describe("validateMode", () => {
     expect(() => {
       validateMode("")
     }).toThrow(/mode/v)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// collectStreamOutput with strictUtf8Stdout (Issue #219)
+// ---------------------------------------------------------------------------
+
+describe("collectStreamOutput with strictUtf8Stdout (Issue #219)", () => {
+  const strict = { silent: true, strictUtf8Stdout: true } as const
+
+  it("rejects stdout that is not valid UTF-8 instead of replacing the bytes", async () => {
+    const promise = runCollect({
+      emitStdout: Buffer.from([0x61, 0xff, 0x62]),
+      options: strict,
+    })
+
+    await expect(promise).rejects.toBeInstanceOf(InvalidUtf8OutputError)
+    await expect(promise).rejects.toThrow(
+      "Command stdout is not valid UTF-8 (exit code 0): echo hello"
+    )
+  })
+
+  it("rejects an invalid sequence that is split across chunks", async () => {
+    const promise = runCollect({
+      emitStdout: [Buffer.from([0x61, 0xe2, 0x82]), Buffer.from([0x41])],
+      options: strict,
+    })
+
+    await expect(promise).rejects.toBeInstanceOf(InvalidUtf8OutputError)
+  })
+
+  it("rejects a multi-byte sequence left incomplete at the end of the stream", async () => {
+    const promise = runCollect({
+      emitStdout: Buffer.from([0x61, 0xe2, 0x82]),
+      options: strict,
+    })
+
+    await expect(promise).rejects.toBeInstanceOf(InvalidUtf8OutputError)
+  })
+
+  it("names a signal instead of the exit code when the command was killed", async () => {
+    const promise = runCollect({
+      emitClose: { code: null, signal: "TERM" },
+      emitStdout: Buffer.from([0xfe]),
+      options: strict,
+    })
+
+    await expect(promise).rejects.toThrow("Command stdout is not valid UTF-8 (signal TERM)")
+  })
+
+  it("decodes a valid multi-byte character split across chunks", async () => {
+    const euro = Buffer.from("\u20ac")
+    const result = await runCollect({
+      emitStdout: [Buffer.from([0x61, euro[0], euro[1]]), Buffer.from([euro[2], 0x62])],
+      options: strict,
+    })
+
+    expect(result.stdout).toBe("a\u20acb")
+  })
+
+  it("keeps a leading byte order mark", async () => {
+    const result = await runCollect({
+      emitStdout: Buffer.from([0xef, 0xbb, 0xbf, 0x78]),
+      options: strict,
+    })
+
+    expect(result.stdout).toBe("\ufeffx")
+  })
+
+  it("still decodes stderr leniently and masks secrets in stdout", async () => {
+    const result = await runCollect({
+      emitStderr: Buffer.from([0x65, 0xff]),
+      emitStdout: "token s3cr3t\u0000",
+      options: strict,
+      secrets: ["s3cr3t"],
+    })
+
+    expect(result).toStrictEqual({
+      code: 0,
+      stderr: "e\ufffd",
+      stdout: "token [REDACTED]\u0000",
+    })
+  })
+
+  it("settles exactly once, by rejecting, when the output is invalid", () => {
+    const { stream } = createMockChannel()
+    const rejectSpy = vi.fn()
+    const resolveSpy = vi.fn()
+    const reject: StreamOutputParameters["reject"] = (reason) => {
+      rejectSpy(reason)
+    }
+    const resolve: StreamOutputParameters["resolve"] = (value) => {
+      resolveSpy(value)
+    }
+    const timer = setTimeout(() => {
+      /* intentionally never fires in tests */
+    }, 60_000)
+
+    collectStreamOutput({
+      command: "probe",
+      options: strict,
+      reject,
+      resolve,
+      stream: stream as unknown as StreamOutputParameters["stream"],
+      timer,
+    })
+    stream.emit("data", Buffer.from([0xff]))
+    stream.emit("data", Buffer.from("more"))
+    stream.emit("close", 0)
+    clearTimeout(timer)
+
+    expect(rejectSpy).toHaveBeenCalledOnce()
+    expect(resolveSpy).not.toHaveBeenCalled()
+  })
+
+  it("keeps the lenient default: invalid bytes become U+FFFD without strictUtf8Stdout", async () => {
+    const result = await runCollect({ emitStdout: Buffer.from([0x61, 0xff, 0x62]) })
+
+    expect(result.stdout).toBe("a\ufffdb")
   })
 })

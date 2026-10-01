@@ -16,11 +16,15 @@ import { describe, expect, it } from "vitest"
 import {
   buildMemberTypeProbeScript,
   buildOwnershipProbeScript,
+  buildPreStagingProbeScript,
   buildSymlinkProbeScript,
   encodeMemberTypeEntry,
   encodeNulPayload,
+  encodePreStagingEntry,
+  runBatchedProbe,
 } from "../../src/modules/archiveProbe.js"
 import { renderBatchedChownSymlinkCommand } from "../../src/modules/fileMetadataHelpers.js"
+import { localShellConnection } from "../helpers/localShell.js"
 
 type ProbeResult = { code: number; fields: string[]; stderr: string }
 
@@ -30,11 +34,14 @@ type ProbeResult = { code: number; fields: string[]; stderr: string }
  *
  * @param script - The probe script under test.
  * @param entries - The entries to transport.
+ * @param env - Issue #219: the environment of the remote shell; the test
+ *   runner's environment when omitted.
  * @returns Exit code, decoded output fields and stderr.
  */
-function runProbe(script: string, entries: string[]): ProbeResult {
+function runProbe(script: string, entries: string[], env?: NodeJS.ProcessEnv): ProbeResult {
   const result = spawnSync("/bin/sh", ["-c", script], {
     encoding: "utf8",
+    env,
     input: encodeNulPayload(entries),
     timeout: 10_000,
   })
@@ -45,6 +52,20 @@ function runProbe(script: string, entries: string[]): ProbeResult {
 
 function makeWorkspace(): string {
   return realpathSync(mkdtempSync(join(tmpdir(), "paratix-probe-smoke-")))
+}
+
+/**
+ * Issue #219: pair up NUL-decoded probe fields.
+ *
+ * @param fields - The decoded fields; an odd count leaves `<missing>` in the last pair.
+ * @returns The `(first, second)` pairs in output order.
+ */
+function fieldPairs(fields: readonly string[]): Array<[string, string]> {
+  const pairs: Array<[string, string]> = []
+  for (let index = 0; index < fields.length; index += 2) {
+    pairs.push([fields[index] ?? "", fields[index + 1] ?? "<missing>"])
+  }
+  return pairs
 }
 
 /**
@@ -404,6 +425,143 @@ describe.skipIf(SKIP_PLATFORM)("archive.extract batched probes", () => {
       } finally {
         rmSync(root, { force: true, recursive: true })
       }
+    })
+  })
+
+  describe("pre-staging probe (Issue #219)", () => {
+    const probe = buildPreStagingProbeScript()
+
+    it("reports a symlink for l, a real directory for n and a non-directory for d", () => {
+      const root = makeWorkspace()
+      try {
+        const directory = join(root, "dir")
+        const file = join(root, "file")
+        const link = join(root, "link")
+        mkdirSync(directory)
+        writeFileSync(file, "x")
+        symlinkSync(directory, link)
+
+        const result = runProbe(probe, [
+          encodePreStagingEntry("l", directory),
+          encodePreStagingEntry("l", link),
+          encodePreStagingEntry("n", file),
+          encodePreStagingEntry("n", directory),
+          encodePreStagingEntry("d", directory),
+          encodePreStagingEntry("d", file),
+        ])
+
+        expect(result.stderr).toBe("")
+        expect(result.code).toBe(0)
+        expect(fieldPairs(result.fields)).toStrictEqual([
+          ["l", link],
+          ["n", directory],
+          ["d", file],
+        ])
+      } finally {
+        rmSync(root, { force: true, recursive: true })
+      }
+    })
+
+    it("never reports a symlink for n or d, even when it points at the conflicting type", () => {
+      // A symlink at a member path is the `l` check's business; `n` and `d`
+      // look at the entry itself, so `[ -d ]` must not follow the link.
+      const root = makeWorkspace()
+      try {
+        const directory = join(root, "dir")
+        const file = join(root, "file")
+        mkdirSync(directory)
+        writeFileSync(file, "x")
+        symlinkSync(directory, join(root, "to-dir"))
+        symlinkSync(file, join(root, "to-file"))
+        symlinkSync(join(root, "missing"), join(root, "dangling"))
+
+        const result = runProbe(probe, [
+          encodePreStagingEntry("n", join(root, "to-dir")),
+          encodePreStagingEntry("d", join(root, "to-file")),
+          encodePreStagingEntry("d", join(root, "dangling")),
+          encodePreStagingEntry("n", join(root, "dangling")),
+        ])
+
+        expect(result).toStrictEqual({ code: 0, fields: [], stderr: "" })
+      } finally {
+        rmSync(root, { force: true, recursive: true })
+      }
+    })
+
+    it("treats nonexistent paths as clean for every check", () => {
+      const root = makeWorkspace()
+      try {
+        const missing = join(root, "missing/deeper")
+
+        const result = runProbe(probe, [
+          encodePreStagingEntry("l", missing),
+          encodePreStagingEntry("n", missing),
+          encodePreStagingEntry("d", missing),
+        ])
+
+        expect(result).toStrictEqual({ code: 0, fields: [], stderr: "" })
+      } finally {
+        rmSync(root, { force: true, recursive: true })
+      }
+    })
+
+    it("keeps check and path paired for paths with colons, spaces and newlines", () => {
+      const root = makeWorkspace()
+      try {
+        const directory = join(root, "d:n: with space\nline")
+        const file = join(root, "l:d:file")
+        mkdirSync(directory)
+        writeFileSync(file, "x")
+
+        const result = runProbe(probe, [
+          encodePreStagingEntry("d", file),
+          encodePreStagingEntry("n", directory),
+          encodePreStagingEntry("d", directory),
+          encodePreStagingEntry("n", file),
+        ])
+
+        expect(result.code).toBe(0)
+        expect(fieldPairs(result.fields)).toStrictEqual([
+          ["d", file],
+          ["n", directory],
+        ])
+      } finally {
+        rmSync(root, { force: true, recursive: true })
+      }
+    })
+
+    it("reports an unknown check code with the kind ? instead of skipping the entry", () => {
+      const root = makeWorkspace()
+      try {
+        const result = runProbe(probe, [`x:${root}`, "no-colon"])
+
+        expect(result.code).toBe(0)
+        expect(fieldPairs(result.fields)).toStrictEqual([
+          ["?", root],
+          ["?", "no-colon"],
+        ])
+      } finally {
+        rmSync(root, { force: true, recursive: true })
+      }
+    })
+  })
+
+  describe("strict UTF-8 transport (Issue #219)", () => {
+    it("fails a probe closed when its output is not valid UTF-8, and decodes valid output exactly", async () => {
+      // Two paths that differ only in bytes that are not UTF-8 would both
+      // decode to U+FFFD leniently; the strict decode refuses the output.
+      const invalid = "xargs -0 sh -c 'printf \"d/\\376\\0d/\\377\\0\"' sh"
+      const valid = "xargs -0 sh -c 'printf \"d/\\303\\251\\0\"' sh"
+      const { conn } = localShellConnection()
+
+      const refused = await runBatchedProbe(conn, { entries: ["x"], script: invalid })
+      const accepted = await runBatchedProbe(conn, { entries: ["x"], script: valid })
+
+      expect(refused).toStrictEqual({
+        detail: `Command stdout is not valid UTF-8 (exit code 0): ${invalid}`,
+        kind: "failed",
+      })
+      expect(accepted).toStrictEqual({ fields: ["d/\u00e9"], kind: "ok" })
     })
   })
 })

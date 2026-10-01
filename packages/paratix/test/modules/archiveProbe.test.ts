@@ -3,11 +3,18 @@ import { describe, expect, it, vi } from "vitest"
 import type { ExecOptions, ExecResult, SshConnection } from "../../src/types.js"
 
 import {
+  buildSymlinkListingProbeScript,
   buildSymlinkProbeScript,
   encodeNulPayload,
+  encodePreStagingEntry,
+  encodeSymlinkListingEntry,
   runBatchedProbe,
 } from "../../src/modules/archiveProbe.js"
-import { CAPTURE_TRUNCATION_MARKER } from "../../src/sshHelpers.js"
+import {
+  CAPTURE_TRUNCATION_MARKER,
+  DEFAULT_MAX_OUTPUT_BYTES,
+  InvalidUtf8OutputError,
+} from "../../src/sshHelpers.js"
 
 function connectionReturning(result: Partial<ExecResult>): {
   conn: SshConnection
@@ -50,6 +57,26 @@ describe("runBatchedProbe", () => {
       ignoreExitCode: true,
       input: "/opt/app\u0000/opt/two\nlines\u0000",
       silent: true,
+      strictUtf8Stdout: true,
+    })
+  })
+
+  it("reports a rejected exec, e.g. stdout that is not valid UTF-8, as a failure (Issue #219)", async () => {
+    const conn = {
+      async exec(): Promise<ExecResult> {
+        await Promise.resolve()
+        throw new InvalidUtf8OutputError("Command stdout is not valid UTF-8 (exit code 0): probe")
+      },
+    } as unknown as SshConnection
+
+    const outcome = await runBatchedProbe(conn, {
+      entries: ["/opt/app"],
+      script: buildSymlinkListingProbeScript(),
+    })
+
+    expect(outcome).toStrictEqual({
+      detail: "Command stdout is not valid UTF-8 (exit code 0): probe",
+      kind: "failed",
     })
   })
 
@@ -79,8 +106,55 @@ describe("runBatchedProbe", () => {
     expect(outcome).toStrictEqual({
       detail: expect.stringContaining("truncated"),
       kind: "failed",
+      truncated: true,
     })
   })
+
+  it("passes a captured-output cap to exec only when the caller sets one (Issue #219)", async () => {
+    const { conn, execCalls } = connectionReturning({})
+
+    await runBatchedProbe(conn, { entries: ["/opt/app"], script: buildSymlinkListingProbeScript() })
+    await runBatchedProbe(conn, {
+      entries: ["/opt/app"],
+      maxOutputBytes: 16_777_216,
+      script: buildSymlinkListingProbeScript(),
+    })
+
+    expect(execCalls.map(({ options }) => options)).toStrictEqual([
+      { ignoreExitCode: true, input: "/opt/app\u0000", silent: true, strictUtf8Stdout: true },
+      {
+        ignoreExitCode: true,
+        input: "/opt/app\u0000",
+        maxOutputBytes: 16_777_216,
+        silent: true,
+        strictUtf8Stdout: true,
+      },
+    ])
+  })
+
+  it.each([
+    { cap: DEFAULT_MAX_OUTPUT_BYTES, limit: {} },
+    { cap: 16_777_216, limit: { maxOutputBytes: 16_777_216 } },
+  ])(
+    "names the effective cap of $cap bytes when the output was truncated (Issue #219)",
+    async ({ cap, limit }) => {
+      const { conn } = connectionReturning({
+        stdout: `/opt/app/l\u0000..\u0000${CAPTURE_TRUNCATION_MARKER}`,
+      })
+
+      const outcome = await runBatchedProbe(conn, {
+        entries: ["/opt/app"],
+        ...limit,
+        script: buildSymlinkListingProbeScript(),
+      })
+
+      expect(outcome).toStrictEqual({
+        detail: `probe output exceeded the captured-output cap of ${String(cap)} bytes; refusing to evaluate a truncated result`,
+        kind: "failed",
+        truncated: true,
+      })
+    }
+  )
 
   it("keeps interior empty fields, which the ownership probe emits for an unstattable path", async () => {
     const { conn } = connectionReturning({ stdout: "/opt/gone\u0000\u0000\u0000\u0000\u0000" })
@@ -145,5 +219,18 @@ describe("truncation reaches the ownership caller", () => {
     const result = await mod.check(conn, {})
 
     expect(result).toBe("needs-apply")
+  })
+})
+
+describe("tagged probe entries (Issue #219)", () => {
+  it("prefixes the path with the check code and keeps colons inside the path", () => {
+    expect(encodePreStagingEntry("l", "/opt/app/a")).toBe("l:/opt/app/a")
+    expect(encodePreStagingEntry("n", "/opt/app/a:b")).toBe("n:/opt/app/a:b")
+    expect(encodePreStagingEntry("d", "/opt/app/x:y:z")).toBe("d:/opt/app/x:y:z")
+  })
+
+  it("prefixes the listing entry with its kind and keeps colons inside the path", () => {
+    expect(encodeSymlinkListingEntry("r", "/opt/app")).toBe("r:/opt/app")
+    expect(encodeSymlinkListingEntry("n", "/opt/app/n:x")).toBe("n:/opt/app/n:x")
   })
 })

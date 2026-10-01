@@ -392,8 +392,81 @@ function normalizeSshCloseSignal(signal: null | string | undefined): string | un
 }
 
 /**
+ * Error a command rejects with when `ExecOptions.strictUtf8Stdout` is set and
+ * its stdout is not valid UTF-8.
+ */
+export class InvalidUtf8OutputError extends Error {
+  public constructor(message: string) {
+    super(message)
+    this.name = "InvalidUtf8OutputError"
+  }
+}
+
+/** A streaming stdout decoder; `valid` turns false once invalid UTF-8 was seen. */
+type StdoutDecoder = { end: () => string; valid: () => boolean; write: (data: Buffer) => string }
+
+/**
+ * Create the stdout decoder `collectStreamOutput` uses.
+ *
+ * By default this is the lenient `StringDecoder`, which replaces invalid byte
+ * sequences with U+FFFD. With `strict`, a fatal `TextDecoder` is used instead:
+ * once it meets invalid UTF-8 (also when the sequence is split across chunks,
+ * or left incomplete at the end), the decoder is marked invalid and decodes
+ * nothing further, and the caller rejects the command when the stream closes.
+ * `ignoreBOM` keeps a leading byte order mark in the text.
+ *
+ * @param strict - Whether stdout must be valid UTF-8.
+ * @returns A lenient decoder, or a fatal one that reports invalid input.
+ */
+function createStdoutDecoder(strict: boolean): StdoutDecoder {
+  if (!strict) {
+    const lenient = new StringDecoder("utf8")
+    return { end: () => lenient.end(), valid: () => true, write: (data) => lenient.write(data) }
+  }
+  const fatal = new TextDecoder("utf-8", { fatal: true, ignoreBOM: true })
+  let valid = true
+  const decode = (data?: Buffer): string => {
+    if (!valid) return ""
+    try {
+      return data === undefined ? fatal.decode() : fatal.decode(data, { stream: true })
+    } catch {
+      valid = false
+      return ""
+    }
+  }
+  return { end: () => decode(), valid: () => valid, write: (data) => decode(data) }
+}
+
+/**
+ * Build the rejection for a strict-UTF-8 command whose stdout was not valid
+ * UTF-8, naming how the command ended and its masked command line.
+ *
+ * @param command - The command that ran.
+ * @param secrets - The secrets to mask in the command.
+ * @param end - How the command ended.
+ * @param end.code - The normalized exit code.
+ * @param end.signal - The signal that ended the command, if any.
+ * @returns The error to reject the command with.
+ */
+function invalidUtf8StdoutError(
+  command: string,
+  secrets: PreparedSecrets,
+  end: { code: number; signal: string | undefined }
+): InvalidUtf8OutputError {
+  const how = end.signal === undefined ? `exit code ${String(end.code)}` : `signal ${end.signal}`
+  return new InvalidUtf8OutputError(
+    `Command stdout is not valid UTF-8 (${how}): ${maskPreparedSecrets(command, secrets)}`
+  )
+}
+
+/**
  * Wire up event listeners on an ssh2 stream to collect stdout/stderr
  * and resolve or reject the promise when the stream closes.
+ *
+ * With `ExecOptions.strictUtf8Stdout`, stdout that is not valid UTF-8 makes
+ * the promise reject with an {@link InvalidUtf8OutputError} when the stream
+ * closes, instead of resolving with replacement characters. The listeners,
+ * the timer and the single settlement work exactly as in the default mode.
  *
  * @param parameters - Stream collection parameters.
  */
@@ -412,7 +485,7 @@ export function collectStreamOutput(parameters: StreamOutputParameters): void {
   }
   const stdout = new CapturedOutput(maxOutputBytes)
   const stderr = new CapturedOutput(maxOutputBytes)
-  const stdoutDecoder = new StringDecoder("utf8")
+  const stdoutDecoder = createStdoutDecoder(options.strictUtf8Stdout === true)
   const stderrDecoder = new StringDecoder("utf8")
   const terminalWriter = createSanitizedTerminalWriter(options.silent === true)
 
@@ -439,35 +512,33 @@ export function collectStreamOutput(parameters: StreamOutputParameters): void {
   stream.stderr.on("data", (data: Buffer) => {
     stderrMasker.push(stderrDecoder.write(data))
   })
-  stream.on("error", (error: Error) => {
+  // Stop the timer and drain every decoder, masker and the terminal writer;
+  // shared by the error and close paths, in the same order for both.
+  const drain = (): void => {
     clearTimeout(timer)
     finishStdoutDecode()
     finishStderrDecode()
     stdoutMasker.flush()
     stderrMasker.flush()
     terminalWriter.flush()
+  }
+  const failStream = (error: Error): void => {
+    drain()
     reject(error)
-  })
-  stream.stderr.on("error", (error: Error) => {
-    clearTimeout(timer)
-    finishStdoutDecode()
-    finishStderrDecode()
-    stdoutMasker.flush()
-    stderrMasker.flush()
-    terminalWriter.flush()
-    reject(error)
-  })
+  }
+  stream.on("error", failStream)
+  stream.stderr.on("error", failStream)
   stream.on("close", (code: null | number | undefined, signal?: null | string) => {
-    clearTimeout(timer)
-    finishStdoutDecode()
-    finishStderrDecode()
-    stdoutMasker.flush()
-    stderrMasker.flush()
-    terminalWriter.flush()
+    drain()
     const capturedStdout = stdout.toString()
     const capturedStderr = stderr.toString()
     const capturedStreams = { capturedStderr, capturedStdout, stderr, stdout }
     const closeSignal = normalizeSshCloseSignal(signal)
+    if (!stdoutDecoder.valid()) {
+      const end = { code: normalizeSshCloseCode(code), signal: closeSignal }
+      reject(invalidUtf8StdoutError(command, secrets, end))
+      return
+    }
     if (closeSignal !== undefined) {
       reject(
         buildCommandError({

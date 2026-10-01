@@ -1,7 +1,14 @@
-import type { SshConnection } from "../types.js"
+import type { ExecResult, SshConnection } from "../types.js"
 
 import { shellQuote } from "../ssh.js"
-import { CAPTURE_TRUNCATION_MARKER } from "../sshHelpers.js"
+import { CAPTURE_TRUNCATION_MARKER, InvalidUtf8OutputError } from "../sshHelpers.js"
+import { tarListingScript } from "./archiveTarListing.js"
+import {
+  type ArchiveListing,
+  archiveMemberKindFromMode,
+  type ArchiveMemberParseResult,
+  parseTarListing,
+} from "./archiveTarListingParser.js"
 
 /** Maximum captured bytes for archive listings and persisted member metadata. */
 export const ARCHIVE_CAPTURE_LIMIT_BYTES = 16_777_216
@@ -36,6 +43,11 @@ function isZipSource(lowerSource: string): boolean {
 /**
  * Build the shell command that lists the archive members for validation.
  *
+ * Issue #219: a tar archive is listed by {@link tarListingScript}, which runs
+ * `tar` under a UTF-8 C locale when the host has one (`LC_ALL=C` otherwise,
+ * and always for bsdtar) and prints a listing mode line first, so the listed names do not depend on
+ * the locale of the exec session.
+ *
  * @param source - The original archive path used for format detection.
  * @param archivePath - The actual archive path on the remote host.
  * @returns The shell command to list members, or null when unsupported.
@@ -44,7 +56,7 @@ export function listArchiveMembersCommand(source: string, archivePath: string): 
   const lower = source.toLowerCase()
   const tarFlags = tarListFlags(lower)
   if (tarFlags !== null) {
-    return `tar ${tarFlags} ${shellQuote(archivePath)}`
+    return tarListingScript(tarFlags, archivePath)
   }
   if (isZipSource(lower)) {
     // `unzip -Zs` includes Unix-style mode metadata, which lets us reject
@@ -74,115 +86,12 @@ export type ArchiveMember = {
   path: string
 }
 
-type ArchiveListing = { failureReason: string } | { members: ArchiveMember[] }
-type ArchiveMemberParseResult =
-  | { failureReason: string; status: "invalid" }
-  | { member: ArchiveMember; status: "parsed" }
-  | { status: "ignored" }
-
-/**
- * Parse a `tar -tv…f` listing line into an {@link ArchiveMember}.
- *
- * The expected line shape is:
- *
- *     mode   user/group   size   date   time   name [-> linktarget]
- *     mode   user/group   size   date   time   name link to linktarget
- *
- * Blank lines are ignored. Non-empty lines that do not match this shape are
- * rejected so the safety guard fails closed before extraction.
- *
- * @param line - A single line from `tar -tv…f` output.
- * @returns The parsed member, an ignored marker or an invalid-line reason.
- */
-const TAR_LINK_ARROW = " -> "
-const TAR_HARDLINK_TARGET = " link to "
-const TAR_VERBOSE_LINE_PATTERN =
-  /^(?<mode>[\-bcdhlps][\-rwxStTs]{9})\s+\S+\s+\S+\s+\S+\s+\S+\s+(?<rest>\S.*)$/v
 const ZIP_INFO_LINE_PATTERN =
   // eslint-disable-next-line security/detect-unsafe-regex -- Anchored Info-ZIP listing parser with fixed-width mode and bounded column count.
   /^(?<mode>[\-bcdlps][\-rwxStTs]{9})\s+(?:\S+\s+){7}(?<path>\S.*)$/v
 const ZIP_INFO_SIZE_LINE_PATTERN = /^Zip file size:\s+\d+\s+bytes,\s+number of entries:\s+\d+$/v
 const ZIP_INFO_SUMMARY_LINE_PATTERN =
   /^\d+\s+files?,\s+\d+\s+bytes uncompressed,\s+\d+\s+bytes compressed:\s+[\d.]+%$/v
-
-function archiveMemberKindFromMode(mode: string): ArchiveMember["kind"] {
-  if (mode.startsWith("d")) return "directory"
-  if (mode.startsWith("l")) return "symlink"
-  if (mode.startsWith("h")) return "hardlink"
-  if (!mode.startsWith("-")) return "special"
-  return "file"
-}
-
-function parseTarVerboseLine(line: string): ArchiveMemberParseResult {
-  const trimmed = line.replace(/\r$/v, "")
-  if (trimmed.length === 0) return { status: "ignored" }
-  // mode owner/group size date time path[ -> link]
-  // The trailing capture starts with a non-whitespace character so the
-  // greedy `\s+` separators cannot exchange characters with the path
-  // capture (avoids polynomial backtracking).
-  const match = TAR_VERBOSE_LINE_PATTERN.exec(trimmed) ?? null
-  if (!match?.groups) {
-    return {
-      failureReason: `could not parse tar listing line: ${JSON.stringify(trimmed)}`,
-      status: "invalid",
-    }
-  }
-  const mode = match.groups.mode
-  const kind = archiveMemberKindFromMode(mode)
-  const rest = match.groups.rest
-  const arrowIndex = rest.indexOf(TAR_LINK_ARROW)
-  if (arrowIndex !== -1 && kind !== "file") {
-    return {
-      member: {
-        format: "tar",
-        kind,
-        linkTarget: rest.slice(arrowIndex + TAR_LINK_ARROW.length),
-        mode,
-        path: rest.slice(0, arrowIndex),
-      },
-      status: "parsed",
-    }
-  }
-  const hardlinkTargetIndex = rest.indexOf(TAR_HARDLINK_TARGET)
-  if (hardlinkTargetIndex !== -1 && kind === "hardlink") {
-    return {
-      member: {
-        format: "tar",
-        kind,
-        linkTarget: rest.slice(hardlinkTargetIndex + TAR_HARDLINK_TARGET.length),
-        mode,
-        path: rest.slice(0, hardlinkTargetIndex),
-      },
-      status: "parsed",
-    }
-  }
-  return {
-    member: {
-      format: "tar",
-      kind,
-      linkTarget: null,
-      mode,
-      path: rest,
-    },
-    status: "parsed",
-  }
-}
-
-/**
- * Parse the full listing of a tar archive into {@link ArchiveMember}s.
- *
- * @param stdout - The combined stdout of `tar -tv…f`.
- * @returns The parsed members, or a failure reason for unparsed member lines.
- */
-function parseTarListing(stdout: string): ArchiveListing {
-  const members: ArchiveMember[] = []
-  for (const line of stdout.split("\n")) {
-    const parsed = parseTarVerboseLine(line)
-    if (parsed.status === "invalid") return { failureReason: parsed.failureReason }
-    if (parsed.status === "parsed") members.push(parsed.member)
-  }
-  return { members }
-}
 
 /**
  * Parse one Info-ZIP `unzip -Zs` listing line into an {@link ArchiveMember}.
@@ -246,6 +155,10 @@ function parseZipListing(stdout: string): ArchiveListing {
 // would terminate a path early when interpolated into a shell argument.
 // Carriage returns and other control bytes serve no legitimate purpose in
 // POSIX paths, so we reject them across the board.
+// Issue #219: the guard paths now travel NUL-terminated on stdin
+// (`buildStagingMergeExec`), so a newline no longer splits that list. The
+// refusal stays: a NUL would now split it the same way, and would still cut a
+// path short in a shell argument.
 /* eslint-disable-next-line regexp/no-control-character -- matching control characters is the explicit purpose of this guard */ /* oxlint-disable-next-line no-control-regex */
 const ARCHIVE_MEMBER_CONTROL_CHARACTER_PATTERN = /[\x00-\x1F]/v
 
@@ -255,6 +168,17 @@ const ARCHIVE_MEMBER_CONTROL_CHARACTER_PATTERN = /[\x00-\x1F]/v
  * Resolves consecutive slashes, drops `.` segments and applies `..`
  * segments without ever escaping above the start. The returned string is
  * the canonical relative form used by {@link memberEscapesDestination}.
+ * The destination root itself (`.`, `./`, the empty string) normalizes to
+ * the empty string, and a trailing slash is dropped, so `./x`, `x` and `x/`
+ * share one form.
+ *
+ * Issue #219: the normalization is purely lexical and knows nothing about
+ * where a path is anchored. Member paths and hardlink targets are relative to
+ * the archive root and can be passed in directly. A relative symlink target is
+ * relative to the directory that contains the link, so callers join it to
+ * {@link archiveMemberParentPath} of the normalized member path first; the
+ * lexical result says nothing about symlinks the path passes through, which
+ * `archiveLinkValidation.ts` resolves separately.
  *
  * Returns null when the path tries to escape the root via `..` segments at
  * the top level, or when the input contains control characters
@@ -285,6 +209,19 @@ export function normalizeArchiveMemberPath(input: string): null | string {
 }
 
 /**
+ * Issue #219: return the parent of a normalized archive path — its POSIX
+ * dirname, with the empty string standing for the destination root. A
+ * root-level member such as `x` therefore has the parent `""`.
+ *
+ * @param normalizedPath - A path already normalized by {@link normalizeArchiveMemberPath}.
+ * @returns The normalized parent path, `""` for a root-level path.
+ */
+export function archiveMemberParentPath(normalizedPath: string): string {
+  const separator = normalizedPath.lastIndexOf("/")
+  return separator === -1 ? "" : normalizedPath.slice(0, separator)
+}
+
+/**
  * Decide whether a single archive member would write outside the
  * destination directory. Treats absolute paths and any traversal escape as
  * unsafe and returns true.
@@ -293,17 +230,26 @@ export function normalizeArchiveMemberPath(input: string): null | string {
  * absolute target or a target that escapes the destination via `..` is
  * rejected to mirror typical zip-slip / tar-slip patterns.
  *
+ * Issue #219: the target is anchored by member kind. A hardlink target is a
+ * member name relative to the archive root, so it is normalized as is. A
+ * relative symlink target is read by the kernel from the directory that
+ * contains the link, so it is normalized after joining it to the link's
+ * parent: `a/bin/x -> ../lib/y` stays inside, `a/x -> ../../y` escapes. This
+ * check is lexical and per member; symlink chains through other archive
+ * members are resolved by `archiveLinkUnsafeReason` afterwards.
+ *
  * @param member - A single parsed archive member.
  * @returns True if the member is unsafe and must be rejected.
  */
 export function memberEscapesDestination(member: ArchiveMember): boolean {
   if (member.path.startsWith("/")) return true
-  if (normalizeArchiveMemberPath(member.path) === null) return true
-  if (member.linkTarget !== null) {
-    if (member.linkTarget.startsWith("/")) return true
-    if (normalizeArchiveMemberPath(member.linkTarget) === null) return true
-  }
-  return false
+  const memberPath = normalizeArchiveMemberPath(member.path)
+  if (memberPath === null) return true
+  if (member.linkTarget === null) return false
+  if (member.linkTarget.startsWith("/")) return true
+  const anchor = member.kind === "symlink" ? archiveMemberParentPath(memberPath) : ""
+  const anchoredTarget = anchor === "" ? member.linkTarget : `${anchor}/${member.linkTarget}`
+  return normalizeArchiveMemberPath(anchoredTarget) === null
 }
 
 /**
@@ -319,6 +265,66 @@ export function memberEscapesDestination(member: ArchiveMember): boolean {
  */
 function modeHasSetuidOrSetgid(mode: string): boolean {
   return mode[3] === "s" || mode[3] === "S" || mode[6] === "s" || mode[6] === "S"
+}
+
+/**
+ * Return why a member's path or link target contains control characters.
+ *
+ * @param member - A single parsed archive member.
+ * @returns The refusal reason, or null.
+ */
+function controlCharacterReason(member: ArchiveMember): null | string {
+  // R-0000636: report control-character members with a dedicated reason so
+  // the failure surface clearly identifies the cause instead of conflating
+  // it with traversal escapes. The check runs before
+  // `memberEscapesDestination` so even paths that would otherwise look
+  // benign (no leading `/`, no `..`) are still rejected.
+  if (ARCHIVE_MEMBER_CONTROL_CHARACTER_PATTERN.test(member.path)) {
+    return `member ${JSON.stringify(member.path)} contains control characters`
+  }
+  if (
+    member.linkTarget !== null &&
+    ARCHIVE_MEMBER_CONTROL_CHARACTER_PATTERN.test(member.linkTarget)
+  ) {
+    return `member ${JSON.stringify(member.path)} -> ${JSON.stringify(member.linkTarget)} link target contains control characters`
+  }
+  return null
+}
+
+/**
+ * Issue #219: refuse a member whose listed name cannot be mapped reliably to
+ * the name that will be extracted.
+ *
+ * GNU tar prints non-printable bytes — and, outside a UTF-8 locale, every
+ * non-ASCII byte — as a `\NNN` escape and a backslash as `\\`, while other tar
+ * implementations print names raw. A listed name with a backslash can
+ * therefore stand for different bytes on disk, and the paths the containment
+ * checks compare could diverge from the names on the host. A U+FFFD
+ * replacement character marks the same problem after decoding. Refusing both
+ * in the path and in the link target keeps archive names and host names one
+ * to one.
+ *
+ * Issue #219: for GNU tar and bsdtar the tar listing is decoded before this
+ * check (`decodeTarListingName`), so an escaped non-ASCII name arrives here
+ * as its real characters in any host locale. A `\\` decodes to a real
+ * backslash, which is still refused: a listing that is not decoded (another
+ * tar, `unzip -Zs`) cannot tell a real backslash from an escape, and one rule
+ * for every listing keeps the verdict for an archive independent of the
+ * `tar` on the host.
+ *
+ * @param member - A single parsed archive member.
+ * @returns The refusal reason, or null.
+ */
+function ambiguousNameReason(member: ArchiveMember): null | string {
+  const hint =
+    "member names with a backslash are refused in every listing, because a listing that Paratix does not decode (a tar other than GNU tar or bsdtar, or unzip) cannot tell a real backslash from an escape sequence, and a U+FFFD may stand for bytes a listing tool replaced"
+  if (/[\\\uFFFD]/v.test(member.path)) {
+    return `member ${JSON.stringify(member.path)} contains a backslash or a U+FFFD replacement character; ${hint}`
+  }
+  if (member.linkTarget !== null && /[\\\uFFFD]/v.test(member.linkTarget)) {
+    return `member ${JSON.stringify(member.path)} -> ${JSON.stringify(member.linkTarget)} link target contains a backslash or a U+FFFD replacement character; ${hint}`
+  }
+  return null
 }
 
 /**
@@ -344,20 +350,8 @@ export function archiveMemberUnsafeReason(member: ArchiveMember): null | string 
   if (modeHasSetuidOrSetgid(member.mode)) {
     return `member ${JSON.stringify(member.path)} has setuid or setgid bit set (mode ${member.mode})`
   }
-  // R-0000636: report control-character members with a dedicated reason so
-  // the failure surface clearly identifies the cause instead of conflating
-  // it with traversal escapes. The check runs before
-  // `memberEscapesDestination` so even paths that would otherwise look
-  // benign (no leading `/`, no `..`) are still rejected.
-  if (ARCHIVE_MEMBER_CONTROL_CHARACTER_PATTERN.test(member.path)) {
-    return `member ${JSON.stringify(member.path)} contains control characters`
-  }
-  if (
-    member.linkTarget !== null &&
-    ARCHIVE_MEMBER_CONTROL_CHARACTER_PATTERN.test(member.linkTarget)
-  ) {
-    return `member ${JSON.stringify(member.path)} -> ${JSON.stringify(member.linkTarget)} link target contains control characters`
-  }
+  const nameProblem = controlCharacterReason(member) ?? ambiguousNameReason(member)
+  if (nameProblem !== null) return nameProblem
   if (!memberEscapesDestination(member)) return null
   const detail =
     member.linkTarget === null
@@ -384,11 +378,26 @@ export async function listArchiveMembers(
   if (command === null) {
     return { failureReason: `unsupported archive format for ${parameters.source}` }
   }
-  const result = await conn.exec(command, {
-    ignoreExitCode: true,
-    maxOutputBytes: ARCHIVE_CAPTURE_LIMIT_BYTES,
-    silent: true,
-  })
+  // Issue #219: the listing is decoded as strict UTF-8, so every member name
+  // maps back to exactly the bytes the listing printed; a lossy decode could
+  // turn two different names into the same string. A listing that is not
+  // valid UTF-8 is refused. GNU tar and bsdtar escape every byte of a name
+  // that is not valid UTF-8 in the locale the listing script picks for them;
+  // another tar may print such bytes raw, which lands here.
+  let result: ExecResult
+  try {
+    result = await conn.exec(command, {
+      ignoreExitCode: true,
+      maxOutputBytes: ARCHIVE_CAPTURE_LIMIT_BYTES,
+      silent: true,
+      strictUtf8Stdout: true,
+    })
+  } catch (error) {
+    if (!(error instanceof InvalidUtf8OutputError)) throw error
+    return {
+      failureReason: `archive listing for ${parameters.source} is not valid UTF-8; refusing to validate member names that cannot be mapped to the extracted names reliably (a member name whose bytes are not valid UTF-8 cannot be mapped)`,
+    }
+  }
   if (
     result.stdout.endsWith(CAPTURE_TRUNCATION_MARKER) ||
     result.stderr.endsWith(CAPTURE_TRUNCATION_MARKER)
