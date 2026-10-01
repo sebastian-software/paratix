@@ -45,9 +45,14 @@
  * combination at a member path or below a host symlink is reported as a
  * conflict, which refuses the extraction instead of guessing what `cp` does.
  */
-import type { MergedSymlinkScope } from "./archiveContainmentScope.js"
+import type { KeyedMember, MergedSymlinkScope } from "./archiveContainmentScope.js"
 
-import { unreadableDirectoryAt, unreadableDirectoryIndex } from "./archiveContainmentScope.js"
+import {
+  keyedMembers,
+  unreadableDirectoryAt,
+  unreadableDirectoryIndex,
+} from "./archiveContainmentScope.js"
+import { archiveLinkAnalysis } from "./archiveLinkAnalysis.js"
 import { type ArchiveMember, normalizeArchiveMemberPath } from "./archiveMemberValidation.js"
 import {
   ArchiveSymlinkResolver,
@@ -66,9 +71,6 @@ export {
   type SymlinkWalkTarget,
   variantDescription,
 } from "./archiveSymlinkResolver.js"
-
-/** A member paired with its normalized path, the key every rule compares. */
-type KeyedMember = { key: string; member: ArchiveMember }
 
 /**
  * Issue #219: one symlink of the combined post-merge link set, keyed elsewhere
@@ -140,6 +142,17 @@ export type MergedSymlinkViolation =
  */
 export type MergedSymlinkResolutions = {
   /**
+   * Issue #219: the links outside the judged set that the resolution of a
+   * judged link placed inside follows, directly or through another followed
+   * link, each once in walk order; none for any other key. They are the host
+   * links the merge did not touch, so they are never judged on their own, but
+   * the kernel cross-check has to confirm their targets as well: a write
+   * through the judged link lands wherever the kernel resolves them (see
+   * `ArchiveSymlinkResolver.followedLinks`). The same `trail` source serves
+   * their trails.
+   */
+  followed: (key: string) => readonly string[]
+  /**
    * Every relevant link that resolves inside the destination, mapped to the
    * normalized destination-relative path it resolves to (`""` for the
    * destination root).
@@ -164,15 +177,6 @@ export type ArchiveSymlinkTargetPrefix = {
 
 function isLink(member: ArchiveMember): boolean {
   return member.kind === "symlink" || member.kind === "hardlink"
-}
-
-function keyedMembers(members: readonly ArchiveMember[]): KeyedMember[] {
-  const keyed: KeyedMember[] = []
-  for (const member of members) {
-    const key = normalizeArchiveMemberPath(member.path)
-    if (key !== null) keyed.push({ key, member })
-  }
-  return keyed
 }
 
 function hardlinkTargetKey(member: ArchiveMember): null | string {
@@ -261,23 +265,6 @@ function hardlinkToSymlinkReason(
   return null
 }
 
-/**
- * Build a resolver over an archive's own symlink members, each walked from its
- * parent directory.
- *
- * @param entries - The members with their normalized paths.
- * @returns A resolver whose known paths are exactly the archive members.
- */
-function archiveResolver(entries: readonly KeyedMember[]): ArchiveSymlinkResolver {
-  const targets = new Map<string, SymlinkWalkTarget>()
-  for (const { key, member } of entries) {
-    if (member.kind === "symlink") {
-      targets.set(key, { anchor: "parent", path: member.linkTarget ?? "" })
-    }
-  }
-  return new ArchiveSymlinkResolver(targets, new Set(entries.map(({ key }) => key)))
-}
-
 function resolutionReason(
   entries: readonly KeyedMember[],
   resolver: ArchiveSymlinkResolver
@@ -316,7 +303,7 @@ function resolutionReason(
  * @returns A human-readable unsafe reason, or null.
  */
 export function archiveLinkUnsafeReason(members: readonly ArchiveMember[]): null | string {
-  const entries = keyedMembers(members)
+  const { entries, resolver } = archiveLinkAnalysis(members)
   const symlinks = new SymlinkVariantIndex(
     entries.filter(({ member }) => member.kind === "symlink").map(({ key }) => key)
   )
@@ -325,7 +312,7 @@ export function archiveLinkUnsafeReason(members: readonly ArchiveMember[]): null
     duplicateReason(entries, symlinks) ??
     ancestorReason(entries, symlinks) ??
     hardlinkToSymlinkReason(entries, symlinks) ??
-    resolutionReason(entries, archiveResolver(entries))
+    resolutionReason(entries, resolver)
   )
 }
 
@@ -345,8 +332,7 @@ export function archiveLinkUnsafeReason(members: readonly ArchiveMember[]): null
 export function archiveSymlinkTargetPrefixes(
   members: readonly ArchiveMember[]
 ): ArchiveSymlinkTargetPrefix[] {
-  const entries = keyedMembers(members)
-  const resolver = archiveResolver(entries)
+  const { entries, resolver } = archiveLinkAnalysis(members)
   const visited = new Map<string, string>()
   for (const { key, member } of entries) {
     if (member.kind !== "symlink") continue
@@ -537,7 +523,8 @@ function mergedViolation(key: string, failure: SymlinkFailure): MergedSymlinkVio
  * an unreadable directory is a violation: it cannot be proven to stay inside.
  * Every other link is reported with the destination-relative path it resolves
  * to; the post-merge backstop asks the host kernel to confirm it, using the
- * returned `trail` source for the points of the link's target path.
+ * returned `trail` source for the points of the link's target path, and to
+ * confirm the unjudged links it follows (see `followed`).
  *
  * Issue #219: with a `scope`, only the links the archive can affect are
  * judged: the archive's own symlinks present in `links`, and every link whose
@@ -584,7 +571,13 @@ export function mergedSymlinkResolutions(
     if (resolution.kind === "resolved") inside.set(key, resolution.segments.join("/"))
     else violations.push(mergedViolation(key, resolution))
   }
-  return { inside, trail: (key, maxLength) => resolver.trail(key, maxLength), violations }
+  return {
+    followed: (key) =>
+      inside.has(key) ? resolver.followedLinks(key).filter((link) => !inside.has(link)) : [],
+    inside,
+    trail: (key, maxLength) => resolver.trail(key, maxLength),
+    violations,
+  }
 }
 
 /**

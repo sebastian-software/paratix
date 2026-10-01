@@ -12,6 +12,9 @@
 import { type ArchiveMember, normalizeArchiveMemberPath } from "./archiveMemberValidation.js"
 import { pathNameVariantKey } from "./archiveSymlinkResolver.js"
 
+/** A member paired with its normalized path, the key the link checks compare. */
+export type KeyedMember = { key: string; member: ArchiveMember }
+
 /**
  * Pair every member with its normalized path, skipping members whose path
  * does not normalize.
@@ -19,10 +22,8 @@ import { pathNameVariantKey } from "./archiveSymlinkResolver.js"
  * @param members - The validated archive members.
  * @returns The members with their normalized paths, in listing order.
  */
-function keyedMembers(
-  members: readonly ArchiveMember[]
-): Array<{ key: string; member: ArchiveMember }> {
-  const keyed: Array<{ key: string; member: ArchiveMember }> = []
+export function keyedMembers(members: readonly ArchiveMember[]): KeyedMember[] {
+  const keyed: KeyedMember[] = []
   for (const member of members) {
     const key = normalizeArchiveMemberPath(member.path)
     if (key !== null) keyed.push({ key, member })

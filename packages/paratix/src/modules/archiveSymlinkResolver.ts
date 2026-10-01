@@ -329,6 +329,8 @@ export class SymlinkVariantIndex {
  * link that follows it inherits that failure.
  */
 export class ArchiveSymlinkResolver {
+  /** Issue #219: the lists `followedLinks` computed so far, by link. */
+  private readonly followed = new Map<string, readonly string[]>()
   private readonly inProgress = new Set<string>()
   private readonly memberKeys: ReadonlySet<string>
   private readonly memo = new Map<string, TrackedSymlinkResolution>()
@@ -370,6 +372,36 @@ export class ArchiveSymlinkResolver {
       if (group === undefined) this.variants.set(variantKey, [key])
       else group.push(key)
     }
+  }
+
+  /**
+   * Issue #219: the links the resolution of `key` follows, directly or
+   * through a link it follows, each once, for the kernel cross-check.
+   *
+   * A link whose own target dangles leaves no trace in the trail of a link
+   * that follows it: the kernel finds nothing at any point past it, so only
+   * that link's own trail can confirm where a write through the chain would
+   * land. Like {@link trail}, the list is computed on demand from the
+   * memoized resolutions; the lists asked for are kept, so a link followed by
+   * many others is retraced once. Every link a resolved walk follows resolved
+   * itself, within the hop limit, so a list never holds more than
+   * {@link SYMLINK_RESOLUTION_LIMIT} links and contains no cycle.
+   *
+   * @param key - Normalized path of a symlink.
+   * @returns The followed links in walk order, or none when the link does not
+   *   resolve inside the destination.
+   */
+  public followedLinks(key: string): readonly string[] {
+    const known = this.followed.get(key)
+    if (known !== undefined) return known
+    const followed = new Set<string>()
+    for (const link of this.directlyFollowedLinks(key)) {
+      followed.add(link)
+      for (const further of this.followedLinks(link)) followed.add(further)
+    }
+    const links = [...followed]
+    this.followed.set(key, links)
+    return links
   }
 
   /**
@@ -468,6 +500,28 @@ export class ArchiveSymlinkResolver {
       }
     }
     return null
+  }
+
+  /**
+   * Issue #219: the links a resolved link's own walk follows, read off its
+   * trail: the prefix a non-`..` segment appends is followed exactly when it
+   * names a link (see {@link follow}).
+   *
+   * @param key - Normalized path of a symlink.
+   * @returns The directly followed links in walk order; none for a link that
+   *   does not resolve inside the destination.
+   */
+  private directlyFollowedLinks(key: string): string[] {
+    const traced = this.trail(key)
+    if (traced === null || traced === "oversized") return []
+    const links: string[] = []
+    for (const [index, segment] of traced.segments.entries()) {
+      if (segment === "..") continue
+      const before = traced.locations[index]
+      const prefix = before === "" ? segment : `${before}/${segment}`
+      if (this.targets.has(prefix)) links.push(prefix)
+    }
+    return links
   }
 
   /**

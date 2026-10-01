@@ -418,4 +418,156 @@ describe("runKernelCrossCheck (Issue #219)", () => {
 
     expect(bounds).toStrictEqual([KERNEL_CROSS_CHECK_ENTRY_LIMIT_BYTES])
   })
+
+  it("names the cause when the output exceeds the capture cap", async () => {
+    const { conn } = connectionAnswering({
+      stdout: `/opt/app/d/esc\u0000same\u00000\u0000${CAPTURE_TRUNCATION_MARKER}`,
+    })
+
+    await expect(runKernelCrossCheck(conn, { destination, links, trail })).resolves.toStrictEqual({
+      detail: `too many symlinks to cross-check, or symlink paths too long: the cross-check output exceeded its captured-output cap of ${String(ARCHIVE_CAPTURE_LIMIT_BYTES)} bytes`,
+      kind: "failed",
+    })
+  })
+})
+
+/**
+ * Issue #219: the absolute link paths a cross-check exec carried, in order.
+ *
+ * @param execCalls - The recorded execs; the first one is the cross-check.
+ * @returns The link path of every entry.
+ */
+function sentLinks(execCalls: ReadonlyArray<{ options?: ExecOptions }>): string[] {
+  return (execCalls[0]?.options?.input ?? "")
+    .split("\u0000")
+    .filter((entry) => entry !== "")
+    .map((entry) => entry.slice(0, entry.indexOf("//")))
+}
+
+/**
+ * Issue #219: NUL-framed cross-check output.
+ *
+ * @param reports - `(link, verdict, level)` triples.
+ * @returns The cross-check's stdout.
+ */
+function reportsStdout(...reports: ReadonlyArray<readonly [string, string, string]>): string {
+  return reports
+    .flat()
+    .map((field) => `${field}\u0000`)
+    .join("")
+}
+
+/**
+ * Issue #219: the followed links of the judged links below: every link but
+ * `d/f` itself follows `d/f`.
+ *
+ * @param key - The judged link.
+ * @returns The links it follows.
+ */
+function followed(key: string): readonly string[] {
+  return key === "d/f" ? [] : ["d/f"]
+}
+
+describe("runKernelCrossCheck with followed links (Issue #219)", () => {
+  const destination = "/opt/app"
+  // `d/j -> f` and `d/k -> f` follow the unjudged `d/f -> missing/q`.
+  const trail = fixedTrails({
+    "d/f": { base: "d", locations: ["d", "d/missing", "d/missing/q"], segments: ["missing", "q"] },
+    "d/j": { base: "d", locations: ["d", "d/missing/q"], segments: ["f"] },
+    "d/k": { base: "d", locations: ["d", "d/missing/q"], segments: ["f"] },
+  })
+  const links = ["d/j", "d/k"]
+
+  it("sends a followed link once, after the judged links, and reports its mismatch under each of them", async () => {
+    const { conn, execCalls } = connectionAnswering({
+      stdout: reportsStdout(
+        ["/opt/app/d/j", "dangling", "2"],
+        ["/opt/app/d/k", "dangling", "2"],
+        ["/opt/app/d/f", "differ", "0"]
+      ),
+    })
+
+    const result = await runKernelCrossCheck(conn, { destination, followed, links, trail })
+
+    expect(result).toStrictEqual({
+      kind: "ok",
+      mismatches: [
+        { at: { kind: "link" }, expected: "/opt/app/d/missing/q", key: "d/j", via: "d/f" },
+        { at: { kind: "link" }, expected: "/opt/app/d/missing/q", key: "d/k", via: "d/f" },
+      ],
+    })
+    expect(sentLinks(execCalls)).toStrictEqual(["/opt/app/d/j", "/opt/app/d/k", "/opt/app/d/f"])
+  })
+
+  it("reports a judged link's own mismatch before that of the link it follows", async () => {
+    const { conn } = connectionAnswering({
+      stdout: reportsStdout(
+        ["/opt/app/d/j", "differ", "0"],
+        ["/opt/app/d/k", "dangling", "2"],
+        ["/opt/app/d/f", "differ", "3"]
+      ),
+    })
+
+    const result = await runKernelCrossCheck(conn, { destination, followed, links, trail })
+
+    const atBase = { host: "/opt/app/d", kind: "point", location: "/opt/app/d" }
+    expect(result).toStrictEqual({
+      kind: "ok",
+      mismatches: [
+        { at: { kind: "link" }, expected: "/opt/app/d/missing/q", key: "d/j" },
+        { at: atBase, expected: "/opt/app/d/missing/q", key: "d/j", via: "d/f" },
+        { at: atBase, expected: "/opt/app/d/missing/q", key: "d/k", via: "d/f" },
+      ],
+    })
+  })
+
+  it("accepts a followed link the kernel confirms", async () => {
+    const { conn } = connectionAnswering({
+      stdout: reportsStdout(
+        ["/opt/app/d/j", "dangling", "2"],
+        ["/opt/app/d/k", "dangling", "2"],
+        ["/opt/app/d/f", "dangling", "3"]
+      ),
+    })
+
+    await expect(
+      runKernelCrossCheck(conn, { destination, followed, links, trail })
+    ).resolves.toStrictEqual({ kind: "ok", mismatches: [] })
+  })
+
+  it("checks a followed link that is judged itself only as its own entry", async () => {
+    const { conn, execCalls } = connectionAnswering({
+      stdout: reportsStdout(["/opt/app/d/j", "dangling", "2"], ["/opt/app/d/f", "differ", "0"]),
+    })
+
+    const result = await runKernelCrossCheck(conn, {
+      destination,
+      followed,
+      links: ["d/j", "d/f"],
+      trail,
+    })
+
+    expect(result).toStrictEqual({
+      kind: "ok",
+      mismatches: [{ at: { kind: "link" }, expected: "/opt/app/d/missing/q", key: "d/f" }],
+    })
+    expect(sentLinks(execCalls)).toStrictEqual(["/opt/app/d/j", "/opt/app/d/f"])
+  })
+
+  it("fails closed when a followed link cannot be sent", async () => {
+    const { conn, execCalls } = connectionAnswering({})
+
+    const result = await runKernelCrossCheck(conn, {
+      destination,
+      followed: () => ["d/untraced"],
+      links: ["d/j"],
+      trail,
+    })
+
+    expect(result).toStrictEqual({
+      detail: 'cannot trace symlink "/opt/app/d/untraced"',
+      kind: "failed",
+    })
+    expect(execCalls).toStrictEqual([])
+  })
 })
