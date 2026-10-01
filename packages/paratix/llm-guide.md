@@ -671,6 +671,16 @@ rsync SSH process and does not depend on a local `known_hosts` entry.
 | `service.reload`   | `(name: string): Module` | No (always-applies, use as signal)                        |
 | `service.facts`    | `(): Module`             | No (always-applies, collects facts into `service.*` meta) |
 
+When a state probe reports a missing unit with exit code 4 (as in systemd 255),
+`service.stopped` and `service.disabled` return `ok` from check and apply without
+issuing a stop or disable command. This also applies to missing timer units.
+
+`service.running` and `service.enabled` fail during apply with `unit not found`,
+preserving the probe's exit code and output without attempting start or enable.
+Their checks return `needs-apply`, so dry-run reports `changed` without applying.
+Unexpected probe failures retain the same check=`needs-apply`, apply=`failed`
+behavior; they do not satisfy a stopped or disabled target.
+
 ### `ssh`
 
 | Method               | Signature                                                                                                                              | Idempotent |
