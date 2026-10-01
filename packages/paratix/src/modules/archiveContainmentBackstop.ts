@@ -68,14 +68,17 @@ const NOTHING_CHANGED_AFTER_MERGE =
  * a virtualenv interpreter link that points into `/usr/bin` after an
  * interrupted apply forced a whole-destination check. Such a link fails every
  * later check, so the operator has to clear the destination's containment
- * entries after checking the tree. Naming the concrete entry directory keeps
- * the step copyable; it is not a recommendation to clear entries blindly.
+ * entries and legacy flag after checking the tree. This hint is offered only
+ * when the current archive's normal scope passes without that state. Naming
+ * both concrete paths keeps the step copyable; it is not a recommendation to
+ * clear entries blindly.
  *
  * @param entryDirectory - The destination's containment entry directory.
+ * @param legacyFlag - The destination's containment flag from older versions.
  * @returns The sentence appended to a post-merge violation message.
  */
-function intendedLinksHint(entryDirectory: string): string {
-  return `if the offending symlinks are intended (for example a virtualenv's interpreter link), they keep failing this check: after checking the destination yourself, clear its containment state with rm -f -- ${shellQuote(entryDirectory)}/run-*`
+function intendedLinksHint(entryDirectory: string, legacyFlag: string): string {
+  return `if the offending symlinks are intended (for example a virtualenv's interpreter link), they keep failing this check: after checking the destination yourself, clear its containment state with rm -f -- ${shellQuote(entryDirectory)}/run-* ${shellQuote(legacyFlag)}`
 }
 
 /** Issue #219: how a violation names a link an earlier failed apply recorded. */
@@ -97,6 +100,8 @@ export const POST_MERGE_VIOLATION_REPORT_LIMIT = 10
  * cannot be shown to stay inside.
  */
 type PostMergeSymlinks = {
+  /** The current archive's scope passes after clearing all containment state. */
+  clearingStateWouldPass: boolean
   kind: "ok"
   links: ReadonlyMap<string, MergedSymlink>
   /** Issue #219: the links an earlier failed apply recorded. */
@@ -117,6 +122,26 @@ type UnlistedViolation = Extract<
 
 /** Issue #219: a post-merge listing, or why it cannot be trusted. */
 type PostMergeSymlinkReading = { detail: string; kind: "failed" } | PostMergeSymlinks
+
+/**
+ * Reuse the decoded listing to check whether state clearing would recover
+ * the current archive. An unreadable directory cannot establish that the
+ * offending links are intended, even when it lies outside archive scope.
+ *
+ * @param inputs - The original backstop reading inputs.
+ * @param host - The decoded host listing.
+ * @param host.links - Every symlink in the listing.
+ * @param host.unreadable - Directories whose links could not be listed.
+ * @returns The archive-scope judgement without recorded state, or undefined
+ *   unless whole-destination verification has a readable listing.
+ */
+function originalArchiveScope(
+  inputs: PostMergeReadingInputs,
+  host: { links: ReadonlyMap<string, MergedSymlink>; unreadable?: ReadonlySet<string> }
+): ReturnType<typeof listingViolations> | undefined {
+  if (!inputs.wholeDestination || (host.unreadable?.size ?? 0) > 0) return undefined
+  return listingViolations({ ...inputs, recorded: new Set(), wholeDestination: false }, host)
+}
 
 /**
  * Issue #219: read every symlink below the destination as it is now, judge
@@ -176,14 +201,20 @@ async function readPostMergeSymlinks(
   const host = hostStateFromListing(destination, outcome.fields, new Map())
   if (typeof host === "string") return { detail: host, kind: "failed" }
   const { resolutions, violations } = listingViolations(inputs, host)
-  const { inside } = resolutions
-  const reading = { kind: "ok", links: host.links, recorded, wholeDestination } as const
+  const scoped = originalArchiveScope(inputs, host)
+  const reading = {
+    clearingStateWouldPass: scoped?.violations.length === 0,
+    kind: "ok",
+    links: host.links,
+    recorded,
+    wholeDestination,
+  } as const
   const ordered = (all: PostMergeViolation[]): PostMergeViolation[] =>
     wholeDestination ? inListingOrder(all, host.links) : all
-  if (inside.size === 0) return { ...reading, violations: ordered(violations) }
+  if (resolutions.inside.size === 0) return { ...reading, violations: ordered(violations) }
   const kernel = await runKernelCrossCheck(conn, {
     destination,
-    links: inside.keys(),
+    links: resolutions.inside.keys(),
     trail: resolutions.trail,
   })
   if (kernel.kind === "failed") {
@@ -195,7 +226,13 @@ async function readPostMergeSymlinks(
     key,
     kind: "kernel-mismatch",
   }))
-  return { ...reading, violations: ordered([...violations, ...mismatches]) }
+  return {
+    ...reading,
+    clearingStateWouldPass:
+      reading.clearingStateWouldPass &&
+      !kernel.mismatches.some(({ key }) => scoped?.resolutions.inside.has(key)),
+    violations: ordered([...violations, ...mismatches]),
+  }
 }
 
 /**
@@ -313,16 +350,20 @@ function linkViolationReason(
  *
  * @param destination - The validated, canonical destination directory.
  * @param reading - The post-merge listing, with at least one violation.
- * @param entryDirectory - Issue #219: the destination's containment entry
- *   directory; when given, the message ends with {@link intendedLinksHint}.
+ * @param paths - The destination's containment state paths.
+ * @param paths.entryDirectory - Issue #219: the destination's containment entry
+ *   directory, needed for a complete {@link intendedLinksHint}.
+ * @param paths.legacyFlag - The destination's old containment flag; the hint needs
+ *   both paths and a passing current archive scope after clearing state.
  * @returns The violation text without the `[archive.extract]` prefix, with the
  *   `(and N more)` suffix after the listed links when there are more.
  */
 function containmentViolationMessage(
   destination: string,
   reading: PostMergeSymlinks,
-  entryDirectory: string | undefined
+  paths: { entryDirectory?: string; legacyFlag?: string }
 ): string {
+  const { entryDirectory, legacyFlag } = paths
   const listed = reading.violations
     .slice(0, POST_MERGE_VIOLATION_REPORT_LIMIT)
     .map((violation) => postMergeViolationDescription(destination, reading, violation))
@@ -331,7 +372,10 @@ function containmentViolationMessage(
   const checked = reading.wholeDestination
     ? CHECKED_WHOLE_DESTINATION_AFTER_MERGE
     : CHECKED_AFTER_MERGE
-  const hint = entryDirectory === undefined ? "" : `; ${intendedLinksHint(entryDirectory)}`
+  const hint =
+    reading.clearingStateWouldPass && entryDirectory !== undefined && legacyFlag !== undefined
+      ? `; ${intendedLinksHint(entryDirectory, legacyFlag)}`
+      : ""
   return `${listed.join("; ")}${suffix}; ${checked}; ${NOTHING_CHANGED_AFTER_MERGE}${hint}`
 }
 
@@ -440,9 +484,12 @@ function offendingLinkKeys(
  * @param parameters - Backstop inputs.
  * @param parameters.destination - The validated, canonical destination directory.
  * @param parameters.entryDirectory - Issue #219: the destination's
- *   containment entry directory; a violation message then names how to clear
- *   it when the offending links are intended. Omitted, the message stays
- *   without that hint.
+ *   containment entry directory. Together with `legacyFlag`, a violation
+ *   message names how to clear state only when whole-destination verification
+ *   fails but the current archive's normal scope would pass after clearing it.
+ *   Omitted, the message stays without that hint.
+ * @param parameters.legacyFlag - The destination's old containment flag;
+ *   omitted, the message stays without the state-clearing hint.
  * @param parameters.members - The validated archive members; they decide
  *   which links are judged.
  * @param parameters.recordedLinks - Issue #219: the links earlier failed
@@ -459,6 +506,7 @@ export async function runSymlinkContainmentBackstop(
   parameters: {
     destination: string
     entryDirectory?: string
+    legacyFlag?: string
     members: readonly ArchiveMember[]
     recordedLinks?: readonly string[]
     source: string
@@ -486,9 +534,7 @@ export async function runSymlinkContainmentBackstop(
   }
   if (reading.violations.length === 0) return { failure: null, offendingLinks: [] }
   return {
-    failure: failed(
-      `${prefix}: ${containmentViolationMessage(destination, reading, parameters.entryDirectory)}`
-    ),
+    failure: failed(`${prefix}: ${containmentViolationMessage(destination, reading, parameters)}`),
     offendingLinks: offendingLinkKeys(reading.violations),
   }
 }
