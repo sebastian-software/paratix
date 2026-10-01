@@ -15,16 +15,39 @@
  * end-of-options confusion, and similar.
  */
 import { execFileSync, spawnSync } from "node:child_process"
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs"
+import {
+  existsSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  statSync,
+  utimesSync,
+  writeFileSync,
+} from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { describe, expect, it } from "vitest"
 
+import {
+  buildFlagLockDiagnosticsCommand,
+  parseFlagLockHolderDiagnostics,
+} from "../../src/modules/flagLockRefresh.js"
+import {
+  buildFlagLockHolderMarkerWrite,
+  buildFlagLockRefreshGuard,
+  buildStaleFlagLockReclaimCommand,
+} from "../../src/modules/flagLockScripts.js"
+import { shellQuote } from "../../src/ssh.js"
+
 type ShellResult = { code: number; stderr: string; stdout: string }
 
-function runShell(commandLine: string): ShellResult {
-  const result = spawnSync("/bin/sh", ["-c", commandLine], {
+function runShell(
+  commandLine: string,
+  options: { args?: string[]; input?: string } = {}
+): ShellResult {
+  const result = spawnSync("/bin/sh", ["-c", commandLine, "sh", ...(options.args ?? [])], {
     encoding: "utf8",
+    input: options.input,
     timeout: 5000,
   })
   return {
@@ -48,6 +71,20 @@ function isAwkAvailable(): boolean {
   } catch {
     return false
   }
+}
+
+/**
+ * Issue #224: move a file's mtime `ageSeconds` into the past (portable,
+ * instead of GNU-only `touch -d`).
+ *
+ * @param path - The file or directory to backdate.
+ * @param ageSeconds - The age to set, in seconds.
+ * @returns The resulting mtime in milliseconds.
+ */
+function backdate(path: string, ageSeconds: number): number {
+  const seconds = Math.floor(Date.now() / 1000) - ageSeconds
+  utimesSync(path, seconds, seconds)
+  return statSync(path).mtimeMs
 }
 
 const SKIP_PLATFORM = process.platform === "win32"
@@ -220,6 +257,235 @@ describe.skipIf(SKIP_PLATFORM || SKIP_NO_AWK)("flagLock shell-level smoke tests"
       } finally {
         rmSync(root, { force: true, recursive: true })
       }
+    })
+  })
+
+  // Issue #224: the refresh guard, the shared reclaim statement, the
+  // caller-supplied holder marker and the diagnostics read, all run from the
+  // production builders against a temporary lock directory.
+  describe("refresh guard (issue #224)", () => {
+    const token = "0123456789abcdef0123456789abcdef"
+    // `-mmin +5`: the guard refuses markers older than 300 s.
+    const guardSeconds = 360
+    // `-mmin +9`: the reclaim removes markers older than 540 s.
+    const staleSeconds = 600
+
+    function createLock(
+      root: string,
+      markerToken = token
+    ): { lockDir: string; markerPath: string } {
+      const lockDir = join(root, "archive-extract-lock-0123456789abcdef")
+      const markerPath = join(lockDir, "holder")
+      expect(runShell(`mkdir ${shellQuote(lockDir)}`).code).toBe(0)
+      const write = buildFlagLockHolderMarkerWrite(shellQuote(markerPath), {
+        ownerLines: ["host=controller pid=42", "entry=run-abc"],
+        token: markerToken,
+      })
+      expect(runShell(write).code).toBe(0)
+      return { lockDir, markerPath }
+    }
+
+    function guardFor(lockDir: string, guardToken = token): string {
+      return buildFlagLockRefreshGuard({
+        guardSeconds,
+        lockDirectory: { kind: "literal", value: lockDir },
+        token: { kind: "literal", value: guardToken },
+      })
+    }
+
+    function reclaimFor(lockDir: string, markerPath: string): string {
+      return buildStaleFlagLockReclaimCommand({
+        awkMarkerWord: shellQuote(markerPath),
+        lockWord: shellQuote(lockDir),
+        markerWord: shellQuote(markerPath),
+        staleSeconds,
+      })
+    }
+
+    function withRoot(body: (root: string) => void): void {
+      const root = makeFlagsRoot()
+      try {
+        body(root)
+      } finally {
+        rmSync(root, { force: true, recursive: true })
+      }
+    }
+
+    it("writes the caller-supplied token on line 1 and the owner lines after it", () => {
+      withRoot((root) => {
+        const { markerPath } = createLock(root)
+        expect(readFileSync(markerPath, "utf8")).toBe(
+          `${token}\nhost=controller pid=42\nentry=run-abc\n`
+        )
+        expect(runShell(`awk 'NR==1{print $1}' ${shellQuote(markerPath)}`).stdout.trim()).toBe(
+          token
+        )
+      })
+    })
+
+    it("refreshes a fresh marker that carries the token", () => {
+      withRoot((root) => {
+        const { lockDir, markerPath } = createLock(root)
+        const before = backdate(markerPath, 120)
+        const result = runShell(guardFor(lockDir))
+        expect(result).toStrictEqual({ code: 0, stderr: "", stdout: "" })
+        expect(statSync(markerPath).mtimeMs).toBeGreaterThan(before)
+      })
+    })
+
+    it("refuses a token mismatch and touches nothing", () => {
+      withRoot((root) => {
+        const { lockDir, markerPath } = createLock(root)
+        const before = backdate(markerPath, 120)
+        expect(runShell(guardFor(lockDir, "fedcba9876543210fedcba9876543210")).code).not.toBe(0)
+        expect(statSync(markerPath).mtimeMs).toBe(before)
+      })
+    })
+
+    it("refuses a missing lock directory and creates nothing", () => {
+      withRoot((root) => {
+        const lockDir = join(root, "archive-extract-lock-missing")
+        expect(runShell(guardFor(lockDir)).code).not.toBe(0)
+        expect(existsSync(lockDir)).toBe(false)
+      })
+    })
+
+    it("refuses a lock directory without a marker and creates no marker", () => {
+      withRoot((root) => {
+        const lockDir = join(root, "archive-extract-lock-0123456789abcdef")
+        expect(runShell(`mkdir ${shellQuote(lockDir)}`).code).toBe(0)
+        expect(runShell(guardFor(lockDir)).code).not.toBe(0)
+        expect(existsSync(join(lockDir, "holder"))).toBe(false)
+      })
+    })
+
+    it("refuses a marker older than the guard threshold and touches nothing", () => {
+      withRoot((root) => {
+        const { lockDir, markerPath } = createLock(root)
+        const before = backdate(markerPath, 400)
+        expect(runShell(guardFor(lockDir)).code).not.toBe(0)
+        expect(statSync(markerPath).mtimeMs).toBe(before)
+      })
+    })
+
+    it("cannot refresh a reclaimable marker, which the reclaim then removes", () => {
+      withRoot((root) => {
+        const { lockDir, markerPath } = createLock(root)
+        const before = backdate(markerPath, 600)
+        backdate(lockDir, 600)
+        expect(runShell(guardFor(lockDir)).code).not.toBe(0)
+        expect(statSync(markerPath).mtimeMs).toBe(before)
+        expect(runShell(reclaimFor(lockDir, markerPath)).code).toBe(0)
+        expect(existsSync(lockDir)).toBe(false)
+      })
+    })
+
+    it("does not reclaim a refreshable marker, which the guard then refreshes", () => {
+      withRoot((root) => {
+        const { lockDir, markerPath } = createLock(root)
+        const before = backdate(markerPath, 240)
+        backdate(lockDir, 600)
+        expect(runShell(reclaimFor(lockDir, markerPath)).code).not.toBe(0)
+        expect(statSync(markerPath).mtimeMs).toBe(before)
+        expect(runShell(guardFor(lockDir)).code).toBe(0)
+        expect(statSync(markerPath).mtimeMs).toBeGreaterThan(before)
+      })
+    })
+
+    it("leaves a lost but not yet reclaimable marker to both sides", () => {
+      withRoot((root) => {
+        const { lockDir, markerPath } = createLock(root)
+        const before = backdate(markerPath, 420)
+        expect(runShell(guardFor(lockDir)).code).not.toBe(0)
+        expect(runShell(reclaimFor(lockDir, markerPath)).code).not.toBe(0)
+        expect(statSync(markerPath).mtimeMs).toBe(before)
+      })
+    })
+
+    // A crash between the `mkdir` and the marker write leaves a lock
+    // directory without a marker: the reclaim then falls back to the
+    // directory's own age, with the same threshold.
+    it("reclaims a lock directory without a marker once the directory is older than the reclaim threshold", () => {
+      withRoot((root) => {
+        const lockDir = join(root, "archive-extract-lock-0123456789abcdef")
+        const markerPath = join(lockDir, "holder")
+        expect(runShell(`mkdir ${shellQuote(lockDir)}`).code).toBe(0)
+        backdate(lockDir, 600)
+        expect(runShell(reclaimFor(lockDir, markerPath)).code).toBe(0)
+        expect(existsSync(lockDir)).toBe(false)
+      })
+    })
+
+    it("keeps a lock directory without a marker that is not yet older than the reclaim threshold", () => {
+      withRoot((root) => {
+        const lockDir = join(root, "archive-extract-lock-0123456789abcdef")
+        const markerPath = join(lockDir, "holder")
+        expect(runShell(`mkdir ${shellQuote(lockDir)}`).code).toBe(0)
+        backdate(lockDir, 420)
+        expect(runShell(reclaimFor(lockDir, markerPath)).code).not.toBe(0)
+        expect(existsSync(lockDir)).toBe(true)
+      })
+    })
+
+    it("reads no stdin, so a following command still receives the whole input", () => {
+      withRoot((root) => {
+        const { lockDir } = createLock(root)
+        const result = runShell(`${guardFor(lockDir)} || exit 97; cat`, { input: "payload\n" })
+        expect(result).toStrictEqual({ code: 0, stderr: "", stdout: "payload\n" })
+      })
+    })
+
+    it("works with positional operands and exits through the caller's status", () => {
+      withRoot((root) => {
+        const { lockDir } = createLock(root)
+        const guard = buildFlagLockRefreshGuard({
+          guardSeconds,
+          lockDirectory: { kind: "parameter", name: "1" },
+          token: { kind: "parameter", name: "2" },
+        })
+        const script = `${guard} || exit 97; cat`
+        const accepted = runShell(script, { args: [lockDir, token], input: "data" })
+        const refused = runShell(script, { args: [lockDir, "x".repeat(32)], input: "data" })
+        expect(accepted).toStrictEqual({ code: 0, stderr: "", stdout: "data" })
+        expect(refused).toStrictEqual({ code: 97, stderr: "", stdout: "" })
+      })
+    })
+
+    it("reports owner lines and the approximate marker age as diagnostics", () => {
+      withRoot((root) => {
+        const { lockDir, markerPath } = createLock(root)
+        backdate(markerPath, 200)
+        const command = buildFlagLockDiagnosticsCommand({
+          lockWord: shellQuote(lockDir),
+          markerWord: shellQuote(markerPath),
+        })
+        const diagnostics = parseFlagLockHolderDiagnostics(runShell(command).stdout)
+        expect(diagnostics).toMatchObject({
+          kind: "held",
+          markerPresent: true,
+          ownerLines: ["host=controller pid=42", "entry=run-abc"],
+        })
+        expect(diagnostics).toHaveProperty("ageSeconds", expect.closeTo(200, -1))
+      })
+    })
+
+    it("reports an absent lock and a lock without a marker", () => {
+      withRoot((root) => {
+        const lockDir = join(root, "archive-extract-lock-0123456789abcdef")
+        const command = buildFlagLockDiagnosticsCommand({
+          lockWord: shellQuote(lockDir),
+          markerWord: shellQuote(join(lockDir, "holder")),
+        })
+        expect(parseFlagLockHolderDiagnostics(runShell(command).stdout)).toStrictEqual({
+          kind: "absent",
+        })
+        expect(runShell(`mkdir ${shellQuote(lockDir)}`).code).toBe(0)
+        expect(parseFlagLockHolderDiagnostics(runShell(command).stdout)).toMatchObject({
+          kind: "held",
+          markerPresent: false,
+          ownerLines: [],
+        })
+      })
     })
   })
 })

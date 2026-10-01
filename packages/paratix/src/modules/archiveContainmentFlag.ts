@@ -33,36 +33,53 @@
  * failing apply rewrites only its own entry. `check` reports needs-apply while
  * any entry or the old flag file exists.
  *
- * Issue #219: remaining races, by design:
+ * Issue #219: remaining races, by design, as updated by issue #224, which
+ * serializes the applies to one destination with a per-destination extract
+ * lock (see `archiveExtractLock.ts`). The lock is taken before the own entry
+ * is created and released after the clear exec:
  *
- * 1. An `in-progress` entry of a live concurrent apply cannot be told apart
- *    from one a killed apply left. Another apply treats it as unknown,
- *    verifies the whole destination and removes it when that verification is
- *    clean and the entry is unchanged. If the live apply then fails, it
- *    re-creates its entry with its record; if it succeeds, it removes only its
- *    own (already removed) entry; if it is killed after that removal, links
- *    its merge published after the other apply's listing were verified by
- *    nobody. A concurrent claim right after `writeFile` renamed the record
- *    onto the entry can also make `writeFile` report a failure (its
- *    post-rename step no longer finds the file) although the record is kept,
- *    under the claim name.
+ * 1. Resolved by issue #224. An `in-progress` entry of a live concurrent apply
+ *    used to be indistinguishable from one a killed apply left, so another
+ *    apply could verify the destination and remove it while its owner was
+ *    still merging. Under the lock, an `in-progress` entry an apply reads
+ *    belongs to an apply that stopped without finishing and whose lock was
+ *    reclaimed as stale; verifying the whole destination and removing it is
+ *    correct. Only a live holder that lost its lock anyway — the target clock
+ *    jumped forward by more than the gap between the guard and the reclaim
+ *    threshold, or a merge hung in uninterruptible I/O past its timeout — can
+ *    reopen the old race, and the guards in its merge and clear execs then
+ *    stop it visibly: a refused merge publishes nothing, a refused clear
+ *    removes nothing. Its failure record still goes through `writeFile`,
+ *    which re-creates an own entry removed meanwhile; a concurrent claim
+ *    right after `writeFile` renamed the record onto the entry can make
+ *    `writeFile` report a failure (its post-rename step no longer finds the
+ *    file) although the record is kept, under the claim name.
  * 2. An entry created after an apply's establish read is never touched by
- *    that apply.
+ *    that apply. Under the lock no other apply creates an entry between this
+ *    apply's establish and clear execs; the rule stays as the safety net for
+ *    a lost lock.
  * 3. A crash inside the clear exec leaves a `run-…-claim-<n>` entry, which is
  *    a normal entry: `check` stays at needs-apply and the next apply reads it.
- * 4. Old and new paratix versions running concurrently on one destination do
- *    not coordinate: old versions still use the single flag file.
- * 5. Whoever can write the root-owned flags directory can remove entries;
- *    that is outside the model.
+ * 4. Still unsupported: old and new paratix versions running concurrently on
+ *    one destination do not coordinate. Old versions take no extract lock and
+ *    still use the single flag file.
+ * 5. Whoever can write the root-owned flags directory can remove entries and
+ *    the extract lock; that is outside the model.
  */
 import { randomBytes } from "node:crypto"
 
 import type { ModuleResult, SshConnection } from "../types.js"
+import type { MutexLockLostReason } from "./mutexLock.js"
 
 import { failed, failedCommand } from "../moduleFailure.js"
 import { shellQuote } from "../ssh.js"
 import { CAPTURE_TRUNCATION_MARKER } from "../sshHelpers.js"
+import {
+  ARCHIVE_EXTRACT_LOCK_LOST_EXIT,
+  archiveExtractLockLostReason,
+} from "./archiveExtractLock.js"
 import { isNormalizedRelativePath } from "./archiveSymlinkListing.js"
+import { buildFlagLockRefreshGuard } from "./flagLockScripts.js"
 
 /** Issue #219: the most offending links an entry records before it records `unknown`. */
 export const CONTAINMENT_FLAG_LINK_LIMIT = 256
@@ -131,6 +148,8 @@ export const CONTAINMENT_CLEAR_EXIT = {
   claimFailed: 5,
   claimTaken: 3,
   claimUnremovable: 4,
+  /** Issue #224: the embedded refresh guard refused; nothing was removed. */
+  lockLost: ARCHIVE_EXTRACT_LOCK_LOST_EXIT,
   ownEntry: 6,
 } as const
 
@@ -173,7 +192,7 @@ export type ParsedContainmentFlag =
 const NO_USABLE_LIST =
   "holds no usable list of offending links (it was written by an older paratix version or is damaged)"
 const IN_PROGRESS =
-  "records an apply that did not finish (it stopped after it started, possibly after its merge had begun, or another apply to this destination is still running)"
+  "records an apply that did not finish (it stopped after it started, possibly after its merge had begun, it lost its extract lock, or it is an apply of an older paratix version without the extract lock that is still running)"
 
 /**
  * Issue #219: serialize an entry body. A link list above
@@ -699,10 +718,36 @@ export async function establishContainmentEntry(
 }
 
 /**
- * Issue #219: the clear script. Positional parameters: `$1` the own entry,
- * then one `<path> <sha256>` pair per removable entry.
+ * Issue #224: the lock the clear exec guards itself with: the holder token and
+ * the guard threshold of the destination's extract lock (see
+ * `archiveExtractLock.ts`).
+ */
+export type ContainmentClearLock = {
+  /** Guard age in seconds; a holder marker older than this refuses the clear. */
+  guardSeconds: number
+  /** The unquoted lock directory path. */
+  lockPath: string
+  /** Issue #224: why the lock handle was latched as lost, if it was. */
+  lostReason?: () => MutexLockLostReason | undefined
+  /** The holder token on marker line 1. */
+  token: string
+}
+
+/**
+ * Issue #219: the clear script. Positional parameters: `$1` the lock
+ * directory and `$2` the holder token of the destination's extract lock
+ * (issue #224), `$3` the own entry, then one `<path> <sha256>` pair per
+ * removable entry.
  *
- * For the n-th pair it claims the entry by renaming it to `$1-claim-<n>`
+ * Issue #224: before anything else, the embedded refresh guard checks that
+ * the lock still belongs to this apply — the lock directory exists, its
+ * holder marker carries the token on line 1 and is not older than the guard
+ * threshold — and refreshes the marker. When it refuses, the script exits
+ * {@link CONTAINMENT_CLEAR_EXIT}.lockLost before it renames or removes
+ * anything: another apply may hold the lock by now and rely on every entry it
+ * read.
+ *
+ * For the n-th pair it claims the entry by renaming it to `$own-claim-<n>`
  * (inside the entry directory, so the claim is still an entry), which is
  * atomic: a concurrent rewrite (a rename onto the path) after that point
  * creates a new entry that is never touched. The claim is removed only when
@@ -713,12 +758,19 @@ export async function establishContainmentEntry(
  * an odd number of arguments 64. The own entry is removed last (exit 6 when
  * that fails), so a failure before it can still rewrite the own entry.
  *
+ * @param guardSeconds - Issue #224: the guard threshold in seconds.
  * @returns The script, identical for every destination.
  */
-export function buildContainmentClearScript(): string {
+export function buildContainmentClearScript(guardSeconds: number): string {
   const exit = CONTAINMENT_CLEAR_EXIT
+  const guard = buildFlagLockRefreshGuard({
+    guardSeconds,
+    lockDirectory: { kind: "parameter", name: "1" },
+    token: { kind: "parameter", name: "2" },
+  })
   return [
     String.raw`LC_ALL=C; export LC_ALL; `,
+    `${guard} || exit ${String(exit.lockLost)}; shift 2; `,
     String.raw`own=$1; shift; n=0; `,
     String.raw`while [ "$#" -ge 2 ]; do `,
     String.raw`p=$1; h=$2; shift 2; c="$own-claim-$n"; n=$((n + 1)); `,
@@ -740,18 +792,39 @@ export function buildContainmentClearScript(): string {
  * {@link buildContainmentClearScript}.
  *
  * @param ledger - The own entry and the entries it may remove.
+ * @param lock - Issue #224: the extract lock the clear guards itself with.
  * @returns The `sh -c` command line with the quoted script and parameters.
  */
 export function buildContainmentClearCommand(
-  ledger: Pick<ContainmentLedger, "ownEntry" | "removable">
+  ledger: Pick<ContainmentLedger, "ownEntry" | "removable">,
+  lock: ContainmentClearLock
 ): string {
   return [
     "sh -c",
-    shellQuote(buildContainmentClearScript()),
+    shellQuote(buildContainmentClearScript(lock.guardSeconds)),
     "sh",
+    shellQuote(lock.lockPath),
+    shellQuote(lock.token),
     shellQuote(ledger.ownEntry),
     ...ledger.removable.flatMap(({ path, sha256 }) => [shellQuote(path), sha256]),
   ].join(" ")
+}
+
+/**
+ * Issue #224: the failure of a clear that removed nothing because the
+ * destination's extract lock is no longer this apply's.
+ *
+ * @param ownEntry - The own entry's absolute path.
+ * @param lock - The lock the apply took.
+ * @returns The failure.
+ */
+export function clearRefusedForLostLock(
+  ownEntry: string,
+  lock: Pick<ContainmentClearLock, "guardSeconds" | "lockPath" | "lostReason">
+): ModuleResult {
+  return failed(
+    `[archive.extract] refusing to remove containment entry ${ownEntry} and the entries it verified: ${archiveExtractLockLostReason(lock)}; no entry was removed, so check stays at needs-apply until a later apply verifies and clears them`
+  )
 }
 
 /**
@@ -761,19 +834,29 @@ export function buildContainmentClearCommand(
  * still unchanged, then its own entry. A failure fails the apply: an entry
  * left behind would keep `check` at needs-apply.
  *
+ * Issue #224: the exec first checks that the destination's extract lock is
+ * still this apply's. When it is not, nothing is removed and the failure
+ * names the lost lock; the caller records an empty `failed` list in the own
+ * entry, which is safe because this apply's own backstop already passed.
+ *
  * @param conn - The SSH connection.
  * @param ledger - What the establish exec read, see {@link ContainmentLedger}.
+ * @param lock - Issue #224: the extract lock the clear guards itself with.
  * @returns Null when the own entry is gone, otherwise a structured failure.
  */
 export async function clearContainmentEntries(
   conn: SshConnection,
-  ledger: Pick<ContainmentLedger, "ownEntry" | "removable">
+  ledger: Pick<ContainmentLedger, "ownEntry" | "removable">,
+  lock: ContainmentClearLock
 ): Promise<ModuleResult | null> {
-  const result = await conn.exec(buildContainmentClearCommand(ledger), {
+  const result = await conn.exec(buildContainmentClearCommand(ledger, lock), {
     ignoreExitCode: true,
     silent: true,
   })
   if (result.code === 0) return null
+  if (result.code === CONTAINMENT_CLEAR_EXIT.lockLost) {
+    return clearRefusedForLostLock(ledger.ownEntry, lock)
+  }
   return failedCommand(
     `[archive.extract] failed to remove containment entry ${ledger.ownEntry} and the entries it verified`,
     result

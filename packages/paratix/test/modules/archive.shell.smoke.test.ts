@@ -27,7 +27,9 @@ import {
   readlinkSync,
   realpathSync,
   rmSync,
+  statSync,
   symlinkSync,
+  utimesSync,
   writeFileSync,
 } from "node:fs"
 import { tmpdir } from "node:os"
@@ -44,6 +46,7 @@ import {
   boundedStagingMergeCommand,
   buildStagingMergeExec,
   buildStagingMergeScript,
+  guardedStagingMergeCommand,
   type StagingMergeTimeLimits,
 } from "../../src/modules/archive.js"
 import {
@@ -55,8 +58,10 @@ import {
 import {
   buildContainmentEstablishScript,
   clearContainmentEntries,
+  CONTAINMENT_CLEAR_EXIT,
   CONTAINMENT_ENTRY_READ_LIMIT,
   CONTAINMENT_FLAG_BODY_LIMIT_BYTES,
+  type ContainmentClearLock,
   containmentFlagBody,
   type ContainmentLedger,
   type ContainmentPaths,
@@ -70,6 +75,7 @@ import {
   destinationPathWithAncestors,
   preStagingProbeEntries,
 } from "../../src/modules/archiveDestinationValidation.js"
+import { ARCHIVE_EXTRACT_LOCK_LOST_EXIT } from "../../src/modules/archiveExtractLock.js"
 import {
   buildKernelCrossCheckScript,
   kernelCrossCheckEntry,
@@ -88,6 +94,7 @@ import {
   decodeListingField,
   hostStateFromListing,
 } from "../../src/modules/archiveSymlinkListing.js"
+import { buildFlagLockRefreshGuard } from "../../src/modules/flagLockScripts.js"
 import { shellQuote } from "../../src/ssh.js"
 import { localShellConnection } from "../helpers/localShell.js"
 
@@ -327,6 +334,8 @@ const SKIP_PLATFORM = process.platform === "win32"
 const HAS_GNU_FIND = !SKIP_PLATFORM && hasGnuFind()
 const SKIP_NO_GNU_CP = !hasGnuCp()
 const HAS_COMMAND_P_TIMEOUT = !SKIP_PLATFORM && hasCommandPTimeout()
+/** Issue #224: a guarded merge that passes its guard needs GNU cp and `command -p timeout`. */
+const SKIP_NO_GUARDED_MERGE = SKIP_NO_GNU_CP || !HAS_COMMAND_P_TIMEOUT
 const SKIP_NO_TRAILING_NEWLINE_READLINK = SKIP_PLATFORM || !readlinkAlwaysAppendsNewline()
 // A privileged user reads directories regardless of their mode.
 const SKIP_AS_ROOT = process.getuid?.() === 0
@@ -3075,6 +3084,60 @@ function scratchContainment(): ScratchContainment {
 /** Issue #219: the own entry name every smoke test establishes. */
 const smokeOwnName = `run-${"1".repeat(32)}`
 
+/** Issue #224: the holder token of the scratch extract lock. */
+const smokeLockToken = "paratix-smoke-0123456789abcdef"
+
+/** Issue #224: the guard threshold the smoke tests use: 360 s, `-mmin +5`. */
+const smokeGuardSeconds = 360
+
+/**
+ * Issue #224: how the scratch extract lock is set up.
+ *
+ * - `held`: a fresh marker carrying the smoke token.
+ * - `other-token`: a fresh marker carrying another apply's token.
+ * - `stale`: the smoke token, but a marker older than the guard threshold.
+ * - `missing`: no lock directory at all.
+ */
+type ScratchLockState = "held" | "missing" | "other-token" | "stale"
+
+/**
+ * Issue #224: create the extract lock of a scratch tree: a lock directory
+ * with a holder marker whose line 1 is the token, followed by an owner line.
+ *
+ * @param root - Directory the lock directory is created in.
+ * @param state - How the lock looks, see {@link ScratchLockState}.
+ * @returns The lock the clear and merge execs guard themselves with.
+ */
+function scratchLock(root: string, state: ScratchLockState = "held"): ContainmentClearLock {
+  const lockPath = join(root, "it's lock")
+  if (state !== "missing") {
+    mkdirSync(lockPath)
+    const token = state === "other-token" ? "paratix-another-apply-token" : smokeLockToken
+    const marker = join(lockPath, "holder")
+    writeFileSync(marker, `${token}\ncontroller smoke pid 1\n`)
+    if (state === "stale") {
+      // Ten minutes is above the guard threshold of 300 s.
+      const tenMinutesAgo = new Date(Date.now() - 10 * 60 * 1000)
+      utimesSync(marker, tenMinutesAgo, tenMinutesAgo)
+    }
+  }
+  return { guardSeconds: smokeGuardSeconds, lockPath, token: smokeLockToken }
+}
+
+/**
+ * Issue #224: the refresh guard of a scratch lock, as the merge exec embeds it.
+ *
+ * @param lock - Lock directory, token and guard threshold to render.
+ * @returns The prefixable guard fragment.
+ */
+function scratchLockGuard(lock: ContainmentClearLock): string {
+  return buildFlagLockRefreshGuard({
+    guardSeconds: lock.guardSeconds,
+    lockDirectory: { kind: "literal", value: lock.lockPath },
+    token: { kind: "literal", value: lock.token },
+  })
+}
+
 /**
  * Issue #219: run the production establish exec against the scratch paths.
  *
@@ -3427,10 +3490,14 @@ describe.skipIf(SKIP_PLATFORM)(
         // Issue #219: so the clear keeps that newer record as a claim entry.
         const { conn } = localShellConnection()
         await expect(
-          clearContainmentEntries(conn, {
-            ownEntry: join(scratch.paths.entryDirectory, smokeOwnName),
-            removable: [{ path: entry, sha256: oldHash }],
-          })
+          clearContainmentEntries(
+            conn,
+            {
+              ownEntry: join(scratch.paths.entryDirectory, smokeOwnName),
+              removable: [{ path: entry, sha256: oldHash }],
+            },
+            scratchLock(scratch.root)
+          )
         ).resolves.toBeNull()
         expect(readdirSync(scratch.paths.entryDirectory)).toStrictEqual([`${smokeOwnName}-claim-0`])
         expect(
@@ -3603,7 +3670,11 @@ describe.skipIf(SKIP_PLATFORM)(
         const { commands, conn } = localShellConnection()
 
         await expect(
-          clearContainmentEntries(conn, { ownEntry: outcome.ownEntry, removable })
+          clearContainmentEntries(
+            conn,
+            { ownEntry: outcome.ownEntry, removable },
+            scratchLock(scratch.root)
+          )
         ).resolves.toBeNull()
 
         expect(commands).toHaveLength(1)
@@ -3635,10 +3706,11 @@ describe.skipIf(SKIP_PLATFORM)(
         const { conn } = localShellConnection()
 
         await expect(
-          clearContainmentEntries(conn, {
-            ownEntry,
-            removable: [{ path: entry, sha256: sha256OfFile(target) }],
-          })
+          clearContainmentEntries(
+            conn,
+            { ownEntry, removable: [{ path: entry, sha256: sha256OfFile(target) }] },
+            scratchLock(scratch.root)
+          )
         ).resolves.toBeNull()
 
         expect(lstatSync(join(entryDirectory, `${smokeOwnName}-claim-0`)).isSymbolicLink()).toBe(
@@ -3679,10 +3751,11 @@ describe.skipIf(SKIP_PLATFORM)(
         writeFileSync(entry, "")
         const { conn } = localShellConnection()
 
-        const failure = await clearContainmentEntries(conn, {
-          ownEntry,
-          removable: [{ path: entry, sha256: sha256OfFile(entry) }],
-        })
+        const failure = await clearContainmentEntries(
+          conn,
+          { ownEntry, removable: [{ path: entry, sha256: sha256OfFile(entry) }] },
+          scratchLock(scratch.root)
+        )
 
         expect(failure?.error?.message).toContain("(exit code 3)")
         expect(existsSync(ownEntry)).toBe(true)
@@ -3806,5 +3879,169 @@ describe.skipIf(SKIP_PLATFORM)(
         })
       ).toBe(false)
     })
+  }
+)
+
+describe.skipIf(SKIP_PLATFORM)(
+  "archive.extract extract lock guard shell smoke tests (Issue #224)",
+  () => {
+    const refusals: Array<{ state: ScratchLockState }> = [
+      { state: "other-token" },
+      { state: "missing" },
+      { state: "stale" },
+    ]
+
+    it.each(refusals)(
+      "removes nothing and exits the lock-lost code when the clear guard refuses a $state lock",
+      async ({ state }) => {
+        const scratch = scratchContainment()
+        try {
+          const { entryDirectory } = scratch.paths
+          mkdirSync(entryDirectory, { recursive: true })
+          const ownEntry = join(entryDirectory, smokeOwnName)
+          writeFileSync(ownEntry, inProgressBody)
+          const entry = join(entryDirectory, "run-a")
+          writeFileSync(entry, inProgressBody)
+          const lock = scratchLock(scratch.root, state)
+          const markerBefore = pathState(join(lock.lockPath, "holder"))
+          const { commands, conn } = localShellConnection()
+
+          const failure = await clearContainmentEntries(
+            conn,
+            { ownEntry, removable: [{ path: entry, sha256: sha256OfFile(entry) }] },
+            lock
+          )
+
+          expect(commands).toHaveLength(1)
+          expect(failure?.error?.message).toContain(
+            `refusing to remove containment entry ${ownEntry} and the entries it verified: the extract lock ${lock.lockPath} of this destination is no longer held by this apply`
+          )
+          expect(readdirSync(entryDirectory).toSorted()).toStrictEqual([smokeOwnName, "run-a"])
+          expect(pathState(join(lock.lockPath, "holder"))).toBe(markerBefore)
+          // The exit code itself, from the very command the clear issued.
+          const direct = spawnSync("/bin/sh", ["-c", commands.join("\n")], {
+            encoding: "utf8",
+            timeout: 5000,
+          })
+          expect(direct.status).toBe(CONTAINMENT_CLEAR_EXIT.lockLost)
+          expect(readdirSync(entryDirectory).toSorted()).toStrictEqual([smokeOwnName, "run-a"])
+        } finally {
+          rmSync(scratch.root, { force: true, recursive: true })
+        }
+      }
+    )
+
+    it("refreshes the marker and clears as before when the clear guard passes", async () => {
+      const scratch = scratchContainment()
+      try {
+        const { entryDirectory } = scratch.paths
+        mkdirSync(entryDirectory, { recursive: true })
+        const ownEntry = join(entryDirectory, smokeOwnName)
+        writeFileSync(ownEntry, inProgressBody)
+        const entry = join(entryDirectory, "run-a")
+        writeFileSync(entry, inProgressBody)
+        const lock = scratchLock(scratch.root)
+        const marker = join(lock.lockPath, "holder")
+        // Two minutes old: still below the guard threshold, but visibly refreshed.
+        const twoMinutesAgo = new Date(Date.now() - 2 * 60 * 1000)
+        utimesSync(marker, twoMinutesAgo, twoMinutesAgo)
+        const { conn } = localShellConnection()
+
+        await expect(
+          clearContainmentEntries(
+            conn,
+            { ownEntry, removable: [{ path: entry, sha256: sha256OfFile(entry) }] },
+            lock
+          )
+        ).resolves.toBeNull()
+
+        expect(readdirSync(entryDirectory)).toStrictEqual([])
+        expect(statSync(marker).mtimeMs).toBeGreaterThan(twoMinutesAgo.getTime() + 60_000)
+        expect(readFileSync(marker, "utf8")).toBe(`${smokeLockToken}\ncontroller smoke pid 1\n`)
+      } finally {
+        rmSync(scratch.root, { force: true, recursive: true })
+      }
+    })
+
+    it.each(refusals)(
+      "exits the lock-lost code without starting the merge when the merge guard refuses a $state lock",
+      ({ state }) => {
+        const { destination, root, staging } = makeWorkspace()
+        try {
+          writeFileSync(join(staging, "f"), "payload")
+          const lock = scratchLock(root, state)
+          const merge = buildStagingMergeExec({
+            destination,
+            guardPaths: destinationPathWithAncestors(destination),
+            staging,
+          })
+          const command = guardedStagingMergeCommand(scratchLockGuard(lock), merge.command)
+
+          const result = spawnSync("/bin/sh", ["-c", command], {
+            encoding: "utf8",
+            input: merge.input,
+            timeout: 10_000,
+          })
+
+          expect(result.status).toBe(ARCHIVE_EXTRACT_LOCK_LOST_EXIT)
+          expect({ stderr: result.stderr, stdout: result.stdout }).toStrictEqual({
+            stderr: "",
+            stdout: "",
+          })
+          expect(readdirSync(destination)).toStrictEqual([])
+        } finally {
+          rmSync(root, { force: true, recursive: true })
+        }
+      }
+    )
+
+    it("reads no stdin, so the guarded command receives its whole input", () => {
+      const { root } = makeWorkspace()
+      try {
+        const passing = scratchLockGuard(scratchLock(root))
+        const input = "first\u0000second\u0000"
+
+        const result = spawnSync("/bin/sh", ["-c", `${passing} || exit 75; cat`], {
+          encoding: "utf8",
+          input,
+          timeout: 5000,
+        })
+
+        expect(result).toMatchObject({ status: 0, stderr: "", stdout: input })
+      } finally {
+        rmSync(root, { force: true, recursive: true })
+      }
+    })
+
+    it.skipIf(SKIP_NO_GUARDED_MERGE)(
+      "merges as before when the merge guard passes (requires GNU cp and command -p timeout)",
+      () => {
+        const { destination, root, staging } = makeWorkspace()
+        try {
+          writeFileSync(join(staging, "f"), "payload")
+          const lock = scratchLock(root)
+          const merge = buildStagingMergeExec({
+            destination,
+            guardPaths: [...destinationPathWithAncestors(destination), join(destination, "f")],
+            staging,
+          })
+
+          const result = spawnSync(
+            "/bin/sh",
+            ["-c", guardedStagingMergeCommand(scratchLockGuard(lock), merge.command)],
+            { encoding: "utf8", input: merge.input, timeout: 10_000 }
+          )
+
+          // The merge's guard count check passed, so the whole stdin reached it.
+          expect({ code: result.status, stderr: result.stderr }).toStrictEqual({
+            code: 0,
+            stderr: "",
+          })
+          expect(readFileSync(join(destination, "f"), "utf8")).toBe("payload")
+        } finally {
+          rmSync(root, { force: true, recursive: true })
+        }
+      }
+    )
   }
 )

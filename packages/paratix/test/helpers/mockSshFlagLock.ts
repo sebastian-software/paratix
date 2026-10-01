@@ -13,7 +13,9 @@
 export const MOCK_FLAG_LOCK_HOLDER_TOKEN = "12345@mockhost"
 
 const VALID_FLAG_NAME_PATTERN_SOURCE = String.raw`[A-Za-z0-9](?:[A-Za-z0-9_\-]|\.[A-Za-z0-9])*`
-const VALID_MUTEX_LOCK_NAME_PATTERN_SOURCE = String.raw`[A-Za-z0-9](?:[A-Za-z0-9_\-]|\.[A-Za-z0-9])*-mutex`
+// Issue #224: the per-destination archive lock (`archive-extract-lock-<hex
+// digest>`) shares the mutex acquire/release defaults.
+const VALID_MUTEX_LOCK_NAME_PATTERN_SOURCE = String.raw`[A-Za-z0-9](?:[A-Za-z0-9_\-]|\.[A-Za-z0-9])*-mutex|archive-extract-lock-[0-9a-f]+`
 const FLAGS_DIRECTORY_PATTERN_SOURCE = String.raw`\/var\/lib\/paratix\/flags`
 
 function flagPathPattern(
@@ -33,6 +35,10 @@ function quotedMarkerPathPattern(lockGroupName: string): string {
 
 function sameQuotedMarkerPathPattern(lockGroupName: string): string {
   return `'${FLAGS_DIRECTORY_PATTERN_SOURCE}\\/\\k<${lockGroupName}>\\/holder'`
+}
+
+function quotedLockPathPattern(lockGroupName: string): string {
+  return `'${FLAGS_DIRECTORY_PATTERN_SOURCE}\\/(?<${lockGroupName}>${VALID_FLAG_NAME_PATTERN_SOURCE})'`
 }
 
 function markerPathPattern(lockGroupName: string): string {
@@ -77,6 +83,17 @@ const FLAG_LOCK_INTERNAL_SUCCESS_PATTERNS: RegExp[] = [
     "v"
   ),
   /^mkdir -p \/var\/lib\/paratix\/flags$/v,
+  // Issue #224: marker write for a caller-supplied holder — the token on
+  // line 1 followed by owner lines, every word single-quoted.
+  new RegExp(
+    `^printf '%s\\\\n'(?: '[^']*')+ > ${markerPathPattern("customHolderWriteLock")}$`,
+    "v"
+  ),
+  // Issue #224: the standalone refresh guard exec (heartbeat / handle.refresh).
+  new RegExp(
+    `^\\{ \\[ -d ${quotedLockPathPattern("refreshLock")} \\] && \\[ -f ${sameQuotedMarkerPathPattern("refreshLock")} \\] && \\[ "x\\$\\(awk 'NR==1\\{print \\$1\\}' ${sameQuotedMarkerPathPattern("refreshLock")} 2>\\/dev\\/null <\\/dev\\/null\\)" = x'[^']*' \\] && \\[ -n "\\$\\(find ${sameQuotedMarkerPathPattern("refreshLock")} -maxdepth 0 ! -mmin \\+\\d+ -print 2>\\/dev\\/null <\\/dev\\/null\\)" \\] && touch -c ${sameQuotedMarkerPathPattern("refreshLock")} <\\/dev\\/null 2>\\/dev\\/null; \\}$`,
+    "v"
+  ),
 ]
 
 /**
