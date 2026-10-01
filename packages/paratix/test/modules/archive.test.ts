@@ -5,13 +5,7 @@ import { describe, expect, it, vi } from "vitest"
 
 import type { ExecOptions, ExecResult, ModuleResult, SshConnection } from "../../src/types.js"
 
-import {
-  archive,
-  boundedStagingMergeCommand,
-  buildStagingMergeExec,
-  buildStagingMergeScript,
-  STAGING_MERGE_TIME_LIMITS,
-} from "../../src/modules/archive.js"
+import { archive } from "../../src/modules/archive.js"
 import {
   POST_MERGE_VIOLATION_REPORT_LIMIT,
   runSymlinkContainmentBackstop,
@@ -50,6 +44,12 @@ import {
   buildSymlinkProbeScript,
   encodeNulPayload,
 } from "../../src/modules/archiveProbe.js"
+import {
+  boundedStagingMergeCommand,
+  buildStagingMergeExec,
+  buildStagingMergeScript,
+  STAGING_MERGE_TIME_LIMITS,
+} from "../../src/modules/archiveStagingMergeScript.js"
 import { SYMLINK_LISTING_CAPTURE_LIMIT_BYTES } from "../../src/modules/archiveSymlinkListing.js"
 import { tarListingScript } from "../../src/modules/archiveTarListing.js"
 import { shellQuote } from "../../src/ssh.js"

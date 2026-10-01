@@ -41,12 +41,6 @@ import type {
 import type { ArchiveMember } from "../../src/modules/archiveMemberValidation.js"
 
 import {
-  boundedStagingMergeCommand,
-  buildStagingMergeExec,
-  buildStagingMergeScript,
-  type StagingMergeTimeLimits,
-} from "../../src/modules/archive.js"
-import {
   enforceSymlinkContainment,
   type PreMergeContainmentVerdict,
   preMergeContainmentVerdict,
@@ -84,6 +78,12 @@ import {
   encodeSymlinkListingEntry,
   symlinkListingBatchScript,
 } from "../../src/modules/archiveProbe.js"
+import {
+  boundedStagingMergeCommand,
+  buildStagingMergeExec,
+  buildStagingMergeScript,
+  type StagingMergeTimeLimits,
+} from "../../src/modules/archiveStagingMergeScript.js"
 import {
   decodeListingField,
   hostStateFromListing,
