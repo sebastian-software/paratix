@@ -53,12 +53,14 @@ import {
 import {
   buildContainmentEstablishScript,
   CONTAINMENT_ENTRY_READ_LIMIT,
-  CONTAINMENT_FLAG_BODY_LIMIT_BYTES,
-  containmentFlagBody,
   type ContainmentLedger,
-  type ContainmentPaths,
   establishContainmentEntry,
   parseContainmentEstablishOutput,
+} from "../../src/modules/archiveContainmentEstablish.js"
+import {
+  CONTAINMENT_FLAG_BODY_LIMIT_BYTES,
+  containmentFlagBody,
+  type ContainmentPaths,
 } from "../../src/modules/archiveContainmentFlag.js"
 import { archiveContainmentScope } from "../../src/modules/archiveContainmentScope.js"
 import {

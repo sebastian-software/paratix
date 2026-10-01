@@ -5,13 +5,13 @@
  */
 
 import type { ModuleResult, SshConnection } from "../types.js"
+import type { ContainmentLedger } from "./archiveContainmentEstablish.js"
 
 import { failed, failedCommand } from "../moduleFailure.js"
 import { shellQuote } from "../ssh.js"
 import {
   containmentFlagBody,
   type ContainmentFlagRecord,
-  type ContainmentLedger,
   type ContainmentPaths,
 } from "./archiveContainmentFlag.js"
 

@@ -5,6 +5,7 @@
  */
 
 import type { ModuleResult, SshConnection } from "../types.js"
+import type { ContainmentLedger } from "./archiveContainmentEstablish.js"
 import type { ArchiveMember } from "./archiveMemberValidation.js"
 
 import { failed } from "../moduleFailure.js"
@@ -15,7 +16,6 @@ import {
 import { validateMergedSymlinkContainment } from "./archiveContainmentEnforcement.js"
 import {
   type ContainmentFlagRecord,
-  type ContainmentLedger,
   STOPPED_AFTER_MERGE_STARTED,
   UNIDENTIFIED_OFFENDING_LINKS,
 } from "./archiveContainmentFlag.js"

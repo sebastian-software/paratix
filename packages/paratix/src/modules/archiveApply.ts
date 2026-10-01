@@ -19,12 +19,8 @@ import {
   recordContainmentFailure,
   recordContainmentFailureAfterThrow,
 } from "./archiveContainmentEntries.js"
-import {
-  type ContainmentFlagRecord,
-  type ContainmentLedger,
-  establishContainmentEntry,
-  newContainmentEntryName,
-} from "./archiveContainmentFlag.js"
+import { type ContainmentLedger, establishContainmentEntry } from "./archiveContainmentEstablish.js"
+import { type ContainmentFlagRecord, newContainmentEntryName } from "./archiveContainmentFlag.js"
 import {
   archiveMemberDestinationPaths,
   createExtractDestinationDirectory,

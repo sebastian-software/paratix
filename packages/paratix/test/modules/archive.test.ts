@@ -23,6 +23,8 @@ import {
   buildContainmentEstablishScript,
   CONTAINMENT_ENTRY_READ_LIMIT,
   CONTAINMENT_ESTABLISH_CAPTURE_LIMIT_BYTES,
+} from "../../src/modules/archiveContainmentEstablish.js"
+import {
   CONTAINMENT_FLAG_BODY_LIMIT_BYTES,
   CONTAINMENT_FLAG_LINK_LIMIT,
   containmentFlagBody,
