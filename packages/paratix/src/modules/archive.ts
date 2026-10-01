@@ -1140,6 +1140,8 @@ async function runContainmentBackstop(
   try {
     return await runSymlinkContainmentBackstop(conn, {
       destination,
+      entryDirectory: containmentPathsFor(destination).entryDirectory,
+      legacyFlag: containmentPathsFor(destination).legacyFlag,
       members,
       recordedLinks,
       source,

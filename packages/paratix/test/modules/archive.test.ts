@@ -12,7 +12,10 @@ import {
   buildStagingMergeScript,
   STAGING_MERGE_TIME_LIMITS,
 } from "../../src/modules/archive.js"
-import { POST_MERGE_VIOLATION_REPORT_LIMIT } from "../../src/modules/archiveContainmentBackstop.js"
+import {
+  POST_MERGE_VIOLATION_REPORT_LIMIT,
+  runSymlinkContainmentBackstop,
+} from "../../src/modules/archiveContainmentBackstop.js"
 import {
   enforceSymlinkContainment,
   validateMergedSymlinkContainment,
@@ -190,6 +193,13 @@ function containmentPathsFor(path: string): ContainmentPaths {
 }
 
 const containment = containmentPathsFor(destination)
+
+/**
+ * Issue #219: the sentence a recoverable whole-destination violation ends with, naming
+ * how to clear the destination's containment entries when the offending links
+ * are intended.
+ */
+const intendedLinksHint = `; if the offending symlinks are intended (for example a virtualenv's interpreter link), they keep failing this check: first stop or wait for all archive.extract applies to this destination to finish and prevent new applies until inspection and state clearing are complete; then check the destination yourself and, before retrying, clear its containment state with rm -f -- '${containment.entryDirectory}'/run-* '${containment.legacyFlag}'`
 
 /** Issue #219: the single flag file of older paratix versions. */
 const legacyContainmentFlag = containment.legacyFlag
@@ -5229,6 +5239,184 @@ function hexListingField(...parts: Array<number | string>): string {
   return `\u0001${Buffer.concat(bytes).toString("hex")}`
 }
 
+describe("archive containment recovery hint", () => {
+  const clearHint = "clear its containment state with rm -f --"
+  const unrelated = [[`${destination}/elsewhere/escape`, "/etc"]] as const
+  const shipped = [[`${destination}/a/s`, "/etc"]] as const
+  const touched = [[`${destination}/x/escape`, "../a/../.."]] as const
+  const unrelatedMembers = [archiveMember("b/f", null)]
+  const symlinkMembers = [archiveMember("a/s", "f")]
+
+  it.each([
+    {
+      hint: false,
+      links: shipped,
+      members: symlinkMembers,
+      name: "an archive-owned violation in archive scope",
+      recordedLinks: [],
+      verifyWholeDestination: false,
+    },
+    {
+      hint: false,
+      links: touched,
+      members: symlinkMembers,
+      name: "a touched link violation in archive scope",
+      recordedLinks: [],
+      verifyWholeDestination: false,
+    },
+    {
+      hint: false,
+      links: unrelated,
+      members: unrelatedMembers,
+      name: "a recorded violation in archive scope",
+      recordedLinks: ["elsewhere/escape"],
+      verifyWholeDestination: false,
+    },
+    {
+      hint: true,
+      links: unrelated,
+      members: unrelatedMembers,
+      name: "an unrelated outward link in whole-destination scope",
+      recordedLinks: ["elsewhere/escape"],
+      verifyWholeDestination: true,
+    },
+    {
+      hint: true,
+      links: unrelated,
+      members: symlinkMembers,
+      name: "an unrelated outward link with an archive symlink in whole-destination scope",
+      recordedLinks: [],
+      verifyWholeDestination: true,
+    },
+    {
+      hint: false,
+      links: shipped,
+      members: symlinkMembers,
+      name: "an archive-owned violation in whole-destination scope",
+      recordedLinks: [],
+      verifyWholeDestination: true,
+    },
+    {
+      hint: false,
+      links: touched,
+      members: symlinkMembers,
+      name: "a touched link violation in whole-destination scope",
+      recordedLinks: [],
+      verifyWholeDestination: true,
+    },
+  ])("offers state clearing only when it can recover from $name", async (testCase) => {
+    const { conn, execCalls } = scriptedBackstopConnection({
+      listings: [{ stdout: listingRecords(destination, testCase.links) }],
+    })
+
+    const outcome = await runSymlinkContainmentBackstop(conn, {
+      ...testCase,
+      destination,
+      entryDirectory: containment.entryDirectory,
+      legacyFlag: containment.legacyFlag,
+      source: src,
+    })
+
+    expect(outcome.failure?.status).toBe("failed")
+    const message = String(outcome.failure?.error?.message)
+    expect(message.includes(clearHint)).toBe(testCase.hint)
+    expect(outcome.offendingLinks).toStrictEqual([
+      testCase.links[0][0].slice(destination.length + 1),
+    ])
+    expect(execCalls.map(({ command }) => command)).toStrictEqual([symlinkListingProbeCommand])
+  })
+
+  it.each([
+    { members: [archiveMember("locked/s", "f")], name: "an unreadable archive member" },
+    { members: symlinkMembers, name: "an unrelated unreadable directory" },
+  ])("suppresses the hint with $name", async ({ members }) => {
+    const { conn, execCalls } = scriptedBackstopConnection({
+      listings: [{ stdout: `u\u0000locked\u0000${listingRecords(destination, unrelated)}` }],
+    })
+
+    const outcome = await runSymlinkContainmentBackstop(conn, {
+      destination,
+      entryDirectory: containment.entryDirectory,
+      legacyFlag: containment.legacyFlag,
+      members,
+      source: src,
+      verifyWholeDestination: true,
+    })
+
+    expect(outcome.failure?.error?.message).toContain("is not readable")
+    expect(outcome.failure?.error?.message).not.toContain(clearHint)
+    expect(outcome.offendingLinks).toBe("unidentified")
+    expect(execCalls.map(({ command }) => command)).toStrictEqual([symlinkListingProbeCommand])
+  })
+
+  it("suppresses the hint when a link in archive scope has a kernel mismatch", async () => {
+    const inside = [`${destination}/a/s`, "f"] as const
+    const { conn, execCalls } = scriptedBackstopConnection({
+      crossChecks: [{ stdout: crossCheckReports([inside[0], "differ", "0"]) }],
+      listings: [{ stdout: listingRecords(destination, [...unrelated, inside]) }],
+    })
+
+    const outcome = await runSymlinkContainmentBackstop(conn, {
+      destination,
+      entryDirectory: containment.entryDirectory,
+      legacyFlag: containment.legacyFlag,
+      members: symlinkMembers,
+      source: src,
+      verifyWholeDestination: true,
+    })
+
+    expect(outcome.failure?.error?.message).toContain(
+      "resolves on the host to a different location"
+    )
+    expect(outcome.failure?.error?.message).not.toContain(clearHint)
+    expect(outcome.offendingLinks).toStrictEqual(["elsewhere/escape", "a/s"])
+    expect(execCalls.map(({ command }) => command)).toStrictEqual([
+      symlinkListingProbeCommand,
+      kernelCrossCheckCommand,
+    ])
+  })
+
+  it("quotes both known containment paths and keeps the entry glob active", async () => {
+    const { conn, execCalls } = scriptedBackstopConnection({
+      listings: [{ stdout: listingRecords(destination, unrelated) }],
+    })
+
+    const outcome = await runSymlinkContainmentBackstop(conn, {
+      destination,
+      entryDirectory: "/flags/a'b.d",
+      legacyFlag: "/old flags/a'b.failed",
+      members: unrelatedMembers,
+      source: src,
+      verifyWholeDestination: true,
+    })
+
+    expect(outcome.failure?.error?.message).toContain(
+      `${clearHint} '/flags/a'\\''b.d'/run-* '/old flags/a'\\''b.failed'`
+    )
+    expect(execCalls.map(({ command }) => command)).toStrictEqual([symlinkListingProbeCommand])
+  })
+
+  it.each([
+    { entryDirectory: containment.entryDirectory, legacyFlag: undefined, name: "the legacy flag" },
+    { entryDirectory: undefined, legacyFlag: containment.legacyFlag, name: "the entry directory" },
+  ])("omits an incomplete recovery command without $name", async (paths) => {
+    const { conn } = scriptedBackstopConnection({
+      listings: [{ stdout: listingRecords(destination, unrelated) }],
+    })
+
+    const outcome = await runSymlinkContainmentBackstop(conn, {
+      ...paths,
+      destination,
+      members: unrelatedMembers,
+      source: src,
+      verifyWholeDestination: true,
+    })
+
+    expect(outcome.failure?.status).toBe("failed")
+    expect(outcome.failure?.error?.message).not.toContain(clearHint)
+  })
+})
+
 describe("enforceSymlinkContainment (Issue #219)", () => {
   const refusal = `[archive.extract] refusing to complete extraction of ${src}: `
   const checkedAfterMerge =
@@ -6022,8 +6210,7 @@ describe("archive.extract post-merge backstop (Issue #219)", () => {
   const backstopRefusal = `[archive.extract] refusing to complete extraction of ${src}: `
   const checkedAfterMerge =
     "after the merge, the archive's symlinks and every symlink under the destination whose resolution passes through a path the archive writes are checked, including links it did not ship"
-  const nothingChanged =
-    "nothing was removed or changed; while the offending symlinks remain, remove them or point them inside the destination manually; this apply's containment entry records them and keeps check at needs-apply, and a later apply of any source verifies them again (every symlink under the destination when the entry could not record them) and, only when they pass, removes the entries it read that are still unchanged"
+  const nothingChanged = `nothing was removed or changed; while the offending symlinks remain, remove them or point them inside the destination manually; this apply's containment entry records them and keeps check at needs-apply, and a later apply of any source verifies them again (every symlink under the destination when the entry could not record them) and, only when they pass, removes the entries it read that are still unchanged`
   const escapesEtc = `symlink ${JSON.stringify(escapingLink)} -> ${JSON.stringify(escapingTarget)} resolves outside destination ${JSON.stringify(destination)}`
   const escapesRoot = `symlink ${JSON.stringify(rootLink)} -> "l/../../.." resolves outside destination ${JSON.stringify(destination)}`
   const reportedEtc = `${backstopRefusal}${escapesEtc}; ${checkedAfterMerge}; ${nothingChanged}`
@@ -7182,6 +7369,7 @@ describe("archive.extract unknown containment flag verifies the whole destinatio
       const message = String(run.result.error?.message)
       expect(message).toContain(JSON.stringify(escapingElsewhere))
       expect(message).toContain("nothing was removed")
+      expect(message).toContain(intendedLinksHint)
       // Issue #219: the unusable entry stays as it was; the own entry records
       // exactly the link.
       expect(files.get(path)).toBe(content)

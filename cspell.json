@@ -258,6 +258,8 @@
     "ignorierbaren",
     "readlink",
     "realpath",
-    "repoint"
+    "repoint",
+    "virtualenv",
+    "virtualenv's"
   ]
 }

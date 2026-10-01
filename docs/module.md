@@ -321,11 +321,24 @@ der Einträge. Nach einem unterbrochenen Durchlauf oder dem Aktualisieren von pa
 nichts von Hand zu tun: Die alte Flag-Datei wird wie ein Eintrag ohne verwertbare Liste gelesen, und
 das ganze Zielverzeichnis wird geprüft, bevor sie entfernt wird. Ein Zielverzeichnis, das
 absichtlich einen nach außen zeigenden Symlink enthält, besteht diese Prüfung nicht, solange ein
-Eintrag keine verwertbare Liste enthält. Bleiben Verstöße bestehen, sind die betroffenen Links zu
-entfernen oder umzulenken, optional nach der Prüfung dieser Links die `run-*`-Einträge im
-Containment-Verzeichnis und, falls noch vorhanden, die alte Flag-Datei zu löschen und der Durchlauf
-zu wiederholen. Bei einem Fehlschlag wird weder die Marker-Datei geschrieben noch `owner`
-angewendet.
+Eintrag keine verwertbare Liste enthält, etwa ein Interpreter-Link eines virtualenv nach `/usr/bin`
+im Arbeitsverzeichnis eines Runners nach einem unterbrochenen Durchlauf. Bleiben Verstöße bestehen,
+sind die betroffenen Links zu entfernen oder umzulenken und der Durchlauf zu wiederholen. Sind die
+betroffenen Links gewollt und liegen außerhalb des Bereichs, auf den das Archiv wirken kann,
+kann das Löschen des Containment-Zustands die Wiederholung ermöglichen. Die Fehlermeldung nennt
+diesen Schritt nur bei einer vollständig lesbaren Prüfung des ganzen Zielverzeichnisses, wenn die
+normale Prüfung des aktuellen Archivs
+ohne festgehaltene Links einschließlich des Abgleichs durch den Kernel bestehen würde. Dann sind
+zuerst alle `archive.extract`-Durchläufe für dieses Zielverzeichnis anzuhalten oder ihr Ende
+abzuwarten. Neue Durchläufe sind zu verhindern, bis sowohl die eigene Prüfung als auch das Löschen
+des Zustands abgeschlossen sind. Ein laufender Durchlauf kann noch weitere Inhalte veröffentlichen;
+sein Eintrag darf deshalb nicht über `run-*` gelöscht werden, solange er noch aktiv ist. Erst dann
+ist das Zielverzeichnis selbst zu prüfen und sind seine `run-*`-Einträge und die alte Flag-Datei mit
+`rm -f -- '/var/lib/paratix/flags/archive-containment-<sha256>.d'/run-* '/var/lib/paratix/flags/archive-containment-<sha256>.failed'`
+zu löschen. Danach ist der Durchlauf zu wiederholen. Vor der Verwendung ist `<sha256>` durch den
+SHA-256-Hash des normalisierten Zielpfads zu ersetzen; die Fehlermeldung nennt den genauen Befehl.
+Verstöße im Bereich des aktuellen Archivs lassen sich durch das Löschen des Zustands nicht
+beheben. Bei einem Fehlschlag wird weder die Marker-Datei geschrieben noch `owner` angewendet.
 
 Nur ein Durchlauf, der einschließlich der erneuten Prüfung festgehaltener Links oder des ganzen
 Zielverzeichnisses, `owner` und Marker-Dateien vollständig gelingt, entfernt Einträge, und zwar in
