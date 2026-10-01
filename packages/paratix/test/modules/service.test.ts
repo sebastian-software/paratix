@@ -3,9 +3,168 @@ import { describe, expect, it } from "vitest"
 import { resolveEnvironment } from "../../src/environment.js"
 import { mergeEnvironmentFromMeta } from "../../src/meta.js"
 import { service } from "../../src/modules/service.js"
+import { CommandError } from "../../src/sshHelpers.js"
 import { createMockSsh } from "../helpers/mockSsh.js"
 
 const emptyEnv = {}
+
+const serviceStateCases = [
+  {
+    applyResult: "changed",
+    checkResult: "needs-apply",
+    method: "running",
+    mutations: ["start"],
+    probe: "is-active",
+  },
+  { applyResult: "ok", checkResult: "ok", method: "stopped", mutations: [], probe: "is-active" },
+  {
+    applyResult: "changed",
+    checkResult: "needs-apply",
+    method: "enabled",
+    mutations: ["enable"],
+    probe: "is-enabled",
+  },
+  { applyResult: "ok", checkResult: "ok", method: "disabled", mutations: [], probe: "is-enabled" },
+] as const
+
+describe.each(serviceStateCases)(
+  "service.$method probe states",
+  ({ applyResult, checkResult, method, mutations, probe }) => {
+    it.each(["missing.service", "docker-prune.timer"])(
+      "check handles missing %s without mutation or extra probes",
+      async (unitName) => {
+        const command = `systemctl ${probe} --quiet -- '${unitName}'`
+        const ssh = createMockSsh({ [command]: { code: 4 } })
+        const result = await service[method](unitName).check(ssh, emptyEnv)
+
+        expect(result).toBe(checkResult)
+        expect(ssh.calls).toStrictEqual([command])
+        expect(ssh.execCalls).toStrictEqual([
+          { command, options: { ignoreExitCode: true, silent: true } },
+        ])
+      }
+    )
+
+    it.each([2, 3])("check preserves the accepted nonzero state for exit %i", async (code) => {
+      const command = `systemctl ${probe} --quiet -- 'nginx'`
+      const ssh = createMockSsh({ [command]: { code } })
+
+      expect(await service[method]("nginx").check(ssh, emptyEnv)).toBe(checkResult)
+      expect(ssh.calls).toStrictEqual([command])
+    })
+
+    it.each([2, 3])("apply preserves the accepted nonzero state for exit %i", async (code) => {
+      const command = `systemctl ${probe} --quiet -- 'nginx'`
+      const mutationCommands = mutations.map((mutation) => `systemctl ${mutation} -- 'nginx'`)
+      const ssh = createMockSsh({
+        [command]: { code },
+        ...Object.fromEntries(
+          mutationCommands.map((mutationCommand) => [mutationCommand, { code: 0 }])
+        ),
+      })
+      const result = await service[method]("nginx").apply(ssh, emptyEnv)
+
+      expect(result.status).toBe(applyResult)
+      expect(ssh.calls).toStrictEqual([command, ...mutationCommands])
+    })
+
+    it.each([99, 127])("check preserves needs-apply for unexpected exit %i", async (code) => {
+      const command = `systemctl ${probe} --quiet -- 'nginx'`
+      const ssh = createMockSsh({ [command]: { code, stderr: "probe unavailable" } })
+
+      expect(await service[method]("nginx").check(ssh, emptyEnv)).toBe("needs-apply")
+      expect(ssh.calls).toStrictEqual([command])
+    })
+
+    it.each([99, 127])("apply fails without mutation for unexpected exit %i", async (code) => {
+      const command = `systemctl ${probe} --quiet -- 'nginx'`
+      const ssh = createMockSsh({ [command]: { code, stderr: "probe unavailable" } })
+      const result = await service[method]("nginx").apply(ssh, emptyEnv)
+
+      expect(result.status).toBe("failed")
+      expect(result.error?.message).toContain(
+        `[service.${method}: nginx] systemctl ${probe} failed while probing service state`
+      )
+      expect(result.error?.message).toContain(`exit code ${String(code)}`)
+      expect(ssh.calls).toStrictEqual([command])
+    })
+  }
+)
+
+describe.each([
+  { method: "stopped", probe: "is-active" },
+  { method: "disabled", probe: "is-enabled" },
+] as const)("service.$method missing-unit teardown", ({ method, probe }) => {
+  it.each(["missing.service", "docker-prune.timer"])(
+    "apply satisfies missing %s without mutation or extra probes",
+    async (unitName) => {
+      const command = `systemctl ${probe} --quiet -- '${unitName}'`
+      const ssh = createMockSsh({ [command]: { code: 4 } })
+      const result = await service[method](unitName).apply(ssh, emptyEnv)
+
+      expect(result.status).toBe("ok")
+      expect(result.error).toBeUndefined()
+      expect(ssh.calls).toStrictEqual([command])
+      expect(ssh.execCalls).toStrictEqual([
+        { command, options: { ignoreExitCode: true, silent: true } },
+      ])
+    }
+  )
+})
+
+describe.each([
+  { method: "running", probe: "is-active" },
+  { method: "enabled", probe: "is-enabled" },
+] as const)("service.$method missing-unit diagnostics", ({ method, probe }) => {
+  it.each(["missing.service", "docker-prune.timer"])(
+    "apply rejects missing %s without mutation or extra probes",
+    async (unitName) => {
+      const command = `systemctl ${probe} --quiet -- '${unitName}'`
+      const ssh = createMockSsh({ [command]: { code: 4 } })
+      const result = await service[method](unitName).apply(ssh, emptyEnv)
+
+      expect(result.status).toBe("failed")
+      expect(result.error).toBeInstanceOf(CommandError)
+      expect(result.error).toMatchObject({ fullStderr: "", fullStdout: "" })
+      expect(result.error?.message).toContain(`[service.${method}: ${unitName}]`)
+      expect(result.error?.message).toContain("unit not found")
+      expect(result.error?.message).toContain("exit code 4")
+      expect(ssh.calls).toStrictEqual([command])
+      expect(ssh.execCalls).toStrictEqual([
+        { command, options: { ignoreExitCode: true, silent: true } },
+      ])
+    }
+  )
+
+  it.each([
+    {
+      label: "nonempty output",
+      stderr: "diagnostic detail\nsecond line\n",
+      stdout: "probe output\n",
+    },
+    {
+      label: "localized output",
+      stderr: "Fehler beim Prüfen der Einheit\nWeitere Angaben\n",
+      stdout: "Status der Einheit\n",
+    },
+  ])("preserves $label without parsing it to detect absence", async ({ stderr, stdout }) => {
+    const unitName = "missing.service"
+    const command = `systemctl ${probe} --quiet -- '${unitName}'`
+    const ssh = createMockSsh({ [command]: { code: 4, stderr, stdout } })
+    const result = await service[method](unitName).apply(ssh, emptyEnv)
+
+    expect(result.status).toBe("failed")
+    expect(result.error).toBeInstanceOf(CommandError)
+    expect(result.error).toMatchObject({ fullStderr: stderr, fullStdout: stdout })
+    expect(result.error?.message).toContain(`[service.${method}: ${unitName}]`)
+    expect(result.error?.message).toContain("unit not found")
+    expect(result.error?.message).toContain("exit code 4")
+    expect(ssh.calls).toStrictEqual([command])
+    expect(ssh.execCalls).toStrictEqual([
+      { command, options: { ignoreExitCode: true, silent: true } },
+    ])
+  })
+})
 
 describe("service unit name validation", () => {
   const factories = [

@@ -1,7 +1,13 @@
 import { environmentToMetaEntries } from "../meta.js"
 import { failed, failedCommand } from "../moduleFailure.js"
 import { shellQuote } from "../ssh.js"
-import { type Module, type ModuleResult, NEEDS_APPLY, type SshConnection } from "../types.js"
+import {
+  type ExecResult,
+  type Module,
+  type ModuleResult,
+  NEEDS_APPLY,
+  type SshConnection,
+} from "../types.js"
 import { restartSystemdUnit } from "./systemctlRestart.js"
 
 const SYSTEMCTL = "systemctl"
@@ -24,6 +30,7 @@ const SYSTEMCTL_STATE_OK = 0
 const SYSTEMCTL_STATE_DISABLED_LIKE = 1
 const SYSTEMCTL_STATE_RUNTIME_LIKE = 2
 const SYSTEMCTL_STATE_INACTIVE_LIKE = 3
+const SYSTEMCTL_STATE_NOT_FOUND = 4
 const WELL_FORMED_SYSTEMCTL_STATE_CODES = new Set([
   SYSTEMCTL_STATE_DISABLED_LIKE,
   SYSTEMCTL_STATE_INACTIVE_LIKE,
@@ -37,10 +44,21 @@ type ServiceProbeContext = {
   unitName: string
 }
 
+type MissingServiceProbe = {
+  result: ExecResult
+  state: "missing"
+}
+
+type ServiceProbeResult = boolean | MissingServiceProbe | ModuleResult
+
+function isMissingServiceProbe(result: ServiceProbeResult): result is MissingServiceProbe {
+  return typeof result !== "boolean" && "state" in result
+}
+
 async function probeServiceEnabled(
   ssh: SshConnection,
   context: ServiceProbeContext
-): Promise<boolean | ModuleResult> {
+): Promise<ServiceProbeResult> {
   const result = await ssh.exec(
     `${SYSTEMCTL} is-enabled --quiet -- ${shellQuote(context.unitName)}`,
     {
@@ -48,6 +66,7 @@ async function probeServiceEnabled(
       silent: true,
     }
   )
+  if (result.code === SYSTEMCTL_STATE_NOT_FOUND) return { result, state: "missing" }
   if (!WELL_FORMED_SYSTEMCTL_STATE_CODES.has(result.code)) {
     return failedCommand(
       `[${context.moduleName}: ${context.serviceName}] systemctl is-enabled failed while probing service state`,
@@ -60,7 +79,7 @@ async function probeServiceEnabled(
 async function probeServiceActive(
   ssh: SshConnection,
   context: ServiceProbeContext
-): Promise<boolean | ModuleResult> {
+): Promise<ServiceProbeResult> {
   const result = await ssh.exec(
     `${SYSTEMCTL} is-active --quiet -- ${shellQuote(context.unitName)}`,
     {
@@ -68,6 +87,7 @@ async function probeServiceActive(
       silent: true,
     }
   )
+  if (result.code === SYSTEMCTL_STATE_NOT_FOUND) return { result, state: "missing" }
   if (!WELL_FORMED_SYSTEMCTL_STATE_CODES.has(result.code)) {
     return failedCommand(
       `[${context.moduleName}: ${context.serviceName}] systemctl is-active failed while probing service state`,
@@ -86,6 +106,7 @@ async function probeServiceActive(
 export const service = {
   /**
    * Ensure a systemd service is disabled and will not start on boot.
+   * A missing unit (state probe exit 4) returns `ok` from check and apply.
    * @param name - The systemd unit name.
    * @returns A Module that ensures the service is disabled.
    */
@@ -99,6 +120,7 @@ export const service = {
           serviceName: name,
           unitName,
         })
+        if (isMissingServiceProbe(enabled)) return { status: "ok" }
         if (typeof enabled !== "boolean") return enabled
         if (!enabled) return { status: "ok" }
         const result = await ssh.exec(`${SYSTEMCTL} disable -- ${shellQuote(unitName)}`, {
@@ -116,6 +138,7 @@ export const service = {
           serviceName: name,
           unitName,
         })
+        if (isMissingServiceProbe(enabled)) return "ok"
         if (typeof enabled !== "boolean") return NEEDS_APPLY
         return enabled ? "needs-apply" : "ok"
       },
@@ -125,6 +148,8 @@ export const service = {
 
   /**
    * Ensure a systemd service is enabled to start on boot.
+   * Apply fails with `unit not found` for a missing unit (state probe exit 4).
+   * Check returns `needs-apply`, displayed as `changed` during dry-run.
    * @param name - The systemd unit name.
    * @returns A Module that ensures the service is enabled.
    */
@@ -138,6 +163,9 @@ export const service = {
           serviceName: name,
           unitName,
         })
+        if (isMissingServiceProbe(enabled)) {
+          return failedCommand(`[service.enabled: ${name}] unit not found`, enabled.result)
+        }
         if (typeof enabled !== "boolean") return enabled
         if (enabled) return { status: "ok" }
         const result = await ssh.exec(`${SYSTEMCTL} enable -- ${shellQuote(unitName)}`, {
@@ -262,6 +290,8 @@ export const service = {
 
   /**
    * Ensure a systemd service is running. Starts the service if inactive.
+   * Apply fails with `unit not found` for a missing unit (state probe exit 4).
+   * Check returns `needs-apply`, displayed as `changed` during dry-run.
    * @param name - The systemd unit name (e.g. `"nginx"`).
    * @returns A Module that ensures the service is running.
    */
@@ -275,6 +305,9 @@ export const service = {
           serviceName: name,
           unitName,
         })
+        if (isMissingServiceProbe(active)) {
+          return failedCommand(`[service.running: ${name}] unit not found`, active.result)
+        }
         if (typeof active !== "boolean") return active
         if (active) return { status: "ok" }
         const result = await ssh.exec(`${SYSTEMCTL} start -- ${shellQuote(unitName)}`, {
@@ -301,6 +334,7 @@ export const service = {
 
   /**
    * Ensure a systemd service is stopped. Stops the service if active.
+   * A missing unit (state probe exit 4) returns `ok` from check and apply.
    * @param name - The systemd unit name.
    * @returns A Module that ensures the service is stopped.
    */
@@ -314,6 +348,7 @@ export const service = {
           serviceName: name,
           unitName,
         })
+        if (isMissingServiceProbe(active)) return { status: "ok" }
         if (typeof active !== "boolean") return active
         if (!active) return { status: "ok" }
         const result = await ssh.exec(`${SYSTEMCTL} stop -- ${shellQuote(unitName)}`, {
@@ -331,6 +366,7 @@ export const service = {
           serviceName: name,
           unitName,
         })
+        if (isMissingServiceProbe(active)) return "ok"
         if (typeof active !== "boolean") return NEEDS_APPLY
         return active ? "needs-apply" : "ok"
       },
