@@ -322,9 +322,13 @@ own one costs one command, and removing them after a success one more, whatever 
 entries. No manual step is needed after an interrupted apply or an upgrade: the old flag file is
 read like an entry without a usable list, and the whole destination is verified before it is
 removed. A destination that deliberately contains a symlink pointing outside it fails this check
-while an entry holds no usable list. If violations persist, remove or repoint the offending links,
-optionally, once those links are checked, delete the `run-*` entries in the entry directory and the
-old flag file if it still exists, and run again. On failure no extraction marker is written and no
+while an entry holds no usable list, for example a virtualenv interpreter link into `/usr/bin` in a
+runner work tree after an interrupted apply. If violations persist, remove or repoint the offending
+links and run again. If the offending links are intended, every later check fails on them as well:
+after checking the destination yourself, delete its `run-*` entries with
+`rm -f -- /var/lib/paratix/flags/archive-containment-<sha256 of the destination>.d/run-*` (the
+failure message names the exact directory), delete the old flag file if it still exists, and run
+again. On failure no extraction marker is written and no
 `owner` is applied.
 
 Only an apply that succeeds completely, including the re-verification of recorded links or of the

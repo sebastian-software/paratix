@@ -19,6 +19,7 @@ import type { ModuleResult, SshConnection } from "../types.js"
 import type { ArchiveMember } from "./archiveMemberValidation.js"
 
 import { failed } from "../moduleFailure.js"
+import { shellQuote } from "../ssh.js"
 import { archiveHasSymlinks } from "./archiveContainmentScope.js"
 import { type KernelMismatchPoint, runKernelCrossCheck } from "./archiveKernelCrossCheck.js"
 import { type MergedSymlink, variantDescription } from "./archiveLinkValidation.js"
@@ -61,6 +62,21 @@ const CHECKED_WHOLE_DESTINATION_AFTER_MERGE =
  */
 const NOTHING_CHANGED_AFTER_MERGE =
   "nothing was removed or changed; while the offending symlinks remain, remove them or point them inside the destination manually; this apply's containment entry records them and keeps check at needs-apply, and a later apply of any source verifies them again (every symlink under the destination when the entry could not record them) and, only when they pass, removes the entries it read that are still unchanged"
+
+/**
+ * Issue #219: the way out when the offending links are intended, for example
+ * a virtualenv interpreter link that points into `/usr/bin` after an
+ * interrupted apply forced a whole-destination check. Such a link fails every
+ * later check, so the operator has to clear the destination's containment
+ * entries after checking the tree. Naming the concrete entry directory keeps
+ * the step copyable; it is not a recommendation to clear entries blindly.
+ *
+ * @param entryDirectory - The destination's containment entry directory.
+ * @returns The sentence appended to a post-merge violation message.
+ */
+function intendedLinksHint(entryDirectory: string): string {
+  return `if the offending symlinks are intended (for example a virtualenv's interpreter link), they keep failing this check: after checking the destination yourself, clear its containment state with rm -f -- ${shellQuote(entryDirectory)}/run-*`
+}
 
 /** Issue #219: how a violation names a link an earlier failed apply recorded. */
 const RECORDED_NOTE = ", recorded by an earlier failed apply,"
@@ -297,10 +313,16 @@ function linkViolationReason(
  *
  * @param destination - The validated, canonical destination directory.
  * @param reading - The post-merge listing, with at least one violation.
+ * @param entryDirectory - Issue #219: the destination's containment entry
+ *   directory; when given, the message ends with {@link intendedLinksHint}.
  * @returns The violation text without the `[archive.extract]` prefix, with the
  *   `(and N more)` suffix after the listed links when there are more.
  */
-function containmentViolationMessage(destination: string, reading: PostMergeSymlinks): string {
+function containmentViolationMessage(
+  destination: string,
+  reading: PostMergeSymlinks,
+  entryDirectory: string | undefined
+): string {
   const listed = reading.violations
     .slice(0, POST_MERGE_VIOLATION_REPORT_LIMIT)
     .map((violation) => postMergeViolationDescription(destination, reading, violation))
@@ -309,7 +331,8 @@ function containmentViolationMessage(destination: string, reading: PostMergeSyml
   const checked = reading.wholeDestination
     ? CHECKED_WHOLE_DESTINATION_AFTER_MERGE
     : CHECKED_AFTER_MERGE
-  return `${listed.join("; ")}${suffix}; ${checked}; ${NOTHING_CHANGED_AFTER_MERGE}`
+  const hint = entryDirectory === undefined ? "" : `; ${intendedLinksHint(entryDirectory)}`
+  return `${listed.join("; ")}${suffix}; ${checked}; ${NOTHING_CHANGED_AFTER_MERGE}${hint}`
 }
 
 /**
@@ -416,6 +439,10 @@ function offendingLinkKeys(
  * @param conn - The SSH connection.
  * @param parameters - Backstop inputs.
  * @param parameters.destination - The validated, canonical destination directory.
+ * @param parameters.entryDirectory - Issue #219: the destination's
+ *   containment entry directory; a violation message then names how to clear
+ *   it when the offending links are intended. Omitted, the message stays
+ *   without that hint.
  * @param parameters.members - The validated archive members; they decide
  *   which links are judged.
  * @param parameters.recordedLinks - Issue #219: the links earlier failed
@@ -431,6 +458,7 @@ export async function runSymlinkContainmentBackstop(
   conn: SshConnection,
   parameters: {
     destination: string
+    entryDirectory?: string
     members: readonly ArchiveMember[]
     recordedLinks?: readonly string[]
     source: string
@@ -458,7 +486,9 @@ export async function runSymlinkContainmentBackstop(
   }
   if (reading.violations.length === 0) return { failure: null, offendingLinks: [] }
   return {
-    failure: failed(`${prefix}: ${containmentViolationMessage(destination, reading)}`),
+    failure: failed(
+      `${prefix}: ${containmentViolationMessage(destination, reading, parameters.entryDirectory)}`
+    ),
     offendingLinks: offendingLinkKeys(reading.violations),
   }
 }

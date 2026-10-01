@@ -321,10 +321,14 @@ der Einträge. Nach einem unterbrochenen Durchlauf oder dem Aktualisieren von pa
 nichts von Hand zu tun: Die alte Flag-Datei wird wie ein Eintrag ohne verwertbare Liste gelesen, und
 das ganze Zielverzeichnis wird geprüft, bevor sie entfernt wird. Ein Zielverzeichnis, das
 absichtlich einen nach außen zeigenden Symlink enthält, besteht diese Prüfung nicht, solange ein
-Eintrag keine verwertbare Liste enthält. Bleiben Verstöße bestehen, sind die betroffenen Links zu
-entfernen oder umzulenken, optional nach der Prüfung dieser Links die `run-*`-Einträge im
-Containment-Verzeichnis und, falls noch vorhanden, die alte Flag-Datei zu löschen und der Durchlauf
-zu wiederholen. Bei einem Fehlschlag wird weder die Marker-Datei geschrieben noch `owner`
+Eintrag keine verwertbare Liste enthält, etwa ein Interpreter-Link eines virtualenv nach `/usr/bin`
+im Arbeitsverzeichnis eines Runners nach einem unterbrochenen Durchlauf. Bleiben Verstöße bestehen,
+sind die betroffenen Links zu entfernen oder umzulenken und der Durchlauf zu wiederholen. Sind die
+betroffenen Links gewollt, scheitert auch jede spätere Prüfung an ihnen: Dann sind nach eigener
+Prüfung des Zielverzeichnisses seine `run-*`-Einträge mit
+`rm -f -- /var/lib/paratix/flags/archive-containment-<sha256 des Zielverzeichnisses>.d/run-*` zu
+löschen (die Fehlermeldung nennt das genaue Verzeichnis), falls noch vorhanden auch die alte
+Flag-Datei, und der Durchlauf ist zu wiederholen. Bei einem Fehlschlag wird weder die Marker-Datei geschrieben noch `owner`
 angewendet.
 
 Nur ein Durchlauf, der einschließlich der erneuten Prüfung festgehaltener Links oder des ganzen

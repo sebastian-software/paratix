@@ -191,6 +191,13 @@ function containmentPathsFor(path: string): ContainmentPaths {
 
 const containment = containmentPathsFor(destination)
 
+/**
+ * Issue #219: the sentence a post-merge violation of an apply ends with, naming
+ * how to clear the destination's containment entries when the offending links
+ * are intended.
+ */
+const intendedLinksHint = `; if the offending symlinks are intended (for example a virtualenv's interpreter link), they keep failing this check: after checking the destination yourself, clear its containment state with rm -f -- '${containment.entryDirectory}'/run-*`
+
 /** Issue #219: the single flag file of older paratix versions. */
 const legacyContainmentFlag = containment.legacyFlag
 
@@ -6022,8 +6029,7 @@ describe("archive.extract post-merge backstop (Issue #219)", () => {
   const backstopRefusal = `[archive.extract] refusing to complete extraction of ${src}: `
   const checkedAfterMerge =
     "after the merge, the archive's symlinks and every symlink under the destination whose resolution passes through a path the archive writes are checked, including links it did not ship"
-  const nothingChanged =
-    "nothing was removed or changed; while the offending symlinks remain, remove them or point them inside the destination manually; this apply's containment entry records them and keeps check at needs-apply, and a later apply of any source verifies them again (every symlink under the destination when the entry could not record them) and, only when they pass, removes the entries it read that are still unchanged"
+  const nothingChanged = `nothing was removed or changed; while the offending symlinks remain, remove them or point them inside the destination manually; this apply's containment entry records them and keeps check at needs-apply, and a later apply of any source verifies them again (every symlink under the destination when the entry could not record them) and, only when they pass, removes the entries it read that are still unchanged${intendedLinksHint}`
   const escapesEtc = `symlink ${JSON.stringify(escapingLink)} -> ${JSON.stringify(escapingTarget)} resolves outside destination ${JSON.stringify(destination)}`
   const escapesRoot = `symlink ${JSON.stringify(rootLink)} -> "l/../../.." resolves outside destination ${JSON.stringify(destination)}`
   const reportedEtc = `${backstopRefusal}${escapesEtc}; ${checkedAfterMerge}; ${nothingChanged}`
@@ -7894,7 +7900,7 @@ describe("archive.extract bounded staging merge (Issue #219)", () => {
       )
 
       expect(run.result.error?.message).toBe(
-        `[archive.extract] failed to copy extracted files into ${destination}${reason} (exit code ${String(code)})\nTerminated; [archive.extract] refusing to complete extraction of ${src}: symlink ${JSON.stringify(escapingLink)} -> "../a/../.." resolves outside destination ${JSON.stringify(destination)}; after the merge, the archive's symlinks and every symlink under the destination whose resolution passes through a path the archive writes are checked, including links it did not ship; nothing was removed or changed; while the offending symlinks remain, remove them or point them inside the destination manually; this apply's containment entry records them and keeps check at needs-apply, and a later apply of any source verifies them again (every symlink under the destination when the entry could not record them) and, only when they pass, removes the entries it read that are still unchanged`
+        `[archive.extract] failed to copy extracted files into ${destination}${reason} (exit code ${String(code)})\nTerminated; [archive.extract] refusing to complete extraction of ${src}: symlink ${JSON.stringify(escapingLink)} -> "../a/../.." resolves outside destination ${JSON.stringify(destination)}; after the merge, the archive's symlinks and every symlink under the destination whose resolution passes through a path the archive writes are checked, including links it did not ship; nothing was removed or changed; while the offending symlinks remain, remove them or point them inside the destination manually; this apply's containment entry records them and keeps check at needs-apply, and a later apply of any source verifies them again (every symlink under the destination when the entry could not record them) and, only when they pass, removes the entries it read that are still unchanged${intendedLinksHint}`
       )
       expect(run.postMergeListings).toHaveLength(1)
       expect(callsFromBackstop(run)).toStrictEqual([symlinkListingProbeCommand])
