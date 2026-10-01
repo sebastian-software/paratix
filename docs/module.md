@@ -287,7 +287,12 @@ Jeder Durchlauf hält sein Ergebnis in seinem eigenen Containment-Eintrag fest, 
 `/var/lib/paratix/flags/archive-containment-<sha256>.d/` (`<sha256>` ist der SHA-256-Hash des
 normalisierten Zielpfads). Er legt diesen Eintrag als `in-progress` an, bevor er das Zielverzeichnis
 berührt, ohne dabei einen vorhandenen Namen zu ersetzen, und er schreibt nur seinen eigenen Eintrag
-neu, nie den eines anderen Durchlaufs. Schlägt ein Durchlauf fehl, nachdem das Zusammenführen
+neu, nie den eines anderen Durchlaufs. Der `in-progress`-Eintrag hält den SHA-256-Digest des
+Containment-Bereichs des Archivs fest (seiner Symlinks und jedes Pfads, den es schreibt, zusammen
+mit einer Algorithmus-Kennung und der Unicode-Version der Node.js-Laufzeit); seine Größe ist deshalb
+unabhängig von der Zahl der Einträge fest. Bricht ein Durchlauf mit einem Fehler ab, nachdem das
+Zusammenführen begonnen hat und bevor die Prüfung danach bestanden ist, schreibt er seinen Eintrag
+als `stopped` mit demselben Digest neu. Schlägt ein Durchlauf fehl, nachdem das Zusammenführen
 begonnen hat, hält sein Eintrag die Links fest, die die Prüfung danach ermittelt hat, relativ zu
 `destination` (höchstens 256); ein Fehlschlag, bevor das Zusammenführen begonnen hat, hat nichts
 veröffentlicht und hält eine leere Liste fest, während die Links, die andere Einträge festhalten, in
@@ -296,38 +301,55 @@ liest alle Einträge, bevor er das Zielverzeichnis berührt, und prüft die Link
 festhalten, in seiner eigenen Prüfung nach dem Zusammenführen erneut, mit derselben lexikalischen
 Auflösung und demselben Abgleich durch den Kernel: Jeder muss verschwunden sein oder nun innerhalb
 von `destination` auflösen, sonst schlägt der Durchlauf mit seinem Namen fehl, und sein eigener
-Eintrag hält ihn fest. Enthält ein Eintrag keine verwertbare Liste – weil ein früherer Durchlauf
-nicht zu Ende kam (er wurde unterbrochen oder konnte sein Ergebnis nicht festhalten, oder ein
-anderer Durchlauf für dieses Zielverzeichnis läuft noch), seine Prüfung die Links nicht ermitteln
-konnte (etwa bei einer gescheiterten Liste oder einem Eintrag des Archivs in einem nicht lesbaren
-Verzeichnis), es für das Festhalten zu viele waren (mehr als 256 Links oder 64 KiB) oder er
-beschädigt ist –, und ebenso, wenn die einzelne Flag-Datei `archive-containment-<sha256>.failed`
-älterer paratix-Versionen besteht oder es mehr als 16 Einträge gibt, läuft der Durchlauf trotzdem
-normal. Seine Prüfung nach dem Zusammenführen prüft dann das ganze Zielverzeichnis: Jeder Symlink
-unter `destination`, nicht nur die, auf die das Archiv wirken kann, muss mit derselben lexikalischen
-Auflösung und demselben Abgleich durch den Kernel innerhalb davon auflösen, bevor `owner` angewendet
-und die Marker-Dateien geschrieben werden. Findet die Prüfung Links, die nach außen zeigen oder sich
-nicht auflösen lassen, schlägt der Durchlauf fehl und nennt sie wie oben, entfernt nichts, und sein
-eigener Eintrag hält genau diese Links fest; die gelesenen Einträge bleiben ebenfalls stehen, sodass
-der nächste Durchlauf diese Links und wieder das ganze Zielverzeichnis prüft. Lässt sich die Prüfung
-nicht vollständig durchführen (eine gescheiterte Liste, ein nicht lesbares Verzeichnis oder zu viele
-Symlinks), schlägt der Durchlauf mit dem Grund fehl, sein Eintrag enthält keine verwertbare Liste,
-und der nächste Durchlauf prüft wieder das ganze Zielverzeichnis. Diese Prüfung nutzt die Liste und
-den Abgleich der Prüfung nach dem Zusammenführen mit: Solange ein Eintrag keine verwertbare Liste
-enthält, kostet sie für ein Archiv ohne Symlinks höchstens eine Liste und einen Abgleich zusätzlich,
-für ein Archiv mit Symlinks keinen weiteren Befehl. Das Lesen der Einträge und das Anlegen des
-eigenen kosten einen Befehl, das Entfernen nach einem Erfolg einen weiteren, unabhängig von der Zahl
-der Einträge. Nach einem unterbrochenen Durchlauf oder dem Aktualisieren von paratix ist deshalb
-nichts von Hand zu tun: Die alte Flag-Datei wird wie ein Eintrag ohne verwertbare Liste gelesen, und
-das ganze Zielverzeichnis wird geprüft, bevor sie entfernt wird. Ein Zielverzeichnis, das
+Eintrag hält ihn fest. Der Eintrag eines früheren Durchlaufs, der nicht zu Ende kam (er wurde
+unterbrochen, brach nach Beginn des Zusammenführens mit einem Fehler ab oder konnte sein Ergebnis
+nicht festhalten, oder ein anderer Durchlauf für dieses Zielverzeichnis läuft noch), hält nur den
+Bereichs-Digest dieses Durchlaufs fest. Stimmt der Digest mit dem des aktuellen Durchlaufs überein,
+hat der frühere Durchlauf dasselbe Archiv entpackt und kann nur Links veröffentlicht haben, die der
+aktuelle Durchlauf ohnehin prüft: seine eigenen Symlinks und jeden Link, dessen Auflösung durch
+einen Pfad führt, den er schreibt. Die normale Prüfung des aktuellen Durchlaufs nach dem
+Zusammenführen deckt diesen Eintrag dann ab, ohne das ganze Zielverzeichnis zu prüfen, und ein
+Symlink außerhalb dieses Bereichs beeinflusst sie nicht, auch wenn er aus `destination` hinauszeigt.
+Enthält ein Eintrag keine verwertbare Liste – weil sein Digest abweicht (das Archiv hat sich
+geändert, oder der Digest wurde von einer paratix-Version mit anderer Ableitung des Bereichs oder
+unter einer anderen Unicode-Version gebildet), er ein `in-progress`-Eintrag einer älteren
+paratix-Version ist, seine Prüfung die Links nicht ermitteln konnte (etwa bei einer gescheiterten
+Liste oder einem Eintrag des Archivs in einem nicht lesbaren Verzeichnis), es für das Festhalten zu
+viele waren (mehr als 256 Links oder 64 KiB) oder er beschädigt ist (etwa leer, abgeschnitten oder
+fehlerhaft aufgebaut) –, und ebenso, wenn die einzelne Flag-Datei
+`archive-containment-<sha256>.failed` älterer paratix-Versionen besteht oder es mehr als 16 Einträge
+gibt, läuft der Durchlauf trotzdem normal. Seine Prüfung nach dem Zusammenführen prüft dann das
+ganze Zielverzeichnis: Jeder Symlink unter `destination`, nicht nur die, auf die das Archiv wirken
+kann, muss mit derselben lexikalischen Auflösung und demselben Abgleich durch den Kernel innerhalb
+davon auflösen, bevor `owner` angewendet und die Marker-Dateien geschrieben werden. Findet die
+Prüfung Links, die nach außen zeigen oder sich nicht auflösen lassen, schlägt der Durchlauf fehl und
+nennt sie wie oben, entfernt nichts, und sein eigener Eintrag hält genau diese Links fest; die
+gelesenen Einträge bleiben ebenfalls stehen, sodass der nächste Durchlauf diese Links und wieder das
+ganze Zielverzeichnis prüft. Lässt sich die Prüfung nicht vollständig durchführen (eine gescheiterte
+Liste, ein nicht lesbares Verzeichnis oder zu viele Symlinks), schlägt der Durchlauf mit dem Grund
+fehl, sein Eintrag enthält keine verwertbare Liste, und der nächste Durchlauf prüft wieder das ganze
+Zielverzeichnis. Diese Prüfung nutzt die Liste und den Abgleich der Prüfung nach dem Zusammenführen
+mit: Solange ein Eintrag keine verwertbare Liste enthält, kostet sie für ein Archiv ohne Symlinks
+höchstens eine Liste und einen Abgleich zusätzlich, für ein Archiv mit Symlinks keinen weiteren
+Befehl. Das Lesen der Einträge und das Anlegen des eigenen kosten einen Befehl, das Entfernen nach
+einem Erfolg einen weiteren, unabhängig von der Zahl der Einträge. Ein Verzeichnis
+`.paratix-stage.*`, das ein abgebrochener Durchlauf in `destination` hinterlassen hat, prüft die
+normale Prüfung nach dem Zusammenführen nicht, weil die Link-Regeln des Archivs oben seine Links
+darin halten, und es wird nicht entfernt. Nach einem unterbrochenen Durchlauf entfernt eine
+erfolgreiche Wiederholung desselben Archivs mit übereinstimmendem Digest den Eintrag, ohne dass
+etwas von Hand zu tun ist. Nach dem Aktualisieren von paratix werden die alte Flag-Datei und die
+Einträge älterer paratix-Versionen wie Einträge ohne verwertbare Liste gelesen, und das ganze
+Zielverzeichnis wird geprüft, bevor sie entfernt werden; eine ältere paratix-Version liest einen
+Eintrag dieser Version ebenso als Eintrag ohne verwertbare Liste. Ein Zielverzeichnis, das
 absichtlich einen nach außen zeigenden Symlink enthält, besteht diese Prüfung nicht, solange ein
 Eintrag keine verwertbare Liste enthält, etwa ein Interpreter-Link eines virtualenv nach `/usr/bin`
-im Arbeitsverzeichnis eines Runners nach einem unterbrochenen Durchlauf. Bleiben Verstöße bestehen,
-sind die betroffenen Links zu entfernen oder umzulenken und der Durchlauf zu wiederholen. Sind die
-betroffenen Links gewollt und liegen außerhalb des Bereichs, auf den das Archiv wirken kann,
-kann das Löschen des Containment-Zustands die Wiederholung ermöglichen. Die Fehlermeldung nennt
-diesen Schritt nur bei einer vollständig lesbaren Prüfung des ganzen Zielverzeichnisses, wenn die
-normale Prüfung des aktuellen Archivs
+im Arbeitsverzeichnis eines Runners, wenn sich das Archiv nach einem unterbrochenen Durchlauf
+geändert hat. Bleiben Verstöße bestehen, sind die betroffenen Links zu entfernen oder umzulenken und
+der Durchlauf zu wiederholen. Sind die betroffenen Links gewollt und liegen außerhalb des Bereichs,
+auf den das Archiv wirken kann, kann das Löschen des Containment-Zustands die Wiederholung
+ermöglichen. Dieser Schritt von Hand ist nur für Einträge ohne verwertbaren Digest oder nach einem
+geänderten Archiv nötig. Die Fehlermeldung nennt diesen Schritt nur bei einer vollständig lesbaren
+Prüfung des ganzen Zielverzeichnisses, wenn die normale Prüfung des aktuellen Archivs
 ohne festgehaltene Links einschließlich des Abgleichs durch den Kernel bestehen würde. Dann sind
 zuerst alle `archive.extract`-Durchläufe für dieses Zielverzeichnis anzuhalten oder ihr Ende
 abzuwarten. Neue Durchläufe sind zu verhindern, bis sowohl die eigene Prüfung als auch das Löschen
@@ -358,14 +380,15 @@ verschiedene Zielverzeichnisse sind unproblematisch. Geschieht es trotzdem, blei
 Wettläufe. Ein
 `in-progress`-Eintrag eines Durchlaufs, der noch läuft, lässt sich nicht von einem unterscheiden,
 den ein unterbrochener Durchlauf hinterlassen hat; ein anderer Durchlauf, dessen Prüfung des ganzen
-Zielverzeichnisses sauber ist, kann ihn deshalb entfernen. Schlägt der laufende Durchlauf danach
-fehl, legt er seinen Eintrag mit seinem Ergebnis neu an; wird er dagegen abgebrochen, prüft niemand
-die Links, die sein Zusammenführen nach dieser Prüfung veröffentlicht hat. Einen Eintrag, der
-entsteht, nachdem ein Durchlauf die Einträge gelesen hat, fasst dieser Durchlauf nie an. Stürzt ein
-Durchlauf beim Entfernen der Einträge ab, bleibt ein Eintrag `run-…-claim-<n>` zurück, der ein
-gewöhnlicher Eintrag ist und `check` bei `needs-apply` hält. Ältere und neuere paratix-Versionen,
-die gleichzeitig für ein Zielverzeichnis laufen, stimmen sich nicht ab, weil ältere Versionen
-weiterhin die einzelne Flag-Datei verwenden.
+Zielverzeichnisses sauber ist, kann ihn deshalb entfernen; entpacken beide dasselbe Archiv, stimmen
+ihre Digests überein, und der andere Durchlauf entfernt ihn schon nach seiner normalen Prüfung nach
+dem Zusammenführen. Schlägt der laufende Durchlauf danach fehl, legt er seinen Eintrag mit seinem
+Ergebnis neu an; wird er dagegen abgebrochen, prüft niemand die Links, die sein Zusammenführen nach
+dieser Prüfung veröffentlicht hat. Einen Eintrag, der entsteht, nachdem ein Durchlauf die Einträge
+gelesen hat, fasst dieser Durchlauf nie an. Stürzt ein Durchlauf beim Entfernen der Einträge ab,
+bleibt ein Eintrag `run-…-claim-<n>` zurück, der ein gewöhnlicher Eintrag ist und `check` bei
+`needs-apply` hält. Ältere und neuere paratix-Versionen, die gleichzeitig für ein Zielverzeichnis
+laufen, stimmen sich nicht ab, weil ältere Versionen weiterhin die einzelne Flag-Datei verwenden.
 
 ---
 

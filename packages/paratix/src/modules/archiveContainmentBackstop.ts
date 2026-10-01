@@ -48,7 +48,7 @@ const CHECKED_AFTER_MERGE =
  * usable list of offending links.
  */
 const CHECKED_WHOLE_DESTINATION_AFTER_MERGE =
-  "after the merge, every symlink under the destination is checked, because a containment entry does not say which links need verification (an unfinished or concurrent apply, an older paratix version's flag file, or too many entries)"
+  "after the merge, every symlink under the destination is checked, because a containment entry does not say which links need verification (an unfinished or concurrent apply of another archive or of another paratix version, a failed apply that could not record its links, an older paratix version's flag file, or too many entries)"
 
 /**
  * Issue #219: what an operator has to do after a post-merge violation. The

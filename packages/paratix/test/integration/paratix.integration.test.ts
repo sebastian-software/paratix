@@ -11,6 +11,15 @@ import type { Environment, Module, SshConfig, SshConnection } from "../../src/ty
 
 import { archive, command, download, file, shellQuote } from "../../src/index.js"
 import { clearHostKeyCache, HostKeyVerificationError } from "../../src/knownHosts.js"
+import { containmentFlagBody } from "../../src/modules/archiveContainmentFlag.js"
+import {
+  archiveContainmentScope,
+  containmentScopeDigest,
+} from "../../src/modules/archiveContainmentScope.js"
+import {
+  type ArchiveMember,
+  listArchiveMembers,
+} from "../../src/modules/archiveMemberValidation.js"
 import { buildLargeDownloadFlagPrefix } from "../../src/modules/download.js"
 import { runPlaybook } from "../../src/runner.js"
 import { server } from "../../src/server.js"
@@ -238,6 +247,23 @@ async function expectRemoteFileContent(
   expected: string
 ): Promise<void> {
   await expect(ssh.readFile(remotePath)).resolves.toBe(expected)
+}
+
+/**
+ * Issue #227: the members of a remote archive as the production listing
+ * parses them for `archive.extract`.
+ *
+ * @param ssh - The connection to list through.
+ * @param archivePath - Where the archive lies on the remote host.
+ * @returns Every member the listing reports, in listing order.
+ */
+async function listedArchiveMembers(
+  ssh: SshConnection,
+  archivePath: string
+): Promise<ArchiveMember[]> {
+  const listing = await listArchiveMembers(ssh, { archivePath, source: archivePath })
+  if ("failureReason" in listing) throw new Error(listing.failureReason)
+  return listing.members
 }
 
 async function expectModuleCheckOk(
@@ -1254,6 +1280,82 @@ describe.skipIf(SKIP_WITHOUT_DOCKER)("Paratix integration", () => {
       await runCleanupSteps(
         [
           removeRemoteDirectoryStep(ssh, remoteBase, "remove remote archive test directory"),
+          disconnectSshStep(ssh),
+        ],
+        primaryError
+      )
+    }
+  })
+
+  it("clears an unfinished containment entry of the same archive next to an intended outward link", async () => {
+    // Issue #227: an interrupted apply left its `in-progress` entry, and the
+    // destination holds a virtualenv interpreter link that points outside it
+    // on purpose. The next apply of the same archive records the same scope
+    // digest, so its scoped backstop covers the entry: it must succeed and
+    // clear the entry instead of judging the whole destination. The entry is
+    // planted with the production body instead of killing a process.
+    const ssh = await connectSsh([getEnvironment().primaryPort], {}, "root")
+    const remoteBase = `/root/integration-${randomUUID()}`
+    const sourceTree = `${remoteBase}/tree`
+    const archivePath = `${remoteBase}/bundle.tar.gz`
+    const destination = `${remoteBase}/destination`
+    const sourceBin = `${sourceTree}/app/bin`
+    const sourceTool = `${sourceBin}/tool`
+    const sourceData = `${sourceTree}/app/data.txt`
+    const sourceLink = `${sourceTree}/app/current`
+    const pythonDirectory = `${destination}/venv/bin`
+    const pythonLink = `${pythonDirectory}/python3`
+    const entryDirectory = `/var/lib/paratix/flags/archive-containment-${createHash("sha256").update(destination, "utf8").digest("hex")}.d`
+    const leftoverEntry = `${entryDirectory}/run-${randomUUID().replaceAll("-", "")}`
+
+    let primaryError: unknown
+    try {
+      await ssh.exec(
+        [
+          `mkdir -p ${shellQuote(sourceBin)} ${shellQuote(pythonDirectory)}`,
+          `printf '%s\\n' tool > ${shellQuote(sourceTool)}`,
+          `printf '%s\\n' data > ${shellQuote(sourceData)}`,
+          // An archive symlink inside the archive, so the scoped backstop runs.
+          `ln -s bin ${shellQuote(sourceLink)}`,
+          `tar -czf ${shellQuote(archivePath)} -C ${shellQuote(sourceTree)} app`,
+          `ln -s /usr/bin/python3 ${shellQuote(pythonLink)}`,
+        ].join(" && "),
+        { silent: true }
+      )
+      // The digest the apply derives: the production listing and scope.
+      const members = await listedArchiveMembers(ssh, archivePath)
+      expect(members.some(({ kind }) => kind === "symlink")).toBe(true)
+      const scope = containmentScopeDigest(archiveContainmentScope(members))
+      const leftoverBody = containmentFlagBody({ scope, state: "in-progress" })
+      await ssh.exec(
+        `mkdir -p ${shellQuote(entryDirectory)} && printf '%s' ${shellQuote(leftoverBody)} > ${shellQuote(leftoverEntry)}`,
+        { silent: true }
+      )
+      await expectRemoteFileContent(ssh, leftoverEntry, leftoverBody)
+
+      const extractModule = archive.extract(archivePath, destination)
+
+      await expect(extractModule.apply(ssh, emptyEnv)).resolves.toMatchObject({
+        status: "changed",
+      })
+      const leftoverEntries = await ssh.exec(
+        `find ${shellQuote(entryDirectory)} -mindepth 1 -maxdepth 1 -name 'run-*' -print`,
+        { ignoreExitCode: true, silent: true }
+      )
+      expect(leftoverEntries.stdout.trim()).toBe("")
+      await expect(ssh.output(`readlink ${shellQuote(pythonLink)}`)).resolves.toBe(
+        "/usr/bin/python3"
+      )
+      await expectRemoteFileContent(ssh, `${destination}/app/data.txt`, "data\n")
+      await expectModuleCheckOk(extractModule, ssh)
+    } catch (error) {
+      primaryError = error
+      throw error
+    } finally {
+      await runCleanupSteps(
+        [
+          removeRemoteDirectoryStep(ssh, remoteBase, "remove remote archive test directory"),
+          removeRemoteDirectoryStep(ssh, entryDirectory, "remove containment entry directory"),
           disconnectSshStep(ssh),
         ],
         primaryError
