@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.21.0](https://github.com/sebastian-software/paratix/compare/create-paratix-v0.20.0...create-paratix-v0.21.0) (2026-10-01)
+
+
+### Bug Fixes
+
+* **deps:** align vitest and coverage on 4.1.11 ([#225](https://github.com/sebastian-software/paratix/issues/225)) ([cf52af4](https://github.com/sebastian-software/paratix/commit/cf52af46b836e398dcca34842b7be6e795e3c765))
+
 ## [0.20.0](https://github.com/sebastian-software/paratix/compare/create-paratix-v0.19.0...create-paratix-v0.20.0) (2026-09-23)
 
 
