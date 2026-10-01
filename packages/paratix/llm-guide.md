@@ -1106,8 +1106,10 @@ firstRun.stop("Bootstrap foundation complete; rerun without --first-run to conti
 
 ### `isFirstRun()`
 
-Returns `true` while the CLI imports and evaluates a playbook passed to `paratix apply --first-run`.
-Use it only while constructing the exported server definition:
+Returns `true` during a `paratix apply --first-run` invocation: while the CLI imports and evaluates
+the playbook, and for the entire run, including every module `check` and `apply`, recipe children,
+and `when` predicates. It returns `false` in ordinary runs and after a run has finished.
+Branch at import time to choose a different module list for the first run:
 
 ```typescript
 import { isFirstRun, server, type Module } from "paratix"
@@ -1123,10 +1125,10 @@ export default server({
 })
 ```
 
-The first-run context ends after import and definition generation. `isFirstRun()` therefore
-returns `false` later inside module `check` and `apply` methods, and there is no public `init` hook.
+A custom module can also call `isFirstRun()` inside its `check` or `apply` to adapt a single step.
+Use `firstRun.stop(...)` to end a first run at an explicit staging boundary.
 The helper reads an async-local context; the CLI does not mutate
-`process.env.PARATIX_FIRST_RUN`.
+`process.env.PARATIX_FIRST_RUN`, and child processes spawned by modules do not see the flag.
 
 ### `signals.flush(message?)`
 
