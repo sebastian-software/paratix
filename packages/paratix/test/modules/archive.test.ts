@@ -32,10 +32,13 @@ import {
   type ContainmentPaths,
   noContainmentEntriesCommand,
   parseContainmentFlag,
-  STOPPED_AFTER_MERGE_STARTED,
   TOO_MANY_OFFENDING_LINKS,
   UNIDENTIFIED_OFFENDING_LINKS,
 } from "../../src/modules/archiveContainmentFlag.js"
+import {
+  archiveContainmentScope,
+  containmentScopeDigest,
+} from "../../src/modules/archiveContainmentScope.js"
 import { buildKernelCrossCheckScript } from "../../src/modules/archiveKernelCrossCheck.js"
 import {
   ARCHIVE_CAPTURE_LIMIT_BYTES,
@@ -52,6 +55,7 @@ import {
 } from "../../src/modules/archiveProbe.js"
 import { SYMLINK_LISTING_CAPTURE_LIMIT_BYTES } from "../../src/modules/archiveSymlinkListing.js"
 import { tarListingScript } from "../../src/modules/archiveTarListing.js"
+import { parseTarListing } from "../../src/modules/archiveTarListingParser.js"
 import { shellQuote } from "../../src/ssh.js"
 import {
   CAPTURE_TRUNCATION_MARKER,
@@ -230,17 +234,37 @@ const earlierEntryName = `run-${"e".repeat(32)}`
 const earlierEntry = `${containment.entryDirectory}/${earlierEntryName}`
 
 /**
+ * Issue #227: the scope digest of an archive the mocks list with these GNU
+ * tar lines, from the production listing parser and scope derivation.
+ *
+ * @param lines - The archive listing lines.
+ * @returns The digest the apply's own entry records.
+ */
+function scopeDigestOf(lines: readonly string[]): string {
+  const listing = parseTarListing(`paratix-tar-listing gnu C.UTF-8\n${lines.join("\n")}\n`)
+  if ("failureReason" in listing) throw new Error(listing.failureReason)
+  return containmentScopeDigest(archiveContainmentScope(listing.members))
+}
+
+/**
  * Issue #219: the establish exec of the n-th apply in a test: it reads every
  * containment entry and creates the apply's own entry.
  *
+ * @param lines - The archive listing lines; Issue #227: the own entry records
+ *   their scope digest.
  * @param run - The apply's position in the test, from 1.
  * @param path - The extraction destination.
  * @returns The `sh -c` command.
  */
-function containmentEstablishCommand(run = 1, path = destination): string {
+function containmentEstablishCommand(
+  lines: readonly string[],
+  run = 1,
+  path = destination
+): string {
   return buildContainmentEstablishCommand({
     ...containmentPathsFor(path),
     ownEntry: ownEntry(run, path),
+    scopeDigest: scopeDigestOf(lines),
   })
 }
 
@@ -3429,10 +3453,8 @@ describe("archive.extract — apply", () => {
       const owner = "www-data:www-data"
       const escapingLink = `${destination}/a/esc`
 
-      const first = await applyTarListing(
-        [tarDirectoryLine("a/"), tarSymlinkLine("a/esc", "up/..")],
-        { hostLinks, owner }
-      )
+      const firstLines = [tarDirectoryLine("a/"), tarSymlinkLine("a/esc", "up/..")]
+      const first = await applyTarListing(firstLines, { hostLinks, owner })
 
       expect(extractionSummary(first)).toStrictEqual(extractedThroughStaging)
       const firstCalls = first.mockSsh.calls
@@ -3453,15 +3475,15 @@ describe("archive.extract — apply", () => {
       // Issue #219: the containment entry is created by the establish exec
       // before the merge; every marker write comes after the containment
       // backstop.
-      expect(firstCalls.indexOf(containmentEstablishCommand(1))).toBeLessThan(firstContainment)
+      expect(firstCalls.indexOf(containmentEstablishCommand(firstLines, 1))).toBeLessThan(
+        firstContainment
+      )
       for (const write of first.writes) {
         expect(write.callIndex).toBeGreaterThan(firstContainment)
       }
 
-      const second = await applyTarListing([tarDirectoryLine("a/"), tarSymlinkLine("a/up", "..")], {
-        hostLinks,
-        owner,
-      })
+      const secondLines = [tarDirectoryLine("a/"), tarSymlinkLine("a/up", "..")]
+      const second = await applyTarListing(secondLines, { hostLinks, owner })
 
       expect(extractionSummary(second)).toStrictEqual({
         error: expect.stringContaining(
@@ -3483,7 +3505,7 @@ describe("archive.extract — apply", () => {
       expect(second.writes.map(({ remotePath }) => remotePath)).toStrictEqual([ownEntry(2)])
       // Issue #219: the containment entry is established before the pre-merge
       // listing; the failure is recorded after it.
-      const establish = secondCalls.indexOf(containmentEstablishCommand(2))
+      const establish = secondCalls.indexOf(containmentEstablishCommand(secondLines, 2))
       const secondListing = secondCalls.indexOf(symlinkListingProbeCommand)
       expect(establish).toBeGreaterThanOrEqual(0)
       expect(establish).toBeLessThan(secondListing)
@@ -3603,16 +3625,14 @@ describe("archive.extract — apply", () => {
         [`${destination}/a/up`, ".."],
       ])
 
-      const run = await applyTarListing(
-        [tarDirectoryLine("a/"), tarDirectoryLine("a/b/"), tarSymlinkLine("a/up", "b")],
-        { hostLinks }
-      )
+      const lines = [tarDirectoryLine("a/"), tarDirectoryLine("a/b/"), tarSymlinkLine("a/up", "b")]
+      const run = await applyTarListing(lines, { hostLinks })
 
       expect(extractionSummary(run)).toStrictEqual(extractedThroughStaging)
       expect(run.mockSsh.calls).toContain(symlinkListingProbeCommand)
       // Issue #219: the containment entry is established before the merge and
       // cleared once the apply has fully succeeded.
-      expect(run.mockSsh.calls).toContain(containmentEstablishCommand())
+      expect(run.mockSsh.calls).toContain(containmentEstablishCommand(lines))
       expect(containmentClears(run.mockSsh.calls)).toHaveLength(1)
       expect(Object.fromEntries(hostLinks)).toStrictEqual({
         [`${destination}/a/esc`]: "up/..",
@@ -3882,8 +3902,9 @@ describe("archive.extract — apply", () => {
       const hostLinks: HostLinkTree = new Map()
       const files = new Map<string, string>()
       const escapingLink = `${destination}/a/esc`
+      const lines = [tarDirectoryLine("a/"), tarSymlinkLine("a/up", "..")]
 
-      const run = await applyTarListing([tarDirectoryLine("a/"), tarSymlinkLine("a/up", "..")], {
+      const run = await applyTarListing(lines, {
         files,
         hostLinks,
         injectedOnMerge: [[escapingLink, "up/.."]],
@@ -3916,7 +3937,7 @@ describe("archive.extract — apply", () => {
       // Issue #219: the containment entry is established before the pre-merge
       // listing, and the backstop leaves the escaping link it found in place:
       // after its listing only the kernel cross-check of `a/up` runs.
-      expect(calls.indexOf(containmentEstablishCommand())).toBeLessThan(listing)
+      expect(calls.indexOf(containmentEstablishCommand(lines))).toBeLessThan(listing)
       expect([...files.keys()]).toStrictEqual([ownEntry()])
       expect(files.get(ownEntry())).toBe(recordedFlag("a/esc"))
       expect(callsFromBackstop(run)).toStrictEqual([
@@ -4991,7 +5012,7 @@ describe("archive.extract containment-failure flag (Issue #219)", () => {
     // it precedes the pre-staging probe and the pre-merge listing as well.
     const { calls } = run.mockSsh
     expect(run.mockSsh.execCalls).toContainEqual({
-      command: containmentEstablishCommand(),
+      command: containmentEstablishCommand(refusedArchive),
       options: {
         ignoreExitCode: true,
         maxOutputBytes: CONTAINMENT_ESTABLISH_CAPTURE_LIMIT_BYTES,
@@ -5001,7 +5022,7 @@ describe("archive.extract containment-failure flag (Issue #219)", () => {
     expect(calls.filter((command) => command.startsWith(containmentEstablishPrefix))).toHaveLength(
       1
     )
-    const establish = calls.indexOf(containmentEstablishCommand())
+    const establish = calls.indexOf(containmentEstablishCommand(refusedArchive))
     const archiveListing = calls.indexOf(tarListCommand(src))
     const destinationMkdir = calls.indexOf(guardedArchiveDestinationMkdirCommand(destination))
     const destinationReadlink = calls.indexOf(`readlink -f -- '${destination}'`)
@@ -5067,7 +5088,10 @@ describe("archive.extract containment-failure flag (Issue #219)", () => {
     const run = await applyTarListing(refusedArchive, {
       hostLinks: escapingHostLinks(),
       responses: {
-        [containmentEstablishCommand()]: { code: 13, stderr: "sh: No space left on device" },
+        [containmentEstablishCommand(refusedArchive)]: {
+          code: 13,
+          stderr: "sh: No space left on device",
+        },
       },
     })
 
@@ -5089,7 +5113,7 @@ describe("archive.extract containment-failure flag (Issue #219)", () => {
       responses: {
         // Issue #219: the establish exec creates the flags directory and
         // exits 2 when that fails.
-        [containmentEstablishCommand()]: {
+        [containmentEstablishCommand(refusedArchive)]: {
           code: 2,
           stderr: "mkdir: cannot create directory '/var/lib/paratix': Read-only file system",
         },
@@ -5112,10 +5136,11 @@ describe("archive.extract containment-failure flag (Issue #219)", () => {
     const escapingLink = `${destination}/a/esc`
     const hostLinks: HostLinkTree = new Map()
 
-    const run = await applyTarListing([tarDirectoryLine("a/"), tarSymlinkLine("a/up", "..")], {
+    const lines = [tarDirectoryLine("a/"), tarSymlinkLine("a/up", "..")]
+    const run = await applyTarListing(lines, {
       hostLinks,
       injectedOnMerge: [[escapingLink, "up/.."]],
-      responses: { [containmentEstablishCommand()]: { code: 13 } },
+      responses: { [containmentEstablishCommand(lines)]: { code: 13 } },
     })
 
     expect(run.result.status).toBe("failed")
@@ -6038,7 +6063,7 @@ describe("archive.extract containment flag lifecycle (Issue #219)", () => {
     expect(extractionSummary(run)).toStrictEqual(extractedThroughStaging)
     const { calls } = run.mockSsh
     const markerWrites = run.writes
-    const establish = calls.indexOf(containmentEstablishCommand())
+    const establish = calls.indexOf(containmentEstablishCommand(lifecycleLines))
     expect(establish).toBeGreaterThanOrEqual(0)
     // Issue #219: the pre-merge and the post-merge listing issue the same
     // command; exactly one of each runs on a converged tree.
@@ -6537,7 +6562,7 @@ describe("archive.extract containment flag records offending links (Issue #219)"
     ])
     expect(
       run.mockSsh.calls.filter((command) => command.includes(containment.entryDirectory))
-    ).toStrictEqual([containmentEstablishCommand(2)])
+    ).toStrictEqual([containmentEstablishCommand(linesWithoutSymlinks, 2)])
     expect(hostLinks.get(escapingLink)).toBe(escapingTarget)
     await expect(checkAgainstHostFiles(otherSrc, files)).resolves.toMatchObject({
       result: "needs-apply",
@@ -6725,14 +6750,25 @@ describe("archive.extract containment flag records offending links (Issue #219)"
 })
 
 /**
- * Issue #219: the `in-progress` body an apply creates its own entry with; an
- * older version's in-progress flag may still carry links.
+ * Issue #219: the version 1 `in-progress` body earlier versions created their
+ * own entry with; it may still carry links. Issue #227: it reads as unknown.
  *
  * @param links - The carried link keys.
  * @returns The JSON body.
  */
 function inProgress(...links: string[]): string {
-  return containmentFlagBody({ links, state: "in-progress" })
+  return `${JSON.stringify({ links, state: "in-progress", version: 1 })}\n`
+}
+
+/**
+ * Issue #227: the `in-progress` body an apply creates its own entry with,
+ * carrying the scope digest of its archive.
+ *
+ * @param lines - The archive listing lines.
+ * @returns The JSON body.
+ */
+function scopedInProgress(lines: readonly string[]): string {
+  return containmentFlagBody({ scope: scopeDigestOf(lines), state: "in-progress" })
 }
 
 /**
@@ -6849,7 +6885,7 @@ describe("archive.extract containment flag recording and verification (Issue #21
     "refuses and writes nothing when the establish exec reports $name",
     async ({ answer, reason }) => {
       const run = await applyTarListing(linesThroughA, {
-        responses: { [containmentEstablishCommand()]: answer },
+        responses: { [containmentEstablishCommand(linesThroughA)]: answer },
       })
 
       expect(run.result.error?.message).toBe(
@@ -6863,7 +6899,10 @@ describe("archive.extract containment flag recording and verification (Issue #21
 
   it("refuses and writes nothing when the establish exec throws", async () => {
     const run = await applyTarListing(linesThroughA, {
-      throwOn: { command: containmentEstablishCommand(), error: new Error("channel closed") },
+      throwOn: {
+        command: containmentEstablishCommand(linesThroughA),
+        error: new Error("channel closed"),
+      },
     })
 
     expect(run.thrown).toBeUndefined()
@@ -7078,7 +7117,9 @@ describe("archive.extract containment flag recording and verification (Issue #21
     expect(run.result.error?.message).toContain(
       "the entry still marks the apply as unfinished, so the next apply verifies the whole destination"
     )
-    expect(containmentState(files)).toStrictEqual({ [ownEntryName()]: inProgress() })
+    expect(containmentState(files)).toStrictEqual({
+      [ownEntryName()]: scopedInProgress(linesThroughA),
+    })
   })
 
   it("re-creates the own entry with the failure record when another apply removed it meanwhile", async () => {
@@ -7104,7 +7145,7 @@ describe("archive.extract containment flag recording and verification (Issue #21
     expect(containmentState(files)).toStrictEqual({ [ownEntryName()]: recordedFlag("a/esc") })
   })
 
-  it("records unknown and re-creates a removed own entry when the apply throws after its merge started", async () => {
+  it("records stopped with the scope digest and re-creates a removed own entry when the apply throws after its merge started", async () => {
     // Issue #219: the only throw that escapes after the merge started is one
     // the staging cleanup cannot contain: its warning to a closed stderr
     // throws again. Meanwhile a concurrent clean apply removed this apply's
@@ -7131,9 +7172,11 @@ describe("archive.extract containment flag recording and verification (Issue #21
     expect(run.mockSsh.calls.some((command) => archiveStageMovePattern.test(command))).toBe(true)
     expect(run.postMergeListings).toStrictEqual([])
     expect(run.writes.map(({ remotePath }) => remotePath)).toStrictEqual([ownEntry()])
-    expect(containmentState(files)).toStrictEqual({
-      [ownEntryName()]: unknownFlag(STOPPED_AFTER_MERGE_STARTED),
-    })
+    // Issue #227: the `stopped` body keeps the scope digest and differs from
+    // the `in-progress` body, so its hash changes (race 1).
+    const stopped = containmentFlagBody({ scope: scopeDigestOf(linesThroughA), state: "stopped" })
+    expect(stopped).not.toBe(scopedInProgress(linesThroughA))
+    expect(containmentState(files)).toStrictEqual({ [ownEntryName()]: stopped })
   })
 
   it("verifies the whole destination after an unfinished entry and records the link that still escapes", async () => {
@@ -7145,16 +7188,20 @@ describe("archive.extract containment flag recording and verification (Issue #21
       hostLinks,
       injectedOnMerge: [[escapingLink, escapingTarget]],
     })
-    expect(containmentState(files)).toStrictEqual({ [ownEntryName(1)]: inProgress() })
+    expect(containmentState(files)).toStrictEqual({
+      [ownEntryName(1)]: scopedInProgress(linesThroughA),
+    })
 
     // Issue #219: `b` shares nothing with `a/esc`; only the destination-wide
-    // verification an unknown entry requires can find the link.
+    // verification an unknown entry requires can find the link. Issue #227:
+    // the entry records the scope digest of another archive, so it counts as
+    // unknown.
     const run = await applyTarListing(linesThroughB, { files, hostLinks, source: otherSrc })
 
     expect(run.result.status).toBe("failed")
     expect(run.result.error?.message).toContain(JSON.stringify(escapingLink))
     expect(containmentState(files)).toStrictEqual({
-      [ownEntryName(1)]: inProgress(),
+      [ownEntryName(1)]: scopedInProgress(linesThroughA),
       [ownEntryName(2)]: recordedFlag("a/esc"),
     })
     expect(files.has(markerFor(otherSrc))).toBe(false)
@@ -7184,6 +7231,67 @@ function extraCommands(more: readonly string[], fewer: readonly string[]): strin
  */
 const unknownFlagRecordPattern = /^\{"reason":".+","state":"unknown","version":1\}\n$/v
 
+/**
+ * Issue #227: an intended host link outside every archive scope here that
+ * points outside the destination, like a virtualenv's interpreter link.
+ */
+const pythonLink = `${destination}/venv/bin/python3`
+const pythonTarget = "/usr/bin/python3"
+
+/** Issue #227: how a post-merge violation says it judged every symlink. */
+const checkedWholeDestination = "after the merge, every symlink under the destination is checked"
+
+/** Issue #227: how a post-merge violation says it judged only the archive's scope. */
+const checkedArchiveScope =
+  "after the merge, the archive's symlinks and every symlink under the destination whose resolution passes through a path the archive writes are checked"
+
+/**
+ * Issue #227: a host link tree with only the intended outward link.
+ *
+ * @returns The host links.
+ */
+function hostWithPythonLink(): HostLinkTree {
+  return new Map([[pythonLink, pythonTarget]])
+}
+
+/**
+ * Issue #227: the arguments of every clear exec of a run: the own entry, then
+ * each removed entry with the hash it had when it was read.
+ *
+ * @param run - The recorded apply run.
+ * @returns One argument list per clear exec.
+ */
+function clearArguments(run: TarListingApplyRun): string[][] {
+  return containmentClears(run.mockSsh.calls).map((command) =>
+    scriptArguments(command, containmentClearPrefix)
+  )
+}
+
+/**
+ * Issue #227: the links the kernel cross-checks of a run carried, in call
+ * order.
+ *
+ * @param run - The recorded apply run.
+ * @returns The absolute link paths.
+ */
+function kernelCrossCheckedLinks(run: TarListingApplyRun): string[] {
+  return run.mockSsh.execCalls.flatMap(({ command, options }) =>
+    command === kernelCrossCheckCommand ? crossCheckedLinks(options?.input) : []
+  )
+}
+
+/**
+ * Issue #227: a version 2 entry body with any scope value and state, for
+ * bodies `containmentFlagBody` never writes.
+ *
+ * @param scope - The `scope` value.
+ * @param state - The `state` value.
+ * @returns The JSON body.
+ */
+function scopedEntryBody(scope: unknown, state: string): string {
+  return `${JSON.stringify({ scope, state, version: 2 })}\n`
+}
+
 describe("archive.extract unknown containment flag verifies the whole destination (Issue #219)", () => {
   // Issue #219: a flag without a usable list of offending links no longer
   // refuses the apply. The apply runs normally; at its end the post-merge
@@ -7196,6 +7304,39 @@ describe("archive.extract unknown containment flag verifies the whole destinatio
     { archive: "with symlinks", lines: linesWithSymlinks },
   ]
   const legacyFlagBody = "archive apply in progress or symlink containment check failed\n"
+  // Issue #227: version 2 entries without a scope digest this apply can use:
+  // the digest of another archive, or one the entry spoiled. The spoiled
+  // digests derive from the archive with symlinks, so for that archive only
+  // the damage keeps them from matching.
+  const linesOfAnotherArchive = [tarDirectoryLine("c/"), tarFileLine("c/h")]
+  const ownDigest = scopeDigestOf(linesWithSymlinks)
+  const unusableScopedBodies = [
+    {
+      content: scopedInProgress(linesOfAnotherArchive),
+      flag: "the in-progress entry of another archive",
+    },
+    {
+      content: containmentFlagBody({
+        scope: scopeDigestOf(linesOfAnotherArchive),
+        state: "stopped",
+      }),
+      flag: "the stopped entry of another archive",
+    },
+    {
+      content: scopedEntryBody(ownDigest.slice(1), "in-progress"),
+      flag: "a digest of 63 hex digits",
+    },
+    {
+      content: scopedEntryBody(ownDigest.toUpperCase(), "in-progress"),
+      flag: "an upper-case digest",
+    },
+    { content: scopedEntryBody(1, "in-progress"), flag: "a digest that is no string" },
+    { content: scopedEntryBody(ownDigest, "failed"), flag: "a version 2 entry in another state" },
+    {
+      content: scopedInProgress(linesWithSymlinks).slice(0, 40),
+      flag: "a truncated version 2 body",
+    },
+  ].map((body) => ({ ...body, path: earlierEntry }))
   // Issue #219: every case is an entry of another apply, except the first:
   // the single flag file of older paratix versions, which always forces the
   // destination-wide verification and is claimed like an entry.
@@ -7214,7 +7355,7 @@ describe("archive.extract unknown containment flag verifies the whole destinatio
       path: earlierEntry,
     },
     { content: inProgress("a/esc"), flag: "an in-progress body", path: earlierEntry },
-    // Issue #219: the body another run of this version creates its own entry
+    // Issue #219: the body another run of version 1 created its own entry
     // with; it carries no links, so only the whole destination can clear it.
     {
       content: inProgress(),
@@ -7226,6 +7367,7 @@ describe("archive.extract unknown containment flag verifies the whole destinatio
       flag: "an unknown record",
       path: earlierEntry,
     },
+    ...unusableScopedBodies,
   ]
   const flagCases = unknownFlagBodies.flatMap((body) =>
     archives.map((shape) => ({ ...body, ...shape }))
@@ -7311,7 +7453,7 @@ describe("archive.extract unknown containment flag verifies the whole destinatio
       name: "an establish capture cut at its cap",
       options: (): TarListingApplyOptions => ({
         responses: {
-          [containmentEstablishCommand()]: {
+          [containmentEstablishCommand(linesWithoutSymlinks)]: {
             code: 0,
             stdout: `entry ${earlierEntryName} ${"0".repeat(64)} 7b226c${CAPTURE_TRUNCATION_MARKER}`,
           },
@@ -7322,7 +7464,7 @@ describe("archive.extract unknown containment flag verifies the whole destinatio
       name: "an entry that is not valid UTF-8",
       options: (): TarListingApplyOptions => ({
         responses: {
-          [containmentEstablishCommand()]: {
+          [containmentEstablishCommand(linesWithoutSymlinks)]: {
             code: 0,
             stdout: `entry ${earlierEntryName} ${"0".repeat(64)} 7bff7d\ndone\n`,
           },
@@ -7333,7 +7475,10 @@ describe("archive.extract unknown containment flag verifies the whole destinatio
       name: "more entries than it reads",
       options: (): TarListingApplyOptions => ({
         responses: {
-          [containmentEstablishCommand()]: { code: 0, stdout: "more\ndone\n" },
+          [containmentEstablishCommand(linesWithoutSymlinks)]: {
+            code: 0,
+            stdout: "more\ndone\n",
+          },
         },
       }),
     },
@@ -7491,6 +7636,29 @@ describe("archive.extract unknown containment flag verifies the whole destinatio
       expect(crossCheckedLinksOf(run)).not.toContain(escapingElsewhere)
       expect(isContainmentClear(run.mockSsh.calls.at(-1))).toBe(true)
       expect(hasContainmentState(files)).toBe(false)
+    }
+  )
+
+  it.each(unusableScopedBodies.flatMap((body) => archives.map((shape) => ({ ...body, ...shape }))))(
+    "verifies the whole destination after $flag for an archive $archive and fails on an unrelated outward link",
+    async ({ content, lines, path }) => {
+      // Issue #227: the control for the scoped clearing: without a usable
+      // matching digest, the intended outward link fails the apply.
+      const files = new Map([[path, content]])
+      const hostLinks = hostWithPythonLink()
+
+      const run = await applyTarListing(lines, { files, hostLinks })
+
+      expect(run.thrown).toBeUndefined()
+      expect(run.result.status).toBe("failed")
+      expect(run.postMergeListings).toHaveLength(1)
+      const message = String(run.result.error?.message)
+      expect(message).toContain(JSON.stringify(pythonLink))
+      expect(message).toContain(checkedWholeDestination)
+      expect(files.get(path)).toBe(content)
+      expect(files.get(ownEntry())).toBe(recordedFlag("venv/bin/python3"))
+      expect(containmentClears(run.mockSsh.calls)).toStrictEqual([])
+      expect(hostLinks.get(pythonLink)).toBe(pythonTarget)
     }
   )
 
@@ -7740,6 +7908,252 @@ describe("archive.extract unknown containment flag verifies the whole destinatio
       expect(crossCheckedLinksOf(unknown.run)).toStrictEqual(crossChecked)
     }
   )
+})
+
+describe("archive.extract unfinished entries of the same archive (Issue #227)", () => {
+  // Issue #227: an entry an interrupted apply of the same archive left records
+  // that archive's scope digest. The next apply of it judges every link that
+  // apply could have published anyway, so it clears the entry after its
+  // normal, scoped verification; the intended `venv/bin/python3` lies outside
+  // that scope. `a/esc` and `x/esc` resolve through `a`, which it writes.
+  const lines = [tarDirectoryLine("a/"), tarFileLine("a/f"), tarSymlinkLine("a/l", "f")]
+  const linesOfAnotherArchive = [
+    tarDirectoryLine("b/"),
+    tarFileLine("b/g"),
+    tarSymlinkLine("b/s", "g"),
+  ]
+  const linesWithoutSymlinks = [tarDirectoryLine("b/"), tarFileLine("b/g")]
+  const escapingTarget = "../a/../.."
+
+  /**
+   * Issue #227: the body an apply of `lines` leaves in its own entry.
+   *
+   * @param state - `in-progress` until it recorded its outcome, `stopped`
+   *   after a throw once its merge had started.
+   * @returns The JSON body.
+   */
+  function leftoverBody(state: "in-progress" | "stopped"): string {
+    return containmentFlagBody({ scope: scopeDigestOf(lines), state })
+  }
+
+  it.each(["in-progress", "stopped"] as const)(
+    "clears a leftover %s entry of the same archive next to an unrelated outward link",
+    async (state) => {
+      const leftover = leftoverBody(state)
+      const files = new Map([[earlierEntry, leftover]])
+      const hostLinks = hostWithPythonLink()
+
+      const run = await applyTarListing(lines, { files, hostLinks })
+
+      expect(run.thrown).toBeUndefined()
+      expect(extractionSummary(run)).toStrictEqual(extractedThroughStaging)
+      // Issue #227: the one post-merge listing of an archive with symlinks
+      // judges only its scope; the outward link is listed, never judged.
+      expect(run.postMergeListings).toHaveLength(1)
+      expect(kernelCrossCheckedLinks(run)).toStrictEqual([`${destination}/a/l`])
+      expect(clearArguments(run)).toStrictEqual([[ownEntry(), earlierEntry, sha256Of(leftover)]])
+      expect(hasContainmentState(files)).toBe(false)
+      expect(hostLinks.get(pythonLink)).toBe(pythonTarget)
+      await expect(checkAgainstHostFiles(src, files)).resolves.toMatchObject({ result: "ok" })
+    }
+  )
+
+  it("verifies the whole destination and fails on the unrelated outward link when the leftover entry records another archive", async () => {
+    const leftover = scopedInProgress(linesOfAnotherArchive)
+    const files = new Map([[earlierEntry, leftover]])
+
+    const run = await applyTarListing(lines, { files, hostLinks: hostWithPythonLink() })
+
+    expect(run.result.status).toBe("failed")
+    const message = String(run.result.error?.message)
+    expect(message).toContain(JSON.stringify(pythonLink))
+    expect(message).toContain(checkedWholeDestination)
+    expect(containmentState(files)).toStrictEqual({
+      [earlierEntryName]: leftover,
+      [ownEntryName()]: recordedFlag("venv/bin/python3"),
+    })
+    expect(containmentClears(run.mockSsh.calls)).toStrictEqual([])
+  })
+
+  it("clears the entry an interrupted apply of the same archive left once its in-scope link is fixed, despite an unrelated outward link", async () => {
+    const files = new Map<string, string>()
+    const hostLinks = hostWithPythonLink()
+    const escapingLink = `${destination}/a/esc`
+    // Issue #227: the first apply publishes an escaping link and cannot
+    // record its outcome, so its own `in-progress` entry stays.
+    const first = await applyTarListing(lines, {
+      failWriteWhen: isContainmentFlagRecord,
+      files,
+      hostLinks,
+      injectedOnMerge: [[escapingLink, escapingTarget]],
+    })
+    expect(first.result.status).toBe("failed")
+    expect(containmentState(files)).toStrictEqual({ [ownEntryName(1)]: scopedInProgress(lines) })
+
+    // Issue #227: a retry still judges the escaping link in its scope: its
+    // pre-merge check refuses on it alone before anything is published, and
+    // the leftover entry stays.
+    const retry = await applyTarListing(lines, { files, hostLinks })
+    expect(retry.result.status).toBe("failed")
+    expect(retry.postMergeListings).toStrictEqual([])
+    expect(retry.result.error?.message).toContain("would resolve outside destination")
+    expect(retry.result.error?.message).toContain(escapingLink)
+    expect(retry.result.error?.message).not.toContain(pythonLink)
+    expect(containmentClears(retry.mockSsh.calls)).toStrictEqual([])
+    expect(containmentState(files)).toStrictEqual({
+      [ownEntryName(1)]: scopedInProgress(lines),
+      [ownEntryName(2)]: recordedFlag(),
+    })
+
+    hostLinks.delete(escapingLink)
+    const fixed = await applyTarListing(lines, { files, hostLinks })
+
+    expect(fixed.result.error).toBeUndefined()
+    expect(fixed.result.status).toBe("changed")
+    expect(clearArguments(fixed)).toStrictEqual([
+      [
+        ownEntry(3),
+        ownEntry(1),
+        sha256Of(scopedInProgress(lines)),
+        ownEntry(2),
+        sha256Of(recordedFlag()),
+      ],
+    ])
+    expect(hasContainmentState(files)).toBe(false)
+    expect(hostLinks.get(pythonLink)).toBe(pythonTarget)
+    await expect(checkAgainstHostFiles(src, files)).resolves.toMatchObject({ result: "ok" })
+  })
+
+  it.each([
+    {
+      injected: [`${destination}/a/l`, "../../.."] as const,
+      key: "a/l",
+      name: "an archive symlink that escapes",
+    },
+    {
+      injected: [`${destination}/x/esc`, escapingTarget] as const,
+      key: "x/esc",
+      name: "a host link that escapes through a written path",
+    },
+  ])(
+    "still judges $name after a leftover entry of the same archive, records it and keeps that entry",
+    async ({ injected, key }) => {
+      const leftover = leftoverBody("in-progress")
+      const files = new Map([[earlierEntry, leftover]])
+
+      const run = await applyTarListing(lines, {
+        files,
+        hostLinks: hostWithPythonLink(),
+        injectedOnMerge: [injected],
+      })
+
+      expect(run.thrown).toBeUndefined()
+      expect(run.result.status).toBe("failed")
+      expect(run.postMergeListings).toHaveLength(1)
+      const message = String(run.result.error?.message)
+      expect(message).toContain(JSON.stringify(injected[0]))
+      expect(message).toContain(checkedArchiveScope)
+      expect(message).not.toContain(checkedWholeDestination)
+      expect(message).not.toContain(pythonLink)
+      expect(containmentState(files)).toStrictEqual({
+        [earlierEntryName]: leftover,
+        [ownEntryName()]: recordedFlag(key),
+      })
+      expect(containmentClears(run.mockSsh.calls)).toStrictEqual([])
+      await expect(checkAgainstHostFiles(src, files)).resolves.toMatchObject({
+        result: "needs-apply",
+      })
+    }
+  )
+
+  it("clears the stopped entry of an apply that threw after its merge started on the next apply of the same archive", async () => {
+    // Issue #227: as in "records stopped with the scope digest …" above, the
+    // staging cleanup's warning to a closed stderr throws after the merge.
+    const files = new Map<string, string>()
+    const hostLinks = hostWithPythonLink()
+    const stderrWrite = vi.spyOn(process.stderr, "write").mockImplementation(() => {
+      throw new Error("write EPIPE")
+    })
+    let first: TarListingApplyRun
+    try {
+      first = await applyTarListing(lines, {
+        files,
+        hostLinks,
+        responseStubs: [
+          { command: archiveStageCleanupPattern, result: { code: 1, stderr: "rm: busy" } },
+        ],
+      })
+    } finally {
+      stderrWrite.mockRestore()
+    }
+    expect(first.thrown).toStrictEqual(new Error("write EPIPE"))
+    const stopped = leftoverBody("stopped")
+    expect(containmentState(files)).toStrictEqual({ [ownEntryName(1)]: stopped })
+
+    const run = await applyTarListing(lines, { files, hostLinks })
+
+    expect(run.thrown).toBeUndefined()
+    expect(run.result.error).toBeUndefined()
+    expect(run.result.status).toBe("changed")
+    expect(run.postMergeListings).toHaveLength(1)
+    expect(kernelCrossCheckedLinks(run)).not.toContain(pythonLink)
+    expect(clearArguments(run)).toStrictEqual([[ownEntry(2), ownEntry(1), sha256Of(stopped)]])
+    expect(hasContainmentState(files)).toBe(false)
+    await expect(checkAgainstHostFiles(src, files)).resolves.toMatchObject({ result: "ok" })
+  })
+
+  // Issue #227: a staging directory a killed apply left inside the
+  // destination, with a link that, as listed, points outside it.
+  const foreignStagingLink = [`${destination}/.paratix-stage.QwErTyUi/a/esc`, "/etc"] as const
+
+  it("neither verifies the whole destination nor judges a leftover staging directory after a leftover entry of the same archive", async () => {
+    const leftover = leftoverBody("in-progress")
+    const files = new Map([[earlierEntry, leftover]])
+    const hostLinks: HostLinkTree = new Map([foreignStagingLink])
+
+    const run = await applyTarListing(lines, { files, hostLinks })
+
+    expect(run.thrown).toBeUndefined()
+    expect(extractionSummary(run)).toStrictEqual(extractedThroughStaging)
+    expect(run.postMergeListings).toHaveLength(1)
+    expect(kernelCrossCheckedLinks(run)).toStrictEqual([`${destination}/a/l`])
+    expect(clearArguments(run)).toStrictEqual([[ownEntry(), earlierEntry, sha256Of(leftover)]])
+    expect(hasContainmentState(files)).toBe(false)
+    expect(hostLinks.get(foreignStagingLink[0])).toBe(foreignStagingLink[1])
+  })
+
+  it("lists the leftover staging directory's link, so an unusable entry fails on it", async () => {
+    // Issue #227: the control for the case above: the same link is listed
+    // and judged when the destination-wide verification runs.
+    const files = new Map([[earlierEntry, inProgress()]])
+
+    const run = await applyTarListing(lines, { files, hostLinks: new Map([foreignStagingLink]) })
+
+    expect(run.result.status).toBe("failed")
+    expect(run.result.error?.message).toContain(JSON.stringify(foreignStagingLink[0]))
+    expect(run.result.error?.message).toContain(checkedWholeDestination)
+    expect(containmentClears(run.mockSsh.calls)).toStrictEqual([])
+  })
+
+  it("clears a leftover entry of the same archive without symlinks without any post-merge listing", async () => {
+    // Issue #227: an archive without symlinks cannot change how a path
+    // resolves, so its backstop returns early, as for an uninterrupted apply.
+    const leftover = scopedInProgress(linesWithoutSymlinks)
+    const files = new Map([[earlierEntry, leftover]])
+
+    const run = await applyTarListing(linesWithoutSymlinks, {
+      files,
+      hostLinks: hostWithPythonLink(),
+    })
+
+    expect(run.thrown).toBeUndefined()
+    expect(extractionSummary(run)).toStrictEqual(extractedThroughStaging)
+    expect(run.postMergeListings).toStrictEqual([])
+    expect(run.mockSsh.calls).not.toContain(kernelCrossCheckCommand)
+    expect(clearArguments(run)).toStrictEqual([[ownEntry(), earlierEntry, sha256Of(leftover)]])
+    expect(hasContainmentState(files)).toBe(false)
+    await expect(checkAgainstHostFiles(src, files)).resolves.toMatchObject({ result: "ok" })
+  })
 })
 
 /**
@@ -8181,6 +8595,17 @@ function entryNameAt(index: number): string {
   return `run-e${String(index).padStart(31, "0")}`
 }
 
+/**
+ * Issue #227: the entry an interrupted apply of an archive left, recording
+ * that archive's scope digest.
+ *
+ * @param lines - The archive listing lines.
+ * @returns The entry path and its body.
+ */
+function leftoverEntryOf(lines: readonly string[]): Array<readonly [string, string]> {
+  return [[earlierEntry, scopedInProgress(lines)]]
+}
+
 describe("archive.extract round trips (Issue #219)", () => {
   it("keeps the total exec count of an apply constant as the member count grows", async () => {
     const runWith = async (
@@ -8293,4 +8718,69 @@ describe("archive.extract round trips (Issue #219)", () => {
     expect(hasContainmentState(many.files)).toBe(false)
     await expect(checkAgainstHostFiles(src, many.files)).resolves.toMatchObject({ result: "ok" })
   })
+
+  it.each([
+    {
+      linesFor: (index: string): string[] => [
+        tarDirectoryLine(`d${index}/`),
+        tarFileLine(`d${index}/f`),
+      ],
+      name: "without symlinks",
+      postMergeListings: 0,
+    },
+    {
+      linesFor: (index: string): string[] => [
+        tarDirectoryLine(`d${index}/`),
+        tarFileLine(`d${index}/f`),
+        tarSymlinkLine(`d${index}/l`, "f"),
+      ],
+      name: "with symlinks",
+      postMergeListings: 1,
+    },
+  ])(
+    "keeps the exec count after a leftover entry of the same archive constant in the member count and equal to an apply without one, for an archive $name",
+    async ({ linesFor, postMergeListings }) => {
+      // Issue #227: the scoped path costs nothing over an apply without any
+      // entry: one establish, one clear, no destination-wide listing.
+      const runWith = async (
+        memberCount: number,
+        entriesFor: (lines: readonly string[]) => Array<readonly [string, string]>
+      ): Promise<{
+        calls: number
+        clears: number
+        commands: string[]
+        crossChecks: number
+        establishes: number
+        postMergeListings: number
+      }> => {
+        const lines = Array.from({ length: memberCount }, (_value, index) =>
+          linesFor(String(index))
+        ).flat()
+        const files = new Map<string, string>(entriesFor(lines))
+        const run = await applyTarListing(lines, { files, hostLinks: hostWithPythonLink() })
+        expect(extractionSummary(run)).toStrictEqual(extractedThroughStaging)
+        expect(hasContainmentState(files)).toBe(false)
+        const { calls } = run.mockSsh
+        return {
+          calls: calls.length,
+          clears: containmentClears(calls).length,
+          commands: commandsWithoutContainmentArguments(run),
+          crossChecks: calls.filter((command) => command === kernelCrossCheckCommand).length,
+          establishes: calls.filter((command) => command.startsWith(containmentEstablishPrefix))
+            .length,
+          postMergeListings: run.postMergeListings.length,
+        }
+      }
+
+      const few = await runWith(3, leftoverEntryOf)
+      const many = await runWith(300, leftoverEntryOf)
+
+      expect(few).toMatchObject({ clears: 1, establishes: 1, postMergeListings })
+      expect(few).toStrictEqual(await runWith(3, () => []))
+      expect(many).toStrictEqual(await runWith(300, () => []))
+      expect(many.calls).toBe(few.calls)
+      expect(many.crossChecks).toBe(few.crossChecks)
+      expect(many.postMergeListings).toBe(few.postMergeListings)
+    }
+  )
 })

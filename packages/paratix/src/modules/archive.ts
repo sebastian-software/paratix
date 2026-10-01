@@ -19,9 +19,9 @@ import {
   noContainmentEntriesCommand,
   recordContainmentFailure,
   recordContainmentFailureAfterThrow,
-  STOPPED_AFTER_MERGE_STARTED,
   UNIDENTIFIED_OFFENDING_LINKS,
 } from "./archiveContainmentFlag.js"
+import { archiveContainmentScope, containmentScopeDigest } from "./archiveContainmentScope.js"
 import {
   archiveMemberDestinationPaths,
   archiveMemberGuardPaths,
@@ -1269,22 +1269,29 @@ async function extractAndValidateSymlinkContainment(
 /**
  * Issue #219: what a thrown error records in the own entry, by how far the
  * apply got: an empty `failed` list before the merge (nothing was
- * published), `unknown` once the merge started (nobody knows what it
- * published), and no links once the backstop passed. The merge-started case
- * is written too, not left to the `in-progress` body: a concurrent clean
- * apply may have removed that entry meanwhile (race 1), and only a write
- * creates it again.
+ * published), `stopped` with the scope digest once the merge started (the
+ * merge published at most what that scope covers, Issue #227), and no links
+ * once the backstop passed. The merge-started case is written too, not left
+ * to the `in-progress` body: a concurrent clean apply may have removed that
+ * entry meanwhile (race 1), and only a write creates it again. The `stopped`
+ * body differs from the `in-progress` one, so its hash changes, and a
+ * concurrent apply that read the `in-progress` body keeps the rewritten entry
+ * instead of removing it.
  *
  * @param progress - How far the apply got.
+ * @param scopeDigest - The digest of the apply's containment scope.
  * @returns What to write into the own entry.
  */
-function recordAfterThrow(progress: ContainmentProgress): ContainmentFlagRecord {
+function recordAfterThrow(
+  progress: ContainmentProgress,
+  scopeDigest: string
+): ContainmentFlagRecord {
   switch (progress.phase()) {
     case "before-merge": {
       return NOTHING_PUBLISHED
     }
     case "merge-started": {
-      return { reason: STOPPED_AFTER_MERGE_STARTED, state: "unknown" }
+      return { scope: scopeDigest, state: "stopped" }
     }
     case "verified": {
       return { links: [], state: "failed" }
@@ -1411,9 +1418,14 @@ async function runExtraction(
   // before anything else is written. An entry without a usable list of
   // offending links does not: the apply runs and its post-merge backstop
   // verifies the whole destination before that entry is removed.
+  // Issue #227: the own entry records the digest of this archive's
+  // containment scope; an entry an interrupted apply of the same archive
+  // left records the same digest and is covered by the scoped backstop.
+  const scopeDigest = containmentScopeDigest(archiveContainmentScope(members))
   const ledger = await establishContainmentEntry(conn, {
     ownEntryName: newContainmentEntryName(),
     paths: containment,
+    scopeDigest,
     source,
   })
   if ("status" in ledger) return ledger
@@ -1431,7 +1443,11 @@ async function runExtraction(
     })
   } catch (error) {
     // Issue #219: best effort; the error is rethrown whatever the write does.
-    await recordContainmentFailureAfterThrow(conn, ledger.ownEntry, recordAfterThrow(progress))
+    await recordContainmentFailureAfterThrow(
+      conn,
+      ledger.ownEntry,
+      recordAfterThrow(progress, scopeDigest)
+    )
     throw error
   }
 }

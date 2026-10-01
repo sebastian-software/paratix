@@ -64,7 +64,10 @@ import {
   noContainmentEntriesCommand,
   parseContainmentEstablishOutput,
 } from "../../src/modules/archiveContainmentFlag.js"
-import { archiveContainmentScope } from "../../src/modules/archiveContainmentScope.js"
+import {
+  archiveContainmentScope,
+  containmentScopeDigest,
+} from "../../src/modules/archiveContainmentScope.js"
 import {
   archiveMemberGuardPaths,
   destinationPathWithAncestors,
@@ -3075,6 +3078,18 @@ function scratchContainment(): ScratchContainment {
 /** Issue #219: the own entry name every smoke test establishes. */
 const smokeOwnName = `run-${"1".repeat(32)}`
 
+/** Issue #227: the scope digest every smoke test establishes with. */
+const smokeScopeDigest = containmentScopeDigest({
+  archiveLinks: new Set(),
+  written: new Set(["app", "app/file"]),
+})
+
+/** Issue #227: the scope digest of another archive. */
+const otherSmokeScopeDigest = containmentScopeDigest({
+  archiveLinks: new Set(["app/link"]),
+  written: new Set(["app", "app/link"]),
+})
+
 /**
  * Issue #219: run the production establish exec against the scratch paths.
  *
@@ -3090,6 +3105,7 @@ async function establishOnDisk(
   const outcome = await establishContainmentEntry(conn, {
     ownEntryName: smokeOwnName,
     paths: scratch.paths,
+    scopeDigest: smokeScopeDigest,
     source: "app.tar",
   })
   return { commands, outcome }
@@ -3160,7 +3176,7 @@ function refusalOf(
   return "status" in outcome ? outcome.error?.message : undefined
 }
 
-const inProgressBody = containmentFlagBody({ links: [], state: "in-progress" })
+const inProgressBody = containmentFlagBody({ scope: smokeScopeDigest, state: "in-progress" })
 
 describe.skipIf(SKIP_PLATFORM)(
   "archive.extract containment establish shell smoke tests (Issue #219)",
@@ -3185,6 +3201,48 @@ describe.skipIf(SKIP_PLATFORM)(
         rmSync(scratch.root, { force: true, recursive: true })
       }
     })
+
+    it("creates the own entry with the version 2 in-progress body of its scope digest (Issue #227)", async () => {
+      const scratch = scratchContainment()
+      try {
+        await establishOnDisk(scratch)
+
+        expect(smokeScopeDigest).toMatch(/^[\da-f]{64}$/v)
+        expect(readFileSync(join(scratch.paths.entryDirectory, smokeOwnName), "utf8")).toBe(
+          `{"scope":"${smokeScopeDigest}","state":"in-progress","version":2}\n`
+        )
+      } finally {
+        rmSync(scratch.root, { force: true, recursive: true })
+      }
+    })
+
+    it.each([
+      { digest: smokeScopeDigest, name: "this apply's", state: "in-progress", whole: false },
+      { digest: smokeScopeDigest, name: "this apply's", state: "stopped", whole: false },
+      { digest: otherSmokeScopeDigest, name: "another", state: "in-progress", whole: true },
+      { digest: otherSmokeScopeDigest, name: "another", state: "stopped", whole: true },
+    ] as const)(
+      "reads a $state entry with $name scope digest as removable, verifying the whole destination: $whole (Issue #227)",
+      async ({ digest, state, whole }) => {
+        const scratch = scratchContainment()
+        try {
+          mkdirSync(scratch.paths.entryDirectory, { recursive: true })
+          const entry = join(scratch.paths.entryDirectory, `run-${"a".repeat(32)}`)
+          writeFileSync(entry, containmentFlagBody({ scope: digest, state }))
+
+          const { outcome } = await establishOnDisk(scratch)
+
+          expect(outcome).toStrictEqual({
+            carried: [],
+            ownEntry: join(scratch.paths.entryDirectory, smokeOwnName),
+            removable: [{ path: entry, sha256: sha256OfFile(entry) }],
+            verifyWholeDestination: whole,
+          })
+        } finally {
+          rmSync(scratch.root, { force: true, recursive: true })
+        }
+      }
+    )
 
     it("reads recorded entries with the hash of their content, and ignores dotfiles and writeFile temp files", async () => {
       const scratch = scratchContainment()
@@ -3340,7 +3398,11 @@ describe.skipIf(SKIP_PLATFORM)(
         // Only the failed redirect of the vanished file may reach stderr.
         expect(result.status).toBe(0)
         expect(
-          parseContainmentEstablishOutput(result.stdout, { ...scratch.paths, ownEntry })
+          parseContainmentEstablishOutput(result.stdout, {
+            ...scratch.paths,
+            ownEntry,
+            scopeDigest: smokeScopeDigest,
+          })
         ).toStrictEqual({
           carried: ["b/esc"],
           ownEntry,
@@ -3395,7 +3457,7 @@ describe.skipIf(SKIP_PLATFORM)(
       try {
         mkdirSync(scratch.paths.entryDirectory, { recursive: true })
         const entry = join(scratch.paths.entryDirectory, "run-a")
-        const oldBody = containmentFlagBody({ links: [], state: "in-progress" })
+        const oldBody = inProgressBody
         const newBody = containmentFlagBody({ links: ["x/esc"], state: "failed" })
         writeFileSync(entry, oldBody)
         const realSha256sum = spawnSync("/bin/sh", ["-c", "command -v sha256sum"], {

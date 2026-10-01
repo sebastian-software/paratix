@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto"
 import { describe, expect, it } from "vitest"
 
 import type { ArchiveMember } from "../../src/modules/archiveMemberValidation.js"
@@ -25,6 +26,11 @@ import {
   recordContainmentFailure,
   TOO_MANY_OFFENDING_LINKS,
 } from "../../src/modules/archiveContainmentFlag.js"
+import {
+  archiveContainmentScope,
+  CONTAINMENT_SCOPE_DIGEST_ALGORITHM,
+  containmentScopeDigest,
+} from "../../src/modules/archiveContainmentScope.js"
 import { buildKernelCrossCheckScript } from "../../src/modules/archiveKernelCrossCheck.js"
 import { buildSymlinkListingProbeScript } from "../../src/modules/archiveProbe.js"
 import { shellQuote } from "../../src/ssh.js"
@@ -142,7 +148,7 @@ describe("containment flag body (Issue #219)", () => {
 
   it("reads an in-progress body as an apply that did not finish, whatever links it carries", () => {
     expect(
-      parseContainmentFlag(containmentFlagBody({ links: ["a/esc"], state: "in-progress" }))
+      parseContainmentFlag(body({ links: ["a/esc"], state: "in-progress", version: 1 }))
     ).toStrictEqual({
       kind: "unknown",
       why: "records an apply that did not finish (it stopped after it started, possibly after its merge had begun, or another apply to this destination is still running)",
@@ -201,6 +207,8 @@ const otherName = `run-${"a".repeat(32)}`
 const otherEntry = `${paths.entryDirectory}/${otherName}`
 const hashA = "a".repeat(64)
 const hashB = "b".repeat(64)
+/** Issue #227: the scope digest of the apply under test. */
+const scopeDigest = "c".repeat(64)
 
 /**
  * Issue #219: one read line of the establish output.
@@ -243,7 +251,7 @@ describe("parseContainmentEntryBytes (Issue #219)", () => {
 })
 
 describe("parseContainmentEstablishOutput (Issue #219)", () => {
-  const inputs = { ...paths, ownEntry }
+  const inputs = { ...paths, ownEntry, scopeDigest }
 
   it("reads an empty entry directory as nothing to verify or remove", () => {
     expect(parseContainmentEstablishOutput("done\n", inputs)).toStrictEqual({
@@ -278,11 +286,11 @@ describe("parseContainmentEstablishOutput (Issue #219)", () => {
 
   it.each([
     {
-      name: "an in-progress entry",
+      name: "an in-progress entry of version 1",
       stdout: readLine(
         `entry ${otherName}`,
         hashA,
-        containmentFlagBody({ links: [], state: "in-progress" })
+        body({ links: [], state: "in-progress", version: 1 })
       ),
     },
     { name: "an empty entry", stdout: readLine(`entry ${otherName}`, hashA, "") },
@@ -346,6 +354,390 @@ describe("parseContainmentEstablishOutput (Issue #219)", () => {
   })
 })
 
+/**
+ * Issue #227: an archive of many members, a directory, a file and a symlink
+ * each, so its scope holds thousands of keys.
+ *
+ * @param count - How many directories the archive ships.
+ * @returns The archive members.
+ */
+function manyMembers(count: number): ArchiveMember[] {
+  return Array.from({ length: count }, (_value, index) => [
+    { ...fileMember(`d${String(index)}/`), kind: "directory" as const, mode: "drwxr-xr-x" },
+    fileMember(`d${String(index)}/f`),
+    symlinkMember(`d${String(index)}/l`, "f"),
+  ]).flat()
+}
+
+/**
+ * Issue #227: the digest encoding of `containmentScopeDigest`, rebuilt here
+ * so a changed algorithm ID, Unicode version or set separation is caught.
+ *
+ * @param scope - The scope's key sets.
+ * @param scope.archiveLinks - The archive link keys.
+ * @param scope.written - The written keys.
+ * @param prefix - The algorithm ID and Unicode version the encoding starts with.
+ * @returns The lowercase hex SHA-256 of the encoding.
+ */
+function digestOfEncoding(
+  scope: { archiveLinks: readonly string[]; written: readonly string[] },
+  prefix: readonly [string, string | undefined]
+): string {
+  return createHash("sha256")
+    .update(
+      JSON.stringify([
+        ...prefix,
+        sortedByCodeUnit(scope.archiveLinks),
+        sortedByCodeUnit(scope.written),
+      ]),
+      "utf8"
+    )
+    .digest("hex")
+}
+
+/**
+ * Issue #227: sort keys by UTF-16 code unit, independent of the locale.
+ *
+ * @param keys - Scope keys in any order.
+ * @returns A sorted copy.
+ */
+function sortedByCodeUnit(keys: readonly string[]): string[] {
+  return [...keys].toSorted((left, right) => {
+    if (left === right) return 0
+    return left < right ? -1 : 1
+  })
+}
+
+describe("containmentScopeDigest (Issue #227)", () => {
+  const members = [
+    { ...fileMember("a/"), kind: "directory" as const, mode: "drwxr-xr-x" },
+    fileMember("a/f"),
+    symlinkMember("a/l", "f"),
+  ]
+
+  it("is 64 lowercase hex digits", () => {
+    expect(containmentScopeDigest(archiveContainmentScope(members))).toMatch(/^[\da-f]{64}$/v)
+  })
+
+  it("hashes the algorithm ID, the Unicode version and both sorted key sets", () => {
+    const scope = { archiveLinks: ["a/l"], written: ["a/l", "a", "a/f"] }
+    const digest = containmentScopeDigest({
+      archiveLinks: new Set(scope.archiveLinks),
+      written: new Set(scope.written),
+    })
+
+    expect(CONTAINMENT_SCOPE_DIGEST_ALGORITHM).toBe("paratix-archive-containment-scope/1")
+    expect(digest).toBe(
+      digestOfEncoding(scope, [CONTAINMENT_SCOPE_DIGEST_ALGORITHM, process.versions.unicode])
+    )
+    // Issue #227: a digest derived by another algorithm or under other
+    // Unicode tables never matches.
+    expect(digest).not.toBe(
+      digestOfEncoding(scope, ["paratix-archive-containment-scope/2", process.versions.unicode])
+    )
+    expect(digest).not.toBe(digestOfEncoding(scope, [CONTAINMENT_SCOPE_DIGEST_ALGORITHM, "0.0"]))
+  })
+
+  it("is deterministic and independent of the member order", () => {
+    const digest = containmentScopeDigest(archiveContainmentScope(members))
+
+    expect(containmentScopeDigest(archiveContainmentScope(members))).toBe(digest)
+    expect(containmentScopeDigest(archiveContainmentScope(members.toReversed()))).toBe(digest)
+    expect(
+      containmentScopeDigest({
+        archiveLinks: new Set(["a/l"]),
+        written: new Set(["a", "a/f", "a/l"].toReversed()),
+      })
+    ).toBe(digest)
+  })
+
+  it("changes when a key moves from the archive links to the written paths", () => {
+    // Issue #227: the union of both sets stays the same; only the separate
+    // encoding of the two sets tells them apart.
+    expect(
+      containmentScopeDigest({ archiveLinks: new Set(["x"]), written: new Set(["y"]) })
+    ).not.toBe(containmentScopeDigest({ archiveLinks: new Set(), written: new Set(["x", "y"]) }))
+  })
+
+  it.each([
+    { changed: [fileMember("a/f"), fileMember("a/l")], name: "a symlink becomes a file" },
+    { changed: [...members, fileMember("a/g")], name: "a member is added" },
+    { changed: members.slice(0, 2), name: "a member is removed" },
+    {
+      changed: [members[0], fileMember("a/f"), symlinkMember("b/l", "f")],
+      name: "a member moves",
+    },
+  ])("changes when $name", ({ changed }) => {
+    expect(containmentScopeDigest(archiveContainmentScope(changed))).not.toBe(
+      containmentScopeDigest(archiveContainmentScope(members))
+    )
+  })
+
+  // Issue #227: a golden vector. Any change to how the scope keys are derived
+  // or encoded changes this digest, which forces a decision about
+  // CONTAINMENT_SCOPE_DIGEST_ALGORITHM. The digest includes the Unicode
+  // version; the value was derived under Unicode 17.0 (Node.js 24).
+  const goldenUnicode = "17.0"
+  const goldenDigest = "7ecd1e83b4ed928d89695f3c8d2dc78ef7094b9f95246d94a3c5eb42a466161e"
+  const goldenMembers = [
+    { ...fileMember("app/"), kind: "directory" as const, mode: "drwxr-xr-x" },
+    fileMember("app/bin/tool"),
+    symlinkMember("app/current", "bin"),
+    fileMember("app/Straße.txt"),
+    symlinkMember("app/STRASSE/\u1E9E", "../Straße.txt"),
+  ]
+  const goldenArchiveLinks = ["app/current", "app/strasse/ss"]
+  const goldenWritten = [
+    "app",
+    "app/bin",
+    "app/bin/tool",
+    "app/current",
+    "app/strasse",
+    "app/strasse.txt",
+    "app/strasse/ss",
+  ]
+
+  it("derives the golden vector's scope keys, folding name variants", () => {
+    expect(archiveContainmentScope(goldenMembers)).toStrictEqual({
+      archiveLinks: new Set(goldenArchiveLinks),
+      written: new Set(goldenWritten),
+    })
+  })
+
+  it.runIf(process.versions.unicode === goldenUnicode)(
+    "pins the digest of the golden vector under Unicode 17.0",
+    () => {
+      expect(containmentScopeDigest(archiveContainmentScope(goldenMembers))).toBe(goldenDigest)
+    }
+  )
+
+  it.skipIf(process.versions.unicode === goldenUnicode)(
+    "derives the golden vector's digest from its encoding under another Unicode version",
+    () => {
+      expect(containmentScopeDigest(archiveContainmentScope(goldenMembers))).toBe(
+        digestOfEncoding({ archiveLinks: goldenArchiveLinks, written: goldenWritten }, [
+          CONTAINMENT_SCOPE_DIGEST_ALGORITHM,
+          process.versions.unicode,
+        ])
+      )
+    }
+  )
+
+  it("ignores symlink targets, which the scope does not hold", () => {
+    expect(
+      containmentScopeDigest(
+        archiveContainmentScope([members[0], fileMember("a/f"), symlinkMember("a/l", "../a/f")])
+      )
+    ).toBe(containmentScopeDigest(archiveContainmentScope(members)))
+  })
+})
+
+describe("containment flag body with a scope digest (Issue #227)", () => {
+  const digest = "0123456789abcdef".repeat(4)
+
+  it.each(["in-progress", "stopped"] as const)(
+    "serializes and parses a version 2 %s body with its scope digest",
+    (state) => {
+      const text = containmentFlagBody({ scope: digest, state })
+
+      expect(text).toBe(`{"scope":"${digest}","state":"${state}","version":2}\n`)
+      expect(parseContainmentFlag(text)).toStrictEqual({ kind: "scoped", scope: digest })
+    }
+  )
+
+  it.each(["in-progress", "stopped"] as const)(
+    "keeps the %s body at a fixed size whatever the member count",
+    (state) => {
+      const one = containmentScopeDigest(archiveContainmentScope([fileMember("f")]))
+      const many = containmentScopeDigest(archiveContainmentScope(manyMembers(5000)))
+      expect(archiveContainmentScope(manyMembers(5000)).written.size).toBe(15_000)
+      const oneBody = containmentFlagBody({ scope: one, state })
+      const manyBody = containmentFlagBody({ scope: many, state })
+
+      expect(one).not.toBe(many)
+      expect(Buffer.byteLength(manyBody)).toBe(Buffer.byteLength(oneBody))
+      expect(Buffer.byteLength(manyBody)).toBeLessThan(128)
+      expect(Buffer.byteLength(manyBody)).toBeLessThan(CONTAINMENT_FLAG_BODY_LIMIT_BYTES / 256)
+    }
+  )
+
+  it.each([
+    {
+      name: "a digest of 63 hex digits",
+      text: body({ scope: digest.slice(1), state: "in-progress", version: 2 }),
+    },
+    {
+      name: "a digest of 65 hex digits",
+      text: body({ scope: `${digest}0`, state: "in-progress", version: 2 }),
+    },
+    {
+      name: "an upper-case digest",
+      text: body({ scope: digest.toUpperCase(), state: "in-progress", version: 2 }),
+    },
+    {
+      name: "a digest that is not hex",
+      text: body({ scope: `${digest.slice(1)}g`, state: "stopped", version: 2 }),
+    },
+    { name: "an empty digest", text: body({ scope: "", state: "in-progress", version: 2 }) },
+    { name: "a numeric digest", text: body({ scope: 1, state: "in-progress", version: 2 }) },
+    { name: "a null digest", text: body({ scope: null, state: "stopped", version: 2 }) },
+    { name: "a digest list", text: body({ scope: [digest], state: "in-progress", version: 2 }) },
+    { name: "a failed state", text: body({ scope: digest, state: "failed", version: 2 }) },
+    { name: "an unknown state", text: body({ scope: digest, state: "unknown", version: 2 }) },
+    { name: "another state", text: body({ scope: digest, state: "done", version: 2 }) },
+    {
+      name: "an extra key",
+      text: body({ extra: true, scope: digest, state: "in-progress", version: 2 }),
+    },
+    { name: "a missing scope key", text: body({ state: "in-progress", version: 2 }) },
+    { name: "a missing state key", text: body({ links: [], scope: digest, version: 2 }) },
+    {
+      name: "links instead of a scope",
+      text: body({ links: [], state: "in-progress", version: 2 }),
+    },
+    { name: "a string version", text: body({ scope: digest, state: "in-progress", version: "2" }) },
+    {
+      name: "a scope in a version 1 body",
+      text: body({ scope: digest, state: "in-progress", version: 1 }),
+    },
+    {
+      name: "a scope in a version 3 body",
+      text: body({ scope: digest, state: "in-progress", version: 3 }),
+    },
+    {
+      name: "a truncated body",
+      text: containmentFlagBody({ scope: digest, state: "in-progress" }).slice(0, -10),
+    },
+  ])("holds no usable list with $name", ({ text }) => {
+    expect(parseContainmentFlag(text)).toStrictEqual({
+      kind: "unknown",
+      why: "holds no usable list of offending links (it was written by an older paratix version or is damaged)",
+    })
+  })
+
+  it("still reads a version 1 in-progress body without links as an apply that did not finish", () => {
+    expect(
+      parseContainmentFlag(body({ links: [], state: "in-progress", version: 1 }))
+    ).toStrictEqual({
+      kind: "unknown",
+      why: "records an apply that did not finish (it stopped after it started, possibly after its merge had begun, or another apply to this destination is still running)",
+    })
+  })
+})
+
+describe("parseContainmentEstablishOutput with scope digests (Issue #227)", () => {
+  const inputs = { ...paths, ownEntry, scopeDigest }
+  const otherDigest = "d".repeat(64)
+  const secondName = `run-${"b".repeat(32)}`
+  const secondEntry = `${paths.entryDirectory}/${secondName}`
+  const otherLabel = `entry ${otherName}`
+
+  it.each(["in-progress", "stopped"] as const)(
+    "lets a %s entry with this apply's digest be removed without a destination-wide verification",
+    (state) => {
+      const stdout = `${readLine(otherLabel, hashA, containmentFlagBody({ scope: scopeDigest, state }))}done\n`
+
+      expect(parseContainmentEstablishOutput(stdout, inputs)).toStrictEqual({
+        carried: [],
+        ownEntry,
+        removable: [{ path: otherEntry, sha256: hashA }],
+        verifyWholeDestination: false,
+      })
+    }
+  )
+
+  it.each(["in-progress", "stopped"] as const)(
+    "verifies the whole destination after a %s entry with another digest and still lets it be removed",
+    (state) => {
+      const stdout = `${readLine(otherLabel, hashA, containmentFlagBody({ scope: otherDigest, state }))}done\n`
+
+      expect(parseContainmentEstablishOutput(stdout, inputs)).toStrictEqual({
+        carried: [],
+        ownEntry,
+        removable: [{ path: otherEntry, sha256: hashA }],
+        verifyWholeDestination: true,
+      })
+    }
+  )
+
+  it("verifies the whole destination when one entry matches and another does not, and lets both be removed", () => {
+    const stdout = [
+      readLine(
+        `entry ${otherName}`,
+        hashA,
+        containmentFlagBody({ scope: scopeDigest, state: "in-progress" })
+      ),
+      readLine(
+        `entry ${secondName}`,
+        hashB,
+        containmentFlagBody({ scope: otherDigest, state: "stopped" })
+      ),
+      "done\n",
+    ].join("")
+
+    expect(parseContainmentEstablishOutput(stdout, inputs)).toStrictEqual({
+      carried: [],
+      ownEntry,
+      removable: [
+        { path: otherEntry, sha256: hashA },
+        { path: secondEntry, sha256: hashB },
+      ],
+      verifyWholeDestination: true,
+    })
+  })
+
+  it("carries the links of a recorded entry next to a matching scoped entry", () => {
+    const stdout = [
+      readLine(
+        `entry ${otherName}`,
+        hashA,
+        containmentFlagBody({ scope: scopeDigest, state: "stopped" })
+      ),
+      readLine(
+        `entry ${secondName}`,
+        hashB,
+        containmentFlagBody({ links: ["x/esc"], state: "failed" })
+      ),
+      "done\n",
+    ].join("")
+
+    expect(parseContainmentEstablishOutput(stdout, inputs)).toStrictEqual({
+      carried: ["x/esc"],
+      ownEntry,
+      removable: [
+        { path: otherEntry, sha256: hashA },
+        { path: secondEntry, sha256: hashB },
+      ],
+      verifyWholeDestination: false,
+    })
+  })
+
+  it("verifies the whole destination for the old flag file even when it records this apply's digest", () => {
+    const stdout = `${readLine("legacy", hashA, containmentFlagBody({ scope: scopeDigest, state: "in-progress" }))}done\n`
+
+    expect(parseContainmentEstablishOutput(stdout, inputs)).toMatchObject({
+      removable: [{ path: paths.legacyFlag, sha256: hashA }],
+      verifyWholeDestination: true,
+    })
+  })
+
+  it("verifies the whole destination after a matching entry when there are more entries than it read", () => {
+    const stdout = `${readLine(otherLabel, hashA, containmentFlagBody({ scope: scopeDigest, state: "in-progress" }))}more\ndone\n`
+
+    expect(parseContainmentEstablishOutput(stdout, inputs)).toMatchObject({
+      removable: [{ path: otherEntry, sha256: hashA }],
+      verifyWholeDestination: true,
+    })
+  })
+
+  it("passes the version 2 in-progress body with this apply's digest to the establish exec", () => {
+    const expectedBody = `{"scope":"${scopeDigest}","state":"in-progress","version":2}\n`
+    const command = buildContainmentEstablishCommand(inputs)
+
+    expect(command.endsWith(` ${shellQuote(expectedBody)}`)).toBe(true)
+  })
+})
+
 describe("containmentEstablishFailure (Issue #219)", () => {
   it.each([
     {
@@ -402,7 +794,7 @@ function refusalMessage(outcome: Awaited<ReturnType<typeof establishContainmentE
 }
 
 describe("establishContainmentEntry (Issue #219)", () => {
-  const parameters = { ownEntryName: ownName, paths, source }
+  const parameters = { ownEntryName: ownName, paths, scopeDigest, source }
 
   it("reads and creates in one explicit sh -c exec with a capture cap from the bounds", async () => {
     const { conn, execs, writes } = singleExecConnection({ stdout: "done\n" })
@@ -416,7 +808,7 @@ describe("establishContainmentEntry (Issue #219)", () => {
 
     expect(execs).toStrictEqual([
       {
-        command: buildContainmentEstablishCommand({ ...paths, ownEntry }),
+        command: buildContainmentEstablishCommand({ ...paths, ownEntry, scopeDigest }),
         options: {
           ignoreExitCode: true,
           maxOutputBytes: CONTAINMENT_ESTABLISH_CAPTURE_LIMIT_BYTES,
@@ -434,7 +826,7 @@ describe("establishContainmentEntry (Issue #219)", () => {
   })
 
   it("passes the paths, the own entry and its in-progress body as positional parameters", () => {
-    const command = buildContainmentEstablishCommand({ ...paths, ownEntry })
+    const command = buildContainmentEstablishCommand({ ...paths, ownEntry, scopeDigest })
 
     expect(command).toBe(
       [
@@ -445,7 +837,7 @@ describe("establishContainmentEntry (Issue #219)", () => {
         `'${paths.legacyFlag}'`,
         `'${paths.entryDirectory}'`,
         `'${ownEntry}'`,
-        shellQuote(containmentFlagBody({ links: [], state: "in-progress" })),
+        shellQuote(containmentFlagBody({ scope: scopeDigest, state: "in-progress" })),
       ].join(" ")
     )
   })
@@ -548,9 +940,10 @@ describe("recordContainmentFailure (Issue #219)", () => {
     })
 
     // Issue #219: a concurrent apply may have verified the destination and
-    // removed the entry meanwhile (race 1).
+    // removed the entry meanwhile (race 1). Issue #227: an apply of the same
+    // archive verifies only what that archive can affect.
     expect(outcome.error?.message).toBe(
-      `[archive.extract] boom; [archive.extract] failed to write containment entry ${ownEntry}: No space left on device; the entry still marks the apply as unfinished, so the next apply verifies the whole destination, unless another apply removed it after verifying the destination`
+      `[archive.extract] boom; [archive.extract] failed to write containment entry ${ownEntry}: No space left on device; the entry still marks the apply as unfinished, so the next apply verifies the whole destination, or every link this archive can affect when it extracts the same archive, unless another apply removed it after verifying the destination`
     )
   })
 })
