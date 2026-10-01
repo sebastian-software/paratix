@@ -288,7 +288,7 @@ async function readDownloadOwnership(
     silent: true,
   })
   if (result.code !== 0) return { group: "", groupId: "", mode: "", owner: "", ownerId: "" }
-  // R-0000253: split on any whitespace run (mirrors mount.ts/archive.ts)
+  // R-0000253: split on any whitespace run (mirrors mount.ts/archiveCheck.ts)
   // because BusyBox/POSIX `stat` implementations may emit tabs or multiple
   // spaces between the columns, which broke the previous single-space
   // split and produced empty owner/group fields.
