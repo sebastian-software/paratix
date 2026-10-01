@@ -1053,7 +1053,7 @@ async function runCurlDownload(
   if (targetDirectoryFailure != null) return targetDirectoryFailure
   // R-0000107: validate the mktemp output before any subcommand consumes
   // it. Reuses the shared validateMktempPath helper from ssh.ts (already
-  // applied in aptKeyHelpers.ts and archive.ts/allocateRemoteUploadPath).
+  // applied in aptKeyHelpers.ts and archiveApply.ts/allocateRemoteUploadPath).
   const downloadParameters = await allocateTemporaryDownloadParameters(conn, parameters)
   try {
     const outcome = await runCurlDownloadCore(conn, parameters, downloadParameters)
