@@ -786,6 +786,109 @@ export default server({
     }
   })
 
+  // #201: the CLI and the library are separate bundles. A playbook imports
+  // `isFirstRun` from `paratix` (dist/index.js) while the CLI opens the scope
+  // in dist/cli.js, so the flag must travel through one process-wide store and
+  // stay open for the whole runner lifecycle, not just the playbook import.
+  it.each([
+    { cliArguments: ["--first-run"], expected: true, label: "with --first-run" },
+    { cliArguments: [], expected: false, label: "without --first-run" },
+  ])(
+    "exposes isFirstRun() at import time and in check/apply through the packed package $label",
+    async ({ cliArguments, expected }) => {
+      const packageJson = JSON.parse(
+        readFileSync(join(packedPackageRootDirectory, "package.json"), "utf8")
+      ) as {
+        bin: { paratix: string }
+      }
+      const packedCliPath = resolve(packedPackageRootDirectory, packageJson.bin.paratix)
+
+      const tempDirectory = mkdtempSync(join(tmpdir(), "paratix-cli-first-run-dist-"))
+      const nodeModulesDirectory = join(tempDirectory, "node_modules")
+      const privateKeyPath = join(tempDirectory, "id_rsa")
+      const playbookPath = join(tempDirectory, "first-run-playbook.mjs")
+      const observationsPath = join(tempDirectory, "first-run-observations.txt")
+      const unexpectedCommands: string[] = []
+
+      const testServer = await startTestSshServer((command) =>
+        handlePostbuildCommand({ command, commandHandlers: new Map(), unexpectedCommands })
+      )
+
+      try {
+        mkdirSync(nodeModulesDirectory)
+        symlinkSync(packedPackageRootDirectory, join(nodeModulesDirectory, "paratix"))
+        writeFileSync(privateKeyPath, testServer.privateKey, { mode: 0o600 })
+        writeFileSync(
+          join(tempDirectory, "package.json"),
+          `${JSON.stringify({ type: "module" })}\n`
+        )
+        writeFileSync(
+          playbookPath,
+          `
+import { appendFileSync } from "node:fs"
+import { isFirstRun, server } from "paratix"
+
+const observationsPath = ${JSON.stringify(observationsPath)}
+function record(phase) {
+  appendFileSync(observationsPath, \`\${phase}=\${String(isFirstRun())}\\n\`)
+}
+
+record("import")
+
+export default server({
+  name: "dist-first-run",
+  host: "127.0.0.1",
+  ssh: {
+    ports: [${String(testServer.port)}],
+    privateKey: ${JSON.stringify(privateKeyPath)},
+    strictHostKeyChecking: "no",
+    user: "root",
+  },
+  run: [
+    {
+      name: "dist first-run probe",
+      async check() {
+        record("check")
+        return "needs-apply"
+      },
+      async apply() {
+        record("apply")
+        return { status: "changed", detail: "first-run probe" }
+      },
+    },
+  ],
+})
+`
+        )
+
+        const stdout = await execFileBuffered(
+          packedCliPath,
+          ["apply", playbookPath, ...cliArguments],
+          {
+            cwd: tempDirectory,
+            encoding: "utf8",
+            env: { ...process.env, SSH_AUTH_SOCK: "" },
+            killSignal: "SIGTERM",
+            maxBuffer: CLI_COMMAND_MAX_BUFFER,
+            timeout: CLI_COMMAND_TIMEOUT_MS,
+          }
+        )
+
+        expect(stdout).toContain("dist first-run probe")
+        const flag = String(expected)
+        expect(readFileSync(observationsPath, "utf8").trim().split("\n")).toStrictEqual([
+          `import=${flag}`,
+          `check=${flag}`,
+          `apply=${flag}`,
+        ])
+        expect(unexpectedCommands).toStrictEqual([])
+      } finally {
+        await testServer.close()
+        rmSync(tempDirectory, { force: true, recursive: true })
+      }
+    }
+  )
+
   it("exports resolveEnvironment from the published package entry point", async () => {
     const distIndexUrl = pathToFileURL(resolve(packageRootDirectory, "dist/index.js")).href
     const { resolveEnvironment } = (await import(distIndexUrl)) as {

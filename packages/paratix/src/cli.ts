@@ -367,9 +367,9 @@ export function isDirectCliExecution(moduleUrl: string, candidateEntryScript?: s
  * {@link FIRST_RUN_ENV_NAME} from `process.env` directly.
  *
  * The returned Environment value is separate from the async-local context
- * exposed by `isFirstRun()`. That context exists only while the CLI imports
- * and evaluates the playbook definition; it never mutates global `process.env`
- * and ends before module `check` and `apply` methods run.
+ * exposed by `isFirstRun()`, which the CLI opens while importing the playbook
+ * and the runner opens for the whole run via `RunOptions.firstRun`. Neither
+ * channel mutates global `process.env`.
  *
  * @param environment - The base environment supplied by the caller.
  * @param options - Overrides derived from CLI flags.
@@ -388,21 +388,21 @@ export function applyCliEnvironmentOverrides(
 }
 
 /**
- * R-0000695 / R-0000729: the first-run AsyncLocalStorage now lives in
+ * R-0000695 / R-0000729: the first-run AsyncLocalStorage lives in
  * `firstRunContext.ts` so the library entry `index.ts` can re-export
  * `isFirstRun` without dragging `cli.ts` (with its `import.meta.url`
- * direct-run guard) into the library bundle. The runtime semantics are
- * unchanged: `isFirstRun()` reads the scoped flag, and
- * {@link withCliProcessEnvironment} below installs it via
- * {@link runWithFirstRunFlag}.
+ * direct-run guard) into the library bundle. {@link withCliProcessEnvironment}
+ * below installs the flag for the playbook import; the runner installs it for
+ * the run.
  */
 export { isFirstRun } from "./firstRunContext.js"
 
 /**
- * Runs `body` while the CLI-derived first-run flag is observable through
- * `isFirstRun` and guarantees the flag is cleared before returning,
- * regardless of whether `body` resolves or rejects. The CLI uses this scope
- * only while importing and evaluating the playbook definition.
+ * Runs `body` while the `--first-run` flag is observable through `isFirstRun`
+ * and restores the outer value before returning, regardless of whether `body`
+ * resolves or rejects. The CLI uses this import-time scope while importing and
+ * evaluating the playbook definition; the runner opens its own scope for the
+ * run via `RunOptions.firstRun`.
  *
  * R-0000265: this helper replaces the previous `applyCliProcessEnvironment`
  * which returned a manual restore callback. That API trusted every caller
@@ -413,8 +413,8 @@ export { isFirstRun } from "./firstRunContext.js"
  * R-0000695: the flag does not touch `process.env`. The runner separately
  * consumes the typed Environment returned by {@link applyCliEnvironmentOverrides}.
  * Playbooks can call `isFirstRun()` while constructing their exported server
- * definition. The context ends before module `check` and `apply` methods
- * run, and there is no public `init` hook.
+ * definition. The glue between import and run (header output, environment
+ * overrides, filter resolution) calls no user code and may observe `false`.
  *
  * Reentrant CLI calls are supported: a nested invocation that sets
  * `firstRun: true` extends the inner async context but does not leak the
@@ -812,6 +812,9 @@ export async function runApplyCommand(
     dryRun: options.dryRun,
     envFile: options.envFile,
     envOverrides: environmentOverrides,
+    // Always forwarded (true or false) so the runner exposes the flag to the
+    // whole run and masks any outer scope when it is false.
+    firstRun: options.firstRun,
     verbose: options.verbose,
   }
   if (options.reconnectTimeout !== undefined) {
@@ -888,7 +891,7 @@ const applyCommand = program
     collectFilter,
     []
   )
-  .option("--first-run", "Expose first-run mode while loading the playbook", false)
+  .option("--first-run", "Expose first-run mode while loading and running the playbook", false)
   .option(
     "--reconnect-timeout <seconds>",
     "SSH reconnect timeout override for reboots and port changes (seconds, max 86400; reboot default 300)",
