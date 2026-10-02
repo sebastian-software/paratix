@@ -10,6 +10,7 @@ import {
   encodeSymlinkListingEntry,
   runBatchedProbe,
 } from "../../src/modules/archiveProbe.js"
+import { SudoInputUnsupportedError } from "../../src/ssh.js"
 import {
   CAPTURE_TRUNCATION_MARKER,
   DEFAULT_MAX_OUTPUT_BYTES,
@@ -78,6 +79,39 @@ describe("runBatchedProbe", () => {
       detail: "Command stdout is not valid UTF-8 (exit code 0): probe",
       kind: "failed",
     })
+  })
+
+  it("reports an exec refused for stdin under password sudo as a failure", async () => {
+    const conn = {
+      async exec(): Promise<ExecResult> {
+        await Promise.resolve()
+        throw new SudoInputUnsupportedError()
+      },
+    } as unknown as SshConnection
+
+    const outcome = await runBatchedProbe(conn, {
+      entries: ["/opt/app"],
+      script: buildSymlinkProbeScript(),
+    })
+
+    expect(outcome).toStrictEqual({
+      detail: new SudoInputUnsupportedError().message,
+      kind: "failed",
+    })
+  })
+
+  it("rethrows any other exec rejection, e.g. a dropped connection", async () => {
+    const dropped = new Error("SSH connection lost")
+    const conn = {
+      async exec(): Promise<ExecResult> {
+        await Promise.resolve()
+        throw dropped
+      },
+    } as unknown as SshConnection
+
+    await expect(
+      runBatchedProbe(conn, { entries: ["/opt/app"], script: buildSymlinkProbeScript() })
+    ).rejects.toBe(dropped)
   })
 
   it("reports a non-zero exit as a failure rather than an empty violation list", async () => {

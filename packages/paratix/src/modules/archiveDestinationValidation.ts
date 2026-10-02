@@ -151,7 +151,7 @@ export function archiveMemberGuardPaths(destination: string, members: ArchiveMem
 /**
  * Issue #219: map the non-member paths visited while resolving the archive's
  * symlink targets to absolute destination paths, each with the raw path of the
- * symlink member that visited it, for {@link validateNoSymlinkPaths}.
+ * symlink member that visited it, for {@link preStagingProbeEntries}.
  *
  * @param destination - The validated destination directory.
  * @param members - The validated archive members.
@@ -183,23 +183,17 @@ function symlinkProbeViolation(
  * Refuse the extraction when any of the given host paths is a symlink, with
  * one batched probe.
  *
- * Issue #219: `linkTargets` adds the paths that archive symlink targets pass
- * through (see {@link archiveSymlinkTargetProbePaths}) to the same probe. A
- * hit there is reported against the symlink member it belongs to; a path in
- * `paths` keeps the plain destination-path message.
- *
  * @param conn - The SSH connection.
  * @param parameters - Probe inputs.
- * @param parameters.linkTargets - Optional link-target paths mapped to their symlink member.
  * @param parameters.paths - Absolute destination paths that must not be symlinks.
  * @param parameters.source - The archive source, for the failure message.
  * @returns A failure when a probed path is a symlink or the probe failed, otherwise null.
  */
 export async function validateNoSymlinkPaths(
   conn: SshConnection,
-  parameters: { linkTargets?: ReadonlyMap<string, string>; paths: string[]; source: string }
+  parameters: { paths: string[]; source: string }
 ): Promise<ModuleResult | null> {
-  const paths = [...new Set([...parameters.paths, ...(parameters.linkTargets?.keys() ?? [])])]
+  const paths = [...new Set(parameters.paths)]
   const outcome = await runBatchedProbe(conn, {
     entries: paths,
     script: buildSymlinkProbeScript(),
@@ -215,7 +209,7 @@ export async function validateNoSymlinkPaths(
   if (outcome.fields.length === 0) return null
   const [unsafe] = outcome.fields
   return failed(
-    `[archive.extract] refusing to extract ${parameters.source}: ${symlinkProbeViolation(unsafe, parameters)}`
+    `[archive.extract] refusing to extract ${parameters.source}: ${symlinkProbeViolation(unsafe, { paths })}`
   )
 }
 
@@ -300,7 +294,7 @@ function memberTypeConflictChecks(
  * The `l` entries are the guard paths ({@link archiveMemberGuardPaths}) and the
  * paths the archive's link targets pass through
  * ({@link archiveSymlinkTargetProbePaths}), in that order, with the messages
- * of {@link validateNoSymlinkPaths}. The `n` entries are the paths of
+ * of {@link symlinkProbeViolation}. The `n` entries are the paths of
  * non-directory members, the `d` entries the paths of directory members and
  * of every implicit ancestor directory below the destination. Symlink entries
  * come first, so a path that is a symlink keeps its symlink refusal.
@@ -338,7 +332,8 @@ export function preStagingProbeEntries(
  * merge over, with one batched probe.
  *
  * This is the pre-staging probe of `archive.extract`: the symlink checks of
- * {@link validateNoSymlinkPaths} (guard paths and link-target paths) plus the
+ * {@link validateNoSymlinkPaths} on the guard paths, the link-target paths with
+ * their own message (see {@link symlinkProbeViolation}), plus the
  * type checks of {@link preStagingProbeEntries}, so a non-directory member
  * over an existing directory, or a directory over an existing file, is
  * refused before `cp -aT` would fail half-way through the merge. The probe

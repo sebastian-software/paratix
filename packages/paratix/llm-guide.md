@@ -199,10 +199,13 @@ export default server({
 own directory (hardlinks: from the archive root) and through the archive's own symlinks, stays
 inside `destination`; absolute targets, a link in place of the destination root, members below an
 archive symlink, hardlinks to or through an archive symlink, a path that occurs more than once with
-a symlink among its occurrences and conflicting types or targets, and zip symlinks are rejected. The
-archive listing is decoded as strict UTF-8, never with replacement characters. `tar` lists the
-archive under a UTF-8 C locale (`C.UTF-8` or `C.utf8`) when the host has one and under `LC_ALL=C`
-otherwise (bsdtar always under `LC_ALL=C`); for GNU tar and bsdtar the escape sequences of the
+a symlink among its occurrences and conflicting types or targets, and zip symlinks are rejected. A
+member whose path, or whose hardlink target, has a `..` path segment is rejected in tar and zip
+archives, even when the normalized path would stay inside `destination`; `.` segments, a leading
+`./` and `..` in symlink targets remain allowed. The archive listing is decoded as strict UTF-8,
+never with replacement characters. `tar` lists the archive under a UTF-8 C locale (`C.UTF-8` or
+`C.utf8`) when the host has one and under `LC_ALL=C` otherwise (bsdtar always under `LC_ALL=C`);
+for GNU tar and bsdtar the escape sequences of the
 listing (`\NNN`, `\\` and the single-letter control escapes) are decoded back to the stored bytes,
 so non-ASCII names are accepted whatever locale the SSH session has. A member whose decoded name is
 not valid UTF-8, or whose name contains any other escape sequence, is rejected because it cannot be
@@ -259,7 +262,8 @@ host, a directory under `destination` that cannot be read or searched is reporte
 the listing: a judged link that resolves into it, or an archive member at or below it, refuses the
 extraction because it cannot be checked, while the links inside it are not judged (a known limit).
 Without GNU `find` (busybox, the BSDs), any unreadable directory under `destination` fails the
-check.
+check. A symlink under `destination` that cannot be read during the check fails it as well, with a
+message that names the link when its name can be transported.
 
 The host stops the merge with GNU `timeout` after 100 seconds (killing it 10 seconds later), before
 the 120-second command timeout; without `timeout` the merge fails before copying anything. Once the
@@ -278,8 +282,11 @@ point that exists on the host or in the model with the model's location of the s
 must exist and be the same object. A link the kernel resolves to a different object, whose nearest
 existing point differs or exists on one side only (for example a target that climbs with `..` out of
 a missing directory, even though nothing can be written through it yet), or of whose target path no
-point exists at all is a violation. A cross-check that cannot be completed fails the run, including
-a judged link whose cross-check entry would exceed 64 KiB (a target with very many segments). A
+point exists at all is a violation. When a judged link resolves through another symlink that is
+not judged itself, the same command cross-checks that link's target as well; a mismatch there is a
+violation of the judged link, names the followed link, and only the judged link is recorded. A
+cross-check that cannot be completed fails the run, including a judged link whose cross-check entry
+would exceed 64 KiB (a target with very many segments). A
 converged tree costs two commands when a judged symlink is placed inside, one otherwise, and none
 for an archive without symlinks (one listing plus at most one cross-check while containment entries
 record links or hold no usable list), independent of the number of members; neither a violation nor
