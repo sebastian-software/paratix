@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.21.1](https://github.com/sebastian-software/paratix/compare/paratix-v0.21.0...paratix-v0.21.1) (2026-10-02)
+
+
+### Bug Fixes
+
+* **paratix:** harden archive.extract link checks and probe error handling ([#233](https://github.com/sebastian-software/paratix/issues/233)) ([de00be7](https://github.com/sebastian-software/paratix/commit/de00be779511a13efb737aefbcc2825de8893a98))
+* **paratix:** keep isFirstRun() true for the whole --first-run apply lifecycle ([#229](https://github.com/sebastian-software/paratix/issues/229)) ([f19b1a5](https://github.com/sebastian-software/paratix/commit/f19b1a54420ff2ac9ffb591d705a9c7978a61fe0))
+
 ## [0.21.0](https://github.com/sebastian-software/paratix/compare/paratix-v0.20.0...paratix-v0.21.0) (2026-10-01)
 
 
