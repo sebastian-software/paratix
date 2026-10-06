@@ -1,4 +1,6 @@
-import { describe, expect, it } from "vitest"
+import { afterEach, describe, expect, it, vi } from "vitest"
+
+import type * as RunnerAbortSignalModule from "../src/runnerAbortSignal.js"
 
 import {
   getRunnerAbortSignal,
@@ -89,5 +91,59 @@ describe("runnerAbortSignal", () => {
     })
 
     expect(observations).toStrictEqual([controller.signal, controller.signal, controller.signal])
+  })
+})
+
+/**
+ * #193: the published package bundles `runnerAbortSignal.ts` twice — once
+ * into `dist/cli.js` (the runner installs the signal there) and once into the
+ * library chunk behind `dist/index.js` (`pause`, `net.waitFor`, `op` and user
+ * recipes read it there). Fresh module instances across `vi.resetModules()`
+ * simulate that bundle split without a build.
+ *
+ * @returns Two independently evaluated instances of the module.
+ */
+async function importTwoInstances(): Promise<
+  [typeof RunnerAbortSignalModule, typeof RunnerAbortSignalModule]
+> {
+  vi.resetModules()
+  const first = await import("../src/runnerAbortSignal.js")
+  vi.resetModules()
+  const second = await import("../src/runnerAbortSignal.js")
+  return [first, second]
+}
+
+describe("runnerAbortSignal process-wide store across module copies (#193)", () => {
+  afterEach(() => {
+    vi.resetModules()
+  })
+
+  it("loads two distinct module instances across resetModules", async () => {
+    const [first, second] = await importTwoInstances()
+
+    expect(first).not.toBe(second)
+    expect(first.getRunnerAbortSignal).not.toBe(second.getRunnerAbortSignal)
+  })
+
+  it("returns undefined outside any runner in every instance", async () => {
+    const [first, second] = await importTwoInstances()
+
+    expect(first.getRunnerAbortSignal()).toBeUndefined()
+    expect(second.getRunnerAbortSignal()).toBeUndefined()
+  })
+
+  it("makes the signal installed through one instance visible through another instance", async () => {
+    const [first, second] = await importTwoInstances()
+    const controller = new AbortController()
+
+    const observed = await first.withRunnerAbortSignal(controller.signal, async () => {
+      await Promise.resolve()
+      return { first: first.getRunnerAbortSignal(), second: second.getRunnerAbortSignal() }
+    })
+
+    expect(observed.first).toBe(controller.signal)
+    expect(observed.second).toBe(controller.signal)
+    expect(first.getRunnerAbortSignal()).toBeUndefined()
+    expect(second.getRunnerAbortSignal()).toBeUndefined()
   })
 })

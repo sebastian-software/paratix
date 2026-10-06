@@ -12,7 +12,7 @@ import {
 import { isRecipe } from "./recipeGuard.js"
 import { getRunnerAbortSignal } from "./runnerAbortSignal.js"
 import { runSignalModules, type SignalHooks } from "./signalOrchestration.js"
-import { CommandError } from "./sshHelpers.js"
+import { CommandError, isCommandError } from "./sshHelpers.js"
 import {
   type Environment,
   type Module,
@@ -309,7 +309,7 @@ function failedRecipeState(environment: Environment): RecipeState {
 
 function annotateRecipeChildError(moduleName: string, error: unknown): Error {
   const prefix = `[${moduleName}] `
-  if (error instanceof CommandError) {
+  if (isCommandError(error)) {
     return new CommandError(`${prefix}${error.message}`, error.fullStdout, error.fullStderr)
   }
   if (error instanceof Error) {

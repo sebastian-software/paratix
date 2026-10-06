@@ -1,5 +1,8 @@
-import { describe, expect, it, vi } from "vitest"
+import { afterEach, describe, expect, it, vi } from "vitest"
 
+import type * as ArchiveProbeModule from "../../src/modules/archiveProbe.js"
+import type * as SshModule from "../../src/ssh.js"
+import type * as SshHelpersModule from "../../src/sshHelpers.js"
 import type { ExecOptions, ExecResult, SshConnection } from "../../src/types.js"
 
 import {
@@ -31,6 +34,71 @@ function connectionReturning(result: Partial<ExecResult>): {
   } as unknown as SshConnection
   return { conn, execCalls }
 }
+
+/**
+ * #193: the published package bundles `sshHelpers.ts` and `ssh.ts` twice —
+ * once into `dist/cli.js` (which creates the SSH connection whose `exec`
+ * throws) and once into the library chunk behind `dist/index.js` (where the
+ * archive module runs the probe). Loading the error classes and the probe
+ * across `vi.resetModules()` simulates that bundle split without a build.
+ *
+ * @returns The error classes of copy A and the probe of copy B.
+ */
+async function loadErrorsAndProbeFromDifferentCopies(): Promise<{
+  probe: typeof ArchiveProbeModule
+  ssh: typeof SshModule
+  sshHelpers: typeof SshHelpersModule
+}> {
+  vi.resetModules()
+  const sshHelpers = await import("../../src/sshHelpers.js")
+  const ssh = await import("../../src/ssh.js")
+  vi.resetModules()
+  const probe = await import("../../src/modules/archiveProbe.js")
+  return { probe, ssh, sshHelpers }
+}
+
+function connectionRejectingWith(error: Error): SshConnection {
+  return {
+    async exec(): Promise<ExecResult> {
+      await Promise.resolve()
+      throw error
+    },
+  } as unknown as SshConnection
+}
+
+describe("runBatchedProbe across module copies (#193)", () => {
+  afterEach(() => {
+    vi.resetModules()
+  })
+
+  it("reports another copy's InvalidUtf8OutputError as a failure instead of rethrowing it", async () => {
+    const { probe, sshHelpers } = await loadErrorsAndProbeFromDifferentCopies()
+    const error = new sshHelpers.InvalidUtf8OutputError(
+      "Command stdout is not valid UTF-8 (exit code 0): probe"
+    )
+    expect(error).not.toBeInstanceOf(InvalidUtf8OutputError)
+
+    const outcome = await probe.runBatchedProbe(connectionRejectingWith(error), {
+      entries: ["/opt/app"],
+      script: probe.buildSymlinkListingProbeScript(),
+    })
+
+    expect(outcome).toStrictEqual({ detail: error.message, kind: "failed" })
+  })
+
+  it("reports another copy's SudoInputUnsupportedError as a failure instead of rethrowing it", async () => {
+    const { probe, ssh } = await loadErrorsAndProbeFromDifferentCopies()
+    const error = new ssh.SudoInputUnsupportedError()
+    expect(error).not.toBeInstanceOf(SudoInputUnsupportedError)
+
+    const outcome = await probe.runBatchedProbe(connectionRejectingWith(error), {
+      entries: ["/opt/app"],
+      script: probe.buildSymlinkProbeScript(),
+    })
+
+    expect(outcome).toStrictEqual({ detail: error.message, kind: "failed" })
+  })
+})
 
 describe("runBatchedProbe", () => {
   it("runs nothing at all for an empty entry list", async () => {

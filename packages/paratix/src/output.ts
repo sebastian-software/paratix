@@ -10,7 +10,7 @@ import {
   formatModuleElapsed,
 } from "./outputFormatting.js"
 import { maskRegisteredSecrets } from "./secretSink.js"
-import { CommandError } from "./sshHelpers.js"
+import { isCommandError } from "./sshHelpers.js"
 import { sanitizeTerminalText } from "./terminalSanitizer.js"
 
 // R-0000580: bounds for `util.inspect` when rendering non-Error cause values so
@@ -730,7 +730,7 @@ function formatCauseValue(cause: unknown): string {
 /**
  * Walk the `Error.cause` chain of `error` and emit one `Cause: …` block per
  * level on stderr. Used by {@link printCommandFailure} so generic (non-
- * {@link CommandError}) failures surface their wrapped root cause even in
+ * {@link "./sshHelpers".CommandError}) failures surface their wrapped root cause even in
  * non-verbose mode — without this, only `Error.message` would reach stderr
  * and the actual reason (a wrapped `ECONNREFUSED`, a parse failure, …)
  * would stay hidden until the operator re-ran with `--verbose`.
@@ -759,7 +759,7 @@ function printCauseChain(error: Error): void {
     // command output once it has been wrapped into an outer error. Stdout and
     // stderr go through `maskRegisteredSecrets` like the existing verbose path
     // in `printCommandFailure`.
-    if (cause instanceof CommandError) {
+    if (isCommandError(cause)) {
       printVerboseCommandError(
         maskRegisteredSecrets(cause.fullStdout),
         maskRegisteredSecrets(cause.fullStderr)
@@ -771,7 +771,7 @@ function printCauseChain(error: Error): void {
 
 /**
  * Print the error message of a failed command and, when verbose mode is active
- * and the error is a {@link CommandError}, the full untruncated output.
+ * and the error is a {@link "./sshHelpers".CommandError}, the full untruncated output.
  *
  * R-0000041: every string written to stderr is passed through
  * {@link maskRegisteredSecrets} so resolved op values, sudo passwords, user
@@ -784,7 +784,7 @@ function printCauseChain(error: Error): void {
  * @param verbose - Whether to show full stdout/stderr.
  */
 export function printCommandFailure(error: unknown, verbose: boolean): void {
-  if (verbose && error instanceof CommandError) {
+  if (verbose && isCommandError(error)) {
     // Print only the exit-code line, skip the truncated output and hint
     const summaryLine = error.message.split("\n")[0]
     printCommandError("", maskRegisteredSecrets(summaryLine))
@@ -797,7 +797,7 @@ export function printCommandFailure(error: unknown, verbose: boolean): void {
 
   printCommandError("", maskRegisteredSecrets(String(error)))
   if (error instanceof Error) {
-    if (!(error instanceof CommandError)) {
+    if (!isCommandError(error)) {
       // R-0000520: for generic Errors, surface the Error.cause chain even
       // without --verbose so the wrapped root cause (ECONNREFUSED behind a
       // wrapper Error, a parser failure behind a domain Error, …) reaches

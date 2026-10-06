@@ -190,12 +190,16 @@ function buildCommandError(parameters: CommandErrorParameters): CommandError {
  * `ExecOptions.maxOutputBytes`; truncated captures are marked in
  * {@link CommandError.fullStdout} and {@link CommandError.fullStderr}.
  *
+ * Inside paratix, match it with {@link isCommandError}: `instanceof` is
+ * unreliable because the CLI and library bundles each carry their own copy of
+ * this class (#193).
+ *
  * @example
  * ```ts
  * try {
  *   await ssh.exec("exit 1")
  * } catch (error) {
- *   if (error instanceof CommandError) {
+ *   if (isCommandError(error)) {
  *     console.error(error.fullStderr)
  *   }
  * }
@@ -214,6 +218,31 @@ export class CommandError extends Error {
     this.fullStderr = fullStderr
     Error.captureStackTrace(this, CommandError)
   }
+}
+
+/**
+ * #193: paratix ships this class in two separate bundles — the CLI
+ * (`cli.js`, the runner and its failure printer) and the library (`index.js`
+ * plus its shared chunk, whose modules run `ssh.exec` and mask failures). An
+ * error built by one copy is not an `instanceof` the other copy's class, so a
+ * cross-copy check silently loses `fullStdout`/`fullStderr`. The
+ * `Symbol.for`-keyed brand on the prototype is identical in every copy, is
+ * non-enumerable (so it does not change error equality) and survives the
+ * `Object.create(prototype)` clones built while masking secrets.
+ */
+const COMMAND_ERROR_BRAND = Symbol.for("paratix.sshHelpers.CommandError")
+Object.defineProperty(CommandError.prototype, COMMAND_ERROR_BRAND, { value: true })
+
+/**
+ * Check whether `value` is a {@link CommandError} from any paratix bundle copy.
+ *
+ * @param value - The value to test, typically a caught error.
+ * @returns `true` when `value` carries the {@link CommandError} brand.
+ */
+export function isCommandError(value: unknown): value is CommandError {
+  return (
+    typeof value === "object" && value !== null && Reflect.get(value, COMMAND_ERROR_BRAND) === true
+  )
 }
 
 export type StreamOutputParameters = {
@@ -400,6 +429,32 @@ export class InvalidUtf8OutputError extends Error {
     super(message)
     this.name = "InvalidUtf8OutputError"
   }
+}
+
+/**
+ * #193: brand for {@link InvalidUtf8OutputError}, for the same reason as the
+ * {@link CommandError} brand — the CLI bundle (`cli.js`) and the library
+ * bundle (`index.js` plus its shared chunk) each carry their own copy of the
+ * class, so a rejection raised by one copy fails `instanceof` in the other.
+ */
+const INVALID_UTF8_OUTPUT_ERROR_BRAND = Symbol.for("paratix.sshHelpers.InvalidUtf8OutputError")
+Object.defineProperty(InvalidUtf8OutputError.prototype, INVALID_UTF8_OUTPUT_ERROR_BRAND, {
+  value: true,
+})
+
+/**
+ * Check whether `value` is an {@link InvalidUtf8OutputError} from any paratix
+ * bundle copy.
+ *
+ * @param value - The value to test, typically a caught error.
+ * @returns `true` when `value` carries the {@link InvalidUtf8OutputError} brand.
+ */
+export function isInvalidUtf8OutputError(value: unknown): value is InvalidUtf8OutputError {
+  return (
+    typeof value === "object" &&
+    value !== null &&
+    Reflect.get(value, INVALID_UTF8_OUTPUT_ERROR_BRAND) === true
+  )
 }
 
 /** A streaming stdout decoder; `valid` turns false once invalid UTF-8 was seen. */

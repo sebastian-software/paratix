@@ -31,6 +31,11 @@ describe("runPlaybook signal handling", () => {
   })
 
   afterEach(() => {
+    // Some tests in this block replace output.js and secretSink.js through
+    // `vi.doMock`; drop those factories so they cannot leak into the next
+    // test when the order is shuffled.
+    vi.doUnmock("../src/output.js")
+    vi.doUnmock("../src/secretSink.js")
     vi.restoreAllMocks()
     vi.resetModules()
     process.exitCode = 0
@@ -1485,6 +1490,11 @@ describe("runPlaybook second-signal best-effort cleanup", () => {
   })
 
   afterEach(() => {
+    // Some tests in this block replace output.js and secretSink.js through
+    // `vi.doMock`; drop those factories so they cannot leak into the next
+    // test when the order is shuffled.
+    vi.doUnmock("../src/output.js")
+    vi.doUnmock("../src/secretSink.js")
     vi.restoreAllMocks()
     vi.resetModules()
     process.exitCode = 0

@@ -114,11 +114,13 @@ vi.mock("../src/sshHelpers.js", async () => {
     CAPTURE_TRUNCATION_MARKER: actual.CAPTURE_TRUNCATION_MARKER,
     cleanupFailedSshClient: vi.fn(actual.cleanupFailedSshClient),
     collectStreamOutput: vi.fn(actual.collectStreamOutput),
-    // R-0000146: secretSink.maskScopedError performs `instanceof CommandError`
-    // when masking thrown errors via withRegisteredSecrets, so the mock must
-    // re-export the real class.
+    // R-0000146: secretSink.maskScopedError performs `isCommandError` (the
+    // #193 cross-bundle replacement for `instanceof CommandError`) when
+    // masking thrown errors via withRegisteredSecrets, so the mock must
+    // re-export the real class and its guard.
     CommandError: actual.CommandError,
     DEFAULT_MAX_OUTPUT_BYTES: actual.DEFAULT_MAX_OUTPUT_BYTES,
+    isCommandError: actual.isCommandError,
     maskPreparedSecrets: actual.maskPreparedSecrets,
     maskSecrets: actual.maskSecrets,
     normalizeSshCloseCode: actual.normalizeSshCloseCode,

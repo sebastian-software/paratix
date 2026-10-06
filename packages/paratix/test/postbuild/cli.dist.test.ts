@@ -276,6 +276,34 @@ async function execFileBuffered(
   })
 }
 
+type CapturedCliRun = {
+  exitCode: null | number | string
+  stderr: string
+  stdout: string
+}
+
+/**
+ * Run a CLI command that is expected to fail and capture both streams.
+ * Asynchronous on purpose: the in-process SSH server answers on this event
+ * loop, so a synchronous spawn would deadlock.
+ *
+ * @param file - The executable.
+ * @param args - Its arguments.
+ * @param options - Spawn settings such as cwd, env and timeout.
+ * @returns The exit code (or `null`/signal name) plus stdout and stderr.
+ */
+async function execFileCapturingFailure(
+  file: string,
+  args: string[],
+  options: ExecFileOptionsWithStringEncoding
+): Promise<CapturedCliRun> {
+  return new Promise<CapturedCliRun>((resolveExec) => {
+    execFile(file, args, options, (error, stdout, stderr) => {
+      resolveExec({ exitCode: error == null ? 0 : (error.code ?? null), stderr, stdout })
+    })
+  })
+}
+
 async function startTestSshServer(
   handleCommand: (command: string) => CommandResponse
 ): Promise<TestSshServer> {
@@ -888,6 +916,164 @@ export default server({
       }
     }
   )
+
+  // #193: a playbook's recipe child throws a CommandError created by the SSH
+  // connection in dist/cli.js, while recipe() in dist/index.js reports or
+  // annotates it (apply failures are printed by the recipe itself, check
+  // failures are annotated and printed by the runner). The verbose printer
+  // must still recognize the error from the other bundle and print the full
+  // stderr instead of degrading it to a plain Error (or throwing a TypeError
+  // on a masked clone without the full streams).
+  it.each([{ failingPhase: "apply" as const }, { failingPhase: "check" as const }])(
+    "prints the full stderr of a recipe child whose $failingPhase fails under --verbose through the packed package",
+    async ({ failingPhase }) => {
+      const packageJson = JSON.parse(
+        readFileSync(join(packedPackageRootDirectory, "package.json"), "utf8")
+      ) as {
+        bin: { paratix: string }
+      }
+      const packedCliPath = resolve(packedPackageRootDirectory, packageJson.bin.paratix)
+
+      const tempDirectory = mkdtempSync(join(tmpdir(), "paratix-cli-verbose-recipe-dist-"))
+      const nodeModulesDirectory = join(tempDirectory, "node_modules")
+      const privateKeyPath = join(tempDirectory, "id_rsa")
+      const playbookPath = join(tempDirectory, "verbose-recipe-playbook.mjs")
+      const failingCommand = "paratix-dist-failing-command"
+      const stderrMarker = "boom-stderr-marker"
+      const seenCommands: string[] = []
+      const unexpectedCommands: string[] = []
+      const commandHandlers = new Map<string, CommandHandler>([
+        [
+          failingCommand,
+          () => ({ code: 3, stderr: `${stderrMarker}\nsecond-stderr-line\n`, stdout: "" }),
+        ],
+      ])
+
+      const testServer = await startTestSshServer((command) => {
+        seenCommands.push(command)
+        return handlePostbuildCommand({ command, commandHandlers, unexpectedCommands })
+      })
+
+      try {
+        mkdirSync(nodeModulesDirectory)
+        symlinkSync(packedPackageRootDirectory, join(nodeModulesDirectory, "paratix"))
+        writeFileSync(privateKeyPath, testServer.privateKey, { mode: 0o600 })
+        writeFileSync(
+          join(tempDirectory, "package.json"),
+          `${JSON.stringify({ type: "module" })}\n`
+        )
+        writeFileSync(
+          playbookPath,
+          `
+import { NEEDS_APPLY, recipe, server } from "paratix"
+
+export default server({
+  name: "dist-verbose-recipe-failure",
+  host: "127.0.0.1",
+  ssh: {
+    ports: [${String(testServer.port)}],
+    privateKey: ${JSON.stringify(privateKeyPath)},
+    strictHostKeyChecking: "no",
+    user: "root",
+  },
+  run: [
+    recipe("dist verbose recipe", [
+      {
+        name: "dist failing child module",
+        async check(ssh) {
+          if (${JSON.stringify(failingPhase)} === "check") {
+            await ssh.exec(${JSON.stringify(failingCommand)}, { silent: true })
+          }
+          return NEEDS_APPLY
+        },
+        async apply(ssh) {
+          await ssh.exec(${JSON.stringify(failingCommand)}, { silent: true })
+          return { status: "changed" }
+        },
+      },
+    ]),
+  ],
+})
+`
+        )
+
+        const run = await execFileCapturingFailure(
+          packedCliPath,
+          ["apply", playbookPath, "--verbose"],
+          {
+            cwd: tempDirectory,
+            encoding: "utf8",
+            env: { ...process.env, NO_COLOR: "1", SSH_AUTH_SOCK: "" },
+            killSignal: "SIGTERM",
+            maxBuffer: CLI_COMMAND_MAX_BUFFER,
+            timeout: CLI_COMMAND_TIMEOUT_MS,
+          }
+        )
+        const output = `${run.stdout}\n${run.stderr}`
+
+        expect(run.exitCode).not.toBe(0)
+        expect(seenCommands).toStrictEqual([failingCommand])
+        expect(unexpectedCommands).toStrictEqual([])
+        expect(output).not.toContain("TypeError")
+        // Each line of the error block carries the same indented `│ ` output
+        // gutter (its indent depends on the nesting depth of the failing step);
+        // the stderr lines must follow the heading consecutively.
+        expect(run.stderr).toMatch(
+          /^(?<gutter> *)│ Full stderr:\n\k<gutter>│ boom-stderr-marker\n\k<gutter>│ second-stderr-line$/mv
+        )
+      } finally {
+        await testServer.close()
+        rmSync(tempDirectory, { force: true, recursive: true })
+      }
+    }
+  )
+
+  // #193: dist/cli.js is a self-contained bundle and dist/index.js loads the
+  // shared library chunk, so each carries its own copy of secretSink and
+  // runnerAbortSignal. Both copies must find one process-wide slot: the CLI
+  // import creates it eagerly and the library import reuses the same object.
+  it("shares the secretSink and runnerAbortSignal slots between dist/cli.js and dist/index.js", () => {
+    const packageJson = JSON.parse(
+      readFileSync(join(packageRootDirectory, "package.json"), "utf8")
+    ) as {
+      bin: { paratix: string }
+    }
+    const distCliUrl = pathToFileURL(resolve(packageRootDirectory, packageJson.bin.paratix)).href
+    const distIndexUrl = pathToFileURL(resolve(packageRootDirectory, "dist/index.js")).href
+    const probeScript = `
+import { AsyncLocalStorage } from "node:async_hooks"
+
+const secretSinkKey = Symbol.for("paratix.secretSink.state")
+const abortSignalKey = Symbol.for("paratix.runnerAbortSignal.storage")
+
+await import(${JSON.stringify(distCliUrl)})
+const secretSinkAfterCli = globalThis[secretSinkKey]
+const abortSignalAfterCli = globalThis[abortSignalKey]
+
+await import(${JSON.stringify(distIndexUrl)})
+
+console.log(JSON.stringify({
+  abortSignalIdentical: abortSignalAfterCli !== undefined && globalThis[abortSignalKey] === abortSignalAfterCli,
+  abortSignalIsStorage: abortSignalAfterCli instanceof AsyncLocalStorage,
+  secretSinkIdentical: secretSinkAfterCli !== undefined && globalThis[secretSinkKey] === secretSinkAfterCli,
+  secretSinkVersion: secretSinkAfterCli?.version ?? null,
+}))
+`
+
+    const stdout = execFileSync(process.execPath, ["--input-type=module", "--eval", probeScript], {
+      cwd: packageRootDirectory,
+      encoding: "utf8",
+      killSignal: "SIGTERM",
+      maxBuffer: CLI_COMMAND_MAX_BUFFER,
+      timeout: CLI_COMMAND_TIMEOUT_MS,
+    })
+    expect(JSON.parse(stdout)).toStrictEqual({
+      abortSignalIdentical: true,
+      abortSignalIsStorage: true,
+      secretSinkIdentical: true,
+      secretSinkVersion: 1,
+    })
+  })
 
   it("exports resolveEnvironment from the published package entry point", async () => {
     const distIndexUrl = pathToFileURL(resolve(packageRootDirectory, "dist/index.js")).href

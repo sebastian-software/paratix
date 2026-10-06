@@ -1,5 +1,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest"
 
+import type * as SecretSinkModule from "../src/secretSink.js"
+
 import { printCommandFailure } from "../src/output.js"
 import {
   clearRegisteredSecrets,
@@ -479,5 +481,180 @@ describe("printCommandFailure — secret redaction (R-0000041)", () => {
     expect(calls.length).toBeGreaterThan(0)
     expect(allOutput).not.toContain("commanderror-secret-DEF")
     expect(allOutput).toContain(REDACTED)
+  })
+})
+
+/** Every secret sink copy a cross-copy test loaded, cleared after each test. */
+const loadedSecretSinks: Array<typeof SecretSinkModule> = []
+
+/**
+ * #193: the published package bundles `secretSink.ts` twice — once into
+ * `dist/cli.js` (the runner opens the run scope there) and once into the
+ * library chunk behind `dist/index.js` (`op`, `net`, `download` and user
+ * recipes register secrets there). Fresh module instances across
+ * `vi.resetModules()` simulate that bundle split without a build.
+ *
+ * @returns Two independently evaluated instances of the secret sink.
+ */
+async function importTwoSecretSinks(): Promise<[typeof SecretSinkModule, typeof SecretSinkModule]> {
+  vi.resetModules()
+  const first = await import("../src/secretSink.js")
+  vi.resetModules()
+  const second = await import("../src/secretSink.js")
+  loadedSecretSinks.push(first, second)
+  return [first, second]
+}
+
+function clearAllLoadedSecretSinks(): void {
+  clearRegisteredSecrets()
+  for (const sink of loadedSecretSinks.splice(0)) {
+    sink.clearRegisteredSecrets()
+  }
+}
+
+describe("secretSink process-wide state across module copies (#193)", () => {
+  afterEach(() => {
+    clearAllLoadedSecretSinks()
+    vi.restoreAllMocks()
+    vi.resetModules()
+  })
+
+  it("loads two distinct module instances across resetModules", async () => {
+    const [first, second] = await importTwoSecretSinks()
+
+    expect(first).not.toBe(second)
+    expect(first.maskRegisteredSecrets).not.toBe(second.maskRegisteredSecrets)
+  })
+
+  it("masks a secret registered through one copy in the other copy, in both directions", async () => {
+    const [first, second] = await importTwoSecretSinks()
+    const firstSecret = "first-copy-secret-AAA111"
+    const secondSecret = "second-copy-secret-BBB222"
+
+    first.registerSecret(firstSecret)
+    second.registerSecret(secondSecret)
+
+    expect(second.maskRegisteredSecrets(`leak ${firstSecret}`)).toBe(`leak ${REDACTED}`)
+    expect(first.maskRegisteredSecrets(`leak ${secondSecret}`)).toBe(`leak ${REDACTED}`)
+
+    first.unregisterSecret(firstSecret)
+    second.unregisterSecret(secondSecret)
+  })
+
+  it.each([
+    { inner: "second", outer: "first" },
+    { inner: "first", outer: "second" },
+  ] as const)(
+    "keeps a secret registered in the $inner copy's nested run scope masked until the $outer copy's run scope ends",
+    async ({ inner, outer }) => {
+      const [first, second] = await importTwoSecretSinks()
+      const sinks = { first, second }
+      const secret = "nested-run-scope-secret-CCC333"
+      const text = `leak ${secret}`
+      const masked = `leak ${REDACTED}`
+
+      const afterInnerScope = await sinks[outer].withRunScopedSecrets(async () => {
+        await sinks[inner].withRunScopedSecrets(async () => {
+          await Promise.resolve()
+          sinks[inner].registerRunScopedSecret(secret)
+        })
+        await Promise.resolve()
+        return {
+          first: first.maskRegisteredSecrets(text),
+          hasScope: {
+            first: first.hasActiveRunScopedSecretScope(),
+            second: second.hasActiveRunScopedSecretScope(),
+          },
+          second: second.maskRegisteredSecrets(text),
+        }
+      })
+
+      expect(afterInnerScope).toStrictEqual({
+        first: masked,
+        hasScope: { first: true, second: true },
+        second: masked,
+      })
+      expect(first.maskRegisteredSecrets(text)).toBe(text)
+      expect(second.maskRegisteredSecrets(text)).toBe(text)
+      expect(first.getRegisteredSecrets()).toStrictEqual([])
+      expect(second.getRegisteredSecrets()).toStrictEqual([])
+    }
+  )
+
+  it("returns the reference counts to their starting state after nested register/unregister calls across both copies", async () => {
+    const [first, second] = await importTwoSecretSinks()
+    const startFirst = first.getRegisteredSecrets()
+    const startSecond = second.getRegisteredSecrets()
+    const secret = "refcounted-secret-DDD444"
+    const text = `leak ${secret}`
+
+    first.registerSecret(secret)
+    second.registerSecret(secret)
+    first.registerSecret(secret)
+
+    second.unregisterSecret(secret)
+    second.unregisterSecret(secret)
+    // One of three registrations is still live, so both copies keep masking.
+    expect(first.maskRegisteredSecrets(text)).toBe(`leak ${REDACTED}`)
+    expect(second.maskRegisteredSecrets(text)).toBe(`leak ${REDACTED}`)
+
+    await first.withRegisteredSecrets([secret], async () => {
+      await second.withRegisteredSecrets([secret], async () => {
+        await Promise.resolve()
+      })
+    })
+    first.unregisterSecret(secret)
+
+    expect(first.getRegisteredSecrets()).toStrictEqual(startFirst)
+    expect(second.getRegisteredSecrets()).toStrictEqual(startSecond)
+    expect(first.maskRegisteredSecrets(text)).toBe(text)
+    expect(second.maskRegisteredSecrets(text)).toBe(text)
+  })
+
+  it("prints the full streams of a CommandError from one copy after another copy's withRegisteredSecrets masked it", async () => {
+    // Copy A provides the error class and the CLI-side printer, copy B the
+    // library-side masking scope — the same split as `dist/cli.js` printing a
+    // failure that `net` or `download` in `dist/index.js` masked.
+    vi.resetModules()
+    const outputA = await import("../src/output.js")
+    const sshHelpersA = await import("../src/sshHelpers.js")
+    const sinkA = await import("../src/secretSink.js")
+    vi.resetModules()
+    const sinkB = await import("../src/secretSink.js")
+    loadedSecretSinks.push(sinkA, sinkB)
+
+    const secret = "cross-copy-command-secret-EEE555"
+    const original = new sshHelpersA.CommandError(
+      `Command failed with exit code 1: deploy ${secret}`,
+      `stdout-marker-line ${secret}`,
+      `stderr-marker-line ${secret}\nsecond-stderr-line`
+    )
+    let maskedError: unknown
+    try {
+      await sinkB.withRegisteredSecrets([secret], async () => {
+        await Promise.resolve()
+        throw original
+      })
+    } catch (error) {
+      maskedError = error
+    }
+    expect(maskedError).toBeInstanceOf(Error)
+
+    const consoleErrors: string[] = []
+    vi.spyOn(console, "error").mockImplementation((...args: unknown[]) => {
+      consoleErrors.push(args.map(String).join(" "))
+    })
+
+    expect(() => {
+      outputA.printCommandFailure(maskedError, true)
+    }).not.toThrow()
+
+    const output = consoleErrors.join("\n")
+    expect(output).toContain("Full stderr:")
+    expect(output).toContain(`stderr-marker-line ${REDACTED}`)
+    expect(output).toContain("second-stderr-line")
+    expect(output).toContain("Full stdout:")
+    expect(output).toContain(`stdout-marker-line ${REDACTED}`)
+    expect(output).not.toContain(secret)
   })
 })

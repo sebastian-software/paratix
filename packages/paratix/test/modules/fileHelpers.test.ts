@@ -64,6 +64,9 @@ describe("localSha256", () => {
       Readable.from([Buffer.from("hello "), Buffer.from("world")])
     )
     vi.doMock("node:fs", () => ({ createReadStream }))
+    // Drop the statically imported copy so the dynamic import picks up the
+    // mock even when this test runs first in a shuffled order.
+    vi.resetModules()
     const { localSha256: streamedLocalSha256 } = await import("../../src/modules/fileHelpers.js")
 
     await expect(streamedLocalSha256("/tmp/payload.txt")).resolves.toBe(

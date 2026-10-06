@@ -31,8 +31,8 @@ import {
   CAPTURE_TRUNCATION_MARKER,
   cleanupFailedSshClient,
   collectStreamOutput,
-  CommandError,
   DEFAULT_MAX_OUTPUT_BYTES,
+  isCommandError,
   maskPreparedSecrets,
   maskSecrets,
   type PreparedSecrets,
@@ -319,6 +319,33 @@ export class SudoInputUnsupportedError extends Error {
     )
     this.name = "SudoInputUnsupportedError"
   }
+}
+
+/**
+ * #193: brand for {@link SudoInputUnsupportedError}. paratix ships this class
+ * in two separate bundles — the CLI (`cli.js`) and the library (`index.js`
+ * plus its shared chunk) — so a rejection raised by one copy fails
+ * `instanceof` in the other. The `Symbol.for`-keyed, non-enumerable prototype
+ * brand is identical in every copy.
+ */
+const SUDO_INPUT_UNSUPPORTED_ERROR_BRAND = Symbol.for("paratix.ssh.SudoInputUnsupportedError")
+Object.defineProperty(SudoInputUnsupportedError.prototype, SUDO_INPUT_UNSUPPORTED_ERROR_BRAND, {
+  value: true,
+})
+
+/**
+ * Check whether `value` is a {@link SudoInputUnsupportedError} from any
+ * paratix bundle copy.
+ *
+ * @param value - The value to test, typically a caught error.
+ * @returns `true` when `value` carries the {@link SudoInputUnsupportedError} brand.
+ */
+export function isSudoInputUnsupportedError(value: unknown): value is SudoInputUnsupportedError {
+  return (
+    typeof value === "object" &&
+    value !== null &&
+    Reflect.get(value, SUDO_INPUT_UNSUPPORTED_ERROR_BRAND) === true
+  )
 }
 
 function closeClientChannel(channel: ClientChannel | null): void {
@@ -2093,7 +2120,7 @@ trap - EXIT
   }
 
   private isNoninteractiveSudoAuthError(error: unknown): boolean {
-    if (!(error instanceof CommandError)) return false
+    if (!isCommandError(error)) return false
     return /sudo: (?:a password is required|a terminal is required|no tty present)/iv.test(
       error.fullStderr
     )
@@ -2617,7 +2644,7 @@ trap - EXIT
    * @throws {Error} The mapped symlink diagnostic when the marker is present.
    */
   private throwIfDirSymlinkMarker(error: unknown, directory: string, remotePath: string): void {
-    if (!(error instanceof CommandError)) return
+    if (!isCommandError(error)) return
     const match = /paratix-symlink-component (?<resolved>.*)/v.exec(error.fullStderr)
     if (match?.groups?.resolved == null) return
     throw new Error(
