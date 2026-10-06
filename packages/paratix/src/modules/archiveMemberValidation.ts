@@ -1,7 +1,7 @@
 import type { ExecResult, SshConnection } from "../types.js"
 
 import { shellQuote } from "../ssh.js"
-import { CAPTURE_TRUNCATION_MARKER, InvalidUtf8OutputError } from "../sshHelpers.js"
+import { CAPTURE_TRUNCATION_MARKER, isInvalidUtf8OutputError } from "../sshHelpers.js"
 import { tarListingScript } from "./archiveTarListing.js"
 import {
   type ArchiveListing,
@@ -434,7 +434,7 @@ export async function listArchiveMembers(
       strictUtf8Stdout: true,
     })
   } catch (error) {
-    if (!(error instanceof InvalidUtf8OutputError)) throw error
+    if (!isInvalidUtf8OutputError(error)) throw error
     return {
       failureReason: `archive listing for ${parameters.source} is not valid UTF-8; refusing to validate member names that cannot be mapped to the extracted names reliably (a member name whose bytes are not valid UTF-8 cannot be mapped)`,
     }

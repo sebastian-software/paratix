@@ -10,6 +10,7 @@ import type {
   SshConnection,
 } from "../../src/types.js"
 
+import { clearRegisteredSecrets } from "../../src/secretSink.js"
 import { createTestSignalBus, resetSignalBus, setSignalBus } from "../../src/signalBus.js"
 
 let signalBus: TestSignalBus
@@ -25,6 +26,11 @@ export function installRunnerTestHooks(): void {
 
   afterEach(() => {
     resetSignalBus()
+    // #193: the secret sink state lives in a process-wide `globalThis` slot,
+    // so the runner copies these files re-import via `vi.resetModules()` no
+    // longer start with a fresh registry. Clear it after every test so a
+    // secret registered by one test cannot leak into the next one.
+    clearRegisteredSecrets()
   })
 }
 

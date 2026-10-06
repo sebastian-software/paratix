@@ -3,7 +3,7 @@ import { sshdPortMeta } from "../meta.js"
 import { failed, failedCommand } from "../moduleFailure.js"
 import { isValidTcpPort } from "../serverDefinitionValidation.js"
 import { validateMktempPath } from "../ssh.js"
-import { CommandError, shellQuote } from "../sshHelpers.js"
+import { isCommandError, shellQuote } from "../sshHelpers.js"
 import {
   type ExecResult,
   guardedWriteFile,
@@ -102,10 +102,9 @@ async function validateProspectiveSshdConfigOrFailed(
 ): Promise<ModuleResult | undefined> {
   const failure = await validateProspectiveSshdConfig(ssh, parameters.newContent)
   if (failure == null) return undefined
-  const stderr =
-    failure.error instanceof CommandError
-      ? failure.error.fullStderr
-      : (failure.error?.message ?? "")
+  const stderr = isCommandError(failure.error)
+    ? failure.error.fullStderr
+    : (failure.error?.message ?? "")
   return failed(
     `[sshd.config: ${parameters.settingNames}] sshd config validation failed ` +
       `(sshd -t against prospective config); not written:\n${stderr}`

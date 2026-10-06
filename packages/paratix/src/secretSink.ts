@@ -21,15 +21,88 @@ import { AsyncLocalStorage } from "node:async_hooks"
 import type { ModuleResult } from "./types.js"
 
 import { isSecretDiagnosticField, REDACTED_SECRET_FIELD_PLACEHOLDER } from "./errorRedaction.js"
-import { CommandError, maskSecrets } from "./sshHelpers.js"
+import { CommandError, isCommandError, maskSecrets } from "./sshHelpers.js"
 
 /**
- * Reference-counted registry: a single secret may be registered concurrently
- * by multiple modules. The counter ensures `unregisterSecret` only forgets
- * the value once the last registration goes out of scope.
+ * Process-wide state of the sink.
+ *
+ * - `counts` is the reference-counted registry: a single secret may be
+ *   registered concurrently by multiple modules. The counter ensures
+ *   `unregisterSecret` only forgets the value once the last registration goes
+ *   out of scope.
+ * - `scopeStorage` holds the per-run map of run-scoped registrations opened by
+ *   {@link withRunScopedSecrets}.
+ *
+ * Version-1 contract: the layout of this object, {@link MINIMUM_SECRET_LENGTH}
+ * and the redaction placeholder are shared by every paratix copy that adopts a
+ * `version: 1` slot, because each copy applies its own constants to the shared
+ * registry. Changing any of them must raise `version`, so that mismatched
+ * copies fail closed instead of masking inconsistently.
  */
-const secretCounts = new Map<string, number>()
-const runScopedSecretCounts = new AsyncLocalStorage<Map<string, number>>()
+type SecretSinkState = {
+  readonly counts: Map<string, number>
+  readonly scopeStorage: AsyncLocalStorage<Map<string, number>>
+  readonly version: 1
+}
+
+/**
+ * #193: the sink state MUST be a single process-wide singleton. paratix ships
+ * this module in two separate bundles — the CLI (`cli.js`, whose runner opens
+ * the run scope and whose failure printer masks diagnostics) and the library
+ * (`index.js` plus its shared chunk, imported by the user's playbook, whose
+ * `op`, `net`, `download` and recipes register secrets). Without sharing, a
+ * secret registered by one copy would not be masked by the other, and a run
+ * scope opened in one copy would not be seen as nested by the other, so `op`
+ * secrets would be released before the run ends. Sharing only the `counts`
+ * map is not enough: the run-scope {@link AsyncLocalStorage} must be shared as
+ * well, which is why both live in one state object. A `Symbol.for`-keyed slot
+ * on `globalThis` collapses every copy of this module onto that one object,
+ * mirroring the slots in `output.ts`, `secretPrewarm.ts` and
+ * `firstRunContext.ts`.
+ *
+ * The slot is created eagerly at module evaluation. A slot that already holds
+ * a value of a different shape or version belongs to an incompatible paratix
+ * copy or version: the import fails closed instead of overwriting the foreign
+ * value or falling back to private per-copy state, so a secret is never
+ * silently left unmasked. Any in-process code can read the slot; this is
+ * accepted under the same-process trust that already lets playbooks and
+ * modules read every secret they use.
+ */
+const SECRET_SINK_STATE_KEY_NAME = "paratix.secretSink.state"
+const SECRET_SINK_STATE_KEY = Symbol.for(SECRET_SINK_STATE_KEY_NAME)
+
+function isSecretSinkState(value: unknown): value is SecretSinkState {
+  if (typeof value !== "object" || value === null) return false
+  return (
+    Reflect.get(value, "version") === 1 &&
+    Reflect.get(value, "counts") instanceof Map &&
+    Reflect.get(value, "scopeStorage") instanceof AsyncLocalStorage
+  )
+}
+
+function getSharedSecretSinkState(): SecretSinkState {
+  const registry = globalThis as Record<symbol, unknown>
+  const existing = registry[SECRET_SINK_STATE_KEY]
+  if (existing === undefined) {
+    const created: SecretSinkState = {
+      counts: new Map<string, number>(),
+      scopeStorage: new AsyncLocalStorage<Map<string, number>>(),
+      version: 1,
+    }
+    registry[SECRET_SINK_STATE_KEY] = created
+    return created
+  }
+  if (isSecretSinkState(existing)) return existing
+  throw new Error(
+    `globalThis[Symbol.for("${SECRET_SINK_STATE_KEY_NAME}")] holds a value that is not a version-1 ` +
+      "paratix secret sink state; another, incompatible paratix copy or version is loaded in this " +
+      "process. Make sure the CLI and the playbook resolve the same paratix installation."
+  )
+}
+
+const secretSinkState = getSharedSecretSinkState()
+const secretCounts = secretSinkState.counts
+const runScopedSecretCounts = secretSinkState.scopeStorage
 const REDACTED_PLACEHOLDER = REDACTED_SECRET_FIELD_PLACEHOLDER
 const CIRCULAR_PLACEHOLDER = "[Circular]"
 
@@ -232,7 +305,7 @@ function maskCauseValue(cause: unknown, secrets: readonly string[], secretList: 
 }
 
 function buildMaskedErrorClone(error: Error, maskedMessage: string, secretList: string[]): Error {
-  if (error instanceof CommandError) {
+  if (isCommandError(error)) {
     return new CommandError(
       maskedMessage,
       maskSecrets(error.fullStdout, secretList),

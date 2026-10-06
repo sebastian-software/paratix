@@ -1,10 +1,11 @@
 import type { ExecResult, SshConnection } from "../types.js"
 
-import { shellQuote, SudoInputUnsupportedError } from "../ssh.js"
+import { isSudoInputUnsupportedError, shellQuote, type SudoInputUnsupportedError } from "../ssh.js"
 import {
   CAPTURE_TRUNCATION_MARKER,
   DEFAULT_MAX_OUTPUT_BYTES,
-  InvalidUtf8OutputError,
+  type InvalidUtf8OutputError,
+  isInvalidUtf8OutputError,
 } from "../sshHelpers.js"
 
 /**
@@ -94,7 +95,7 @@ export type BatchedProbeOutcome =
 function isProbeOwnRejection(
   error: unknown
 ): error is InvalidUtf8OutputError | SudoInputUnsupportedError {
-  return error instanceof InvalidUtf8OutputError || error instanceof SudoInputUnsupportedError
+  return isInvalidUtf8OutputError(error) || isSudoInputUnsupportedError(error)
 }
 
 /**

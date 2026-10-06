@@ -20,8 +20,50 @@ import { AsyncLocalStorage } from "node:async_hooks"
  *
  * R-0000027 introduced the `pause` use case; R-0000052 generalized the helper
  * for `net.waitFor` so its polling loop aborts on shutdown.
+ *
+ * #193: the storage itself MUST be a single process-wide singleton. paratix
+ * ships this module in two separate bundles — the CLI (`cli.js`, whose runner
+ * installs the signal) and the library (`index.js` plus its shared chunk,
+ * imported by the user's playbook, whose `pause`, `net.waitFor`, `op` and
+ * recipes read it). Without sharing, each bundle would build its own
+ * {@link AsyncLocalStorage}: the runner would install the signal in one
+ * instance, every library-side wait would read `undefined` from the other and
+ * Ctrl-C would no longer unblock it. A `Symbol.for`-keyed slot on `globalThis`
+ * collapses every copy of this module onto one storage, mirroring the slots
+ * in `output.ts`, `secretPrewarm.ts` and `firstRunContext.ts`. The slot is
+ * created eagerly at module evaluation. A slot that already holds anything
+ * other than an {@link AsyncLocalStorage} belongs to an incompatible paratix
+ * copy or version: the import fails closed instead of overwriting the foreign
+ * value or falling back to private per-copy state.
  */
-const runnerAbortSignalStorage = new AsyncLocalStorage<AbortSignal | undefined>()
+const RUNNER_ABORT_SIGNAL_STORAGE_KEY_NAME = "paratix.runnerAbortSignal.storage"
+const RUNNER_ABORT_SIGNAL_STORAGE_KEY = Symbol.for(RUNNER_ABORT_SIGNAL_STORAGE_KEY_NAME)
+
+// The store type is erased at runtime; every paratix copy writes only
+// `AbortSignal | undefined` into this storage.
+function isRunnerAbortSignalStorage(
+  value: unknown
+): value is AsyncLocalStorage<AbortSignal | undefined> {
+  return value instanceof AsyncLocalStorage
+}
+
+function getSharedRunnerAbortSignalStorage(): AsyncLocalStorage<AbortSignal | undefined> {
+  const registry = globalThis as Record<symbol, unknown>
+  const existing = registry[RUNNER_ABORT_SIGNAL_STORAGE_KEY]
+  if (existing === undefined) {
+    const created = new AsyncLocalStorage<AbortSignal | undefined>()
+    registry[RUNNER_ABORT_SIGNAL_STORAGE_KEY] = created
+    return created
+  }
+  if (isRunnerAbortSignalStorage(existing)) return existing
+  throw new Error(
+    `globalThis[Symbol.for("${RUNNER_ABORT_SIGNAL_STORAGE_KEY_NAME}")] holds a value that is not an ` +
+      "AsyncLocalStorage; another, incompatible paratix copy or version is loaded in this process. " +
+      "Make sure the CLI and the playbook resolve the same paratix installation."
+  )
+}
+
+const runnerAbortSignalStorage = getSharedRunnerAbortSignalStorage()
 
 /**
  * Runs `body` while {@link getRunnerAbortSignal} resolves to `signal` for the
