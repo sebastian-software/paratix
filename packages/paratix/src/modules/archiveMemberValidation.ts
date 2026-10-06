@@ -17,7 +17,7 @@ export const ARCHIVE_CAPTURE_LIMIT_BYTES = 16_777_216
  * R-0000067: select the appropriate `tar` listing flag for an archive based
  * on the source extension. The `v` flag is intentionally included so the
  * output also encodes symlink/hardlink targets via the `name -> link`
- * syntax. The match mirrors `extractCommand` in archive.ts.
+ * syntax. The match mirrors `extractCommand` in archiveStagingMergeScript.ts.
  *
  * @param lowerSource - The archive source path, lower-cased.
  * @returns The `tar` list flags or null when the format is not tar-based.

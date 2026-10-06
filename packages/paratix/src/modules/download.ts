@@ -288,7 +288,7 @@ async function readDownloadOwnership(
     silent: true,
   })
   if (result.code !== 0) return { group: "", groupId: "", mode: "", owner: "", ownerId: "" }
-  // R-0000253: split on any whitespace run (mirrors mount.ts/archive.ts)
+  // R-0000253: split on any whitespace run (mirrors mount.ts/archiveCheck.ts)
   // because BusyBox/POSIX `stat` implementations may emit tabs or multiple
   // spaces between the columns, which broke the previous single-space
   // split and produced empty owner/group fields.
@@ -1053,7 +1053,7 @@ async function runCurlDownload(
   if (targetDirectoryFailure != null) return targetDirectoryFailure
   // R-0000107: validate the mktemp output before any subcommand consumes
   // it. Reuses the shared validateMktempPath helper from ssh.ts (already
-  // applied in aptKeyHelpers.ts and archive.ts/allocateRemoteUploadPath).
+  // applied in aptKeyHelpers.ts and archiveApply.ts/allocateRemoteUploadPath).
   const downloadParameters = await allocateTemporaryDownloadParameters(conn, parameters)
   try {
     const outcome = await runCurlDownloadCore(conn, parameters, downloadParameters)

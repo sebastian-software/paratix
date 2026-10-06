@@ -8,22 +8,26 @@ import { runSymlinkContainmentBackstop } from "../../src/modules/archiveContainm
 import {
   buildContainmentCheckScript,
   buildContainmentClearScript,
+  clearContainmentEntries,
+  noContainmentEntriesCommand,
+  recordContainmentFailure,
+} from "../../src/modules/archiveContainmentEntries.js"
+import {
   buildContainmentEstablishCommand,
   buildContainmentEstablishScript,
-  clearContainmentEntries,
   CONTAINMENT_ENTRY_READ_LIMIT,
   CONTAINMENT_ESTABLISH_CAPTURE_LIMIT_BYTES,
+  containmentEstablishFailure,
+  establishContainmentEntry,
+  parseContainmentEstablishOutput,
+} from "../../src/modules/archiveContainmentEstablish.js"
+import {
   CONTAINMENT_FLAG_BODY_LIMIT_BYTES,
   CONTAINMENT_FLAG_LINK_LIMIT,
-  containmentEstablishFailure,
   containmentFlagBody,
   type ContainmentPaths,
-  establishContainmentEntry,
-  noContainmentEntriesCommand,
   parseContainmentEntryBytes,
-  parseContainmentEstablishOutput,
   parseContainmentFlag,
-  recordContainmentFailure,
   TOO_MANY_OFFENDING_LINKS,
 } from "../../src/modules/archiveContainmentFlag.js"
 import {

@@ -5,13 +5,7 @@ import { describe, expect, it, vi } from "vitest"
 
 import type { ExecOptions, ExecResult, ModuleResult, SshConnection } from "../../src/types.js"
 
-import {
-  archive,
-  boundedStagingMergeCommand,
-  buildStagingMergeExec,
-  buildStagingMergeScript,
-  STAGING_MERGE_TIME_LIMITS,
-} from "../../src/modules/archive.js"
+import { archive } from "../../src/modules/archive.js"
 import {
   POST_MERGE_VIOLATION_REPORT_LIMIT,
   runSymlinkContainmentBackstop,
@@ -22,15 +16,19 @@ import {
 } from "../../src/modules/archiveContainmentEnforcement.js"
 import {
   buildContainmentClearScript,
+  noContainmentEntriesCommand,
+} from "../../src/modules/archiveContainmentEntries.js"
+import {
   buildContainmentEstablishCommand,
   buildContainmentEstablishScript,
   CONTAINMENT_ENTRY_READ_LIMIT,
   CONTAINMENT_ESTABLISH_CAPTURE_LIMIT_BYTES,
+} from "../../src/modules/archiveContainmentEstablish.js"
+import {
   CONTAINMENT_FLAG_BODY_LIMIT_BYTES,
   CONTAINMENT_FLAG_LINK_LIMIT,
   containmentFlagBody,
   type ContainmentPaths,
-  noContainmentEntriesCommand,
   parseContainmentFlag,
   TOO_MANY_OFFENDING_LINKS,
   UNIDENTIFIED_OFFENDING_LINKS,
@@ -53,6 +51,12 @@ import {
   buildSymlinkProbeScript,
   encodeNulPayload,
 } from "../../src/modules/archiveProbe.js"
+import {
+  boundedStagingMergeCommand,
+  buildStagingMergeExec,
+  buildStagingMergeScript,
+  STAGING_MERGE_TIME_LIMITS,
+} from "../../src/modules/archiveStagingMergeScript.js"
 import { SYMLINK_LISTING_CAPTURE_LIMIT_BYTES } from "../../src/modules/archiveSymlinkListing.js"
 import { tarListingScript } from "../../src/modules/archiveTarListing.js"
 import { parseTarListing } from "../../src/modules/archiveTarListingParser.js"

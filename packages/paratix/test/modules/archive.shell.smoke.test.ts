@@ -40,12 +40,6 @@ import type {
 } from "../../src/modules/archiveLinkValidation.js"
 import type { ArchiveMember } from "../../src/modules/archiveMemberValidation.js"
 
-import {
-  boundedStagingMergeCommand,
-  buildStagingMergeExec,
-  buildStagingMergeScript,
-  type StagingMergeTimeLimits,
-} from "../../src/modules/archive.js"
 import { runSymlinkContainmentBackstop } from "../../src/modules/archiveContainmentBackstop.js"
 import {
   enforceSymlinkContainment,
@@ -54,16 +48,20 @@ import {
   symlinkListingEntries,
 } from "../../src/modules/archiveContainmentEnforcement.js"
 import {
-  buildContainmentEstablishScript,
   clearContainmentEntries,
+  noContainmentEntriesCommand,
+} from "../../src/modules/archiveContainmentEntries.js"
+import {
+  buildContainmentEstablishScript,
   CONTAINMENT_ENTRY_READ_LIMIT,
+  type ContainmentLedger,
+  establishContainmentEntry,
+  parseContainmentEstablishOutput,
+} from "../../src/modules/archiveContainmentEstablish.js"
+import {
   CONTAINMENT_FLAG_BODY_LIMIT_BYTES,
   containmentFlagBody,
-  type ContainmentLedger,
   type ContainmentPaths,
-  establishContainmentEntry,
-  noContainmentEntriesCommand,
-  parseContainmentEstablishOutput,
 } from "../../src/modules/archiveContainmentFlag.js"
 import {
   archiveContainmentScope,
@@ -88,6 +86,12 @@ import {
   encodeSymlinkListingEntry,
   symlinkListingBatchScript,
 } from "../../src/modules/archiveProbe.js"
+import {
+  boundedStagingMergeCommand,
+  buildStagingMergeExec,
+  buildStagingMergeScript,
+  type StagingMergeTimeLimits,
+} from "../../src/modules/archiveStagingMergeScript.js"
 import {
   decodeListingField,
   hostStateFromListing,
