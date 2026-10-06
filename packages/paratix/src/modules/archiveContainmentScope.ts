@@ -9,6 +9,8 @@
  * helpers here derive that scope from the archive members and locate member
  * paths inside host directories the listing could not read.
  */
+import { createHash } from "node:crypto"
+
 import { type ArchiveMember, normalizeArchiveMemberPath } from "./archiveMemberValidation.js"
 import { pathNameVariantKey } from "./archiveSymlinkResolver.js"
 
@@ -119,6 +121,52 @@ export function archiveContainmentScope(
     }
   }
   return { archiveLinks, written }
+}
+
+/**
+ * Issue #227: the algorithm ID {@link containmentScopeDigest} hashes first. A
+ * change to how the scope is derived or encoded must change this ID, so that a
+ * digest an older derivation recorded never matches a newer one.
+ */
+export const CONTAINMENT_SCOPE_DIGEST_ALGORITHM = "paratix-archive-containment-scope/1"
+
+/**
+ * Issue #227: order strings by UTF-16 code unit, independent of the locale.
+ *
+ * @param left - One string.
+ * @param right - The other string.
+ * @returns A negative number, zero or a positive number.
+ */
+function compareCodeUnits(left: string, right: string): number {
+  if (left === right) return 0
+  return left < right ? -1 : 1
+}
+
+/**
+ * Issue #227: the digest of an archive's containment scope that the
+ * containment entry of an apply records, so a later apply of an archive with
+ * an equivalent containment scope can recognize the entry an interrupted apply
+ * left.
+ *
+ * It is the lowercase hex SHA-256 of the JSON array of
+ * {@link CONTAINMENT_SCOPE_DIGEST_ALGORITHM}, `process.versions.unicode`, the
+ * `archiveLinks` keys and the `written` keys, each set sorted by UTF-16 code
+ * unit. The two sets stay separate arrays, so moving a key from one to the
+ * other changes the digest; the Unicode version is included because
+ * {@link pathNameVariantKey} depends on the engine's Unicode tables, and a key
+ * derived under other tables must not match.
+ *
+ * @param scope - The scope, see {@link archiveContainmentScope}.
+ * @returns 64 lowercase hex digits.
+ */
+export function containmentScopeDigest(scope: ArchiveContainmentScope): string {
+  const encoding = JSON.stringify([
+    CONTAINMENT_SCOPE_DIGEST_ALGORITHM,
+    process.versions.unicode,
+    [...scope.archiveLinks].toSorted(compareCodeUnits),
+    [...scope.written].toSorted(compareCodeUnits),
+  ])
+  return createHash("sha256").update(encoding, "utf8").digest("hex")
 }
 
 /**

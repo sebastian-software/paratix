@@ -181,8 +181,9 @@ async function writeOwnEntry(
 /**
  * Issue #219: record a failed apply's outcome in its own entry, best effort;
  * other entries are never touched. When the write fails, the `in-progress`
- * body stays (if the entry still exists), which reads as unknown, so the next
- * apply verifies the whole destination; the write failure is appended to the
+ * body stays (if the entry still exists), so the next apply verifies the
+ * whole destination, or (Issue #227) every link this archive can affect when
+ * it extracts the same archive; the write failure is appended to the
  * apply's failure. The message says so conditionally: a concurrent apply may
  * have verified the destination and removed the entry meanwhile (race 1).
  *
@@ -202,7 +203,7 @@ export async function recordContainmentFailure(
   if (recordFailure === null) return failure
   const message = failure.error?.message ?? "[archive.extract] apply failed"
   return failed(
-    `${message}; [archive.extract] ${recordFailure}; the entry still marks the apply as unfinished, so the next apply verifies the whole destination, unless another apply removed it after verifying the destination`
+    `${message}; [archive.extract] ${recordFailure}; the entry still marks the apply as unfinished, so the next apply verifies the whole destination, or every link this archive can affect when it extracts the same archive, unless another apply removed it after verifying the destination`
   )
 }
 

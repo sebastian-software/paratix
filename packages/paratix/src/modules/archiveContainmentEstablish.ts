@@ -11,8 +11,10 @@ import { shellQuote } from "../ssh.js"
 import { CAPTURE_TRUNCATION_MARKER } from "../sshHelpers.js"
 import {
   CONTAINMENT_FLAG_BODY_LIMIT_BYTES,
+  containmentEntryForScope,
   containmentFlagBody,
   type ContainmentPaths,
+  IN_PROGRESS_STATE,
   parseContainmentEntryBytes,
   type ParsedContainmentFlag,
 } from "./archiveContainmentFlag.js"
@@ -65,9 +67,6 @@ export const CONTAINMENT_ESTABLISH_EXIT = {
   storeNotDirectory: 6,
   storeSymlink: 5,
 } as const
-
-/** Issue #219: the body an apply creates its own entry with. */
-const IN_PROGRESS_BODY = containmentFlagBody({ links: [], state: "in-progress" })
 
 /** Issue #219: the names the establish exec reports as entries. */
 const ENTRY_NAME_PATTERN = /^run-[\dA-Za-z\-]*$/v
@@ -175,19 +174,33 @@ export function buildContainmentEstablishScript(): string {
 }
 
 /**
+ * Issue #227: the inputs of the establish exec and of reading its output.
+ *
+ * - `ownEntry`: the own entry's absolute path inside the entry directory.
+ * - `scopeDigest`: the digest of this apply's containment scope, see
+ *   `containmentScopeDigest`; the own entry records it, and an entry that
+ *   records the same digest is covered by this apply's scoped verification.
+ */
+export type ContainmentEstablishInputs = {
+  ownEntry: string
+  scopeDigest: string
+} & ContainmentPaths
+
+/**
  * Issue #219: the establish exec as an explicit `sh -c` command with the
  * paths as positional parameters, see {@link buildContainmentEstablishScript}.
+ * Issue #227: `$5` is the v2 `in-progress` body with the scope digest; its
+ * size is fixed, so it stays in argv whatever the member count.
  *
- * @param parameters - Paths and the own entry.
+ * @param parameters - Paths, the own entry and the scope digest.
  * @param parameters.directory - The flags directory.
  * @param parameters.entryDirectory - The destination's entry directory.
  * @param parameters.legacyFlag - The old single flag file.
  * @param parameters.ownEntry - The own entry's absolute path inside the entry directory.
+ * @param parameters.scopeDigest - The digest of this apply's containment scope.
  * @returns The `sh -c` command line with the quoted script and parameters.
  */
-export function buildContainmentEstablishCommand(
-  parameters: { ownEntry: string } & ContainmentPaths
-): string {
+export function buildContainmentEstablishCommand(parameters: ContainmentEstablishInputs): string {
   return [
     "sh -c",
     shellQuote(buildContainmentEstablishScript()),
@@ -196,7 +209,7 @@ export function buildContainmentEstablishCommand(
     shellQuote(parameters.legacyFlag),
     shellQuote(parameters.entryDirectory),
     shellQuote(parameters.ownEntry),
-    shellQuote(IN_PROGRESS_BODY),
+    shellQuote(containmentFlagBody({ scope: parameters.scopeDigest, state: IN_PROGRESS_STATE })),
   ].join(" ")
 }
 
@@ -289,15 +302,20 @@ function establishLines(stdout: string, paths: ContainmentPaths): EstablishLine[
  * and removes no other entry; output the script does not print, or a missing
  * `done` line, returns null (unreadable).
  *
+ * Issue #227: an entry whose scope digest equals this apply's is removable,
+ * carries no links and needs no destination-wide verification; one with
+ * another digest counts as unknown.
+ *
  * @param stdout - The captured stdout.
- * @param parameters - The containment paths and the own entry's absolute path.
+ * @param parameters - The containment paths, the own entry's absolute path
+ *   and this apply's scope digest.
  * @returns The ledger, or null when the output cannot be trusted.
  */
 export function parseContainmentEstablishOutput(
   stdout: string,
-  parameters: { ownEntry: string } & ContainmentPaths
+  parameters: ContainmentEstablishInputs
 ): ContainmentLedger | null {
-  const { legacyFlag, ownEntry } = parameters
+  const { legacyFlag, ownEntry, scopeDigest } = parameters
   if (stdout.endsWith(CAPTURE_TRUNCATION_MARKER)) {
     return { carried: [], ownEntry, removable: [], verifyWholeDestination: true }
   }
@@ -315,7 +333,10 @@ export function parseContainmentEstablishOutput(
     // entries past the read limit.
     verifyWholeDestination:
       lines.some(({ kind }) => kind === "more") ||
-      entries.some(({ path, state }) => path === legacyFlag || state.kind === "unknown"),
+      entries.some(
+        ({ path, state }) =>
+          path === legacyFlag || containmentEntryForScope(state, scopeDigest).kind === "unknown"
+      ),
   }
 }
 
@@ -391,25 +412,29 @@ export function containmentEstablishFailure(
  * that cannot be created — refuses the apply before anything else happens,
  * and so does an exec that throws or prints what the script does not. An
  * entry without a usable list of offending links does not refuse: the apply
- * runs and verifies the whole destination after its merge.
+ * runs and verifies the whole destination after its merge. Issue #227: the
+ * own entry records the scope digest, and an entry with the same digest needs
+ * no destination-wide verification.
  *
  * @param conn - The SSH connection.
  * @param parameters - Establish inputs.
  * @param parameters.ownEntryName - The own entry's name, see `newContainmentEntryName` in `archiveContainmentFlag.ts`.
  * @param parameters.paths - Where the containment state lives.
+ * @param parameters.scopeDigest - The digest of this apply's containment
+ *   scope, see `containmentScopeDigest`.
  * @param parameters.source - The archive source, for failure messages.
  * @returns The ledger, see {@link ContainmentLedger}, or the refusal.
  */
 export async function establishContainmentEntry(
   conn: SshConnection,
-  parameters: { ownEntryName: string; paths: ContainmentPaths; source: string }
+  parameters: { ownEntryName: string; paths: ContainmentPaths; scopeDigest: string; source: string }
 ): Promise<ContainmentLedger | ModuleResult> {
-  const { ownEntryName, paths, source } = parameters
+  const { ownEntryName, paths, scopeDigest, source } = parameters
   const refusal = (reason: string): ModuleResult =>
     failed(
       `[archive.extract] refusing to extract ${source}: ${reason}; the containment entry must be in place before the destination is touched`
     )
-  const inputs = { ...paths, ownEntry: `${paths.entryDirectory}/${ownEntryName}` }
+  const inputs = { ...paths, ownEntry: `${paths.entryDirectory}/${ownEntryName}`, scopeDigest }
   let result: Awaited<ReturnType<SshConnection["exec"]>>
   try {
     result = await conn.exec(buildContainmentEstablishCommand(inputs), {

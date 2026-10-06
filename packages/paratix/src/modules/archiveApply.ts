@@ -21,6 +21,7 @@ import {
 } from "./archiveContainmentEntries.js"
 import { type ContainmentLedger, establishContainmentEntry } from "./archiveContainmentEstablish.js"
 import { type ContainmentFlagRecord, newContainmentEntryName } from "./archiveContainmentFlag.js"
+import { archiveContainmentScope, containmentScopeDigest } from "./archiveContainmentScope.js"
 import {
   archiveMemberDestinationPaths,
   createExtractDestinationDirectory,
@@ -337,9 +338,14 @@ async function runExtraction(
   // before anything else is written. An entry without a usable list of
   // offending links does not: the apply runs and its post-merge backstop
   // verifies the whole destination before that entry is removed.
+  // Issue #227: the own entry records the digest of this archive's
+  // containment scope; an entry an interrupted apply of the same archive
+  // left records the same digest and is covered by the scoped backstop.
+  const scopeDigest = containmentScopeDigest(archiveContainmentScope(members))
   const ledger = await establishContainmentEntry(conn, {
     ownEntryName: newContainmentEntryName(),
     paths: containment,
+    scopeDigest,
     source,
   })
   if ("status" in ledger) return ledger
@@ -357,7 +363,11 @@ async function runExtraction(
     })
   } catch (error) {
     // Issue #219: best effort; the error is rethrown whatever the write does.
-    await recordContainmentFailureAfterThrow(conn, ledger.ownEntry, recordAfterThrow(progress))
+    await recordContainmentFailureAfterThrow(
+      conn,
+      ledger.ownEntry,
+      recordAfterThrow(progress, scopeDigest)
+    )
     throw error
   }
 }

@@ -16,7 +16,6 @@ import {
 import { validateMergedSymlinkContainment } from "./archiveContainmentEnforcement.js"
 import {
   type ContainmentFlagRecord,
-  STOPPED_AFTER_MERGE_STARTED,
   UNIDENTIFIED_OFFENDING_LINKS,
 } from "./archiveContainmentFlag.js"
 import { containmentPathsFor } from "./archiveMarker.js"
@@ -209,22 +208,29 @@ export async function extractAndValidateSymlinkContainment(
 /**
  * Issue #219: what a thrown error records in the own entry, by how far the
  * apply got: an empty `failed` list before the merge (nothing was
- * published), `unknown` once the merge started (nobody knows what it
- * published), and no links once the backstop passed. The merge-started case
- * is written too, not left to the `in-progress` body: a concurrent clean
- * apply may have removed that entry meanwhile (race 1), and only a write
- * creates it again.
+ * published), `stopped` with the scope digest once the merge started (the
+ * merge published at most what that scope covers, Issue #227), and no links
+ * once the backstop passed. The merge-started case is written too, not left
+ * to the `in-progress` body: a concurrent clean apply may have removed that
+ * entry meanwhile (race 1), and only a write creates it again. The `stopped`
+ * body differs from the `in-progress` one, so its hash changes, and a
+ * concurrent apply that read the `in-progress` body keeps the rewritten entry
+ * instead of removing it.
  *
  * @param progress - How far the apply got.
+ * @param scopeDigest - The digest of the apply's containment scope.
  * @returns What to write into the own entry.
  */
-export function recordAfterThrow(progress: ContainmentProgress): ContainmentFlagRecord {
+export function recordAfterThrow(
+  progress: ContainmentProgress,
+  scopeDigest: string
+): ContainmentFlagRecord {
   switch (progress.phase()) {
     case "before-merge": {
       return NOTHING_PUBLISHED
     }
     case "merge-started": {
-      return { reason: STOPPED_AFTER_MERGE_STARTED, state: "unknown" }
+      return { scope: scopeDigest, state: "stopped" }
     }
     case "verified": {
       return { links: [], state: "failed" }
