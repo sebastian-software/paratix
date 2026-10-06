@@ -237,7 +237,7 @@ const DISCONNECT_DESTROY_FALLBACK_MS = 5000
 // fan-outs used to issue 8 at once, one channel below that ceiling, which
 // surfaced as an opaque `Channel open failure` on archives with many members.
 // Bounding the channels here rather than at each call site keeps one authority
-// for the limit: `archive.ts`, the `known_hosts` filter in `modules/ssh.ts` and
+// for the limit: `archiveCheck.ts`, the `known_hosts` filter in `modules/ssh.ts` and
 // the compose image probes all share it, as does any future fan-out. 4 leaves
 // room for a concurrent SFTP channel plus headroom under the stock default.
 const MAX_CONCURRENT_SESSION_CHANNELS = 4
