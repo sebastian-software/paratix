@@ -2255,6 +2255,9 @@ describe("CLI entrypoint", () => {
         dryRun: true,
         envFile: envFilePath,
         envOverrides: { INLINE_ENV: "inline", PARATIX_FIRST_RUN: "true" },
+        // #201: the runner owns the first-run scope for check/apply, so the
+        // CLI must forward the flag explicitly.
+        firstRun: true,
         reconnectTimeout: 12_500,
         verbose: true,
       })
@@ -2268,7 +2271,7 @@ describe("CLI entrypoint", () => {
   it("omits reconnectTimeout when the apply option is not provided", async () => {
     const tempDirectory = mkdtempSync(join(tmpdir(), "paratix-cli-apply-options-"))
     const playbookPath = join(tempDirectory, "capture-default-options.mjs")
-    const calls: Array<{ options: unknown }> = []
+    const calls: Array<{ options: RunOptions }> = []
     const logSpy = vi.spyOn(console, "log").mockImplementation(() => {
       /* suppress CLI header */
     })
@@ -2304,6 +2307,9 @@ describe("CLI entrypoint", () => {
 
       expect(calls).toHaveLength(1)
       expect(calls[0]?.options).not.toHaveProperty("reconnectTimeout")
+      // #201: `firstRun: false` is forwarded explicitly so the runner opens a
+      // masking `false` scope instead of inheriting an outer one.
+      expect(calls[0]?.options).toHaveProperty("firstRun", false)
     } finally {
       logSpy.mockRestore()
       rmSync(tempDirectory, { force: true, recursive: true })

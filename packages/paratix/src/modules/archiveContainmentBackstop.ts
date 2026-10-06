@@ -19,9 +19,13 @@ import type { ModuleResult, SshConnection } from "../types.js"
 import type { ArchiveMember } from "./archiveMemberValidation.js"
 
 import { failed } from "../moduleFailure.js"
-import { shellQuote } from "../ssh.js"
+import { intendedLinksHint } from "./archiveContainmentEntries.js"
 import { archiveHasSymlinks } from "./archiveContainmentScope.js"
-import { type KernelMismatchPoint, runKernelCrossCheck } from "./archiveKernelCrossCheck.js"
+import {
+  type KernelMismatch,
+  type KernelMismatchPoint,
+  runKernelCrossCheck,
+} from "./archiveKernelCrossCheck.js"
 import { type MergedSymlink, variantDescription } from "./archiveLinkValidation.js"
 import {
   inListingOrder,
@@ -48,7 +52,7 @@ const CHECKED_AFTER_MERGE =
  * usable list of offending links.
  */
 const CHECKED_WHOLE_DESTINATION_AFTER_MERGE =
-  "after the merge, every symlink under the destination is checked, because a containment entry does not say which links need verification (an apply that stopped without finishing or lost its extract lock, a concurrent apply or the flag file of an older paratix version, or too many entries)"
+  "after the merge, every symlink under the destination is checked, because a containment entry does not say which links need verification (an apply of another archive or of another paratix version that stopped without finishing or lost its extract lock, a concurrent apply of an older paratix version, a failed apply that could not record its links, an older paratix version's flag file, or too many entries)"
 
 /**
  * Issue #219: what an operator has to do after a post-merge violation. The
@@ -63,47 +67,8 @@ const CHECKED_WHOLE_DESTINATION_AFTER_MERGE =
 const NOTHING_CHANGED_AFTER_MERGE =
   "nothing was removed or changed; while the offending symlinks remain, remove them or point them inside the destination manually; this apply's containment entry records them and keeps check at needs-apply, and a later apply of any source verifies them again (every symlink under the destination when the entry could not record them) and, only when they pass, removes the entries it read that are still unchanged"
 
-/**
- * Issue #219: the way out when the offending links are intended, for example
- * a virtualenv interpreter link that points into `/usr/bin` after an
- * interrupted apply forced a whole-destination check. Such a link fails every
- * later check, so the operator first has to stop or wait for all applies to
- * this destination to finish, with no new applies until inspection and state
- * clearing are complete. No apply may be active when inspection begins: the
- * tree must stay unchanged while it is checked, and clearing state must not
- * remove a live apply's in-progress entry. The operator can then check the
- * tree, clear the destination's containment entries and legacy flag, and
- * retry. This hint is offered only when the current archive's normal scope
- * passes without that state. Naming both concrete paths keeps the step
- * copyable; it is not a recommendation to clear entries blindly.
- *
- * Issue #224: applies to one destination are serialized by its extract lock,
- * so the hint names the lock directory: while it exists an apply runs or was
- * interrupted. A lock an interrupted apply left is reclaimed by the next
- * apply once its holder marker is stale; removing it by hand is safe only
- * when no apply for the destination runs anywhere, because a live holder
- * would then lose its lock to the next apply.
- *
- * @param paths - The destination's containment state paths.
- * @param paths.entryDirectory - The destination's containment entry directory.
- * @param paths.legacyFlag - The destination's containment flag from older versions.
- * @param paths.lockPath - Issue #224: the destination's extract lock directory;
- *   omitted, the hint does not name it.
- * @returns The sentence appended to a post-merge violation message.
- */
-function intendedLinksHint(paths: {
-  entryDirectory: string
-  legacyFlag: string
-  lockPath?: string
-}): string {
-  const { entryDirectory, legacyFlag, lockPath } = paths
-  const holder = lockPath === undefined ? "" : shellQuote(`${lockPath}/holder`)
-  const lock =
-    lockPath === undefined
-      ? ""
-      : ` (while the extract lock ${shellQuote(lockPath)} exists, an apply to this destination runs or was interrupted; the next apply reclaims an interrupted apply's lock once it is stale, and removing it by hand with rm -f -- ${holder} && rmdir -- ${shellQuote(lockPath)} is safe only when no apply for this destination runs anywhere)`
-  return `if the offending symlinks are intended (for example a virtualenv's interpreter link), they keep failing this check: first stop or wait for all archive.extract applies to this destination to finish and prevent new applies until inspection and state clearing are complete${lock}; then check the destination yourself and, before retrying, clear its containment state with rm -f -- ${shellQuote(entryDirectory)}/run-* ${shellQuote(legacyFlag)}`
-}
+/** Issue #219: the kind of a violation the host kernel reports. */
+const KERNEL_MISMATCH = "kernel-mismatch"
 
 /** Issue #219: how a violation names a link an earlier failed apply recorded. */
 const RECORDED_NOTE = ", recorded by an earlier failed apply,"
@@ -147,6 +112,45 @@ type UnlistedViolation = Extract<
 /** Issue #219: a post-merge listing, or why it cannot be trusted. */
 type PostMergeSymlinkReading = { detail: string; kind: "failed" } | PostMergeSymlinks
 
+/** Context every incomplete kernel cross-check carries in the backstop failure. */
+const KERNEL_CROSS_CHECK_INCOMPLETE = "kernel cross-check could not be completed"
+
+/**
+ * A kernel cross-check whose exec rejected (a dropped connection, a timeout)
+ * instead of reporting `failed`. It keeps the same context as a reported
+ * failure, so the backstop failure reads alike whichever way the cross-check
+ * stopped, and carries the rejection as its cause.
+ */
+class KernelCrossCheckIncompleteError extends Error {
+  public constructor(cause: unknown) {
+    super(
+      `${KERNEL_CROSS_CHECK_INCOMPLETE}: ${cause instanceof Error ? cause.message : String(cause)}`,
+      { cause }
+    )
+    this.name = "KernelCrossCheckIncompleteError"
+  }
+}
+
+/**
+ * Run the kernel cross-check and give a rejected exec the cross-check's
+ * context before it propagates.
+ *
+ * @param conn - The SSH connection.
+ * @param parameters - The cross-check inputs, see {@link runKernelCrossCheck}.
+ * @returns The cross-check outcome.
+ * @throws {KernelCrossCheckIncompleteError} When the cross-check's exec rejected.
+ */
+async function kernelCrossCheck(
+  conn: SshConnection,
+  parameters: Parameters<typeof runKernelCrossCheck>[1]
+): ReturnType<typeof runKernelCrossCheck> {
+  try {
+    return await runKernelCrossCheck(conn, parameters)
+  } catch (error) {
+    throw new KernelCrossCheckIncompleteError(error)
+  }
+}
+
 /**
  * Reuse the decoded listing to check whether state clearing would recover
  * the current archive. An unreadable directory cannot establish that the
@@ -165,6 +169,45 @@ function originalArchiveScope(
 ): ReturnType<typeof listingViolations> | undefined {
   if (!inputs.wholeDestination || (host.unreadable?.size ?? 0) > 0) return undefined
   return listingViolations({ ...inputs, recorded: new Set(), wholeDestination: false }, host)
+}
+
+/**
+ * Issue #219: every link the kernel cross-check of a judgement confirms: the
+ * links it places inside and the unjudged links they follow (see `followed`
+ * in `MergedSymlinkResolutions`).
+ *
+ * @param resolutions - The judgement's resolutions.
+ * @returns The cross-checked links by destination-relative path.
+ */
+function crossCheckedLinks(
+  resolutions: ReturnType<typeof listingViolations>["resolutions"]
+): Set<string> {
+  const links = new Set(resolutions.inside.keys())
+  for (const key of resolutions.inside.keys()) {
+    for (const link of resolutions.followed(key)) links.add(link)
+  }
+  return links
+}
+
+/**
+ * Issue #219: whether a kernel mismatch of the actual reading would also fail
+ * the current archive's scope without containment state: its link is
+ * cross-checked there as well, judged inside or followed by a link judged
+ * inside, so clearing state would not let the archive pass.
+ *
+ * @param scoped - The archive-scope judgement without recorded state.
+ * @param mismatches - The kernel mismatches of the actual reading.
+ * @returns True when no mismatch concerns a link the archive's scope checks.
+ */
+function scopeSurvivesKernel(
+  scoped: ReturnType<typeof listingViolations>,
+  mismatches: readonly KernelMismatch[]
+): boolean {
+  if (mismatches.length === 0) return true
+  const checked = crossCheckedLinks(scoped.resolutions)
+  return !mismatches.some(
+    ({ key, via }) => checked.has(key) || (via !== undefined && checked.has(via))
+  )
 }
 
 /**
@@ -201,8 +244,15 @@ function originalArchiveScope(
  * existing point of its target path with the resolver's location of that
  * point. A link the kernel resolves elsewhere, or whose nearest existing
  * point differs, is a `kernel-mismatch` violation; a cross-check that cannot
- * be completed fails the reading like a failed listing. Without judged links
- * inside, no cross-check runs.
+ * be completed fails the reading like a failed listing, and one whose exec
+ * rejected throws with the same context. Without judged links inside, no
+ * cross-check runs.
+ *
+ * Issue #219: the same exec also confirms the unjudged links a judged link
+ * follows. A mismatch there is a `kernel-mismatch` of the judged link that
+ * names the followed one as `via`, so only the judged link is reported and
+ * recorded; the followed host link is never recorded, and a later apply
+ * re-checks it through the recorded link that follows it.
  *
  * Issue #219: in a destination-wide verification every listed link is judged
  * from the same listing, every one judged inside rides in the same single
@@ -236,25 +286,25 @@ async function readPostMergeSymlinks(
   const ordered = (all: PostMergeViolation[]): PostMergeViolation[] =>
     wholeDestination ? inListingOrder(all, host.links) : all
   if (resolutions.inside.size === 0) return { ...reading, violations: ordered(violations) }
-  const kernel = await runKernelCrossCheck(conn, {
+  const kernel = await kernelCrossCheck(conn, {
     destination,
+    followed: resolutions.followed,
     links: resolutions.inside.keys(),
     trail: resolutions.trail,
   })
   if (kernel.kind === "failed") {
-    return { detail: `kernel cross-check could not be completed: ${kernel.detail}`, kind: "failed" }
+    return { detail: `${KERNEL_CROSS_CHECK_INCOMPLETE}: ${kernel.detail}`, kind: "failed" }
   }
-  const mismatches = kernel.mismatches.map(({ at, expected, key }): PostMergeViolation => ({
-    at,
-    expected,
-    key,
-    kind: "kernel-mismatch",
+  const mismatches = kernel.mismatches.map((mismatch): PostMergeViolation => ({
+    ...mismatch,
+    kind: KERNEL_MISMATCH,
   }))
   return {
     ...reading,
     clearingStateWouldPass:
       reading.clearingStateWouldPass &&
-      !kernel.mismatches.some(({ key }) => scoped?.resolutions.inside.has(key)),
+      scoped !== undefined &&
+      scopeSurvivesKernel(scoped, kernel.mismatches),
     violations: ordered([...violations, ...mismatches]),
   }
 }
@@ -328,11 +378,17 @@ function postMergeViolationDescription(
   ) {
     return unlistedPathDescription(destination, violation)
   }
-  const stored = reading.links.get(violation.key)?.stored ?? ""
+  const describe = (key: string): string =>
+    symlinkDescription(destination, key, reading.links.get(key)?.stored ?? "")
   // Issue #219: name a link an earlier failed apply recorded as such, so the
   // operator sees why a source that never touches it still fails.
   const recorded = reading.recorded.has(violation.key) ? RECORDED_NOTE : ""
-  const link = `${symlinkDescription(destination, violation.key, stored)}${recorded}`
+  const link = `${describe(violation.key)}${recorded}`
+  // Issue #219: a mismatch of a followed link is reported under the judged
+  // link that follows it; the followed link is named, not judged.
+  if (violation.kind === KERNEL_MISMATCH && violation.via !== undefined) {
+    return `${link} follows ${describe(violation.via)}, which ${kernelMismatchDescription(violation)}`
+  }
   return `${link} ${linkViolationReason(destination, violation)}`
 }
 
@@ -351,7 +407,7 @@ function linkViolationReason(
     case "escape": {
       return `resolves outside destination ${JSON.stringify(destination)}`
     }
-    case "kernel-mismatch": {
+    case KERNEL_MISMATCH: {
       return kernelMismatchDescription(violation)
     }
     case "limit": {
@@ -504,7 +560,9 @@ function offendingLinkKeys(
  * A listing that failed (including a missing or unusable `readlink`, a `find`
  * traversal error other than an unreadable directory with GNU find, and a
  * truncated capture), returned broken framing or a duplicate link, or whose
- * kernel cross-check could not be completed fails the run as well.
+ * kernel cross-check could not be completed fails the run as well. An exec
+ * rejection such as a dropped connection propagates instead of becoming a
+ * result; the apply's caller turns it into a failure as well.
  *
  * @param conn - The SSH connection.
  * @param parameters - Backstop inputs.

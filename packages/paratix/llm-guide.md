@@ -199,10 +199,13 @@ export default server({
 own directory (hardlinks: from the archive root) and through the archive's own symlinks, stays
 inside `destination`; absolute targets, a link in place of the destination root, members below an
 archive symlink, hardlinks to or through an archive symlink, a path that occurs more than once with
-a symlink among its occurrences and conflicting types or targets, and zip symlinks are rejected. The
-archive listing is decoded as strict UTF-8, never with replacement characters. `tar` lists the
-archive under a UTF-8 C locale (`C.UTF-8` or `C.utf8`) when the host has one and under `LC_ALL=C`
-otherwise (bsdtar always under `LC_ALL=C`); for GNU tar and bsdtar the escape sequences of the
+a symlink among its occurrences and conflicting types or targets, and zip symlinks are rejected. A
+member whose path, or whose hardlink target, has a `..` path segment is rejected in tar and zip
+archives, even when the normalized path would stay inside `destination`; `.` segments, a leading
+`./` and `..` in symlink targets remain allowed. The archive listing is decoded as strict UTF-8,
+never with replacement characters. `tar` lists the archive under a UTF-8 C locale (`C.UTF-8` or
+`C.utf8`) when the host has one and under `LC_ALL=C` otherwise (bsdtar always under `LC_ALL=C`);
+for GNU tar and bsdtar the escape sequences of the
 listing (`\NNN`, `\\` and the single-letter control escapes) are decoded back to the stored bytes,
 so non-ASCII names are accepted whatever locale the SSH session has. A member whose decoded name is
 not valid UTF-8, or whose name contains any other escape sequence, is rejected because it cannot be
@@ -259,7 +262,8 @@ host, a directory under `destination` that cannot be read or searched is reporte
 the listing: a judged link that resolves into it, or an archive member at or below it, refuses the
 extraction because it cannot be checked, while the links inside it are not judged (a known limit).
 Without GNU `find` (busybox, the BSDs), any unreadable directory under `destination` fails the
-check.
+check. A symlink under `destination` that cannot be read during the check fails it as well, with a
+message that names the link when its name can be transported.
 
 The host stops the merge with GNU `timeout` after 100 seconds (killing it 10 seconds later), before
 the 120-second command timeout; without `timeout` the merge fails before copying anything. Once the
@@ -278,8 +282,11 @@ point that exists on the host or in the model with the model's location of the s
 must exist and be the same object. A link the kernel resolves to a different object, whose nearest
 existing point differs or exists on one side only (for example a target that climbs with `..` out of
 a missing directory, even though nothing can be written through it yet), or of whose target path no
-point exists at all is a violation. A cross-check that cannot be completed fails the run, including
-a judged link whose cross-check entry would exceed 64 KiB (a target with very many segments). A
+point exists at all is a violation. When a judged link resolves through another symlink that is
+not judged itself, the same command cross-checks that link's target as well; a mismatch there is a
+violation of the judged link, names the followed link, and only the judged link is recorded. A
+cross-check that cannot be completed fails the run, including a judged link whose cross-check entry
+would exceed 64 KiB (a target with very many segments). A
 converged tree costs two commands when a judged symlink is placed inside, one otherwise, and none
 for an archive without symlinks (one listing plus at most one cross-check while containment entries
 record links or hold no usable list), independent of the number of members; neither a violation nor
@@ -295,43 +302,66 @@ Every apply records its outcome in its own containment entry, a file `run-<32 he
 destination's entry directory `/var/lib/paratix/flags/archive-containment-<sha256>.d/` (`<sha256>`
 is the SHA-256 of the normalized destination path). It creates that entry as `in-progress` once it
 holds the destination's extract lock (see below) and before it touches the destination, never
-replacing an existing name, and it only ever rewrites its own entry, never another apply's. When an
-apply fails after its merge started, its entry records the links its post-merge check identified,
-relative to `destination` (at most 256); a failure before the merge started published nothing and
-records an empty list, while the links other entries record stay in those entries. A later apply of
-any source into that destination reads every entry before it touches the destination and re-verifies
-the links all of them record in its own post-merge check, with the same lexical resolution and
-kernel cross-check: each must be gone or now resolve inside `destination`, otherwise the apply fails
-naming it and its own entry records it. If an entry holds no usable list, because an earlier apply
-did not finish (it was interrupted or could not record its outcome), its check could not identify
-the links (a failed listing or an archive member in an unreadable directory, for example), there
-were too many to record (more than 256 links or 64 KiB), or it is damaged, and likewise when the
-single flag file `archive-containment-<sha256>.failed` of older paratix versions exists or there are
-more than 16 entries, the apply still runs normally. Its post-merge check then verifies the whole
-destination: every symlink under `destination`, not only those the archive can affect, must resolve
-inside it, with the same lexical resolution and kernel cross-check, before `owner` is applied and
-the marker files are written. If the check finds links that escape or cannot be resolved, the apply
-fails naming them as above, removes nothing, and its own entry records exactly those links; the
-entries it read stay as well, so the next apply verifies those links and the whole destination
-again. If the check cannot complete (a failed listing, an unreadable directory or too many
-symlinks), the apply fails with the reason, its entry holds no usable list, and the next apply
-verifies the whole destination again. This check reuses the post-merge listing and cross-check:
-while an entry holds no usable list, it adds at most one listing and one cross-check for an archive
-without symlinks and no command for an archive with symlinks. Reading the entries and creating the
-own one costs one command, and removing them after a success one more, whatever the number of
-entries. No manual step is needed after an interrupted apply or an upgrade: the old flag file is
-read like an entry without a usable list, and the whole destination is verified before it is
-removed. A destination that deliberately contains a symlink pointing outside it fails this check
-while an entry holds no usable list, for example a virtualenv interpreter link into `/usr/bin` in a
-runner work tree after an interrupted apply. If violations persist, remove or repoint the offending
+replacing an existing name, and it only ever rewrites its own entry, never another apply's. The `in-progress` entry records the SHA-256 digest of the archive's
+containment scope (its symlinks and every path it writes, together with an algorithm identifier and
+the Unicode version of the Node.js runtime), so its size is fixed whatever the number of members. An
+apply that stops with an error after its merge started, before its post-merge check passed, rewrites
+its entry as `stopped` with the same digest. When an apply fails after its merge started, its entry
+records the links its post-merge check identified, relative to `destination` (at most 256); a
+failure before the merge started published nothing and records an empty list, while the links other
+entries record stay in those entries. A later apply of any source into that destination reads every
+entry before it touches the destination and re-verifies the links all of them record in its own
+post-merge check, with the same lexical resolution and kernel cross-check: each must be gone or now
+resolve inside `destination`, otherwise the apply fails naming it and its own entry records it. An
+entry of an earlier apply that did not finish (it was interrupted, stopped with an error after its
+merge started or could not record its outcome) records only that apply's scope digest. If the
+digest equals the current apply's own, the earlier apply extracted an archive with an equivalent containment scope (the same symlink paths and
+written paths, compared by name variant; member contents and symlink targets are not part of the
+digest) and could only have published links the current apply judges anyway: its own symlinks and
+every link whose resolution passes through a path it writes. The
+current apply's normal post-merge check then covers that entry, without verifying the whole
+destination, and a symlink outside that scope does not affect it, even one that points outside
+`destination`. If an entry holds no usable list, because its digest differs (the archive's
+containment scope changed, or the digest was derived by a paratix version with another scope
+derivation or under another Unicode
+version), it is an `in-progress` entry of an older paratix version, its check could not identify the
+links (a failed listing or an archive member in an unreadable directory, for example), there were
+too many to record (more than 256 links or 64 KiB), or it is damaged (empty, truncated or malformed,
+for example), and likewise when the single flag file `archive-containment-<sha256>.failed` of older
+paratix versions exists or there are more than 16 entries, the apply still runs normally. Its
+post-merge check then verifies the whole destination: every symlink under `destination`, not only
+those the archive can affect, must resolve inside it, with the same lexical resolution and kernel
+cross-check, before `owner` is applied and the marker files are written. If the check finds links
+that escape or cannot be resolved, the apply fails naming them as above, removes nothing, and its
+own entry records exactly those links; the entries it read stay as well, so the next apply verifies
+those links and the whole destination again. If the check cannot complete (a failed listing, an
+unreadable directory or too many symlinks), the apply fails with the reason, its entry holds no
+usable list, and the next apply verifies the whole destination again. This check reuses the
+post-merge listing and cross-check: while an entry holds no usable list, it adds at most one listing
+and one cross-check for an archive without symlinks and no command for an archive with symlinks.
+Reading the entries and creating the own one costs one command, and removing them after a success
+one more, whatever the number of entries. A `.paratix-stage.*` directory that a killed apply left
+inside `destination` is not judged by the normal post-merge check, because the archive link rules
+above keep its links inside it, and it is not removed. After an interrupted apply, a successful
+retry with an archive of equivalent containment scope (a matching digest) removes the entry without
+a manual step. After an
+upgrade, the old flag file and the entries of older paratix versions are read like entries without a
+usable list, and the whole destination is verified before they are removed; an older paratix version
+likewise reads an entry of this version as one without a usable list. A destination that
+deliberately contains a symlink pointing outside it fails this check while an entry holds no usable
+list, for example a virtualenv interpreter link into `/usr/bin` in a runner work tree when the
+archive's containment scope changed after an interrupted apply. If violations persist, remove or
+repoint the offending
 links and run again. If the offending links are intended and outside the scope the archive can
-affect, clearing the containment state can allow a retry to pass. The failure message offers this
-step only after a fully readable whole-destination check when the current archive's normal scope
-would pass without recorded links, including the kernel cross-check. First stop or wait for all
-`archive.extract` applies to this destination to finish; while its extract lock
-`/var/lib/paratix/flags/archive-extract-lock-<sha256>` exists, an apply runs or was interrupted (see
-below). Prevent new applies until both your inspection and state clearing are complete. An active
-apply can still publish more contents, so its entry must not be deleted through `run-*` while it is
+affect, clearing the containment state can allow a retry to pass. This manual step is needed only
+for entries without a usable digest or after the archive's containment scope changed. The failure
+message offers this step
+only after a fully readable whole-destination check when the current archive's normal scope
+would pass without recorded links, including the kernel
+cross-check. First stop or wait for all `archive.extract` applies to this destination to finish;
+while its extract lock `/var/lib/paratix/flags/archive-extract-lock-<sha256>` exists, an apply runs
+or was interrupted (see below). Prevent new applies until both your inspection and state clearing
+are complete. An active apply can still publish more contents, so its entry must not be deleted through `run-*` while it is
 running. Only then check the destination yourself and delete its `run-*` entries and the old flag
 file with
 `rm -f -- '/var/lib/paratix/flags/archive-containment-<sha256>.d'/run-* '/var/lib/paratix/flags/archive-containment-<sha256>.failed'`.
@@ -384,8 +414,9 @@ this lies above the guard's 300 seconds plus the host-side merge limit of 110 se
 the guard let start has ended before its lock can be reclaimed. An apply started shortly after an
 interrupted one can therefore still fail with the wait message, which says when the lock becomes
 reclaimable. Under the lock, an `in-progress` entry belongs to an apply that stopped without
-finishing, so the apply that reclaimed the lock verifies the whole destination as described above
-and, after a success, removes the entries; `check` then converges. To inspect a held lock, read the
+finishing, so the apply that reclaimed the lock verifies the whole destination as described above,
+or only its own archive's scope when the scope digests match, and, after a success, removes the
+entries; `check` then converges. To inspect a held lock, read the
 owner lines in its `holder` file. Remove the lock by hand with
 `rm -f -- '/var/lib/paratix/flags/archive-extract-lock-<sha256>/holder' && rmdir -- '/var/lib/paratix/flags/archive-extract-lock-<sha256>'`
 only when no `archive.extract` apply for that destination runs anywhere, on any controller;
@@ -395,8 +426,9 @@ exact command.
 Known limits remain. A forward jump of the target host's clock larger than the gap between the
 guard age and the reclaim age, or a merge stuck in uninterruptible I/O beyond its `timeout`, can
 make a live apply's lock look stale: another apply may then reclaim it and, after a clean
-whole-destination check, remove the live apply's `in-progress` entry; the guards stop the live apply
-at its next guarded step, but if it is killed, links its merge published after that check are
+whole-destination check, remove the live apply's `in-progress` entry; if both extract the same
+archive, their digests match, and the other apply removes it after its normal post-merge check
+alone. The guards stop the live apply at its next guarded step, but if it is killed, links its merge published after that check are
 checked by nobody. Nested destinations such as `/srv/a` and `/srv/a/b` use different locks and are
 not serialized against each other. Running older and newer paratix versions at the same time on one
 destination is not supported: older versions take no extract lock and still use the single flag
@@ -1147,8 +1179,10 @@ firstRun.stop("Bootstrap foundation complete; rerun without --first-run to conti
 
 ### `isFirstRun()`
 
-Returns `true` while the CLI imports and evaluates a playbook passed to `paratix apply --first-run`.
-Use it only while constructing the exported server definition:
+Returns `true` during a `paratix apply --first-run` invocation: while the CLI imports and evaluates
+the playbook, and for the entire run, including every module `check` and `apply`, recipe children,
+and `when` predicates. It returns `false` in ordinary runs and after a run has finished.
+Branch at import time to choose a different module list for the first run:
 
 ```typescript
 import { isFirstRun, server, type Module } from "paratix"
@@ -1164,10 +1198,10 @@ export default server({
 })
 ```
 
-The first-run context ends after import and definition generation. `isFirstRun()` therefore
-returns `false` later inside module `check` and `apply` methods, and there is no public `init` hook.
+A custom module can also call `isFirstRun()` inside its `check` or `apply` to adapt a single step.
+Use `firstRun.stop(...)` to end a first run at an explicit staging boundary.
 The helper reads an async-local context; the CLI does not mutate
-`process.env.PARATIX_FIRST_RUN`.
+`process.env.PARATIX_FIRST_RUN`, and child processes spawned by modules do not see the flag.
 
 ### `signals.flush(message?)`
 

@@ -19,11 +19,19 @@ import { archive, command, download, file, shellQuote } from "../../src/index.js
 import { clearHostKeyCache, HostKeyVerificationError } from "../../src/knownHosts.js"
 import { containmentFlagBody } from "../../src/modules/archiveContainmentFlag.js"
 import {
+  archiveContainmentScope,
+  containmentScopeDigest,
+} from "../../src/modules/archiveContainmentScope.js"
+import {
   archiveExtractLockName,
   archiveExtractLockSettings,
   resetArchiveExtractLockOverridesForTests,
   setArchiveExtractLockOverridesForTests,
 } from "../../src/modules/archiveExtractLock.js"
+import {
+  type ArchiveMember,
+  listArchiveMembers,
+} from "../../src/modules/archiveMemberValidation.js"
 import { buildLargeDownloadFlagPrefix } from "../../src/modules/download.js"
 import { sha256String } from "../../src/modules/fileHelpers.js"
 import { flagLockDisplayPath } from "../../src/modules/flagLock.js"
@@ -257,6 +265,23 @@ async function expectRemoteFileContent(
   expected: string
 ): Promise<void> {
   await expect(ssh.readFile(remotePath)).resolves.toBe(expected)
+}
+
+/**
+ * Issue #227: the members of a remote archive as the production listing
+ * parses them for `archive.extract`.
+ *
+ * @param ssh - The connection to list through.
+ * @param archivePath - Where the archive lies on the remote host.
+ * @returns Every member the listing reports, in listing order.
+ */
+async function listedArchiveMembers(
+  ssh: SshConnection,
+  archivePath: string
+): Promise<ArchiveMember[]> {
+  const listing = await listArchiveMembers(ssh, { archivePath, source: archivePath })
+  if ("failureReason" in listing) throw new Error(listing.failureReason)
+  return listing.members
 }
 
 async function expectModuleCheckOk(
@@ -1164,6 +1189,90 @@ describe.skipIf(SKIP_WITHOUT_DOCKER)("Paratix integration", () => {
     }
   })
 
+  // #201: the playbook imports `isFirstRun` from dist/index.js while the CLI
+  // opens the first-run scope in dist/cli.js. Under `--first-run` the flag must
+  // reach the playbook import and every module check/apply against a real
+  // SSH server.
+  it("exposes isFirstRun() to a custom module check and apply through the built apply CLI with --first-run", async () => {
+    const environment = getEnvironment()
+    const packageDirectory = resolve(import.meta.dirname, "../..")
+    const distCliPath = resolve(packageDirectory, "dist/cli.js")
+    const distIndexUrl = pathToFileURL(resolve(packageDirectory, "dist/index.js")).href
+    let localDirectory: string | undefined
+
+    let primaryError: unknown
+    try {
+      localDirectory = mkdtempSync(join(tmpdir(), "paratix-dist-cli-first-run-"))
+      const playbookPath = join(localDirectory, "playbook.mjs")
+      const observationsPath = join(localDirectory, "observations.txt")
+
+      writeFileSync(
+        playbookPath,
+        [
+          'import { appendFileSync } from "node:fs"',
+          `import { isFirstRun, server } from ${JSON.stringify(distIndexUrl)}`,
+          "",
+          `const observationsPath = ${JSON.stringify(observationsPath)}`,
+          "function record(phase) {",
+          "  appendFileSync(observationsPath, phase + '=' + String(isFirstRun()) + '\\n')",
+          "}",
+          "",
+          "record('import')",
+          "",
+          "export default server({",
+          "  name: 'dist-cli-first-run-integration',",
+          `  host: ${JSON.stringify(environment.host)},`,
+          "  ssh: {",
+          `    expectedHostPublicKey: ${JSON.stringify(environment.hostPublicKey)},`,
+          `    ports: [${String(environment.primaryPort)}],`,
+          `    privateKey: ${JSON.stringify(environment.clientPrivateKeyPath)},`,
+          "    strictHostKeyChecking: 'yes',",
+          "    user: 'root',",
+          "  },",
+          "  run: [",
+          "    {",
+          "      name: 'record first-run flag',",
+          "      async check(ssh) {",
+          "        await ssh.exec('true', { silent: true })",
+          "        record('check')",
+          "        return 'needs-apply'",
+          "      },",
+          "      async apply(ssh) {",
+          "        await ssh.exec('true', { silent: true })",
+          "        record('apply')",
+          "        return { status: 'changed', detail: 'first-run probe' }",
+          "      },",
+          "    },",
+          "  ],",
+          "})",
+          "",
+        ].join("\n")
+      )
+
+      const output = await execFileText(
+        process.execPath,
+        [distCliPath, "apply", playbookPath, "--first-run"],
+        {
+          cwd: packageDirectory,
+          env: { ...process.env, HOME: testHome },
+        }
+      )
+
+      expect(output).toContain("record first-run flag")
+      const observations = await readFile(observationsPath, "utf8")
+      expect(observations.trim().split("\n")).toStrictEqual([
+        "import=true",
+        "check=true",
+        "apply=true",
+      ])
+    } catch (error) {
+      primaryError = error
+      throw error
+    } finally {
+      await runCleanupSteps([removeCreatedLocalDirectoryStep(() => localDirectory)], primaryError)
+    }
+  })
+
   it("runs the built apply CLI with dist modules and mutates the integration server", async () => {
     const environment = getEnvironment()
     const packageDirectory = resolve(import.meta.dirname, "../..")
@@ -1473,18 +1582,26 @@ describe.skipIf(SKIP_WITHOUT_DOCKER)("Paratix integration", () => {
     })
 
     it("reclaims a stale lock, verifies the whole destination and converges", async () => {
-      // An apply killed under the lock leaves the lock and its `in-progress`
-      // entry behind. Backdated past the production reclaim age (above 540 s),
-      // the next apply reclaims the lock. The leftover entry says nothing about
-      // which links need verification, so that apply must judge every symlink
-      // under the destination: an escaping link outside the archive's scope
-      // fails it, which only a whole-destination check can detect.
+      // An apply of another archive killed under the lock leaves the lock and
+      // its `in-progress` entry behind. Backdated past the production reclaim
+      // age (above 540 s), the next apply reclaims the lock. The leftover
+      // entry records another archive's scope digest (Issue #227), so it says
+      // nothing about which links need verification, and that apply must judge
+      // every symlink under the destination: an escaping link outside the
+      // archive's scope fails it, which only a whole-destination check can
+      // detect.
       const ssh = await connectSsh([getEnvironment().primaryPort], {}, "root")
       const fixture = extractLockFixture()
       const unrelatedDirectory = `${fixture.destination}/unrelated`
       const escapingLink = `${unrelatedDirectory}/escape`
       const leftoverEntry = `${fixture.entryDirectory}/${LEFTOVER_ENTRY_NAME}`
-      const inProgressBody = containmentFlagBody({ links: [], state: "in-progress" })
+      const inProgressBody = containmentFlagBody({
+        scope: containmentScopeDigest({
+          archiveLinks: new Set(),
+          written: new Set(["another-archive"]),
+        }),
+        state: "in-progress",
+      })
 
       let primaryError: unknown
       try {
@@ -1610,6 +1727,82 @@ describe.skipIf(SKIP_WITHOUT_DOCKER)("Paratix integration", () => {
         )
       }
     })
+  })
+
+  it("clears an unfinished containment entry of the same archive next to an intended outward link", async () => {
+    // Issue #227: an interrupted apply left its `in-progress` entry, and the
+    // destination holds a virtualenv interpreter link that points outside it
+    // on purpose. The next apply of the same archive records the same scope
+    // digest, so its scoped backstop covers the entry: it must succeed and
+    // clear the entry instead of judging the whole destination. The entry is
+    // planted with the production body instead of killing a process.
+    const ssh = await connectSsh([getEnvironment().primaryPort], {}, "root")
+    const remoteBase = `/root/integration-${randomUUID()}`
+    const sourceTree = `${remoteBase}/tree`
+    const archivePath = `${remoteBase}/bundle.tar.gz`
+    const destination = `${remoteBase}/destination`
+    const sourceBin = `${sourceTree}/app/bin`
+    const sourceTool = `${sourceBin}/tool`
+    const sourceData = `${sourceTree}/app/data.txt`
+    const sourceLink = `${sourceTree}/app/current`
+    const pythonDirectory = `${destination}/venv/bin`
+    const pythonLink = `${pythonDirectory}/python3`
+    const entryDirectory = `/var/lib/paratix/flags/archive-containment-${createHash("sha256").update(destination, "utf8").digest("hex")}.d`
+    const leftoverEntry = `${entryDirectory}/run-${randomUUID().replaceAll("-", "")}`
+
+    let primaryError: unknown
+    try {
+      await ssh.exec(
+        [
+          `mkdir -p ${shellQuote(sourceBin)} ${shellQuote(pythonDirectory)}`,
+          `printf '%s\\n' tool > ${shellQuote(sourceTool)}`,
+          `printf '%s\\n' data > ${shellQuote(sourceData)}`,
+          // An archive symlink inside the archive, so the scoped backstop runs.
+          `ln -s bin ${shellQuote(sourceLink)}`,
+          `tar -czf ${shellQuote(archivePath)} -C ${shellQuote(sourceTree)} app`,
+          `ln -s /usr/bin/python3 ${shellQuote(pythonLink)}`,
+        ].join(" && "),
+        { silent: true }
+      )
+      // The digest the apply derives: the production listing and scope.
+      const members = await listedArchiveMembers(ssh, archivePath)
+      expect(members.some(({ kind }) => kind === "symlink")).toBe(true)
+      const scope = containmentScopeDigest(archiveContainmentScope(members))
+      const leftoverBody = containmentFlagBody({ scope, state: "in-progress" })
+      await ssh.exec(
+        `mkdir -p ${shellQuote(entryDirectory)} && printf '%s' ${shellQuote(leftoverBody)} > ${shellQuote(leftoverEntry)}`,
+        { silent: true }
+      )
+      await expectRemoteFileContent(ssh, leftoverEntry, leftoverBody)
+
+      const extractModule = archive.extract(archivePath, destination)
+
+      await expect(extractModule.apply(ssh, emptyEnv)).resolves.toMatchObject({
+        status: "changed",
+      })
+      const leftoverEntries = await ssh.exec(
+        `find ${shellQuote(entryDirectory)} -mindepth 1 -maxdepth 1 -name 'run-*' -print`,
+        { ignoreExitCode: true, silent: true }
+      )
+      expect(leftoverEntries.stdout.trim()).toBe("")
+      await expect(ssh.output(`readlink ${shellQuote(pythonLink)}`)).resolves.toBe(
+        "/usr/bin/python3"
+      )
+      await expectRemoteFileContent(ssh, `${destination}/app/data.txt`, "data\n")
+      await expectModuleCheckOk(extractModule, ssh)
+    } catch (error) {
+      primaryError = error
+      throw error
+    } finally {
+      await runCleanupSteps(
+        [
+          removeRemoteDirectoryStep(ssh, remoteBase, "remove remote archive test directory"),
+          removeRemoteDirectoryStep(ssh, entryDirectory, "remove containment entry directory"),
+          disconnectSshStep(ssh),
+        ],
+        primaryError
+      )
+    }
   })
 
   it("converges file and command modules to verifiable remote state", async () => {

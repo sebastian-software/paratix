@@ -42,13 +42,7 @@ import type {
 } from "../../src/modules/archiveLinkValidation.js"
 import type { ArchiveMember } from "../../src/modules/archiveMemberValidation.js"
 
-import {
-  boundedStagingMergeCommand,
-  buildStagingMergeExec,
-  buildStagingMergeScript,
-  guardedStagingMergeCommand,
-  type StagingMergeTimeLimits,
-} from "../../src/modules/archive.js"
+import { runSymlinkContainmentBackstop } from "../../src/modules/archiveContainmentBackstop.js"
 import {
   enforceSymlinkContainment,
   type PreMergeContainmentVerdict,
@@ -56,20 +50,27 @@ import {
   symlinkListingEntries,
 } from "../../src/modules/archiveContainmentEnforcement.js"
 import {
-  buildContainmentEstablishScript,
   clearContainmentEntries,
   CONTAINMENT_CLEAR_EXIT,
-  CONTAINMENT_ENTRY_READ_LIMIT,
-  CONTAINMENT_FLAG_BODY_LIMIT_BYTES,
   type ContainmentClearLock,
-  containmentFlagBody,
-  type ContainmentLedger,
-  type ContainmentPaths,
-  establishContainmentEntry,
   noContainmentEntriesCommand,
+} from "../../src/modules/archiveContainmentEntries.js"
+import {
+  buildContainmentEstablishScript,
+  CONTAINMENT_ENTRY_READ_LIMIT,
+  type ContainmentLedger,
+  establishContainmentEntry,
   parseContainmentEstablishOutput,
+} from "../../src/modules/archiveContainmentEstablish.js"
+import {
+  CONTAINMENT_FLAG_BODY_LIMIT_BYTES,
+  containmentFlagBody,
+  type ContainmentPaths,
 } from "../../src/modules/archiveContainmentFlag.js"
-import { archiveContainmentScope } from "../../src/modules/archiveContainmentScope.js"
+import {
+  archiveContainmentScope,
+  containmentScopeDigest,
+} from "../../src/modules/archiveContainmentScope.js"
 import {
   archiveMemberGuardPaths,
   destinationPathWithAncestors,
@@ -91,6 +92,13 @@ import {
   symlinkListingBatchScript,
 } from "../../src/modules/archiveProbe.js"
 import {
+  boundedStagingMergeCommand,
+  buildStagingMergeExec,
+  buildStagingMergeScript,
+  guardedStagingMergeCommand,
+  type StagingMergeTimeLimits,
+} from "../../src/modules/archiveStagingMergeScript.js"
+import {
   decodeListingField,
   hostStateFromListing,
 } from "../../src/modules/archiveSymlinkListing.js"
@@ -103,32 +111,51 @@ type ShellResult = { code: number; stderr: string; stdout: string }
 /**
  * Run the production merge script the way the remote `find -exec sh -c` does.
  *
- * Issue #219: `$3` names a file with the NUL-terminated guard paths, as the
- * outer script of `buildStagingMergeExec` writes it on the host; this helper
- * writes it into its own scratch directory.
+ * Issue #219: `$3` names a file with the NUL-terminated guard paths and `$4`
+ * the failure file a failed batch appends to, as the outer script of
+ * `buildStagingMergeExec` creates them on the host; this helper creates both
+ * in its own scratch directory.
  *
  * @param parameters - Invocation inputs.
  * @param parameters.destination - Value for `$1` and `$2` (destination and its expected resolution).
+ * @param parameters.earlierFailure - Whether the failure file already records a failed batch.
  * @param parameters.guardPaths - Guard paths for the file named by `$3`.
  * @param parameters.sourcePaths - Staging entries passed as the trailing arguments.
- * @returns Exit code and captured output.
+ * @returns Exit code, captured output and whether the failure file is non-empty afterwards.
  */
 function runMergeScript(parameters: {
   destination: string
+  earlierFailure?: boolean
   guardPaths?: string[]
   sourcePaths: string[]
-}): ShellResult {
+}): { failureRecorded: boolean } & ShellResult {
   const { destination, sourcePaths } = parameters
   const scratch = mkdtempSync(join(tmpdir(), "paratix-merge-guards-"))
   try {
     const guardFile = join(scratch, "guards")
+    const failureFile = join(scratch, "failed")
     writeFileSync(guardFile, encodeNulPayload(parameters.guardPaths ?? []))
+    writeFileSync(failureFile, parameters.earlierFailure === true ? "x" : "")
     const result = spawnSync(
       "/bin/sh",
-      ["-c", buildStagingMergeScript(), "sh", destination, destination, guardFile, ...sourcePaths],
+      [
+        "-c",
+        buildStagingMergeScript(),
+        "sh",
+        destination,
+        destination,
+        guardFile,
+        failureFile,
+        ...sourcePaths,
+      ],
       { encoding: "utf8", timeout: 5000 }
     )
-    return { code: result.status ?? -1, stderr: result.stderr, stdout: result.stdout }
+    return {
+      code: result.status ?? -1,
+      failureRecorded: readFileSync(failureFile, "utf8") !== "",
+      stderr: result.stderr,
+      stdout: result.stdout,
+    }
   } finally {
     rmSync(scratch, { force: true, recursive: true })
   }
@@ -221,6 +248,8 @@ function describeTree(root: string, prefix = ""): string[] {
 
 type ListingProbeResult = {
   code: number
+  /** The `x` records: entries the probe could not read or encode, decoded, in order. */
+  failed: string[]
   /** The `l` records as decoded `(link, target)` pairs, sorted by link. */
   pairs: Array<[string, string]>
   stderr: string
@@ -245,7 +274,7 @@ function decodedField(field: string | undefined): string {
  * must be valid UTF-8, as `strictUtf8Stdout` demands.
  *
  * @param destination - The canonical destination directory.
- * @returns Exit code, the decoded `l` and `u` records, and stderr.
+ * @returns Exit code, the decoded `l`, `u` and `x` records, and stderr.
  */
 function runListingProbe(destination: string): ListingProbeResult {
   const result = spawnSync("/bin/sh", ["-c", buildSymlinkListingProbeScript()], {
@@ -255,11 +284,15 @@ function runListingProbe(destination: string): ListingProbeResult {
   const stdout = new TextDecoder("utf-8", { fatal: true }).decode(result.stdout)
   const fields = stdout.split("\0")
   if (fields.at(-1) === "") fields.pop()
+  const failed: string[] = []
   const pairs: Array<[string, string]> = []
   const unreadable: string[] = []
   for (let index = 0; index < fields.length;) {
-    if (fields[index] === "u") {
-      unreadable.push(decodedField(fields[index + 1]))
+    const kind = fields[index]
+    if (kind === "u" || kind === "x") {
+      const decoded = decodedField(fields[index + 1])
+      if (kind === "u") unreadable.push(decoded)
+      else failed.push(decoded)
       index += 2
     } else {
       pairs.push([decodedField(fields[index + 1]), decodedField(fields[index + 2])])
@@ -269,6 +302,7 @@ function runListingProbe(destination: string): ListingProbeResult {
   pairs.sort(([left], [right]) => left.localeCompare(right))
   return {
     code: result.status ?? -1,
+    failed,
     pairs,
     stderr: result.stderr.toString("utf8"),
     unreadable: unreadable.toSorted(),
@@ -361,6 +395,7 @@ describe.skipIf(SKIP_PLATFORM)("archive.extract staging merge shell smoke tests"
 
       expect(result.code).toBe(64)
       expect(result.stderr).toContain("extracted path contains a newline")
+      expect(result.failureRecorded).toBe(true)
     } finally {
       rmSync(root, { force: true, recursive: true })
     }
@@ -470,6 +505,44 @@ describe.skipIf(SKIP_PLATFORM)("archive.extract staging merge shell smoke tests"
 
       expect(result.stderr).toBe("")
       expect(result.code).toBe(0)
+      expect(result.failureRecorded).toBe(false)
+    } finally {
+      rmSync(root, { force: true, recursive: true })
+    }
+  })
+
+  it("records a refused batch in the failure file", () => {
+    const { destination, root, staging } = makeWorkspace()
+    try {
+      const sourceFile = join(staging, "payload.txt")
+      writeFileSync(sourceFile, "payload\n")
+      symlinkSync(join(root, "elsewhere"), join(destination, "payload.txt"))
+
+      const result = runMergeScript({ destination, sourcePaths: [sourceFile] })
+
+      expect(result.code).toBe(64)
+      expect(result.failureRecorded).toBe(true)
+    } finally {
+      rmSync(root, { force: true, recursive: true })
+    }
+  })
+
+  it("copies nothing once the failure file records an earlier failed batch", () => {
+    const { destination, root, staging } = makeWorkspace()
+    try {
+      const sourceFile = join(staging, "payload.txt")
+      writeFileSync(sourceFile, "payload\n")
+
+      const result = runMergeScript({
+        destination,
+        earlierFailure: true,
+        sourcePaths: [sourceFile],
+      })
+
+      // The batch stops before its first guard check or `cp`, so it neither
+      // prints anything nor touches the destination.
+      expect({ code: result.code, stderr: result.stderr }).toStrictEqual({ code: 64, stderr: "" })
+      expect(readdirSync(destination)).toStrictEqual([])
     } finally {
       rmSync(root, { force: true, recursive: true })
     }
@@ -654,6 +727,7 @@ describe.skipIf(SKIP_PLATFORM)(
 
         expect(result).toStrictEqual({
           code: 0,
+          failed: [],
           pairs: [
             ["a/dangling", "missing/y/z"],
             ["a/esc", "up/.."],
@@ -670,6 +744,33 @@ describe.skipIf(SKIP_PLATFORM)(
       }
     })
 
+    it("lists links below a destination whose name contains shell pattern characters", () => {
+      const { root } = makeWorkspace()
+      // `*`, `[`, `?` and `\` must stay literal wherever the probe strips the
+      // destination from a listed path.
+      const destination = join(root, "app*[x]?\\y")
+      try {
+        mkdirSync(join(destination, "a"), { recursive: true })
+        // A sibling the patterns would match if they were not literal.
+        mkdirSync(join(root, "appz[x]?\\y"))
+        symlinkSync("..", join(destination, "a/up"))
+        symlinkSync("../*", join(destination, "a/star"))
+
+        expect(runListingProbe(destination)).toStrictEqual({
+          code: 0,
+          failed: [],
+          pairs: [
+            ["a/star", "../*"],
+            ["a/up", ".."],
+          ],
+          stderr: "",
+          unreadable: [],
+        })
+      } finally {
+        rmSync(root, { force: true, recursive: true })
+      }
+    })
+
     it("reports nothing and succeeds for a destination without symlinks", () => {
       const { destination, root } = makeWorkspace()
       try {
@@ -678,6 +779,7 @@ describe.skipIf(SKIP_PLATFORM)(
 
         expect(runListingProbe(destination)).toStrictEqual({
           code: 0,
+          failed: [],
           pairs: [],
           stderr: "",
           unreadable: [],
@@ -697,6 +799,7 @@ describe.skipIf(SKIP_PLATFORM)(
 
         expect(runListingProbe(destination)).toStrictEqual({
           code: 0,
+          failed: [],
           pairs: [["to-elsewhere", elsewhere]],
           stderr: "",
           unreadable: [],
@@ -717,6 +820,7 @@ describe.skipIf(SKIP_PLATFORM)(
 
         expect(runListingProbe(destination)).toStrictEqual({
           code: 0,
+          failed: [],
           pairs: [
             ["dir with space/link with space", "target with space"],
             ["dir with space/trailing space ", "../other dir/f"],
@@ -738,6 +842,7 @@ describe.skipIf(SKIP_PLATFORM)(
 
         expect(runListingProbe(destination)).toStrictEqual({
           code: 0,
+          failed: [],
           pairs: [
             ["embedded", "up\n/.."],
             ["leading", "\nleading"],
@@ -763,6 +868,7 @@ describe.skipIf(SKIP_PLATFORM)(
 
           expect(runListingProbe(destination)).toStrictEqual({
             code: 0,
+            failed: [],
             pairs: [
               ["one", "up\n"],
               ["two", "up\n\n"],
@@ -831,6 +937,7 @@ describe.skipIf(SKIP_PLATFORM)(
 
           expect(runListingProbe(destination)).toStrictEqual({
             code: 0,
+            failed: [],
             pairs: [["visible", ".."]],
             stderr: "",
             unreadable: ["locked", "unsearchable"],
@@ -859,6 +966,7 @@ describe.skipIf(SKIP_PLATFORM)(
         expect([...result.stdout].every((byte) => byte <= 0x7e)).toBe(true)
         expect(runListingProbe(destination)).toStrictEqual({
           code: 0,
+          failed: [],
           pairs: [
             ["ctl\u007f", "x\u0001y"],
             ["literal-fffd", "t\ufffd"],
@@ -902,14 +1010,16 @@ describe.skipIf(SKIP_PLATFORM)(
       }
     })
 
-    it("fails a batch whose link still exists but cannot be read", () => {
+    it("reports a link that still exists but cannot be read in-band, and the listing is refused", () => {
       const { destination, root } = makeWorkspace()
       try {
         symlinkSync("..", join(destination, "kept"))
         // `command -p` ignores PATH, so a missing `readlink` is simulated by
         // shadowing `command` with a function that fails like `command -p`
         // does without `readlink` (127): the batch still sees the link through
-        // `[ -L ]` and must exit 1 instead of skipping it.
+        // `[ -L ]` and must report it instead of skipping it. The report does
+        // not depend on the batch's exit status, which not every `find`
+        // passes on for a batch before the last one.
         const result = spawnSync(
           "/bin/sh",
           [
@@ -924,9 +1034,54 @@ describe.skipIf(SKIP_PLATFORM)(
         )
 
         expect({ code: result.status, stdout: result.stdout }).toStrictEqual({
-          code: 1,
-          stdout: "",
+          code: 0,
+          stdout: "x\u0000kept\u0000",
         })
+        expect(hostStateFromListing(destination, ["x", "kept"], new Map())).toBe(
+          'probe could not read or encode entry "kept" below the destination (readlink or od failed on the host)'
+        )
+      } finally {
+        rmSync(root, { force: true, recursive: true })
+      }
+    })
+
+    it("reports a name or target that cannot be encoded in-band and lists the rest of the batch", () => {
+      const { destination, root } = makeWorkspace()
+      try {
+        symlinkSync("ü", join(destination, "plain"))
+        symlinkSync("..", join(destination, "nämlich"))
+        symlinkSync("..", join(destination, "ok"))
+        // A failing `od` is simulated by shadowing `command`: `od` fails,
+        // every other `command -p <tool>` runs the tool from PATH. The batch
+        // runs under `LC_ALL=C` as the outer probe script exports it, so the
+        // non-ASCII bytes need encoding whatever locale the test runner has.
+        const result = spawnSync(
+          "/bin/sh",
+          [
+            "-c",
+            `command() { case $2 in od) return 1;; esac; shift; "$@"; }; ${symlinkListingBatchScript()}`,
+            "sh",
+            "l",
+            destination,
+            join(destination, "plain"),
+            join(destination, "nämlich"),
+            join(destination, "ok"),
+          ],
+          { encoding: "utf8", env: { ...process.env, LC_ALL: "C" }, timeout: 10_000 }
+        )
+
+        // The target of `plain` cannot be encoded, so its record names the
+        // link; the name of `nämlich` cannot be encoded, so its record carries
+        // an empty path. Neither leaves a partial `l` record behind.
+        expect({ code: result.status, stdout: result.stdout }).toStrictEqual({
+          code: 0,
+          stdout: "x\u0000plain\u0000x\u0000\u0000l\u0000ok\u0000..\u0000",
+        })
+        expect(
+          hostStateFromListing(destination, result.stdout.split("\u0000").slice(0, -1), new Map())
+        ).toBe(
+          'probe could not read or encode entry "plain" below the destination (readlink or od failed on the host)'
+        )
       } finally {
         rmSync(root, { force: true, recursive: true })
       }
@@ -2244,6 +2399,52 @@ function sleepingFindShim(
 }
 
 /**
+ * One merge batch of {@link twoBatchFindShim}: the merge body with the outer
+ * script's fixed arguments and a single staged entry.
+ *
+ * @param entry - The staged entry name.
+ * @returns The shell line that runs the batch.
+ */
+function findShimBatch(entry: string): string {
+  return `sh -c "$body" sh "$5" "$6" "$7" "$8" "$staging"/${shellQuote(entry)}`
+}
+
+/**
+ * A `find` stand-in that runs the merge body for two batches, one staged
+ * entry each, and then exits 0 whatever the batches did — like a `find` that
+ * does not pass on the exit status of a batch before the last one. It reads
+ * the arguments the outer merge script passes:
+ * `<staging> -mindepth 1 -maxdepth 1 -exec sh -c <body> sh <dest> <dest> <guards> <failed> {} +`.
+ *
+ * @param workspace - The workspace from {@link makeGuardTransportWorkspace}.
+ * @param batches - The staged entry names of the first and the second batch.
+ * @returns The environment that puts the stand-in first on PATH and uses the
+ *   workspace `TMPDIR`.
+ */
+function twoBatchFindShim(
+  workspace: ReturnType<typeof makeGuardTransportWorkspace>,
+  batches: readonly [string, string]
+): NodeJS.ProcessEnv {
+  const bin = join(workspace.root, "bin")
+  mkdirSync(bin)
+  writeFileSync(
+    join(bin, "find"),
+    [
+      "#!/bin/sh",
+      // After `shift 6`: `sh -c <body> sh <dest> <dest> <guards> <failed> {} +`.
+      "staging=$1; shift 6; body=$3",
+      findShimBatch(batches[0]),
+      findShimBatch(batches[1]),
+      "exit 0",
+      "",
+    ].join("\n")
+  )
+  chmodSync(join(bin, "find"), 0o755)
+  const path = [bin, process.env.PATH].filter((entry) => entry !== undefined).join(":")
+  return { ...process.env, PATH: path, TMPDIR: workspace.tmp }
+}
+
+/**
  * Issue #219: send a signal to the process group of a detached child,
  * tolerating a group that is already gone.
  *
@@ -2416,6 +2617,37 @@ describe.skipIf(SKIP_PLATFORM)(
       }
     })
 
+    it("fails the merge and copies nothing more when an earlier batch failed although find exits 0", () => {
+      const workspace = makeGuardTransportWorkspace()
+      try {
+        // The first batch is refused before its `cp`: its target is a
+        // destination symlink where the staging entry is a regular file.
+        writeFileSync(join(workspace.staging, "first.txt"), "first\n")
+        const elsewhere = join(workspace.root, "elsewhere")
+        symlinkSync(elsewhere, join(workspace.destination, "first.txt"))
+        const env = twoBatchFindShim(workspace, ["first.txt", "payload.txt"])
+
+        const result = runMergeExec({ env, guardPaths: [workspace.destination], workspace })
+
+        // The second batch stops before it copies or prints anything, so the
+        // refusal of the first batch and the outer report are all there is.
+        expect(result).toStrictEqual({
+          code: 64,
+          stderr: [
+            `[archive.extract] refusing staging merge: destination path ${join(workspace.destination, "first.txt")} is a symlink`,
+            "[archive.extract] staging merge failed: a merge batch failed although find reported success; later batches copied nothing",
+            "",
+          ].join("\n"),
+          stdout: "",
+        })
+        expect(readdirSync(workspace.destination)).toStrictEqual(["first.txt"])
+        expect(existsSync(elsewhere)).toBe(false)
+        expect(readdirSync(workspace.tmp)).toStrictEqual([])
+      } finally {
+        rmSync(workspace.root, { force: true, recursive: true })
+      }
+    })
+
     // The signal reaches the merge shell and `find` together, as the host
     // timeout sends it, so `find` returns at once and the trap runs.
     it.each<[NodeJS.Signals, number]>([
@@ -2423,13 +2655,14 @@ describe.skipIf(SKIP_PLATFORM)(
       ["SIGINT", 130],
       ["SIGTERM", 143],
     ])(
-      "removes the guard file when the merge is stopped with %s: exit %i",
+      "removes the guard and failure files when the merge is stopped with %s: exit %i",
       async (signal, code) => {
         const workspace = makeGuardTransportWorkspace()
         const { child, exited, started } = spawnDetachedMerge(workspace)
         try {
           expect(await appeared(started)).toBe(true)
-          expect(readdirSync(workspace.tmp)).toHaveLength(1)
+          // The guard file and the failure file.
+          expect(readdirSync(workspace.tmp)).toHaveLength(2)
 
           signalProcessGroup(child, signal)
 
@@ -2443,7 +2676,7 @@ describe.skipIf(SKIP_PLATFORM)(
       15_000
     )
 
-    it("removes the guard file once find returns when only the merge shell gets SIGTERM: exit 143", async () => {
+    it("removes the guard and failure files once find returns when only the merge shell gets SIGTERM: exit 143", async () => {
       const workspace = makeGuardTransportWorkspace()
       // Issue #219: the shell defers the trap until the foreground `find`
       // returns. The stand-in sleeps 3 s, long enough that the signal
@@ -2452,7 +2685,8 @@ describe.skipIf(SKIP_PLATFORM)(
       const { child, exited, started } = spawnDetachedMerge(workspace, 3)
       try {
         expect(await appeared(started)).toBe(true)
-        expect(readdirSync(workspace.tmp)).toHaveLength(1)
+        // The guard file and the failure file.
+        expect(readdirSync(workspace.tmp)).toHaveLength(2)
 
         // `kill` signals the merge shell alone, not its process group.
         const signalled = Date.now()
@@ -2468,7 +2702,7 @@ describe.skipIf(SKIP_PLATFORM)(
     }, 15_000)
 
     it.skipIf(!HAS_COMMAND_P_TIMEOUT)(
-      "removes the guard file when the host timeout stops the merge: exit 124",
+      "removes the guard and failure files when the host timeout stops the merge: exit 124",
       () => {
         const workspace = makeGuardTransportWorkspace()
         try {
@@ -2835,6 +3069,41 @@ describe.skipIf(SKIP_PLATFORM)(
       }
     })
 
+    it("reports a followed host link the kernel disagrees with under the archive link and records only that", async () => {
+      const { destination, root } = makeAppWorkspace()
+      try {
+        mkdirSync(join(destination, "d/sub"), { recursive: true })
+        // Host link the archive does not touch: the model walks `missing/..`
+        // back to `d`, while the kernel cannot walk `..` out of the missing
+        // `d/missing`. The archive link `d/j` reaches nothing through it, and
+        // its own trail agrees with the model up to `d`.
+        symlinkSync("missing/../sub/n", join(destination, "d/f"))
+        symlinkSync("f", join(destination, "d/j"))
+        const { commands, conn } = localShellConnection()
+
+        const outcome = await runSymlinkContainmentBackstop(conn, {
+          destination,
+          members: [
+            { format: "tar", kind: "directory", linkTarget: null, mode: "drwxr-xr-x", path: "d/" },
+            { format: "tar", kind: "symlink", linkTarget: "f", mode: "lrwxrwxrwx", path: "d/j" },
+          ],
+          source: "followed.tar",
+        })
+
+        const d = join(destination, "d")
+        expect(outcome.failure?.error?.message).toContain(
+          `symlink "${d}/j" -> "f" follows symlink "${d}/f" -> "missing/../sub/n", which reaches nothing on the host, and the nearest existing point of its target path, "${d}/missing/../sub" on the host, is not the location the containment check computed for it ("${d}/sub")`
+        )
+        expect(outcome.offendingLinks).toStrictEqual(["d/j"])
+        expect(commands).toStrictEqual([
+          buildSymlinkListingProbeScript(),
+          buildKernelCrossCheckScript(),
+        ])
+      } finally {
+        rmSync(root, { force: true, recursive: true })
+      }
+    })
+
     it("names the trail point where the kernel and a hand-made model disagree for a dangling link", async () => {
       const { destination, root } = makeAppWorkspace()
       try {
@@ -3137,6 +3406,17 @@ function scratchLockGuard(lock: ContainmentClearLock): string {
     token: { kind: "literal", value: lock.token },
   })
 }
+/** Issue #227: the scope digest every smoke test establishes with. */
+const smokeScopeDigest = containmentScopeDigest({
+  archiveLinks: new Set(),
+  written: new Set(["app", "app/file"]),
+})
+
+/** Issue #227: the scope digest of another archive. */
+const otherSmokeScopeDigest = containmentScopeDigest({
+  archiveLinks: new Set(["app/link"]),
+  written: new Set(["app", "app/link"]),
+})
 
 /**
  * Issue #219: run the production establish exec against the scratch paths.
@@ -3153,6 +3433,7 @@ async function establishOnDisk(
   const outcome = await establishContainmentEntry(conn, {
     ownEntryName: smokeOwnName,
     paths: scratch.paths,
+    scopeDigest: smokeScopeDigest,
     source: "app.tar",
   })
   return { commands, outcome }
@@ -3223,7 +3504,7 @@ function refusalOf(
   return "status" in outcome ? outcome.error?.message : undefined
 }
 
-const inProgressBody = containmentFlagBody({ links: [], state: "in-progress" })
+const inProgressBody = containmentFlagBody({ scope: smokeScopeDigest, state: "in-progress" })
 
 describe.skipIf(SKIP_PLATFORM)(
   "archive.extract containment establish shell smoke tests (Issue #219)",
@@ -3248,6 +3529,48 @@ describe.skipIf(SKIP_PLATFORM)(
         rmSync(scratch.root, { force: true, recursive: true })
       }
     })
+
+    it("creates the own entry with the version 2 in-progress body of its scope digest (Issue #227)", async () => {
+      const scratch = scratchContainment()
+      try {
+        await establishOnDisk(scratch)
+
+        expect(smokeScopeDigest).toMatch(/^[\da-f]{64}$/v)
+        expect(readFileSync(join(scratch.paths.entryDirectory, smokeOwnName), "utf8")).toBe(
+          `{"scope":"${smokeScopeDigest}","state":"in-progress","version":2}\n`
+        )
+      } finally {
+        rmSync(scratch.root, { force: true, recursive: true })
+      }
+    })
+
+    it.each([
+      { digest: smokeScopeDigest, name: "this apply's", state: "in-progress", whole: false },
+      { digest: smokeScopeDigest, name: "this apply's", state: "stopped", whole: false },
+      { digest: otherSmokeScopeDigest, name: "another", state: "in-progress", whole: true },
+      { digest: otherSmokeScopeDigest, name: "another", state: "stopped", whole: true },
+    ] as const)(
+      "reads a $state entry with $name scope digest as removable, verifying the whole destination: $whole (Issue #227)",
+      async ({ digest, state, whole }) => {
+        const scratch = scratchContainment()
+        try {
+          mkdirSync(scratch.paths.entryDirectory, { recursive: true })
+          const entry = join(scratch.paths.entryDirectory, `run-${"a".repeat(32)}`)
+          writeFileSync(entry, containmentFlagBody({ scope: digest, state }))
+
+          const { outcome } = await establishOnDisk(scratch)
+
+          expect(outcome).toStrictEqual({
+            carried: [],
+            ownEntry: join(scratch.paths.entryDirectory, smokeOwnName),
+            removable: [{ path: entry, sha256: sha256OfFile(entry) }],
+            verifyWholeDestination: whole,
+          })
+        } finally {
+          rmSync(scratch.root, { force: true, recursive: true })
+        }
+      }
+    )
 
     it("reads recorded entries with the hash of their content, and ignores dotfiles and writeFile temp files", async () => {
       const scratch = scratchContainment()
@@ -3403,7 +3726,11 @@ describe.skipIf(SKIP_PLATFORM)(
         // Only the failed redirect of the vanished file may reach stderr.
         expect(result.status).toBe(0)
         expect(
-          parseContainmentEstablishOutput(result.stdout, { ...scratch.paths, ownEntry })
+          parseContainmentEstablishOutput(result.stdout, {
+            ...scratch.paths,
+            ownEntry,
+            scopeDigest: smokeScopeDigest,
+          })
         ).toStrictEqual({
           carried: ["b/esc"],
           ownEntry,
@@ -3458,7 +3785,7 @@ describe.skipIf(SKIP_PLATFORM)(
       try {
         mkdirSync(scratch.paths.entryDirectory, { recursive: true })
         const entry = join(scratch.paths.entryDirectory, "run-a")
-        const oldBody = containmentFlagBody({ links: [], state: "in-progress" })
+        const oldBody = inProgressBody
         const newBody = containmentFlagBody({ links: ["x/esc"], state: "failed" })
         writeFileSync(entry, oldBody)
         const realSha256sum = spawnSync("/bin/sh", ["-c", "command -v sha256sum"], {

@@ -1282,7 +1282,7 @@ describe("download.url", () => {
 
       // R-0000253 regression: BusyBox/POSIX `stat` may emit tabs or multiple
       // spaces between the columns. The parser must split on any whitespace
-      // run (mirroring mount.ts/archive.ts) instead of a single space, or
+      // run (mirroring mount.ts/archiveCheck.ts) instead of a single space, or
       // else the owner/group fields end up empty and the metadata-only fast
       // path falsely reports drift.
       it("R-0000253: tolerates tabs and multiple spaces in stat output", async () => {

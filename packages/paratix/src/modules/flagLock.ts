@@ -143,7 +143,7 @@ async function writeFlagLockHolderMarker(
     // expires. Drop the directory now so the next acquirer is not blocked.
     // R-0000749: `rmdir --` so a future `flagPath`-style value that begins
     // with `-` cannot be mis-parsed as an option, matching the convention in
-    // archive.ts / compose.ts / aptKeyStaging.ts.
+    // archiveApply.ts / compose.ts / aptKeyStaging.ts.
     await ssh.exec(`rmdir -- ${lock}`, { ignoreExitCode: true, silent: true })
     return {
       failure: failedCommand(
@@ -455,7 +455,7 @@ export async function tryReclaimStaleFlagLock(
   // is older than the threshold to avoid racing with a holder that has
   // not yet written its marker.
   // R-0000749: `rm -f --` and `rmdir --` so path arguments are never
-  // mis-parsed as options, mirroring the convention used in archive.ts /
+  // mis-parsed as options, mirroring the convention used in archiveApply.ts /
   // compose.ts / aptKeyStaging.ts. `awk` does NOT support `--` (see issue
   // #35) and `find` is not affected here because its path argument is
   // followed by additional flags (`-maxdepth`), so `--` cannot be placed

@@ -1,4 +1,3 @@
-/* eslint-disable max-lines -- Issue #219: the entry body format and the establish, clear and check scripts that read and write it stay together */
 /**
  * The containment entries of `archive.extract` and the offending links they
  * record.
@@ -11,10 +10,17 @@
  * without looking at the link that caused it. An entry body is versioned
  * JSON:
  *
- * - `{"version":1,"state":"in-progress","links":[]}` is what an apply creates
- *   before it touches the destination. It reads as unknown: an apply that
- *   stopped without recording its outcome may have published links nobody
- *   checked.
+ * - `{"scope":"<64 hex>","state":"in-progress","version":2}` is what an apply
+ *   creates before it touches the destination (Issue #227). `scope` is the
+ *   digest of the archive's containment scope, see `containmentScopeDigest`
+ *   in `archiveContainmentScope.ts`. An apply that stopped without recording
+ *   its outcome may have published links nobody checked, but only links the
+ *   scope covers.
+ * - `{"scope":"<64 hex>","state":"stopped","version":2}` is written when an
+ *   apply throws after its merge started (Issue #227): the merge may have
+ *   published anything its scope covers. It differs from the `in-progress`
+ *   body, so its hash changes and a concurrent apply that read the
+ *   `in-progress` body keeps it (race 1).
  * - `{"version":1,"state":"failed","links":[…]}` is written when an apply
  *   fails and every link that still needs verification is known; the list is
  *   complete and may be empty.
@@ -22,16 +28,48 @@
  *   fails and the offending links could not be identified, or there are too
  *   many of them to record.
  *
+ * Each v2 body has a fixed size (about 110 bytes) whatever the member count,
+ * so it stays far below {@link CONTAINMENT_FLAG_BODY_LIMIT_BYTES} and fits the
+ * argv of the establish exec. The `{"version":1,"state":"in-progress","links":[…]}`
+ * body of earlier versions reads as unknown, with or without links.
+ *
  * An apply reads every entry before it touches the destination (see
- * {@link establishContainmentEntry}), re-verifies the recorded links in its
+ * `establishContainmentEntry` in `archiveContainmentEstablish.ts`), re-verifies the recorded links in its
  * post-merge backstop, and on full success removes the entries it read, but
  * only those whose content is unchanged since it read them, and then its own
- * (see {@link clearContainmentEntries}). Without a usable list — an unknown or
- * in-progress entry, the single flag file of older paratix versions, anything
- * damaged — the apply still runs, but its post-merge backstop judges every
- * symlink under the destination, not only the ones the archive can affect. A
- * failing apply rewrites only its own entry. `check` reports needs-apply while
- * any entry or the old flag file exists.
+ * (see `clearContainmentEntries` in `archiveContainmentEntries.ts`). Without a usable list — an unknown
+ * entry, a v1 `in-progress` entry, a v2 entry whose scope digest differs from
+ * the apply's own or is malformed, the single flag file of older paratix
+ * versions, anything damaged — the apply still runs, but its post-merge
+ * backstop judges every symlink under the destination, not only the ones the
+ * archive can affect. A failing apply rewrites only its own entry. `check`
+ * reports needs-apply while any entry or the old flag file exists.
+ *
+ * Issue #227: scoped clearing. A v2 entry whose digest equals the digest of
+ * the current apply's own scope needs no destination-wide verification: the
+ * interrupted apply extracted the same members, so it could only publish
+ * links the current apply judges anyway — its own symlinks and every link
+ * whose resolution passes through a path it writes. The current apply's
+ * normal, scoped post-merge backstop therefore covers it, and a successful
+ * apply removes the entry like any other it read. A digest that differs,
+ * because the archive changed or the digest was derived by another paratix
+ * or Unicode version, says nothing about what that apply published, so the
+ * destination-wide path stays; so does every entry without a usable digest.
+ * After a changed archive the manual removal therefore remains necessary when
+ * the destination holds intended links that point outside it.
+ *
+ * Issue #227: a `.paratix-stage.*` directory a killed apply left inside the
+ * destination is listed but not judged in scoped mode. Its links come from an
+ * archive that passed the static link validation (`archiveLinkUnsafeReason`
+ * in `archiveLinkValidation.ts`, and see the staging comment in
+ * `archiveStagingMerge.ts`), which keeps every symlink target inside the archive's own
+ * tree, so they resolve inside the staging directory. Such a directory is not
+ * removed either; that is out of scope.
+ *
+ * Issue #227: mixed versions. An older paratix reads a v2 entry as another
+ * version, so as unknown, and verifies the whole destination; its message
+ * calls the entry written by an older version or damaged, which is misleading
+ * but safe. This version reads a v1 `in-progress` entry as unknown too.
  *
  * Issue #219: remaining races, by design, as updated by issue #224, which
  * serializes the applies to one destination with a per-destination extract
@@ -43,17 +81,19 @@
  *    apply could verify the destination and remove it while its owner was
  *    still merging. Under the lock, an `in-progress` entry an apply reads
  *    belongs to an apply that stopped without finishing and whose lock was
- *    reclaimed as stale; verifying the whole destination and removing it is
- *    correct. Only a live holder that lost its lock anyway — the target clock
- *    jumped forward by more than the gap between the guard and the reclaim
- *    threshold, or a merge hung in uninterruptible I/O past its timeout — can
- *    reopen the old race, and the guards in its merge and clear execs then
- *    stop it visibly: a refused merge publishes nothing, a refused clear
- *    removes nothing. Its failure record still goes through `writeFile`,
- *    which re-creates an own entry removed meanwhile; a concurrent claim
- *    right after `writeFile` renamed the record onto the entry can make
- *    `writeFile` report a failure (its post-rename step no longer finds the
- *    file) although the record is kept, under the claim name.
+ *    reclaimed as stale; verifying the whole destination — or, Issue #227,
+ *    only this apply's scope when the entry records the same scope digest —
+ *    and removing it is correct. Only a live holder that lost its lock anyway
+ *    — the target clock jumped forward by more than the gap between the guard
+ *    and the reclaim threshold, or a merge hung in uninterruptible I/O past
+ *    its timeout — can reopen the old race, and the guards in its merge and
+ *    clear execs then stop it visibly: a refused merge publishes nothing, a
+ *    refused clear removes nothing. Its failure record still goes through
+ *    `writeFile`, which re-creates an own entry removed meanwhile; a
+ *    concurrent claim right after `writeFile` renamed the record onto the
+ *    entry can make `writeFile` report a failure (its post-rename step no
+ *    longer finds the file) although the record is kept, under the claim
+ *    name.
  * 2. An entry created after an apply's establish read is never touched by
  *    that apply. Under the lock no other apply creates an entry between this
  *    apply's establish and clear execs; the rule stays as the safety net for
@@ -68,18 +108,7 @@
  */
 import { randomBytes } from "node:crypto"
 
-import type { ModuleResult, SshConnection } from "../types.js"
-import type { MutexLockLostReason } from "./mutexLock.js"
-
-import { failed, failedCommand } from "../moduleFailure.js"
-import { shellQuote } from "../ssh.js"
-import { CAPTURE_TRUNCATION_MARKER } from "../sshHelpers.js"
-import {
-  ARCHIVE_EXTRACT_LOCK_LOST_EXIT,
-  archiveExtractLockLostReason,
-} from "./archiveExtractLock.js"
 import { isNormalizedRelativePath } from "./archiveSymlinkListing.js"
-import { buildFlagLockRefreshGuard } from "./flagLockScripts.js"
 
 /** Issue #219: the most offending links an entry records before it records `unknown`. */
 export const CONTAINMENT_FLAG_LINK_LIMIT = 256
@@ -87,71 +116,16 @@ export const CONTAINMENT_FLAG_LINK_LIMIT = 256
 /** Issue #219: the largest entry body in bytes; a larger one records `unknown`. */
 export const CONTAINMENT_FLAG_BODY_LIMIT_BYTES = 65_536
 
-/**
- * Issue #219: how many entries the establish exec reads in full. It still
- * type-checks every further entry, but only reports that there are more,
- * which makes the apply verify the whole destination.
- */
-export const CONTAINMENT_ENTRY_READ_LIMIT = 16
-
 const CONTAINMENT_FLAG_VERSION = 1
-const CONTAINMENT_ENTRY_MODE = "0644"
 
-/** Issue #219: the bytes the establish exec reads of one entry: one more than the limit. */
-const ENTRY_READ_BYTES = CONTAINMENT_FLAG_BODY_LIMIT_BYTES + 1
+/** Issue #227: the version of the bodies that record a scope digest. */
+const CONTAINMENT_SCOPE_FLAG_VERSION = 2
 
-/** Issue #219: the longest file name the establish exec can report. */
-const ENTRY_NAME_MAX_BYTES = 255
+/** Issue #219: the state of the body an apply creates its own entry with. */
+export const IN_PROGRESS_STATE = "in-progress"
 
-/** Issue #219: the hex digits of a sha256 digest. */
-const SHA256_HEX_LENGTH = 64
-
-/** Issue #219: the longest read line, `entry <name> <sha256> <hex>` and its newline. */
-const ESTABLISH_LINE_MAX_BYTES =
-  "entry ".length + ENTRY_NAME_MAX_BYTES + 1 + SHA256_HEX_LENGTH + 1 + 2 * ENTRY_READ_BYTES + 1
-const ESTABLISH_HEADROOM_BYTES = 1024
-
-/**
- * Issue #219: the capture cap of the establish exec: one full line per entry
- * read plus the old flag file (the hex twice the bytes read), the `more` and
- * `done` lines, and headroom. A capture within the bounds is therefore never
- * cut.
- */
-export const CONTAINMENT_ESTABLISH_CAPTURE_LIMIT_BYTES =
-  (CONTAINMENT_ENTRY_READ_LIMIT + 1) * ESTABLISH_LINE_MAX_BYTES + ESTABLISH_HEADROOM_BYTES
-
-/**
- * Issue #219: exit statuses of the establish exec, see
- * {@link buildContainmentEstablishScript}.
- */
-export const CONTAINMENT_ESTABLISH_EXIT = {
-  entryName: 10,
-  entryNotRegular: 9,
-  entrySymlink: 8,
-  entryUnreadable: 11,
-  flagsDirectory: 2,
-  legacyNotRegular: 4,
-  legacySymlink: 3,
-  legacyUnreadable: 12,
-  ownEntry: 13,
-  storeInaccessible: 7,
-  storeNotDirectory: 6,
-  storeSymlink: 5,
-} as const
-
-/**
- * Issue #219: exit statuses of the clear exec, see
- * {@link buildContainmentClearScript}.
- */
-export const CONTAINMENT_CLEAR_EXIT = {
-  arguments: 64,
-  claimFailed: 5,
-  claimTaken: 3,
-  claimUnremovable: 4,
-  /** Issue #224: the embedded refresh guard refused; nothing was removed. */
-  lockLost: ARCHIVE_EXTRACT_LOCK_LOST_EXIT,
-  ownEntry: 6,
-} as const
+/** Issue #219: a sha256 digest as lowercase hex, also the form of a scope digest. */
+const SHA256_PATTERN = /^[\da-f]{64}$/v
 
 /** Issue #219: the `unknown` reason when there are too many offending links to record. */
 export const TOO_MANY_OFFENDING_LINKS = "too many offending links"
@@ -161,38 +135,44 @@ export const UNIDENTIFIED_OFFENDING_LINKS =
   "the symlink containment check could not identify the offending links"
 
 /**
- * Issue #219: the `unknown` reason when an apply threw after its merge had
- * started, before its backstop could tell what the merge published.
- */
-export const STOPPED_AFTER_MERGE_STARTED = "the apply stopped with an error after its merge started"
-
-/**
  * Issue #219: the outcome an apply records in its own entry when it fails.
  *
  * - `failed`: the complete list of destination-relative link keys that still
  *   need verification; may be empty.
+ * - `stopped`: Issue #227: the apply threw after its merge started; it
+ *   published at most what the scope with this digest covers.
  * - `unknown`: the offending links are not known.
  */
 export type ContainmentFlagRecord =
-  { links: readonly string[]; state: "failed" } | { reason: string; state: "unknown" }
+  | { links: readonly string[]; state: "failed" }
+  | { reason: string; state: "unknown" }
+  | { scope: string; state: "stopped" }
 
-/** Issue #219: every entry body, including the one an apply creates first. */
-type ContainmentFlagBody =
-  { links: readonly string[]; state: "in-progress" } | ContainmentFlagRecord
+/**
+ * Issue #219: every entry body, including the one an apply creates first;
+ * Issue #227: that one records the digest of the apply's containment scope.
+ */
+type ContainmentFlagBody = { scope: string; state: "in-progress" } | ContainmentFlagRecord
 
 /**
  * Issue #219: what an entry body says.
  *
  * - `recorded`: a failed apply recorded these links.
+ * - `scoped`: Issue #227: an apply that did not finish recorded the digest
+ *   of its containment scope; an apply with the same digest covers it.
  * - `unknown`: the entry holds no usable list; `why` says why.
  */
 export type ParsedContainmentFlag =
-  { kind: "recorded"; links: readonly string[] } | { kind: "unknown"; why: string }
+  | { kind: "recorded"; links: readonly string[] }
+  | { kind: "scoped"; scope: string }
+  | { kind: "unknown"; why: string }
 
 const NO_USABLE_LIST =
   "holds no usable list of offending links (it was written by an older paratix version or is damaged)"
 const IN_PROGRESS =
   "records an apply that did not finish (it stopped after it started, possibly after its merge had begun, it lost its extract lock, or it is an apply of an older paratix version without the extract lock that is still running)"
+const SCOPE_MISMATCH =
+  "records an apply that did not finish whose archive scope differs from this apply's (another archive, or a scope derived by another paratix or Unicode version)"
 
 /**
  * Issue #219: serialize an entry body. A link list above
@@ -203,6 +183,10 @@ const IN_PROGRESS =
  * @returns The JSON text with a trailing newline.
  */
 export function containmentFlagBody(body: ContainmentFlagBody): string {
+  if ("scope" in body) {
+    const { scope, state } = body
+    return `${JSON.stringify({ scope, state, version: CONTAINMENT_SCOPE_FLAG_VERSION })}\n`
+  }
   if (body.state === "unknown") {
     const { reason, state } = body
     return `${JSON.stringify({ reason, state, version: CONTAINMENT_FLAG_VERSION })}\n`
@@ -217,9 +201,6 @@ export function containmentFlagBody(body: ContainmentFlagBody): string {
   }
   return text
 }
-
-/** Issue #219: the body an apply creates its own entry with. */
-const IN_PROGRESS_BODY = containmentFlagBody({ links: [], state: "in-progress" })
 
 /** Issue #219: every entry object has `version`, `state` and one more key. */
 const FLAG_OBJECT_KEY_COUNT = 3
@@ -258,7 +239,7 @@ function validRecordedLinks(links: unknown): null | string[] {
  */
 function interpretFlagObject(value: { state: unknown } & object): ParsedContainmentFlag {
   if ("links" in value) {
-    if (value.state === "in-progress") return { kind: "unknown", why: IN_PROGRESS }
+    if (value.state === IN_PROGRESS_STATE) return { kind: "unknown", why: IN_PROGRESS }
     if (value.state !== "failed") return NO_USABLE_LIST_STATE
     const links = validRecordedLinks(value.links)
     return links === null ? NO_USABLE_LIST_STATE : { kind: "recorded", links }
@@ -273,10 +254,32 @@ function interpretFlagObject(value: { state: unknown } & object): ParsedContainm
 }
 
 /**
+ * Issue #227: interpret a v2 entry object with `version`, `state` and
+ * exactly one more key: an `in-progress` or `stopped` body with a
+ * well-formed scope digest is scoped, anything else holds no usable list.
+ *
+ * @param value - The parsed entry object.
+ * @param value.state - Its `state`.
+ * @returns The scope digest, or why the entry holds no usable list.
+ */
+function interpretScopedFlagObject(value: { state: unknown } & object): ParsedContainmentFlag {
+  if (
+    "scope" in value &&
+    (value.state === IN_PROGRESS_STATE || value.state === "stopped") &&
+    typeof value.scope === "string" &&
+    SHA256_PATTERN.test(value.scope)
+  ) {
+    return { kind: "scoped", scope: value.scope }
+  }
+  return NO_USABLE_LIST_STATE
+}
+
+/**
  * Issue #219: interpret an entry body. Only a well-formed `failed` record of
- * the current version yields links; everything else — an `in-progress` or
- * `unknown` record, the fixed text of older versions, an empty file, invalid
- * JSON, another version or shape — is unknown.
+ * version 1 yields links, and (Issue #227) only a well-formed v2
+ * `in-progress` or `stopped` body yields a scope digest; everything else — a
+ * v1 `in-progress` or `unknown` record, the fixed text of older versions, an
+ * empty file, invalid JSON, another version or shape — is unknown.
  *
  * @param text - The entry body.
  * @returns The recorded links, or why the entry holds no usable list.
@@ -295,12 +298,13 @@ export function parseContainmentFlag(text: string): ParsedContainmentFlag {
     typeof value !== "object" ||
     value === null ||
     !("version" in value) ||
-    value.version !== CONTAINMENT_FLAG_VERSION ||
     !("state" in value) ||
     Object.keys(value).length !== FLAG_OBJECT_KEY_COUNT
   ) {
     return NO_USABLE_LIST_STATE
   }
+  if (value.version === CONTAINMENT_SCOPE_FLAG_VERSION) return interpretScopedFlagObject(value)
+  if (value.version !== CONTAINMENT_FLAG_VERSION) return NO_USABLE_LIST_STATE
   return interpretFlagObject(value)
 }
 
@@ -329,6 +333,23 @@ export function parseContainmentEntryBytes(bytes: Uint8Array): ParsedContainment
 }
 
 /**
+ * Issue #227: what an entry means for an apply with the given scope digest:
+ * a scoped entry with another digest holds no usable list for it.
+ *
+ * @param state - The parsed entry.
+ * @param scopeDigest - The digest of this apply's containment scope.
+ * @returns The entry, or unknown when its scope digest differs.
+ */
+export function containmentEntryForScope(
+  state: ParsedContainmentFlag,
+  scopeDigest: string
+): ParsedContainmentFlag {
+  return state.kind === "scoped" && state.scope !== scopeDigest
+    ? { kind: "unknown", why: SCOPE_MISMATCH }
+    : state
+}
+
+/**
  * Issue #219: where the containment state of one destination lives.
  *
  * - `directory`: the flags directory, created when missing.
@@ -353,623 +374,4 @@ const ENTRY_ID_BYTES = 16
  */
 export function newContainmentEntryName(): string {
   return `run-${randomBytes(ENTRY_ID_BYTES).toString("hex")}`
-}
-
-/** Issue #219: the names the establish exec reports as entries. */
-const ENTRY_NAME_PATTERN = /^run-[\dA-Za-z\-]*$/v
-const SHA256_PATTERN = /^[\da-f]{64}$/v
-const HEX_DIGITS_PATTERN = /^[\da-f]*$/v
-
-/**
- * Issue #219: the POSIX `sh` function that prints one read line: its label,
- * the sha256 of the file and then the hex of its first bytes. The hash is
- * taken BEFORE the body is read: an entry replaced by a rename in between
- * then shows the old hash with the newer body, never the other way round, so
- * a removal keyed on the hash can never erase a newer record nobody read. A
- * file that vanishes between hash and body reads as an empty body, which
- * holds no usable list. `paratix_gone` tells a path that vanished apart from
- * one that is there but fails a guard.
- */
-const READ_LINE_FUNCTION = [
-  String.raw`paratix_read() { `,
-  String.raw`h=$(sha256sum < "$2" | cut -c1-64); `,
-  String.raw`case $h in ''|*[!0-9a-f]*) return 1;; esac; `,
-  // Not `String.raw`: `$\{` emits a literal shell parameter expansion.
-  `[ "$\{#h}" -eq 64 ] || return 1; `,
-  String.raw`printf '%s %s ' "$1" "$h"; `,
-  `head -c ${String(ENTRY_READ_BYTES)} < "$2" | od -An -v -tx1 | tr -d ' \\n'; `,
-  String.raw`printf '\n'; }; `,
-  // Issue #219: whether a path is gone, a dangling symlink counting as present.
-  String.raw`paratix_gone() { [ ! -e "$1" ] && [ ! -L "$1" ]; }; `,
-].join("")
-
-/**
- * Issue #219: the establish script. Positional parameters: `$1` flags
- * directory, `$2` old flag file, `$3` entry directory, `$4` own entry (inside
- * `$3`), `$5` its body.
- *
- * In order, and nothing is created before every guard passed:
- *
- * 1. `mkdir -p` the flags directory, else exit 2.
- * 2. The old flag file: a symlink (even a dangling one) exits 3, anything
- *    else that is not a regular file 4, an unreadable one 12.
- * 3. The entry directory: a symlink exits 5; a missing one is created; one
- *    that is (still) not a directory exits 6, one that is not readable,
- *    writable and searchable 7.
- * 4. Every name matching `run-*` (sorted, the no-match literal skipped): a
- *    name with characters other than ASCII letters, digits and `-` exits 10,
- *    a symlink 8, anything else that is not a regular file 9, an unreadable
- *    one 11; the entry name goes to stderr. The first
- *    {@link CONTAINMENT_ENTRY_READ_LIMIT} are printed as
- *    `entry <name> <sha256> <hex>`, any further ones only as one `more` line.
- *    Other names — dotfiles and the `paratix-write.*` temp files of
- *    `writeFile` — are never entries.
- * 5. The old flag file, when present: `legacy <sha256> <hex>`.
- * 6. The own entry is created exclusively: an existing name (a dangling
- *    symlink included) or a failed write exits 13. `set -C` opens a missing
- *    name with `O_EXCL`, which never follows a symlink and never replaces a
- *    file.
- * 7. `done`.
- *
- * Issue #219: an entry, or the old flag file, that vanishes while the script
- * looks at it — a concurrent clear claimed it with `mv`, or its owner removed
- * it — is skipped instead of failing a guard: its claimer verified and removed
- * it, or it survives under a claim name created after this glob, which this
- * apply never touches (race 2). Without that, concurrent applies refused each
- * other at random.
- *
- * `LC_ALL=C` keeps the glob order and the name ranges byte-wise, and
- * `umask 022` makes the entry directory and the own entry world-readable, as
- * the flags have always been.
- *
- * @returns The script, identical for every destination.
- */
-export function buildContainmentEstablishScript(): string {
-  const exit = CONTAINMENT_ESTABLISH_EXIT
-  return [
-    String.raw`LC_ALL=C; export LC_ALL; umask 022; `,
-    READ_LINE_FUNCTION,
-    `mkdir -p -- "$1" || exit ${String(exit.flagsDirectory)}; `,
-    `if [ -L "$2" ]; then exit ${String(exit.legacySymlink)}; fi; `,
-    `if [ -e "$2" ] && [ ! -f "$2" ] && ! paratix_gone "$2"; then exit ${String(exit.legacyNotRegular)}; fi; `,
-    `if [ -e "$2" ] && [ ! -r "$2" ] && ! paratix_gone "$2"; then exit ${String(exit.legacyUnreadable)}; fi; `,
-    `if [ -L "$3" ]; then exit ${String(exit.storeSymlink)}; fi; `,
-    `if [ ! -e "$3" ]; then mkdir -- "$3" 2>/dev/null || [ -d "$3" ] || exit ${String(exit.storeNotDirectory)}; fi; `,
-    `if [ -L "$3" ]; then exit ${String(exit.storeSymlink)}; fi; `,
-    `[ -d "$3" ] || exit ${String(exit.storeNotDirectory)}; `,
-    `[ -r "$3" ] && [ -w "$3" ] && [ -x "$3" ] || exit ${String(exit.storeInaccessible)}; `,
-    String.raw`n=0; more=0; `,
-    String.raw`for e in "$3"/run-*; do `,
-    String.raw`if [ ! -e "$e" ] && [ ! -L "$e" ]; then continue; fi; `,
-    `name=$\{e##*/}; `,
-    `case $name in *[!A-Za-z0-9-]*) exit ${String(exit.entryName)};; esac; `,
-    `if [ -L "$e" ]; then printf '%s\\n' "$name" >&2; exit ${String(exit.entrySymlink)}; fi; `,
-    `if [ ! -f "$e" ]; then paratix_gone "$e" && continue; printf '%s\\n' "$name" >&2; exit ${String(exit.entryNotRegular)}; fi; `,
-    `if [ ! -r "$e" ]; then paratix_gone "$e" && continue; printf '%s\\n' "$name" >&2; exit ${String(exit.entryUnreadable)}; fi; `,
-    `if [ "$n" -ge ${String(CONTAINMENT_ENTRY_READ_LIMIT)} ]; then more=1; continue; fi; `,
-    String.raw`if paratix_read "entry $name" "$e"; then n=$((n + 1)); continue; fi; `,
-    `paratix_gone "$e" && continue; printf '%s\\n' "$name" >&2; exit ${String(exit.entryUnreadable)}; `,
-    String.raw`done; `,
-    `if [ -L "$2" ]; then exit ${String(exit.legacySymlink)}; fi; `,
-    `if [ -e "$2" ] && [ ! -f "$2" ] && ! paratix_gone "$2"; then exit ${String(exit.legacyNotRegular)}; fi; `,
-    `if [ -f "$2" ] && ! paratix_read legacy "$2" && ! paratix_gone "$2"; then exit ${String(exit.legacyUnreadable)}; fi; `,
-    String.raw`if [ "$more" = 1 ]; then printf 'more\n'; fi; `,
-    `if [ -e "$4" ] || [ -L "$4" ]; then exit ${String(exit.ownEntry)}; fi; `,
-    `( set -C; printf '%s' "$5" > "$4" ) || exit ${String(exit.ownEntry)}; `,
-    String.raw`printf 'done\n'`,
-  ].join("")
-}
-
-/**
- * Issue #219: the establish exec as an explicit `sh -c` command with the
- * paths as positional parameters, see {@link buildContainmentEstablishScript}.
- *
- * @param parameters - Paths and the own entry.
- * @param parameters.directory - The flags directory.
- * @param parameters.entryDirectory - The destination's entry directory.
- * @param parameters.legacyFlag - The old single flag file.
- * @param parameters.ownEntry - The own entry's absolute path inside the entry directory.
- * @returns The `sh -c` command line with the quoted script and parameters.
- */
-export function buildContainmentEstablishCommand(
-  parameters: { ownEntry: string } & ContainmentPaths
-): string {
-  return [
-    "sh -c",
-    shellQuote(buildContainmentEstablishScript()),
-    "sh",
-    shellQuote(parameters.directory),
-    shellQuote(parameters.legacyFlag),
-    shellQuote(parameters.entryDirectory),
-    shellQuote(parameters.ownEntry),
-    shellQuote(IN_PROGRESS_BODY),
-  ].join(" ")
-}
-
-/**
- * Issue #219: an entry the successful apply may remove, with the sha256 its
- * content had when the establish exec read it.
- */
-export type RemovableContainmentEntry = { path: string; sha256: string }
-
-/**
- * Issue #219: what an apply learned from the entries before it touched the
- * destination, and where its own entry is.
- *
- * - `carried`: the links failed applies recorded; the post-merge backstop
- *   re-verifies them.
- * - `ownEntry`: the absolute path of this apply's own entry.
- * - `removable`: every entry read in full, the old flag file included, never
- *   the own entry; a fully successful apply removes those still unchanged.
- * - `verifyWholeDestination`: an entry held no usable list, the old flag file
- *   exists, or not every entry could be read, so the post-merge backstop
- *   judges every symlink under the destination.
- */
-export type ContainmentLedger = {
-  carried: readonly string[]
-  ownEntry: string
-  removable: readonly RemovableContainmentEntry[]
-  verifyWholeDestination: boolean
-}
-
-/** Issue #219: an entry (or the old flag file) the establish exec read. */
-type ReadContainmentEntry = { path: string; sha256: string; state: ParsedContainmentFlag }
-
-/** Issue #219: one decoded line of the establish output. */
-type EstablishLine =
-  { kind: "done" } | ({ kind: "entry" } & ReadContainmentEntry) | { kind: "more" }
-
-/**
- * Issue #219: decode one read line's hash and hex body.
- *
- * @param path - The absolute path of the entry that was read.
- * @param sha256 - The printed hash.
- * @param hex - The printed hex of the first bytes.
- * @returns The decoded line, or null when the fields are malformed.
- */
-function readEntryLine(path: string, sha256 = "", hex = ""): EstablishLine | null {
-  if (!SHA256_PATTERN.test(sha256) || !HEX_DIGITS_PATTERN.test(hex) || hex.length % 2 !== 0) {
-    return null
-  }
-  return { kind: "entry", path, sha256, state: parseContainmentEntryBytes(Buffer.from(hex, "hex")) }
-}
-
-/**
- * Issue #219: decode one line of the establish output.
- *
- * @param line - The line, without its newline.
- * @param paths - The containment paths, to make entry paths absolute.
- * @returns The decoded line, or null when it is not one the script prints.
- */
-function parseEstablishLine(line: string, paths: ContainmentPaths): EstablishLine | null {
-  if (line === "done" || line === "more") return { kind: line }
-  const [label, ...fields] = line.split(" ")
-  if (label === "legacy" && fields.length === 2) {
-    return readEntryLine(paths.legacyFlag, ...fields)
-  }
-  const [name = "", ...read] = fields
-  if (label !== "entry" || read.length !== 2 || !ENTRY_NAME_PATTERN.test(name)) return null
-  return readEntryLine(`${paths.entryDirectory}/${name}`, ...read)
-}
-
-/**
- * Issue #219: decode every line before the final `done` line.
- *
- * @param stdout - The captured stdout of a successful establish exec.
- * @param paths - The containment paths.
- * @returns The decoded lines, or null when a line is not one the script
- *   prints or `done` is missing or not last.
- */
-function establishLines(stdout: string, paths: ContainmentPaths): EstablishLine[] | null {
-  const doneLine = "done\n"
-  if (stdout !== doneLine && !stdout.endsWith(`\n${doneLine}`)) return null
-  const body = stdout.slice(0, -doneLine.length)
-  const lines = body === "" ? [] : body.slice(0, -1).split("\n")
-  const parsed = lines.map((line) => parseEstablishLine(line, paths))
-  return parsed.every((line) => line !== null && line.kind !== "done") ? parsed : null
-}
-
-/**
- * Issue #219: turn the output of a successful establish exec into the
- * ledger. A truncated capture makes the apply verify the whole destination
- * and removes no other entry; output the script does not print, or a missing
- * `done` line, returns null (unreadable).
- *
- * @param stdout - The captured stdout.
- * @param parameters - The containment paths and the own entry's absolute path.
- * @returns The ledger, or null when the output cannot be trusted.
- */
-export function parseContainmentEstablishOutput(
-  stdout: string,
-  parameters: { ownEntry: string } & ContainmentPaths
-): ContainmentLedger | null {
-  const { legacyFlag, ownEntry } = parameters
-  if (stdout.endsWith(CAPTURE_TRUNCATION_MARKER)) {
-    return { carried: [], ownEntry, removable: [], verifyWholeDestination: true }
-  }
-  const lines = establishLines(stdout, parameters)
-  if (lines === null) return null
-  const entries = lines.flatMap((line) => (line.kind === "entry" ? [line] : []))
-  if (entries.some(({ path }) => path === ownEntry)) return null
-  const recorded = entries.flatMap(({ state }) => (state.kind === "recorded" ? state.links : []))
-  return {
-    carried: [...new Set(recorded)],
-    ownEntry,
-    removable: entries.map(({ path, sha256 }) => ({ path, sha256 })),
-    // Issue #219: the old flag file forces a destination-wide verification
-    // whatever it records, like an entry without a usable list and like
-    // entries past the read limit.
-    verifyWholeDestination:
-      lines.some(({ kind }) => kind === "more") ||
-      entries.some(({ path, state }) => path === legacyFlag || state.kind === "unknown"),
-  }
-}
-
-/**
- * Issue #219: the entry name the establish exec wrote to stderr, as an
- * absolute path, or the entry directory when stderr names none.
- *
- * @param entryDirectory - Where the entries live.
- * @param stderr - The exec's stderr, whose last line may name the entry.
- * @returns The offending entry's absolute path, or a phrase naming the entry
- *   directory.
- */
-function offendingEntryPath(entryDirectory: string, stderr: string): string {
-  const name = stderr.trimEnd().split("\n").at(-1) ?? ""
-  return ENTRY_NAME_PATTERN.test(name)
-    ? `${entryDirectory}/${name}`
-    : `an entry in ${entryDirectory}`
-}
-
-/**
- * Issue #219: why an establish exec exited non-zero. Every refusal names the
- * offending path and says to remove it where that resolves it.
- *
- * @param paths - The destination's containment paths, for the message.
- * @param result - The exec's exit code and stderr.
- * @param result.code - The exit code.
- * @param result.stderr - The captured stderr.
- * @returns The reason, without the `[archive.extract]` prefix.
- */
-export function containmentEstablishFailure(
-  paths: ContainmentPaths,
-  result: { code: number; stderr: string }
-): string {
-  const { entryDirectory, legacyFlag } = paths
-  const detail = result.stderr.trim() || `exit code ${String(result.code)}`
-  const exit = CONTAINMENT_ESTABLISH_EXIT
-  const entry = (): string => offendingEntryPath(entryDirectory, result.stderr)
-  const reasons: Record<number, (() => string) | undefined> = {
-    [exit.entryName]: () =>
-      `containment entry directory ${entryDirectory} holds a run-* entry whose name has characters other than ASCII letters, digits and "-"; remove that entry`,
-    [exit.entryNotRegular]: () =>
-      `containment entry ${entry()} exists but is not a regular file; remove it`,
-    [exit.entrySymlink]: () => `containment entry ${entry()} is a symlink; remove it`,
-    [exit.entryUnreadable]: () => `failed to read containment entry ${entry()}`,
-    [exit.flagsDirectory]: () =>
-      `failed to create archive marker directory for containment entries ${entryDirectory}: ${detail}`,
-    [exit.legacyNotRegular]: () =>
-      `containment-failure flag ${legacyFlag} exists but is not a regular file; remove it`,
-    [exit.legacySymlink]: () => `containment-failure flag ${legacyFlag} is a symlink; remove it`,
-    [exit.legacyUnreadable]: () =>
-      `failed to read containment-failure flag ${legacyFlag}: ${detail}`,
-    [exit.ownEntry]: () => `failed to create containment entry in ${entryDirectory}: ${detail}`,
-    [exit.storeInaccessible]: () =>
-      `containment entry directory ${entryDirectory} is not readable, writable and searchable`,
-    [exit.storeNotDirectory]: () =>
-      `containment entry directory ${entryDirectory} is not a directory and cannot be created; remove it`,
-    [exit.storeSymlink]: () =>
-      `containment entry directory ${entryDirectory} is a symlink; remove it`,
-  }
-  return (
-    reasons[result.code]?.() ?? `failed to read containment entries in ${entryDirectory}: ${detail}`
-  )
-}
-
-/**
- * Issue #219: read every entry and create the own `in-progress` entry in ONE
- * exec, before the destination is touched; the exec count is one whatever
- * the number of entries or members.
- *
- * A guard that fails — a symlink or other non-regular old flag file or entry,
- * an entry directory that is a symlink, not a directory or not accessible, a
- * flags directory that cannot be created, a read that fails, an own entry
- * that cannot be created — refuses the apply before anything else happens,
- * and so does an exec that throws or prints what the script does not. An
- * entry without a usable list of offending links does not refuse: the apply
- * runs and verifies the whole destination after its merge.
- *
- * @param conn - The SSH connection.
- * @param parameters - Establish inputs.
- * @param parameters.ownEntryName - The own entry's name, see {@link newContainmentEntryName}.
- * @param parameters.paths - Where the containment state lives.
- * @param parameters.source - The archive source, for failure messages.
- * @returns The ledger, see {@link ContainmentLedger}, or the refusal.
- */
-export async function establishContainmentEntry(
-  conn: SshConnection,
-  parameters: { ownEntryName: string; paths: ContainmentPaths; source: string }
-): Promise<ContainmentLedger | ModuleResult> {
-  const { ownEntryName, paths, source } = parameters
-  const refusal = (reason: string): ModuleResult =>
-    failed(
-      `[archive.extract] refusing to extract ${source}: ${reason}; the containment entry must be in place before the destination is touched`
-    )
-  const inputs = { ...paths, ownEntry: `${paths.entryDirectory}/${ownEntryName}` }
-  let result: Awaited<ReturnType<SshConnection["exec"]>>
-  try {
-    result = await conn.exec(buildContainmentEstablishCommand(inputs), {
-      ignoreExitCode: true,
-      maxOutputBytes: CONTAINMENT_ESTABLISH_CAPTURE_LIMIT_BYTES,
-      silent: true,
-    })
-  } catch (error) {
-    const reason = error instanceof Error ? error.message : String(error)
-    return refusal(`failed to read containment entries in ${paths.entryDirectory}: ${reason}`)
-  }
-  if (result.code !== 0) return refusal(containmentEstablishFailure(paths, result))
-  const ledger = parseContainmentEstablishOutput(result.stdout, inputs)
-  if (ledger === null) {
-    return refusal(
-      `failed to read containment entries in ${paths.entryDirectory}: unexpected output`
-    )
-  }
-  return ledger
-}
-
-/**
- * Issue #224: the lock the clear exec guards itself with: the holder token and
- * the guard threshold of the destination's extract lock (see
- * `archiveExtractLock.ts`).
- */
-export type ContainmentClearLock = {
-  /** Guard age in seconds; a holder marker older than this refuses the clear. */
-  guardSeconds: number
-  /** The unquoted lock directory path. */
-  lockPath: string
-  /** Issue #224: why the lock handle was latched as lost, if it was. */
-  lostReason?: () => MutexLockLostReason | undefined
-  /** The holder token on marker line 1. */
-  token: string
-}
-
-/**
- * Issue #219: the clear script. Positional parameters: `$1` the lock
- * directory and `$2` the holder token of the destination's extract lock
- * (issue #224), `$3` the own entry, then one `<path> <sha256>` pair per
- * removable entry.
- *
- * Issue #224: before anything else, the embedded refresh guard checks that
- * the lock still belongs to this apply — the lock directory exists, its
- * holder marker carries the token on line 1 and is not older than the guard
- * threshold — and refreshes the marker. When it refuses, the script exits
- * {@link CONTAINMENT_CLEAR_EXIT}.lockLost before it renames or removes
- * anything: another apply may hold the lock by now and rely on every entry it
- * read.
- *
- * For the n-th pair it claims the entry by renaming it to `$own-claim-<n>`
- * (inside the entry directory, so the claim is still an entry), which is
- * atomic: a concurrent rewrite (a rename onto the path) after that point
- * creates a new entry that is never touched. The claim is removed only when
- * it is a regular file whose sha256 still equals the one read before;
- * otherwise it stays, and `check` and the next apply see it. An entry that is
- * already gone is fine. A claim name that is taken exits 3, a claim that
- * cannot be removed 4, an entry that is still there but cannot be claimed 5,
- * an odd number of arguments 64. The own entry is removed last (exit 6 when
- * that fails), so a failure before it can still rewrite the own entry.
- *
- * @param guardSeconds - Issue #224: the guard threshold in seconds.
- * @returns The script, identical for every destination.
- */
-export function buildContainmentClearScript(guardSeconds: number): string {
-  const exit = CONTAINMENT_CLEAR_EXIT
-  const guard = buildFlagLockRefreshGuard({
-    guardSeconds,
-    lockDirectory: { kind: "parameter", name: "1" },
-    token: { kind: "parameter", name: "2" },
-  })
-  return [
-    String.raw`LC_ALL=C; export LC_ALL; `,
-    `${guard} || exit ${String(exit.lockLost)}; shift 2; `,
-    String.raw`own=$1; shift; n=0; `,
-    String.raw`while [ "$#" -ge 2 ]; do `,
-    String.raw`p=$1; h=$2; shift 2; c="$own-claim-$n"; n=$((n + 1)); `,
-    `if [ -e "$c" ] || [ -L "$c" ]; then printf 'claim %s exists\\n' "$c" >&2; exit ${String(exit.claimTaken)}; fi; `,
-    String.raw`if mv -- "$p" "$c" 2>/dev/null; then `,
-    String.raw`if [ -f "$c" ] && [ ! -L "$c" ] && [ "$(sha256sum < "$c" | cut -c1-64)" = "$h" ]; then `,
-    `rm -f -- "$c" || exit ${String(exit.claimUnremovable)}; `,
-    String.raw`fi; `,
-    `elif [ -e "$p" ] || [ -L "$p" ]; then printf 'cannot claim %s\\n' "$p" >&2; exit ${String(exit.claimFailed)}; `,
-    String.raw`fi; `,
-    String.raw`done; `,
-    `[ "$#" -eq 0 ] || exit ${String(exit.arguments)}; `,
-    `rm -f -- "$own" || exit ${String(exit.ownEntry)}`,
-  ].join("")
-}
-
-/**
- * Issue #219: the clear exec as an explicit `sh -c` command, see
- * {@link buildContainmentClearScript}.
- *
- * @param ledger - The own entry and the entries it may remove.
- * @param lock - Issue #224: the extract lock the clear guards itself with.
- * @returns The `sh -c` command line with the quoted script and parameters.
- */
-export function buildContainmentClearCommand(
-  ledger: Pick<ContainmentLedger, "ownEntry" | "removable">,
-  lock: ContainmentClearLock
-): string {
-  return [
-    "sh -c",
-    shellQuote(buildContainmentClearScript(lock.guardSeconds)),
-    "sh",
-    shellQuote(lock.lockPath),
-    shellQuote(lock.token),
-    shellQuote(ledger.ownEntry),
-    ...ledger.removable.flatMap(({ path, sha256 }) => [shellQuote(path), sha256]),
-  ].join(" ")
-}
-
-/**
- * Issue #224: the failure of a clear that removed nothing because the
- * destination's extract lock is no longer this apply's.
- *
- * @param ownEntry - The own entry's absolute path.
- * @param lock - The lock the apply took.
- * @returns The failure.
- */
-export function clearRefusedForLostLock(
-  ownEntry: string,
-  lock: Pick<ContainmentClearLock, "guardSeconds" | "lockPath" | "lostReason">
-): ModuleResult {
-  return failed(
-    `[archive.extract] refusing to remove containment entry ${ownEntry} and the entries it verified: ${archiveExtractLockLostReason(lock)}; no entry was removed, so check stays at needs-apply until a later apply verifies and clears them`
-  )
-}
-
-/**
- * Issue #219: after a fully successful apply — its post-merge backstop
- * re-verified every carried link, and the whole destination when an entry
- * held no usable list — remove, in ONE exec, every entry it read that is
- * still unchanged, then its own entry. A failure fails the apply: an entry
- * left behind would keep `check` at needs-apply.
- *
- * Issue #224: the exec first checks that the destination's extract lock is
- * still this apply's. When it is not, nothing is removed and the failure
- * names the lost lock; the caller records an empty `failed` list in the own
- * entry, which is safe because this apply's own backstop already passed.
- *
- * @param conn - The SSH connection.
- * @param ledger - What the establish exec read, see {@link ContainmentLedger}.
- * @param lock - Issue #224: the extract lock the clear guards itself with.
- * @returns Null when the own entry is gone, otherwise a structured failure.
- */
-export async function clearContainmentEntries(
-  conn: SshConnection,
-  ledger: Pick<ContainmentLedger, "ownEntry" | "removable">,
-  lock: ContainmentClearLock
-): Promise<ModuleResult | null> {
-  const result = await conn.exec(buildContainmentClearCommand(ledger, lock), {
-    ignoreExitCode: true,
-    silent: true,
-  })
-  if (result.code === 0) return null
-  if (result.code === CONTAINMENT_CLEAR_EXIT.lockLost) {
-    return clearRefusedForLostLock(ledger.ownEntry, lock)
-  }
-  return failedCommand(
-    `[archive.extract] failed to remove containment entry ${ledger.ownEntry} and the entries it verified`,
-    result
-  )
-}
-
-/**
- * Issue #219: the `check` script that passes only when the entry directory
- * `$1` holds no entry: it is absent, or a real directory that is readable and
- * searchable and in which `run-*` matches nothing, a dangling symlink
- * included. A symlink, a non-directory or an unreadable directory fails.
- *
- * @returns The POSIX `sh` script, which exits 0 only without any entry.
- */
-export function buildContainmentCheckScript(): string {
-  return [
-    String.raw`if [ -L "$1" ]; then exit 1; fi; `,
-    String.raw`if [ ! -e "$1" ]; then exit 0; fi; `,
-    String.raw`[ -d "$1" ] && [ -r "$1" ] && [ -x "$1" ] || exit 1; `,
-    String.raw`for e in "$1"/run-*; do if [ -e "$e" ] || [ -L "$e" ]; then exit 1; fi; done; `,
-    String.raw`exit 0`,
-  ].join("")
-}
-
-/**
- * Issue #219: the part of the `check` test that passes only when neither the
- * old flag file (not even a dangling symlink) nor any entry exists; to be
- * joined with `&&` to the marker test so the exec count of `check` stays
- * unchanged.
- *
- * @param paths - Where the destination's containment state lives.
- * @param paths.entryDirectory - The destination's entry directory.
- * @param paths.legacyFlag - The old single flag file.
- * @returns The shell test.
- */
-export function noContainmentEntriesCommand(
-  paths: Pick<ContainmentPaths, "entryDirectory" | "legacyFlag">
-): string {
-  const legacy = shellQuote(paths.legacyFlag)
-  return [
-    `test ! -e ${legacy} && test ! -L ${legacy} &&`,
-    "sh -c",
-    shellQuote(buildContainmentCheckScript()),
-    "sh",
-    shellQuote(paths.entryDirectory),
-  ].join(" ")
-}
-
-/**
- * Issue #219: rewrite the own entry through the guarded `writeFile`, which
- * stages a temp file and renames it onto the entry, refusing to finalize onto
- * a symlink or a directory. An own entry another apply removed in the
- * meantime is created again.
- *
- * @param conn - The SSH connection.
- * @param ownEntry - The own entry's absolute path.
- * @param record - What to record.
- * @returns Null when the record is in place, otherwise why it could not be written.
- */
-async function writeOwnEntry(
-  conn: SshConnection,
-  ownEntry: string,
-  record: ContainmentFlagRecord
-): Promise<null | string> {
-  try {
-    await conn.writeFile(ownEntry, containmentFlagBody(record), { mode: CONTAINMENT_ENTRY_MODE })
-  } catch (error) {
-    const reason = error instanceof Error ? error.message : String(error)
-    return `failed to write containment entry ${ownEntry}: ${reason}`
-  }
-  return null
-}
-
-/**
- * Issue #219: record a failed apply's outcome in its own entry, best effort;
- * other entries are never touched. When the write fails, the `in-progress`
- * body stays (if the entry still exists), which reads as unknown, so the next
- * apply verifies the whole destination; the write failure is appended to the
- * apply's failure. The message says so conditionally: a concurrent apply may
- * have verified the destination and removed the entry meanwhile (race 1).
- *
- * @param conn - The SSH connection.
- * @param parameters - Record inputs.
- * @param parameters.failure - The apply's failure.
- * @param parameters.ownEntry - The own entry's absolute path.
- * @param parameters.record - What to record.
- * @returns The failure, extended by a record failure if there was one.
- */
-export async function recordContainmentFailure(
-  conn: SshConnection,
-  parameters: { failure: ModuleResult; ownEntry: string; record: ContainmentFlagRecord }
-): Promise<ModuleResult> {
-  const { failure, ownEntry, record } = parameters
-  const recordFailure = await writeOwnEntry(conn, ownEntry, record)
-  if (recordFailure === null) return failure
-  const message = failure.error?.message ?? "[archive.extract] apply failed"
-  return failed(
-    `${message}; [archive.extract] ${recordFailure}; the entry still marks the apply as unfinished, so the next apply verifies the whole destination, unless another apply removed it after verifying the destination`
-  )
-}
-
-/**
- * Issue #219: record a failed apply's outcome after a thrown error, ignoring
- * any failure of the write itself; the caller rethrows the error.
- *
- * @param conn - The SSH connection.
- * @param ownEntry - The own entry's absolute path.
- * @param record - What to record.
- */
-export async function recordContainmentFailureAfterThrow(
-  conn: SshConnection,
-  ownEntry: string,
-  record: ContainmentFlagRecord
-): Promise<void> {
-  await writeOwnEntry(conn, ownEntry, record)
 }

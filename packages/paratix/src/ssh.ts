@@ -237,7 +237,7 @@ const DISCONNECT_DESTROY_FALLBACK_MS = 5000
 // fan-outs used to issue 8 at once, one channel below that ceiling, which
 // surfaced as an opaque `Channel open failure` on archives with many members.
 // Bounding the channels here rather than at each call site keeps one authority
-// for the limit: `archive.ts`, the `known_hosts` filter in `modules/ssh.ts` and
+// for the limit: `archiveCheck.ts`, the `known_hosts` filter in `modules/ssh.ts` and
 // the compose image probes all share it, as does any future fan-out. 4 leaves
 // room for a concurrent SFTP channel plus headroom under the stock default.
 const MAX_CONCURRENT_SESSION_CHANNELS = 4
@@ -300,6 +300,24 @@ export class RemoteStatTransientError extends Error {
   public constructor(message: string, options?: { cause?: unknown }) {
     super(message, options)
     this.name = "RemoteStatTransientError"
+  }
+}
+
+/**
+ * Rejection of an `exec` that carries caller-provided stdin while sudo would
+ * need a password on that same stdin (see `sudoCommand`). It is a
+ * configuration limit of the connection, not a transport failure: callers that
+ * can degrade gracefully — e.g. the batched archive probes, whose `check` path
+ * reports needs-apply instead of aborting — match on this class, while every
+ * other exec rejection keeps propagating.
+ */
+export class SudoInputUnsupportedError extends Error {
+  public constructor() {
+    super(
+      "exec with input is not supported when sudo requires a password: " +
+        "configure passwordless sudo for the connecting user or remove the input payload"
+    )
+    this.name = "SudoInputUnsupportedError"
   }
 }
 
@@ -2541,10 +2559,7 @@ trap - EXIT
       // instead of silently producing a `sudo -n` command that breaks at
       // runtime.
       if (!this.passwordlessSudo && !this.credentialCachePrimed) {
-        throw new Error(
-          "exec with input is not supported when sudo requires a password: " +
-            "configure passwordless sudo for the connecting user or remove the input payload"
-        )
+        throw new SudoInputUnsupportedError()
       }
       return { command: `sudo -n bash -c ${quoted}`, mode: "noninteractive", needsPassword: false }
     }

@@ -12,6 +12,7 @@ import type {
 import { shouldExecuteApplyDuringDryRun } from "./dryRunDispatch.js"
 import { dryRunRecipeModule } from "./dryRunRecipe.js"
 import { loadDotEnvironment, mergeEnvironment } from "./environment.js"
+import { runWithFirstRunValue } from "./firstRunContext.js"
 import {
   assertValidModuleMetaEntries,
   isSshdPortMetaEntry,
@@ -243,6 +244,18 @@ export type RunOptions = {
   envFile?: string
   /** Additional environment variables that override values from `envFile` and the server definition. */
   envOverrides?: Environment
+  /**
+   * Internal option (not part of the public API): when `true`,
+   * `isFirstRun()` returns `true` for the entire run lifecycle — validation,
+   * environment setup, secret prewarm, connect, every module `check` and
+   * `apply` (including recipe children and `when` predicates), signal
+   * handlers, teardown and exit-code resolution. When omitted or `false`, the
+   * run opens its own `false` scope, masking any outer first-run scope so a
+   * nested run never inherits it. The CLI forwards `--first-run` here. This
+   * option only sets the async-local flag; it never touches
+   * `process.env.PARATIX_FIRST_RUN`. Defaults to `false`.
+   */
+  firstRun?: boolean
   /**
    * Initial grace period (in seconds) the runner waits before the first
    * reconnect attempt after a `system.reboot` meta. Defaults to
@@ -1342,6 +1355,24 @@ async function prewarmRunSecrets(definition: ServerDefinition): Promise<void> {
 export async function runPlaybook(
   definition: ServerDefinition,
   options: RunOptions = {}
+): Promise<void> {
+  // The first-run scope is outermost so every phase of the run — validation
+  // through exit-code resolution — observes this run's own flag.
+  // Omitted means `false`, which masks any outer scope for nested runs.
+  await runWithFirstRunValue(options.firstRun === true, async () => {
+    await runPlaybookLifecycle(definition, options)
+  })
+}
+
+/**
+ * The body of {@link runPlaybook}, run inside its first-run scope.
+ *
+ * @param definition - The (already filtered) server definition of this run.
+ * @param options - The run options passed to {@link runPlaybook}.
+ */
+async function runPlaybookLifecycle(
+  definition: ServerDefinition,
+  options: RunOptions
 ): Promise<void> {
   validateServerDefinition(definition, { allowEmptyRun: true })
   const { diff = false, dryRun = false, verbose = false } = options
