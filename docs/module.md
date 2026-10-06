@@ -312,18 +312,20 @@ Eintrag hält ihn fest. Der Eintrag eines früheren Durchlaufs, der nicht zu End
 unterbrochen, brach nach Beginn des Zusammenführens mit einem Fehler ab oder konnte sein Ergebnis
 nicht festhalten, oder ein anderer Durchlauf für dieses Zielverzeichnis läuft noch), hält nur den
 Bereichs-Digest dieses Durchlaufs fest. Stimmt der Digest mit dem des aktuellen Durchlaufs überein,
-hat der frühere Durchlauf dasselbe Archiv entpackt und kann nur Links veröffentlicht haben, die der
-aktuelle Durchlauf ohnehin prüft: seine eigenen Symlinks und jeden Link, dessen Auflösung durch
+hat der frühere Durchlauf ein Archiv mit gleichwertigem Containment-Bereich entpackt (dieselben
+Symlink-Pfade und geschriebenen Pfade, nach Namensvariante verglichen; Inhalte und Symlink-Ziele
+gehen nicht in den Digest ein) und kann nur Links veröffentlicht haben, die der aktuelle Durchlauf
+ohnehin prüft: seine eigenen Symlinks und jeden Link, dessen Auflösung durch
 einen Pfad führt, den er schreibt. Die normale Prüfung des aktuellen Durchlaufs nach dem
 Zusammenführen deckt diesen Eintrag dann ab, ohne das ganze Zielverzeichnis zu prüfen, und ein
 Symlink außerhalb dieses Bereichs beeinflusst sie nicht, auch wenn er aus `destination` hinauszeigt.
-Enthält ein Eintrag keine verwertbare Liste – weil sein Digest abweicht (das Archiv hat sich
-geändert, oder der Digest wurde von einer paratix-Version mit anderer Ableitung des Bereichs oder
-unter einer anderen Unicode-Version gebildet), er ein `in-progress`-Eintrag einer älteren
-paratix-Version ist, seine Prüfung die Links nicht ermitteln konnte (etwa bei einer gescheiterten
-Liste oder einem Eintrag des Archivs in einem nicht lesbaren Verzeichnis), es für das Festhalten zu
-viele waren (mehr als 256 Links oder 64 KiB) oder er beschädigt ist (etwa leer, abgeschnitten oder
-fehlerhaft aufgebaut) –, und ebenso, wenn die einzelne Flag-Datei
+Enthält ein Eintrag keine verwertbare Liste – weil sein Digest abweicht (der Containment-Bereich des
+Archivs hat sich geändert, oder der Digest wurde von einer paratix-Version mit anderer Ableitung des
+Bereichs oder unter einer anderen Unicode-Version gebildet), er ein `in-progress`-Eintrag einer
+älteren paratix-Version ist, seine Prüfung die Links nicht ermitteln konnte (etwa bei einer
+gescheiterten Liste oder einem Eintrag des Archivs in einem nicht lesbaren Verzeichnis), es für das
+Festhalten zu viele waren (mehr als 256 Links oder 64 KiB) oder er beschädigt ist (etwa leer,
+abgeschnitten oder fehlerhaft aufgebaut) –, und ebenso, wenn die einzelne Flag-Datei
 `archive-containment-<sha256>.failed` älterer paratix-Versionen besteht oder es mehr als 16 Einträge
 gibt, läuft der Durchlauf trotzdem normal. Seine Prüfung nach dem Zusammenführen prüft dann das
 ganze Zielverzeichnis: Jeder Symlink unter `destination`, nicht nur die, auf die das Archiv wirken
@@ -343,19 +345,22 @@ einem Erfolg einen weiteren, unabhängig von der Zahl der Einträge. Ein Verzeic
 `.paratix-stage.*`, das ein abgebrochener Durchlauf in `destination` hinterlassen hat, prüft die
 normale Prüfung nach dem Zusammenführen nicht, weil die Link-Regeln des Archivs oben seine Links
 darin halten, und es wird nicht entfernt. Nach einem unterbrochenen Durchlauf entfernt eine
-erfolgreiche Wiederholung desselben Archivs mit übereinstimmendem Digest den Eintrag, ohne dass
-etwas von Hand zu tun ist. Nach dem Aktualisieren von paratix werden die alte Flag-Datei und die
+erfolgreiche Wiederholung mit einem Archiv gleichwertigen Containment-Bereichs (übereinstimmender
+Digest) den Eintrag, ohne dass etwas von Hand zu tun ist.
+Nach dem Aktualisieren von paratix werden die alte Flag-Datei und die
 Einträge älterer paratix-Versionen wie Einträge ohne verwertbare Liste gelesen, und das ganze
 Zielverzeichnis wird geprüft, bevor sie entfernt werden; eine ältere paratix-Version liest einen
 Eintrag dieser Version ebenso als Eintrag ohne verwertbare Liste. Ein Zielverzeichnis, das
 absichtlich einen nach außen zeigenden Symlink enthält, besteht diese Prüfung nicht, solange ein
 Eintrag keine verwertbare Liste enthält, etwa ein Interpreter-Link eines virtualenv nach `/usr/bin`
-im Arbeitsverzeichnis eines Runners, wenn sich das Archiv nach einem unterbrochenen Durchlauf
-geändert hat. Bleiben Verstöße bestehen, sind die betroffenen Links zu entfernen oder umzulenken und
+im Arbeitsverzeichnis eines Runners, wenn sich der Containment-Bereich des Archivs nach einem
+unterbrochenen Durchlauf geändert hat.
+Bleiben Verstöße bestehen, sind die betroffenen Links zu entfernen oder umzulenken und
 der Durchlauf zu wiederholen. Sind die betroffenen Links gewollt und liegen außerhalb des Bereichs,
 auf den das Archiv wirken kann, kann das Löschen des Containment-Zustands die Wiederholung
-ermöglichen. Dieser Schritt von Hand ist nur für Einträge ohne verwertbaren Digest oder nach einem
-geänderten Archiv nötig. Die Fehlermeldung nennt diesen Schritt nur bei einer vollständig lesbaren
+ermöglichen. Dieser Schritt von Hand ist nur für Einträge ohne verwertbaren Digest oder nach einer
+Änderung des Containment-Bereichs des Archivs nötig.
+Die Fehlermeldung nennt diesen Schritt nur bei einer vollständig lesbaren
 Prüfung des ganzen Zielverzeichnisses, wenn die normale Prüfung des aktuellen Archivs
 ohne festgehaltene Links einschließlich des Abgleichs durch den Kernel bestehen würde. Dann sind
 zuerst alle `archive.extract`-Durchläufe für dieses Zielverzeichnis anzuhalten oder ihr Ende

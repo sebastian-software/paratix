@@ -144,8 +144,9 @@ function compareCodeUnits(left: string, right: string): number {
 
 /**
  * Issue #227: the digest of an archive's containment scope that the
- * containment entry of an apply records, so a later apply of the same archive
- * can recognize the entry an interrupted apply left.
+ * containment entry of an apply records, so a later apply of an archive with
+ * an equivalent containment scope can recognize the entry an interrupted apply
+ * left.
  *
  * It is the lowercase hex SHA-256 of the JSON array of
  * {@link CONTAINMENT_SCOPE_DIGEST_ALGORITHM}, `process.versions.unicode`, the
