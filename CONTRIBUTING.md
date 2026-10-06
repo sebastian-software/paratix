@@ -102,7 +102,9 @@ presets, standards, age policy and normal updates remain in effect.
 Its prepared branch hook uses Renovate's bounded upgrades data file and the exact
 absolute helper command. The command and owned pnpm CLI require independently
 authenticated read-only releases and a separately reviewed worker configuration;
-these paths do not assert that tooling is deployed. Do not replace the predicate
+these paths do not assert that tooling is deployed. The prepared release directory
+tracks the reviewed containing source commit. E must select authenticated published
+releases and actual deployment snapshots before activation. Do not replace the predicate
 with `isVulnerabilityAlert = true` until the reviewed
 [parent issue #37](https://github.com/sebastian-software/renovate-config/issues/37)
 E manifest authorizes Paratix alone and proves publisher isolation, independent

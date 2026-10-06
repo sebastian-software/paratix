@@ -19,7 +19,7 @@
       ],
       "postUpgradeTasks": {
         "commands": [
-          "/opt/renovate/toolchains/candidate43-consumer11/node/bin/node /opt/renovate/releases/vitest-72eccad55567efd96e87fb215a6aaa81201920a1/scripts/vitest-lockstep.mjs"
+          "/opt/renovate/toolchains/candidate43-consumer11/node/bin/node /opt/renovate/releases/vitest-eaf25235679c46bb3259f70babcfd1da4a8e7e70/scripts/vitest-lockstep.mjs"
         ],
         "dataFileTemplate": "{{{toJSON upgrades}}}",
         "fileFilters": [
