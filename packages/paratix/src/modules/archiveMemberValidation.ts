@@ -328,6 +328,46 @@ function ambiguousNameReason(member: ArchiveMember): null | string {
 }
 
 /**
+ * Return why a member path, or a hardlink's target, has a `..` segment.
+ *
+ * The containment rules compare normalized member paths, but the extracting
+ * tool receives the raw names, and how it treats a `..` segment — in
+ * particular one after a symlink the same archive creates — depends on the
+ * implementation. Refusing such names for tar and zip alike keeps the names
+ * the rules judge and the names that are extracted the same. Hardlink targets
+ * are relative to the archive root like member paths, so they follow the same
+ * rule. Symlink targets keep `..`: it is legitimate there, and the link
+ * resolver judges where they lead. `.` segments and a leading `./` stay
+ * allowed, as does a segment that merely contains dots, such as `a..b`.
+ *
+ * @param member - A single parsed archive member.
+ * @returns The refusal reason, or null.
+ */
+function parentSegmentReason(member: ArchiveMember): null | string {
+  if (hasParentSegment(member.path)) {
+    return `member ${JSON.stringify(member.path)} contains a ".." path segment`
+  }
+  if (
+    member.kind === "hardlink" &&
+    member.linkTarget !== null &&
+    hasParentSegment(member.linkTarget)
+  ) {
+    return `member ${JSON.stringify(member.path)} -> ${JSON.stringify(member.linkTarget)} hardlink target contains a ".." path segment`
+  }
+  return null
+}
+
+/**
+ * Whether a slash-separated path has a segment that is exactly `..`.
+ *
+ * @param path - The path as the archive listing spells it.
+ * @returns True when any segment is `..`.
+ */
+function hasParentSegment(path: string): boolean {
+  return path.split("/").includes("..")
+}
+
+/**
  * Return why an archive member is unsafe, or null when it may be extracted.
  *
  * @param member - A single parsed archive member.
@@ -350,7 +390,8 @@ export function archiveMemberUnsafeReason(member: ArchiveMember): null | string 
   if (modeHasSetuidOrSetgid(member.mode)) {
     return `member ${JSON.stringify(member.path)} has setuid or setgid bit set (mode ${member.mode})`
   }
-  const nameProblem = controlCharacterReason(member) ?? ambiguousNameReason(member)
+  const nameProblem =
+    controlCharacterReason(member) ?? ambiguousNameReason(member) ?? parentSegmentReason(member)
   if (nameProblem !== null) return nameProblem
   if (!memberEscapesDestination(member)) return null
   const detail =

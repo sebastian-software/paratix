@@ -1021,6 +1021,90 @@ describe.skipIf(SKIP_WITHOUT_DOCKER)("Paratix integration", () => {
     }
   })
 
+  // #201: the playbook imports `isFirstRun` from dist/index.js while the CLI
+  // opens the first-run scope in dist/cli.js. Under `--first-run` the flag must
+  // reach the playbook import and every module check/apply against a real
+  // SSH server.
+  it("exposes isFirstRun() to a custom module check and apply through the built apply CLI with --first-run", async () => {
+    const environment = getEnvironment()
+    const packageDirectory = resolve(import.meta.dirname, "../..")
+    const distCliPath = resolve(packageDirectory, "dist/cli.js")
+    const distIndexUrl = pathToFileURL(resolve(packageDirectory, "dist/index.js")).href
+    let localDirectory: string | undefined
+
+    let primaryError: unknown
+    try {
+      localDirectory = mkdtempSync(join(tmpdir(), "paratix-dist-cli-first-run-"))
+      const playbookPath = join(localDirectory, "playbook.mjs")
+      const observationsPath = join(localDirectory, "observations.txt")
+
+      writeFileSync(
+        playbookPath,
+        [
+          'import { appendFileSync } from "node:fs"',
+          `import { isFirstRun, server } from ${JSON.stringify(distIndexUrl)}`,
+          "",
+          `const observationsPath = ${JSON.stringify(observationsPath)}`,
+          "function record(phase) {",
+          "  appendFileSync(observationsPath, phase + '=' + String(isFirstRun()) + '\\n')",
+          "}",
+          "",
+          "record('import')",
+          "",
+          "export default server({",
+          "  name: 'dist-cli-first-run-integration',",
+          `  host: ${JSON.stringify(environment.host)},`,
+          "  ssh: {",
+          `    expectedHostPublicKey: ${JSON.stringify(environment.hostPublicKey)},`,
+          `    ports: [${String(environment.primaryPort)}],`,
+          `    privateKey: ${JSON.stringify(environment.clientPrivateKeyPath)},`,
+          "    strictHostKeyChecking: 'yes',",
+          "    user: 'root',",
+          "  },",
+          "  run: [",
+          "    {",
+          "      name: 'record first-run flag',",
+          "      async check(ssh) {",
+          "        await ssh.exec('true', { silent: true })",
+          "        record('check')",
+          "        return 'needs-apply'",
+          "      },",
+          "      async apply(ssh) {",
+          "        await ssh.exec('true', { silent: true })",
+          "        record('apply')",
+          "        return { status: 'changed', detail: 'first-run probe' }",
+          "      },",
+          "    },",
+          "  ],",
+          "})",
+          "",
+        ].join("\n")
+      )
+
+      const output = await execFileText(
+        process.execPath,
+        [distCliPath, "apply", playbookPath, "--first-run"],
+        {
+          cwd: packageDirectory,
+          env: { ...process.env, HOME: testHome },
+        }
+      )
+
+      expect(output).toContain("record first-run flag")
+      const observations = await readFile(observationsPath, "utf8")
+      expect(observations.trim().split("\n")).toStrictEqual([
+        "import=true",
+        "check=true",
+        "apply=true",
+      ])
+    } catch (error) {
+      primaryError = error
+      throw error
+    } finally {
+      await runCleanupSteps([removeCreatedLocalDirectoryStep(() => localDirectory)], primaryError)
+    }
+  })
+
   it("runs the built apply CLI with dist modules and mutates the integration server", async () => {
     const environment = getEnvironment()
     const packageDirectory = resolve(import.meta.dirname, "../..")

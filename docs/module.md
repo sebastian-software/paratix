@@ -172,8 +172,11 @@ Verzeichnis aus, bei Hardlinks vom Archiv-Stamm aus und auch über die Symlinks 
 aufgelöst – innerhalb von `destination` bleibt; absolute Ziele, ein Link anstelle des
 Zielverzeichnisses selbst, Einträge unterhalb eines Archiv-Symlinks, Hardlinks auf oder durch einen
 Archiv-Symlink, ein mehrfach vorkommender Pfad mit einem Symlink unter seinen Vorkommen und
-abweichenden Typen oder Zielen sowie Zip-Symlinks werden abgelehnt. Die Archivliste wird als
-striktes UTF-8 gelesen, nie mit Ersatzzeichen. `tar` listet das Archiv unter einer UTF-8-C-Locale
+abweichenden Typen oder Zielen sowie Zip-Symlinks werden abgelehnt. Ein Eintrag, dessen Pfad oder
+(bei Hardlinks) Ziel ein Pfadsegment `..` enthält, wird in Tar- und Zip-Archiven abgelehnt, auch
+wenn der normalisierte Pfad innerhalb von `destination` bliebe; `.`-Segmente und ein führendes `./`
+bleiben erlaubt, ebenso `..` in Symlink-Zielen. Die Archivliste wird als striktes UTF-8 gelesen,
+nie mit Ersatzzeichen. `tar` listet das Archiv unter einer UTF-8-C-Locale
 (`C.UTF-8` oder `C.utf8`), wenn der Host eine hat, sonst unter `LC_ALL=C` (bsdtar immer unter
 `LC_ALL=C`); bei GNU tar und bsdtar werden die Escape-Sequenzen der Liste (`\NNN`, `\\` und die
 Ein-Buchstaben-Escapes für Steuerzeichen) in die gespeicherten Bytes zurückübersetzt, sodass
@@ -244,7 +247,8 @@ gemeldet, statt die Liste scheitern zu lassen: Ein geprüfter Link, der hinein a
 Eintrag des Archivs darin oder darunter verhindert das Entpacken, weil er sich nicht prüfen lässt;
 die Links in einem solchen Verzeichnis selbst werden nicht geprüft (eine bekannte Grenze). Ohne GNU
 `find` (busybox, die BSDs) lässt jedes nicht lesbare Verzeichnis unter `destination` die Prüfung
-fehlschlagen.
+fehlschlagen. Lässt sich ein Symlink unter `destination` während der Prüfung nicht lesen, schlägt
+sie ebenfalls fehl, mit einer Meldung, die den Link nennt, wenn sich sein Name übertragen lässt.
 
 Der Host bricht das Zusammenführen per GNU `timeout` nach 100 Sekunden ab (10 Sekunden später
 erzwungen), also vor dem Befehls-Timeout von 120 Sekunden; fehlt `timeout`, scheitert das
@@ -266,7 +270,10 @@ Stelle, an die das Modell denselben Punkt legt; beide müssen existieren und das
 Löst der Kernel einen Link zu einem anderen Objekt auf, weicht der nächste vorhandene Punkt ab oder
 existiert er nur auf einer Seite (etwa bei einem Ziel, das mit `..` aus einem fehlenden Verzeichnis
 heraussteigt, auch wenn sich durch den Link noch nichts schreiben lässt), oder existiert kein Punkt
-seines Zielpfads, gilt das als Verstoß. Lässt sich dieser Abgleich nicht vollständig durchführen,
+seines Zielpfads, gilt das als Verstoß. Löst ein geprüfter Link über einen anderen Symlink auf,
+der selbst nicht geprüft wird, gleicht derselbe Befehl auch dessen Ziel ab; eine Abweichung dort
+gilt als Verstoß des geprüften Links, die Meldung nennt den gefolgten Link, und festgehalten wird
+nur der geprüfte Link. Lässt sich dieser Abgleich nicht vollständig durchführen,
 schlägt der Durchlauf fehl – auch dann, wenn der Eintrag eines geprüften Links für den Abgleich
 größer als 64 KiB würde (ein Ziel mit sehr vielen Segmenten). Ein Baum ohne Verstoß kostet zwei
 Befehle, wenn ein geprüfter Symlink als innen liegend eingestuft wird, sonst einen und für ein

@@ -45,18 +45,26 @@ export function extractCommand(
  * Build the `sh -c` snippet that merges one batch of staging entries into the
  * destination.
  *
- * The script reads `destination`, `expected_destination` and `guard_file` from
- * `$1`–`$3` and the staging entries from the remaining positional arguments, so
- * it is free of interpolated paths and can be executed verbatim against a real
- * `/bin/sh` in a test. Issue #178 showed why that matters: a guard that reads
- * correctly can still be inert at run time, and only executing it proves
- * otherwise.
+ * The script reads `destination`, `expected_destination`, `guard_file` and
+ * `failure_file` from `$1`–`$4` and the staging entries from the remaining
+ * positional arguments, so it is free of interpolated paths and can be
+ * executed verbatim against a real `/bin/sh` in a test. Issue #178 showed why
+ * that matters: a guard that reads correctly can still be inert at run time,
+ * and only executing it proves otherwise.
  *
  * Issue #219: `guard_file` names a file holding the guard paths, each
  * terminated by a NUL byte, as {@link buildStagingMergeExec} writes it on the
  * host. Before every staged entry is copied, the script re-reads the file with
  * `xargs -0` and refuses the merge (exit 64) when any guard path is a symlink
  * or the check itself fails. An empty file checks nothing and passes.
+ *
+ * `failure_file` records a failed batch in-band, because not every `find`
+ * passes on the exit status of a batch that `-exec … {} +` ran before the last
+ * one. An `EXIT` trap appends a byte to it whenever the batch exits non-zero
+ * (a refusal, a failed guard check or a failed `cp`), and a batch that finds
+ * the file non-empty exits 64 before copying anything, so no later batch
+ * continues a merge that already failed. The outer script checks the file
+ * after `find` (see {@link buildStagingMergeExec}).
  *
  * @returns The merge script as a single shell command string.
  */
@@ -85,7 +93,11 @@ export function buildStagingMergeScript(): string {
     // `$\{` is the same escape the `target_path` line below uses to emit a
     // literal shell parameter expansion from a template literal.
     `nl=$(printf '\\nx'); nl=$\{nl%x}; `,
-    String.raw`destination=$1; expected_destination=$2; guard_file=$3; shift 3; `,
+    String.raw`destination=$1; expected_destination=$2; guard_file=$3; failure_file=$4; shift 4; `,
+    // The trap keeps the batch's own exit status and only records that it
+    // failed; the check after it stops a batch that runs after a failed one.
+    String.raw`trap 'merge_status=$?; [ "$merge_status" -eq 0 ] || printf x >> "$failure_file"; exit "$merge_status"' EXIT; `,
+    String.raw`if [ -s "$failure_file" ]; then exit 64; fi; `,
     String.raw`for source_path do `,
     String.raw`case "$source_path" in *"$nl"*) `,
     String.raw`echo "[archive.extract] refusing staging merge: extracted path contains a newline" >&2; `,
@@ -127,17 +139,25 @@ export function buildStagingMergeScript(): string {
  * the NUL-terminated guard paths from stdin in a private temporary file and
  * runs the merge with that file as `$3` of {@link buildStagingMergeScript}.
  *
+ * A second, separate `mktemp` file is passed as `$4`, the failure file the
+ * merge batches append to when they fail. It is created on its own rather
+ * than derived from the guard file's name, so it is just as private and
+ * unique as the guard file. After `find`, a non-zero `find` status
+ * is passed on unchanged; otherwise a non-empty failure file ends the merge
+ * with 64, so a failed batch is reported even when `find` exits 0. That code
+ * is never 124 or 137, which the caller reads as the host timeout.
+ *
  * Positional parameters: `$1` staging directory, `$2` merge script, `$3`
  * destination, `$4` expected number of guard paths. The count check refuses a
  * truncated stdin, which would otherwise silently drop guard paths.
  *
- * The file comes from `mktemp` (mode 0600, owned by the merge user, i.e. root
- * under sudo) below `$TMPDIR` or `/tmp`. The `EXIT` trap removes it on every
- * exit the shell sees, and the `HUP`/`INT`/`TERM` traps turn those signals
- * into such an exit — including the `SIGTERM` of the host timeout. Only a
- * `SIGKILL` (the timeout's kill-after stage) leaves the file behind: a
- * harmless root-owned list of destination paths that the next run does not
- * read. `find` is not the last command (`; exit $?`), so the shell cannot
+ * Both files come from `mktemp` (mode 0600, owned by the merge user, i.e.
+ * root under sudo) below `$TMPDIR` or `/tmp`. The `EXIT` trap removes them on
+ * every exit the shell sees, and the `HUP`/`INT`/`TERM` traps turn those
+ * signals into such an exit — including the `SIGTERM` of the host timeout.
+ * Only a `SIGKILL` (the timeout's kill-after stage) leaves the files behind: a
+ * harmless root-owned list of destination paths and a failure marker that the
+ * next run does not read. `find` is not the last command, so the shell cannot
  * `exec` it and skip the trap.
  *
  * Issue #219: a signal sent to the merge shell alone takes effect only after
@@ -152,12 +172,15 @@ export function buildStagingMergeScript(): string {
  * child gone and stop signalling the group, leaving `find` copying unbounded.
  */
 const STAGING_MERGE_GUARD_FILE_SCRIPT = [
-  String.raw`guard_file=; `,
-  String.raw`trap '[ -z "$guard_file" ] || rm -f -- "$guard_file"' EXIT; `,
+  String.raw`guard_file=; failure_file=; `,
+  String.raw`trap '[ -z "$guard_file" ] || rm -f -- "$guard_file"; [ -z "$failure_file" ] || rm -f -- "$failure_file"' EXIT; `,
   String.raw`trap 'exit 129' HUP; trap 'exit 130' INT; trap 'exit 143' TERM; `,
   // Not `String.raw`: `$\{` emits a literal shell parameter expansion.
   `guard_file=$(mktemp "$\{TMPDIR:-/tmp}/paratix-merge-guards.XXXXXXXX") && [ -f "$guard_file" ] || { `,
   String.raw`echo "[archive.extract] refusing staging merge: failed to create the guard path file" >&2; `,
+  String.raw`exit 64; }; `,
+  `failure_file=$(mktemp "$\{TMPDIR:-/tmp}/paratix-merge-failed.XXXXXXXX") && [ -f "$failure_file" ] || { `,
+  String.raw`echo "[archive.extract] refusing staging merge: failed to create the merge failure file" >&2; `,
   String.raw`exit 64; }; `,
   String.raw`cat > "$guard_file" || { `,
   String.raw`echo "[archive.extract] refusing staging merge: failed to store the guard paths" >&2; `,
@@ -166,8 +189,12 @@ const STAGING_MERGE_GUARD_FILE_SCRIPT = [
   String.raw`[ "$guard_count" = "$4" ] || { `,
   String.raw`echo "[archive.extract] refusing staging merge: received $guard_count of $4 guard paths" >&2; `,
   String.raw`exit 64; }; `,
-  String.raw`find "$1" -mindepth 1 -maxdepth 1 -exec sh -c "$2" sh "$3" "$3" "$guard_file" {} +; `,
-  String.raw`exit $?`,
+  String.raw`find "$1" -mindepth 1 -maxdepth 1 -exec sh -c "$2" sh "$3" "$3" "$guard_file" "$failure_file" {} +; `,
+  String.raw`find_status=$?; [ "$find_status" -eq 0 ] || exit "$find_status"; `,
+  String.raw`if [ -s "$failure_file" ]; then `,
+  String.raw`echo "[archive.extract] staging merge failed: a merge batch failed although find reported success; later batches copied nothing" >&2; `,
+  String.raw`exit 64; fi; `,
+  String.raw`exit 0`,
 ].join("")
 
 /** Issue #219: staging merge inputs. */

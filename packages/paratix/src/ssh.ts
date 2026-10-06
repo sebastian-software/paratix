@@ -303,6 +303,24 @@ export class RemoteStatTransientError extends Error {
   }
 }
 
+/**
+ * Rejection of an `exec` that carries caller-provided stdin while sudo would
+ * need a password on that same stdin (see `sudoCommand`). It is a
+ * configuration limit of the connection, not a transport failure: callers that
+ * can degrade gracefully — e.g. the batched archive probes, whose `check` path
+ * reports needs-apply instead of aborting — match on this class, while every
+ * other exec rejection keeps propagating.
+ */
+export class SudoInputUnsupportedError extends Error {
+  public constructor() {
+    super(
+      "exec with input is not supported when sudo requires a password: " +
+        "configure passwordless sudo for the connecting user or remove the input payload"
+    )
+    this.name = "SudoInputUnsupportedError"
+  }
+}
+
 function closeClientChannel(channel: ClientChannel | null): void {
   if (channel == null) return
   channel.close()
@@ -2541,10 +2559,7 @@ trap - EXIT
       // instead of silently producing a `sudo -n` command that breaks at
       // runtime.
       if (!this.passwordlessSudo && !this.credentialCachePrimed) {
-        throw new Error(
-          "exec with input is not supported when sudo requires a password: " +
-            "configure passwordless sudo for the connecting user or remove the input payload"
-        )
+        throw new SudoInputUnsupportedError()
       }
       return { command: `sudo -n bash -c ${quoted}`, mode: "noninteractive", needsPassword: false }
     }

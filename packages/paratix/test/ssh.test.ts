@@ -14,7 +14,7 @@ import type * as SshHelpers from "../src/sshHelpers.js"
 import { HostKeyVerificationError } from "../src/knownHosts.js"
 import { rsync } from "../src/modules/rsync.js"
 import { sftpDownload } from "../src/sftp.js"
-import { SshConnectionImpl, validateMktempPath } from "../src/ssh.js"
+import { SshConnectionImpl, SudoInputUnsupportedError, validateMktempPath } from "../src/ssh.js"
 import {
   CAPTURE_TRUNCATION_MARKER,
   cleanupFailedSshClient,
@@ -2141,6 +2141,7 @@ describe("SshConnectionImpl", () => {
 
       const error = await expectRejectedError(ssh.exec("tee /etc/config", { input: "payload\n" }))
 
+      expect(error).toBeInstanceOf(SudoInputUnsupportedError)
       expect(error.message).toContain(
         "exec with input is not supported when sudo requires a password"
       )
