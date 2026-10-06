@@ -316,12 +316,15 @@ resolve inside `destination`, otherwise the apply fails naming it and its own en
 entry of an earlier apply that did not finish (it was interrupted, stopped with an error after its
 merge started or could not record its outcome, or another apply to this destination is still
 running) records only that apply's scope digest. If the digest equals the current apply's own, the
-earlier apply extracted the same archive and could only have published links the current apply
-judges anyway: its own symlinks and every link whose resolution passes through a path it writes. The
+earlier apply extracted an archive with an equivalent containment scope (the same symlink paths and
+written paths, compared by name variant; member contents and symlink targets are not part of the
+digest) and could only have published links the current apply judges anyway: its own symlinks and
+every link whose resolution passes through a path it writes. The
 current apply's normal post-merge check then covers that entry, without verifying the whole
 destination, and a symlink outside that scope does not affect it, even one that points outside
-`destination`. If an entry holds no usable list, because its digest differs (the archive changed, or
-the digest was derived by a paratix version with another scope derivation or under another Unicode
+`destination`. If an entry holds no usable list, because its digest differs (the archive's
+containment scope changed, or the digest was derived by a paratix version with another scope
+derivation or under another Unicode
 version), it is an `in-progress` entry of an older paratix version, its check could not identify the
 links (a failed listing or an archive member in an unreadable directory, for example), there were
 too many to record (more than 256 links or 64 KiB), or it is damaged (empty, truncated or malformed,
@@ -341,16 +344,19 @@ Reading the entries and creating the own one costs one command, and removing the
 one more, whatever the number of entries. A `.paratix-stage.*` directory that a killed apply left
 inside `destination` is not judged by the normal post-merge check, because the archive link rules
 above keep its links inside it, and it is not removed. After an interrupted apply, a successful
-retry of the same archive with a matching digest removes the entry without a manual step. After an
+retry with an archive of equivalent containment scope (a matching digest) removes the entry without
+a manual step. After an
 upgrade, the old flag file and the entries of older paratix versions are read like entries without a
 usable list, and the whole destination is verified before they are removed; an older paratix version
 likewise reads an entry of this version as one without a usable list. A destination that
 deliberately contains a symlink pointing outside it fails this check while an entry holds no usable
 list, for example a virtualenv interpreter link into `/usr/bin` in a runner work tree when the
-archive changed after an interrupted apply. If violations persist, remove or repoint the offending
+archive's containment scope changed after an interrupted apply. If violations persist, remove or
+repoint the offending
 links and run again. If the offending links are intended and outside the scope the archive can
 affect, clearing the containment state can allow a retry to pass. This manual step is needed only
-for entries without a usable digest or after a changed archive. The failure message offers this step
+for entries without a usable digest or after the archive's containment scope changed. The failure
+message offers this step
 only after a fully readable whole-destination check when the current archive's normal scope
 would pass without recorded links, including the kernel
 cross-check. First stop or wait for all `archive.extract` applies to this destination to finish.
