@@ -130,7 +130,7 @@ Options:
   --env <key=value...>           Set environment values for the playbook (repeatable)
   --env-file <path>              Load environment values from a dotenv file
   --filter <names>               Run only the named recipes/modules (comma-separated, repeatable)
-  --first-run                    Expose first-run mode while loading the playbook
+  --first-run                    Expose first-run mode while loading and running the playbook
   --reconnect-timeout <seconds>  SSH reconnect timeout for reboots/port changes (max 86400)
   --verbose                      Show full stack traces on error
   --help                         Show help
@@ -138,7 +138,7 @@ Options:
 
 `--filter <names>` restricts the run to the named recipes and modules. Names are matched anywhere in the tree, and every node that is not selected is shown as `skipped` instead of being executed. The option is comma-separated and repeatable, so `--filter rybbit,palamedes-examples` and `--filter rybbit --filter palamedes-examples` are equivalent. Selecting a recipe runs its whole subtree; a recipe that is not selected but contains a selected descendant is still descended into, so only the matching children run while its siblings are skipped. If several nodes share the same name, every one of them is selected. An unknown filter name aborts the run before it connects (exit code 2). The final run summary counts only top-level nodes, so nested skipped nodes are still shown but are not added to the `skipped` tally. `--filter` composes with `--dry-run` and the other flags.
 
-`--first-run` is meant for explicit bootstrap flows where a fresh server must be hardened first and the rest of the system should only be applied later. During playbook import and definition generation, `isFirstRun()` from `paratix` returns `true`. That async-local context ends before module `check` and `apply` methods run, and the CLI does not mutate `process.env.PARATIX_FIRST_RUN`. Use `firstRun.stop(...)` in the module list for an execution-time staging boundary.
+`--first-run` is meant for explicit bootstrap flows where a fresh server must be hardened first and the rest of the system should only be applied later. During a `paratix apply --first-run` invocation, `isFirstRun()` from `paratix` returns `true` while the playbook is imported and its definition is generated, and for the entire run, including every module `check` and `apply`. It returns `false` everywhere else, and the CLI does not mutate `process.env.PARATIX_FIRST_RUN`. Use `firstRun.stop(...)` in the module list for an execution-time staging boundary that ends a first run cleanly.
 
 `--diff` only works together with `--dry-run`. When enabled, modules that opt in print a unified diff below their status line, showing exactly which lines or values would change. Without `--diff`, the dry-run output is unchanged. Diff-producing modules: `file.copy`, `file.template`, `sysctl.set`, `hostname.set`, `swap.file`, `swap.swappiness`, `swap.vfsCachePressure`, `cron.job`, `cron.absent`, `timer.scheduled`, `timer.absent`, `net.hosts`, `quadlet.container`, `quadlet.network`.
 

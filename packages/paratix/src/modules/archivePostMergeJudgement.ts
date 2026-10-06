@@ -31,7 +31,9 @@ import { pathNameVariantKey } from "./archiveSymlinkResolver.js"
  * Issue #219: a link the backstop cannot show to stay inside: a violation of
  * the lexical resolver, a `kernel-mismatch` where the host kernel does not
  * confirm the location the resolver computed (`expected`, absolute; `at`
- * says where the two disagree, see `KernelMismatchPoint`), or an
+ * says where the two disagree, see `KernelMismatchPoint`; Issue #219: with
+ * `via`, both describe a link the judged link follows, which is never judged
+ * or recorded itself, see `KernelMismatch`), or an
  * `unreadable-member`: an archive member path (`key`) at or below a host
  * directory the listing could not read, whose links the backstop cannot see.
  * Issue #219: an `unreadable-recorded` violation is a link an earlier failed
@@ -41,7 +43,13 @@ import { pathNameVariantKey } from "./archiveSymlinkResolver.js"
  * its `key` is the directory itself.
  */
 export type PostMergeViolation =
-  | { at: KernelMismatchPoint; expected: string; key: string; kind: "kernel-mismatch" }
+  | {
+      at: KernelMismatchPoint
+      expected: string
+      key: string
+      kind: "kernel-mismatch"
+      via?: string
+    }
   | { directory: string; key: string; kind: "unreadable-directory" }
   | { directory: string; key: string; kind: "unreadable-member" }
   | { directory: string; key: string; kind: "unreadable-recorded" }

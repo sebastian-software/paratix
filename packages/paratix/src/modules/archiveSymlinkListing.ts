@@ -319,6 +319,25 @@ function addDirectoryRecord(state: ListingState, field: string): null | string {
 }
 
 /**
+ * Read one `x` record: an entry below the destination that the listing found
+ * but could not read or encode. The listing is then incomplete, so the record
+ * always refuses it; the path is named when it can be decoded.
+ *
+ * @param field - The raw path field; empty when the path itself could not be encoded.
+ * @returns Why the output cannot be trusted.
+ */
+function failedEntryRecord(field: string): string {
+  if (field === "") {
+    return "probe could not encode the name of an entry below the destination (od failed on the host)"
+  }
+  const path = decodeListingField(field)
+  if (typeof path === "string") {
+    return `probe could not read or encode an entry below the destination and reported it with an unusable path: ${path}`
+  }
+  return `probe could not read or encode entry ${JSON.stringify(path.text)} below the destination (readlink or od failed on the host)`
+}
+
+/**
  * Issue #219: how one record kind is read: the number of fields after the
  * kind field, and how those fields are added to the host state.
  */
@@ -332,6 +351,7 @@ const RECORD_READERS: ReadonlyMap<string, RecordReader> = new Map([
   ["l", { add: (state, [link, target]) => addLinkRecord(state, [link, target]), count: 2 }],
   ["n", { add: (state, [path]) => addDirectoryRecord(state, path), count: 1 }],
   ["u", { add: (state, [directory]) => addUnreadableRecord(state, directory), count: 1 }],
+  ["x", { add: (_state, [path]) => failedEntryRecord(path), count: 1 }],
 ])
 
 /**
@@ -356,8 +376,11 @@ function addRecord(state: ListingState, fields: readonly string[], index: number
  * or explain why the output cannot be trusted.
  *
  * Issue #219: the listing is a sequence of records (see
- * `buildSymlinkListingProbeScript`): `l, <link>, <target>`, `u, <directory>`
- * and `n, <path>`. An unknown record kind, a record cut off at the end, a
+ * `buildSymlinkListingProbeScript`): `l, <link>, <target>`, `u, <directory>`,
+ * `n, <path>` and `x, <path>`. An `x` record — an entry the probe could not
+ * read or encode, reported in-band so it does not depend on the exit status
+ * `find` passes on — always makes the listing untrusted, with or without a
+ * decodable path. An unknown record kind, a record cut off at the end, a
  * field that is neither plain printable ASCII nor well-formed hex, a link or
  * directory path that is not a normalized relative path, a link or
  * unreadable directory listed twice, and a directory hit for a path that was

@@ -17,32 +17,25 @@
  * resolves the rest of its target path. For such a link the cross-check
  * therefore compares the nearest existing point of the target path, as the
  * kernel walks it, with the resolver's location of the same point (see
- * {@link KernelCrossCheckVerdict}).
+ * `KernelCrossCheckVerdict`).
  */
 import { posix as pathPosix } from "node:path"
 
 import type { SshConnection } from "../types.js"
+import type { KernelCrossCheckReport } from "./archiveKernelCrossCheckReport.js"
 import type { SymlinkTrail, SymlinkTrailSource } from "./archiveSymlinkResolver.js"
 
 import { shellQuote } from "../ssh.js"
+import { crossCheckFailure, kernelCrossCheckVerdicts } from "./archiveKernelCrossCheckReport.js"
 import { ARCHIVE_CAPTURE_LIMIT_BYTES } from "./archiveMemberValidation.js"
-import { type BatchedProbeOutcome, runBatchedProbe } from "./archiveProbe.js"
+import { runBatchedProbe } from "./archiveProbe.js"
 
-/**
- * Issue #219: what the kernel reports for one link.
- *
- * - `same`: the link reaches an existing file, and that file is the location
- *   the resolver computed (`test -ef`).
- * - `dangling`: the link reaches nothing, and the nearest existing point of
- *   its target path is where the resolver puts it: walking the target trail
- *   (see {@link SymlinkTrail}) from the full target path towards the link's
- *   directory, the first point that exists on the host or in the model exists
- *   on both sides and is the same file.
- * - `differ`: anything else — the link reaches a different file, or reaches
- *   nothing while the nearest existing point differs, exists on one side only,
- *   or no point of the trail exists at all.
- */
-export type KernelCrossCheckVerdict = "dangling" | "differ" | "same"
+export {
+  type KernelCrossCheckReport,
+  type KernelCrossCheckResult,
+  type KernelCrossCheckVerdict,
+  kernelCrossCheckVerdicts,
+} from "./archiveKernelCrossCheckReport.js"
 
 /**
  * Issue #219: the largest cross-check entry, in bytes, that is sent for one
@@ -56,19 +49,6 @@ export const KERNEL_CROSS_CHECK_ENTRY_LIMIT_BYTES = 65_536
 
 /** Issue #219: what separates the paths within one cross-check entry. */
 const ENTRY_SEPARATOR = "//"
-
-/** Issue #219: the fields the script prints per link: link, verdict, level. */
-const REPORT_FIELD_COUNT = 3
-
-/**
- * Issue #219: narrow a reported verdict field.
- *
- * @param value - The field the script printed.
- * @returns True when it is one of the {@link KernelCrossCheckVerdict} values.
- */
-function isKernelCrossCheckVerdict(value: string): value is KernelCrossCheckVerdict {
-  return value === "dangling" || value === "differ" || value === "same"
-}
 
 /**
  * Per-batch body of {@link buildKernelCrossCheckScript}. Each argument is one
@@ -112,7 +92,7 @@ const KERNEL_CROSS_CHECK_SCRIPT = [
  * It is meant for {@link runBatchedProbe} with one entry per link (see
  * {@link kernelCrossCheckEntry}), so it costs exactly one exec regardless of
  * the number of links. Per entry it reports the verdict described at
- * {@link KernelCrossCheckVerdict}. `test -e` follows the link like any path
+ * `KernelCrossCheckVerdict`. `test -e` follows the link like any path
  * lookup, and `test -ef` compares device and inode of the two resolved files;
  * neither resolves a path in user space.
  *
@@ -243,126 +223,6 @@ function trailPoints(
 }
 
 /**
- * Issue #219: one link's report: the verdict and the level at which it was
- * decided. Level 0 means the link reaches an existing file, compared with its
- * resolved location. A level `m` from 1 to `n + 1` means the link reaches
- * nothing and the trail point `j = n + 1 - m` was the first where either side
- * exists; `n + 2` means no trail point exists on either side.
- */
-export type KernelCrossCheckReport = { level: number; verdict: KernelCrossCheckVerdict }
-
-/** Issue #219: the parsed cross-check output, or why it cannot be trusted. */
-export type KernelCrossCheckResult =
-  { detail: string; kind: "failed" } | { kind: "ok"; reports: Map<string, KernelCrossCheckReport> }
-
-/**
- * Issue #219: a cross-check result that cannot be trusted.
- *
- * @param detail - Why.
- * @returns The failed result.
- */
-function crossCheckFailure(detail: string): { detail: string; kind: "failed" } {
-  return { detail, kind: "failed" }
-}
-
-/**
- * Issue #219: parse a reported level strictly and check it against the
- * verdict and the number of trail segments.
- *
- * @param field - The level field the script printed.
- * @param verdict - The verdict reported with it.
- * @param segments - The number of trail segments `n` of the link.
- * @returns The level, or null when it is malformed, out of range or
- *   inconsistent with the verdict.
- */
-function reportedLevel(
-  field: string,
-  verdict: KernelCrossCheckVerdict,
-  segments: number
-): null | number {
-  if (!/^(?:0|[1-9]\d{0,9})$/v.test(field)) return null
-  const level = Number(field)
-  switch (verdict) {
-    case "dangling": {
-      return level >= 1 && level <= segments + 1 ? level : null
-    }
-    case "differ": {
-      return level <= segments + 2 ? level : null
-    }
-    case "same": {
-      return level === 0 ? level : null
-    }
-  }
-}
-
-/**
- * Issue #219: group the reported fields into reports, refusing anything that
- * was not requested, is reported twice, is not a known verdict or carries an
- * invalid level.
- *
- * @param requested - The absolute link paths that were sent, each with its
- *   number of trail segments.
- * @param fields - The decoded fields, a multiple of three.
- * @returns The report per reported link, or why the output cannot be trusted.
- */
-function groupedReports(
-  requested: ReadonlyMap<string, number>,
-  fields: readonly string[]
-): KernelCrossCheckResult {
-  const reports = new Map<string, KernelCrossCheckReport>()
-  for (let index = 0; index < fields.length; index += REPORT_FIELD_COUNT) {
-    const link = fields[index]
-    const verdict = fields[index + 1]
-    const segments = requested.get(link)
-    if (segments === undefined || reports.has(link)) {
-      return crossCheckFailure(`reported unexpected link ${JSON.stringify(link)}`)
-    }
-    if (!isKernelCrossCheckVerdict(verdict)) {
-      return crossCheckFailure(`reported unknown verdict ${JSON.stringify(verdict)}`)
-    }
-    const level = reportedLevel(fields[index + 2], verdict, segments)
-    if (level === null) {
-      return crossCheckFailure(
-        `reported invalid level ${JSON.stringify(fields[index + 2])} for ${JSON.stringify(link)}`
-      )
-    }
-    reports.set(link, { level, verdict })
-  }
-  return { kind: "ok", reports }
-}
-
-/**
- * Issue #219: parse the cross-check output strictly, failing closed.
- *
- * A failed exec, a truncated capture, a field count that is not a multiple of
- * three, an unknown verdict, a malformed or inconsistent level, a link that
- * was not requested, a link reported twice and a requested link without a
- * report all make the whole result `failed`.
- *
- * @param requested - The absolute link paths that were sent, each with its
- *   number of trail segments `n`.
- * @param outcome - The batched probe outcome of the cross-check exec.
- * @returns The report per link, or why the output cannot be trusted.
- */
-export function kernelCrossCheckVerdicts(
-  requested: ReadonlyMap<string, number>,
-  outcome: BatchedProbeOutcome
-): KernelCrossCheckResult {
-  if (outcome.kind === "failed") return outcome
-  const { fields } = outcome
-  if (fields.length % REPORT_FIELD_COUNT !== 0) {
-    return crossCheckFailure(
-      `returned ${String(fields.length)} fields, expected (link, verdict, level) triples`
-    )
-  }
-  const grouped = groupedReports(requested, fields)
-  if (grouped.kind === "failed") return grouped
-  const missing = [...requested.keys()].find((link) => !grouped.reports.has(link))
-  if (missing === undefined) return grouped
-  return crossCheckFailure(`reported no verdict for ${JSON.stringify(missing)}`)
-}
-
-/**
  * Issue #219: where the kernel does not confirm the resolver.
  *
  * - `link`: the link reaches an existing file other than its resolved
@@ -376,14 +236,21 @@ export function kernelCrossCheckVerdicts(
 export type KernelMismatchPoint =
   { host: string; kind: "point"; location: string } | { kind: "link" } | { kind: "none" }
 
-/** Issue #219: a link whose location the kernel does not confirm. */
+/**
+ * Issue #219: a link whose location the kernel does not confirm. With `via`,
+ * the link itself was confirmed or reaches nothing, but the kernel does not
+ * confirm the followed link `via` (see `followed` at
+ * {@link runKernelCrossCheck}); `at` and `expected` then describe `via`.
+ */
 export type KernelMismatch = {
   /** Issue #219: where the kernel and the resolver disagree. */
   at: KernelMismatchPoint
-  /** The absolute path the resolver computed for the link. */
+  /** The absolute path the resolver computed for the link, or for `via`. */
   expected: string
   /** Normalized destination-relative path of the link. */
   key: string
+  /** Normalized destination-relative path of the followed link that differs. */
+  via?: string
 }
 
 /** Issue #219: what the cross-check remembers of one sent link. */
@@ -499,6 +366,86 @@ function mismatchPoint(parameters: {
 }
 
 /**
+ * Issue #219: the followed links of every judged link that are not judged
+ * themselves, see `followed` at {@link runKernelCrossCheck}.
+ *
+ * @param judged - Every link judged inside, in order.
+ * @param followed - The followed links of one judged link.
+ * @returns The followed links per judged link that follows any.
+ */
+function followedLinksOf(
+  judged: readonly string[],
+  followed: ((key: string) => readonly string[]) | undefined
+): Map<string, string[]> {
+  const byLink = new Map<string, string[]>()
+  if (followed === undefined) return byLink
+  const judgedLinks = new Set(judged)
+  for (const key of judged) {
+    const links = followed(key).filter((link) => !judgedLinks.has(link))
+    if (links.length > 0) byLink.set(key, links)
+  }
+  return byLink
+}
+
+/** Issue #219: where the kernel disagrees for one sent link, before it is attributed. */
+type LinkMismatch = Omit<KernelMismatch, "key" | "via">
+
+/**
+ * Issue #219: every sent link the kernel reported as `differ`, with where it
+ * differs.
+ *
+ * @param parameters - The parsed cross-check.
+ * @param parameters.destination - The validated, canonical destination directory.
+ * @param parameters.reports - The report per absolute link path.
+ * @param parameters.sent - What was sent per absolute link path.
+ * @param parameters.trail - The trail source, to name a trail point again.
+ * @returns The mismatch per destination-relative link path.
+ */
+function differingLinks(parameters: {
+  destination: string
+  reports: ReadonlyMap<string, KernelCrossCheckReport>
+  sent: ReadonlyMap<string, SentLink>
+  trail: SymlinkTrailSource
+}): Map<string, LinkMismatch> {
+  const { destination, reports, trail } = parameters
+  const differing = new Map<string, LinkMismatch>()
+  for (const [link, sent] of parameters.sent) {
+    const report = reports.get(link)
+    if (report?.verdict !== "differ") continue
+    const at = mismatchPoint({ destination, level: report.level, sent, trail })
+    differing.set(sent.key, { at, expected: sent.expected })
+  }
+  return differing
+}
+
+/**
+ * Issue #219: attribute the mismatches to the judged links: each judged
+ * link's own, then those of the links it follows, under the judged link with
+ * the followed one as `via`.
+ *
+ * @param judged - Every link judged inside, in order.
+ * @param followedBy - The unjudged followed links per judged link.
+ * @param differing - The mismatch per sent link.
+ * @returns The mismatches in the order of `judged`.
+ */
+function judgedMismatches(
+  judged: readonly string[],
+  followedBy: ReadonlyMap<string, readonly string[]>,
+  differing: ReadonlyMap<string, LinkMismatch>
+): KernelMismatch[] {
+  const mismatches: KernelMismatch[] = []
+  for (const key of judged) {
+    const own = differing.get(key)
+    if (own !== undefined) mismatches.push({ ...own, key })
+    for (const via of followedBy.get(key) ?? []) {
+      const followed = differing.get(via)
+      if (followed !== undefined) mismatches.push({ ...followed, key, via })
+    }
+  }
+  return mismatches
+}
+
+/**
  * Issue #219: ask the host kernel to confirm the resolver's location of every
  * link judged inside the destination, in one batched exec.
  *
@@ -507,27 +454,52 @@ function mismatchPoint(parameters: {
  * a destination of `/`, a path that cannot be transported, an entry above
  * {@link KERNEL_CROSS_CHECK_ENTRY_LIMIT_BYTES}, a failed or truncated exec,
  * output that is not valid UTF-8 or not strictly well-formed — is reported as
- * `failed`, which the backstop treats as a failed listing. Only relevant links
- * judged inside reach the cross-check, so only such a link can make its entry
- * too large.
+ * `failed`, which the backstop treats as a failed listing. An exec rejection
+ * that {@link runBatchedProbe} does not map to `failed`, such as a dropped
+ * connection, propagates instead. Only relevant links judged inside and the
+ * links they follow reach the cross-check, so only such a link can make its
+ * entry too large. Output beyond the archive capture cap names its cause.
+ *
+ * Issue #219: a judged link that follows another link whose target dangles is
+ * reported `dangling` as soon as its own trail agrees with the model up to
+ * that link; where a write through it would land depends on how the kernel
+ * resolves the followed link's target. Every followed link that is not judged
+ * itself is therefore sent once with its own trail, however many judged links
+ * follow it, and a `differ` for it becomes a mismatch of each judged link that
+ * follows it, with the followed link as `via`. The followed link never becomes
+ * a mismatch of its own, so the caller does not judge or record it.
  *
  * @param conn - The SSH connection.
  * @param parameters - Cross-check inputs.
  * @param parameters.destination - The validated, canonical destination directory.
+ * @param parameters.followed - Issue #219: the links the resolution of a
+ *   judged link follows; a followed link that is judged itself is checked
+ *   only as its own entry. None when omitted.
  * @param parameters.links - Every link judged inside, by destination-relative
  *   path.
  * @param parameters.trail - The trail source of the resolver that judged them
  *   (see {@link SymlinkTrail}); a trail is computed only while its link's
  *   entry is built, and again for a mismatch.
- * @returns The mismatches, or why the cross-check could not be completed.
+ * @returns The mismatches, each judged link's own before those of the links
+ *   it follows, in the order of `links`, or why the cross-check could not be
+ *   completed.
+ * @throws {Error} The exec rejections `runBatchedProbe` propagates.
  */
 export async function runKernelCrossCheck(
   conn: SshConnection,
-  parameters: { destination: string; links: Iterable<string>; trail: SymlinkTrailSource }
+  parameters: {
+    destination: string
+    followed?: (key: string) => readonly string[]
+    links: Iterable<string>
+    trail: SymlinkTrailSource
+  }
 ): Promise<{ detail: string; kind: "failed" } | { kind: "ok"; mismatches: KernelMismatch[] }> {
   const { destination, trail } = parameters
   if (destination === "/") return crossCheckFailure("the destination is the filesystem root")
-  const encoded = crossCheckEntries(destination, parameters.links, trail)
+  const judged = [...parameters.links]
+  const followedBy = followedLinksOf(judged, parameters.followed)
+  const followedLinks = new Set([...followedBy.values()].flat())
+  const encoded = crossCheckEntries(destination, [...judged, ...followedLinks], trail)
   if ("refused" in encoded) return crossCheckFailure(encoded.refused)
   // The output grows with the number of links, like the listing, so it gets
   // the archive capture cap; truncation still fails closed.
@@ -539,12 +511,11 @@ export async function runKernelCrossCheck(
   const requested = new Map([...encoded.links].map(([link, sent]) => [link, sent.segments]))
   const parsed = kernelCrossCheckVerdicts(requested, outcome)
   if (parsed.kind === "failed") return parsed
-  const mismatches: KernelMismatch[] = []
-  for (const [link, sent] of encoded.links) {
-    const report = parsed.reports.get(link)
-    if (report?.verdict !== "differ") continue
-    const at = mismatchPoint({ destination, level: report.level, sent, trail })
-    mismatches.push({ at, expected: sent.expected, key: sent.key })
-  }
-  return { kind: "ok", mismatches }
+  const differing = differingLinks({
+    destination,
+    reports: parsed.reports,
+    sent: encoded.links,
+    trail,
+  })
+  return { kind: "ok", mismatches: judgedMismatches(judged, followedBy, differing) }
 }

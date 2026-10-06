@@ -1,6 +1,6 @@
-import { describe, expect, it } from "vitest"
+import { describe, expect, it, vi } from "vitest"
 
-import type { ArchiveMember } from "../../src/modules/archiveMemberValidation.js"
+import type * as SymlinkResolverModule from "../../src/modules/archiveSymlinkResolver.js"
 
 import {
   type PreMergeContainmentVerdict,
@@ -19,6 +19,30 @@ import {
   pathNameVariantKey,
   type SymlinkWalkTarget,
 } from "../../src/modules/archiveLinkValidation.js"
+import {
+  type ArchiveMember,
+  archiveMemberUnsafeReason,
+} from "../../src/modules/archiveMemberValidation.js"
+
+/**
+ * Issue #219: how many symlink resolvers were built. A transparent subclass
+ * counts them, so a test can show that the archive-level rules and the
+ * pre-staging prefix model share one resolver per member list.
+ */
+const resolverInstances = vi.hoisted(() => ({ built: 0 }))
+
+vi.mock("../../src/modules/archiveSymlinkResolver.js", async (importOriginal) => {
+  const original = await importOriginal<typeof SymlinkResolverModule>()
+  class CountedSymlinkResolver extends original.ArchiveSymlinkResolver {
+    public constructor(
+      ...parameters: ConstructorParameters<typeof original.ArchiveSymlinkResolver>
+    ) {
+      super(...parameters)
+      resolverInstances.built += 1
+    }
+  }
+  return { ...original, ArchiveSymlinkResolver: CountedSymlinkResolver }
+})
 
 /**
  * Issue #219: a host link as the pre-merge listing produces it.
@@ -385,9 +409,32 @@ describe("preMergeContainmentVerdict (Issue #219)", () => {
       reason: 'probe reported unknown record kind ""',
     },
     {
-      fields: ["x", "a/b"],
+      fields: ["y", "a/b"],
       name: "an unknown record kind",
-      reason: 'probe reported unknown record kind "x"',
+      reason: 'probe reported unknown record kind "y"',
+    },
+    {
+      fields: ["l", "a/k", ".", "x", "a/l"],
+      name: "an entry the probe could not read or encode",
+      reason:
+        'probe could not read or encode entry "a/l" below the destination (readlink or od failed on the host)',
+    },
+    {
+      fields: ["x", "", "l", "a/k", "."],
+      name: "an entry whose name the probe could not encode",
+      reason:
+        "probe could not encode the name of an entry below the destination (od failed on the host)",
+    },
+    {
+      fields: ["x", "\u0001abc"],
+      name: "an entry the probe could not read, with a malformed path",
+      reason:
+        'probe could not read or encode an entry below the destination and reported it with an unusable path: probe reported hex field "abc" that is not well-formed hex',
+    },
+    {
+      fields: ["x"],
+      name: "an entry record cut off at the end",
+      reason: 'probe output ends inside a "x" record',
     },
     {
       fields: ["l", "/opt/app/a/x", "."],
@@ -486,6 +533,21 @@ describe("preMergeContainmentVerdict (Issue #219)", () => {
       ["a/b", { stored: "q", target: { anchor: "parent", path: "q" } }],
     ])
   })
+
+  // Issue #219: an absolute target is inside only when it is the destination
+  // or continues it with `/`; a newline or a glob character right after the
+  // destination's name is a different directory.
+  it.each([
+    { field: hexField("/opt/app\n/x"), name: "a newline", stored: "/opt/app\n/x" },
+    { field: "/opt/app*", name: "a glob character", stored: "/opt/app*" },
+  ])(
+    "classifies an absolute target that continues the destination name with $name as outside",
+    ({ field, stored }) => {
+      const verdict = preMergeContainmentVerdict(destination, ["l", "x/l", field], members)
+
+      expect(okLinks(verdict).get("x/l")).toStrictEqual({ stored, target: { anchor: "outside" } })
+    }
+  )
 
   it("combines host links and archive links and reports the escaping host link", () => {
     const verdict = preMergeContainmentVerdict(
@@ -1231,6 +1293,15 @@ describe("name variants in the archive relationship rules (Issue #219)", () => {
       }
     )
 
+    it("leaves no member path with a .. segment to the ancestor rule", () => {
+      // The ancestor rule compares normalized paths; a raw `x/L/../f` passes
+      // through the archive symlink `x/L` although it normalizes to `x/f`, so
+      // the member rule refuses it first.
+      expect(archiveMemberUnsafeReason(member("x/L/../f", "file"))).toBe(
+        'member "x/L/../f" contains a ".." path segment'
+      )
+    })
+
     it("accepts a member below an unrelated name next to an archive symlink", () => {
       expect(
         archiveLinkUnsafeReason([
@@ -1281,6 +1352,16 @@ describe("name variants in the archive relationship rules (Issue #219)", () => {
 
       expect(reason).toBe('member "h" hardlinks to archive symlink "a/é"')
     })
+  })
+
+  it("leaves no hardlink target with a .. segment to the hardlink rules", () => {
+    // Hardlink targets are archive-root-relative member names, so a `..` in
+    // one is refused like in a member path, even when it normalizes inside.
+    expect(archiveMemberUnsafeReason(member("h", "hardlink", "a/s/../f"))).toBe(
+      'member "h" -> "a/s/../f" hardlink target contains a ".." path segment'
+    )
+    // A symlink target keeps its `..`: the link resolver judges where it leads.
+    expect(archiveMemberUnsafeReason(member("a/up", "symlink", ".."))).toBeNull()
   })
 
   describe("hardlink to a symlink", () => {
@@ -1594,5 +1675,123 @@ describe("symlink trails for the kernel cross-check (Issue #219)", () => {
     expect(trail("x", Number.POSITIVE_INFINITY)).toBeNull()
     expect(trail("b", Number.POSITIVE_INFINITY)).toBeNull()
     expect(trail("unknown", Number.POSITIVE_INFINITY)).toBeNull()
+  })
+})
+
+describe("links followed by judged links for the kernel cross-check (Issue #219)", () => {
+  // Issue #219: the archive ships `d/j -> f` and `d/k -> f`; the host
+  // links `d/f -> e` and `d/e -> missing/q` touch no path the archive writes,
+  // so they are not judged, but both archive links resolve through them.
+  const members = [
+    member("d/", "directory"),
+    member("d/j", "symlink", "f"),
+    member("d/k", "symlink", "f"),
+  ]
+  const links = relativeLinks([
+    ["d/j", "f"],
+    ["d/k", "f"],
+    ["d/f", "e"],
+    ["d/e", "missing/q"],
+    ["d/sub", "../other"],
+    ["d/mid", "sub/x"],
+  ])
+
+  it("lists the unjudged links a judged link follows, directly and transitively, each once", () => {
+    const { followed, inside, trail } = mergedSymlinkResolutions(
+      links,
+      archiveContainmentScope(members)
+    )
+
+    expect(inside).toStrictEqual(
+      new Map([
+        ["d/j", "d/missing/q"],
+        ["d/k", "d/missing/q"],
+      ])
+    )
+    expect(followed("d/j")).toStrictEqual(["d/f", "d/e"])
+    expect(followed("d/k")).toStrictEqual(["d/f", "d/e"])
+    // The followed links have trails of their own, from the same source.
+    expect(trail("d/f", Number.POSITIVE_INFINITY)).toStrictEqual({
+      base: "d",
+      locations: ["d", "d/missing/q"],
+      segments: ["e"],
+    })
+    expect(trail("d/e", Number.POSITIVE_INFINITY)).toStrictEqual({
+      base: "d",
+      locations: ["d", "d/missing", "d/missing/q"],
+      segments: ["missing", "q"],
+    })
+  })
+
+  it("has no followed links for a link that is not judged inside", () => {
+    const { followed } = mergedSymlinkResolutions(links, archiveContainmentScope(members))
+
+    expect(followed("d/f")).toStrictEqual([])
+    expect(followed("d/mid")).toStrictEqual([])
+    expect(followed("unknown")).toStrictEqual([])
+  })
+
+  it("lists a link followed in the middle of a target path", () => {
+    const { followed, inside } = mergedSymlinkResolutions(
+      links,
+      archiveContainmentScope([member("d/", "directory"), member("d/mid", "symlink", "sub/x")])
+    )
+
+    expect(inside).toStrictEqual(new Map([["d/mid", "other/x"]]))
+    expect(followed("d/mid")).toStrictEqual(["d/sub"])
+  })
+
+  it("leaves out a followed link that is judged itself", () => {
+    // Without a scope every link is judged, so every followed link is
+    // cross-checked as its own entry.
+    const all = mergedSymlinkResolutions(links)
+    const scoped = mergedSymlinkResolutions(
+      links,
+      archiveContainmentScope([...members, member("d/f", "symlink", "e")])
+    )
+
+    expect(all.followed("d/j")).toStrictEqual([])
+    expect(scoped.followed("d/j")).toStrictEqual(["d/e"])
+  })
+
+  it("follows nothing for a link that does not resolve inside", () => {
+    const { followed, violations } = mergedSymlinkResolutions(
+      relativeLinks([
+        ["d/j", "f/../../../.."],
+        ["d/f", "e"],
+        ["d/e", "missing/q"],
+      ]),
+      archiveContainmentScope([
+        member("d/", "directory"),
+        member("d/j", "symlink", "f/../../../.."),
+      ])
+    )
+
+    expect(violations).toStrictEqual([{ key: "d/j", kind: "escape" }])
+    expect(followed("d/j")).toStrictEqual([])
+  })
+})
+
+describe("one symlink resolver per member list (Issue #219)", () => {
+  it("resolves the archive's links once for the link rules and the prefix model", () => {
+    const members = [
+      member("a/", "directory"),
+      member("a/lib/", "directory"),
+      member("a/up", "symlink", ".."),
+      member("a/bin", "symlink", "up/b/c"),
+    ]
+    const before = resolverInstances.built
+
+    expect(archiveLinkUnsafeReason(members)).toBeNull()
+    expect(archiveSymlinkTargetPrefixes(members)).toStrictEqual([
+      { path: "b", symlink: "a/bin" },
+      { path: "b/c", symlink: "a/bin" },
+    ])
+    expect(archiveLinkUnsafeReason(members)).toBeNull()
+    expect(resolverInstances.built - before).toBe(1)
+
+    // A different member list, even with equal content, gets its own resolver.
+    expect(archiveSymlinkTargetPrefixes([...members])).toHaveLength(2)
+    expect(resolverInstances.built - before).toBe(2)
   })
 })

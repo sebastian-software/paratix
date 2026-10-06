@@ -1,7 +1,11 @@
 import type { ExecResult, SshConnection } from "../types.js"
 
-import { shellQuote } from "../ssh.js"
-import { CAPTURE_TRUNCATION_MARKER, DEFAULT_MAX_OUTPUT_BYTES } from "../sshHelpers.js"
+import { shellQuote, SudoInputUnsupportedError } from "../ssh.js"
+import {
+  CAPTURE_TRUNCATION_MARKER,
+  DEFAULT_MAX_OUTPUT_BYTES,
+  InvalidUtf8OutputError,
+} from "../sshHelpers.js"
 
 /**
  * Batched remote probes for `archive.extract`.
@@ -14,9 +18,16 @@ import { CAPTURE_TRUNCATION_MARKER, DEFAULT_MAX_OUTPUT_BYTES } from "../sshHelpe
  *
  * All three now share one transport: the path list travels NUL-delimited on
  * stdin, a small POSIX script fans it out locally with `xargs -0`, and only
- * **violations** come back. A converged run therefore produces empty output
- * regardless of member count, which keeps the result far below the 1 MiB
- * captured-output cap without any chunk size to choose or tune.
+ * **violations** come back. A converged run of those probes therefore produces
+ * empty output regardless of member count, which keeps their result far below
+ * the default captured-output cap (1 MiB) without any chunk size to choose or
+ * tune.
+ *
+ * Issue #219: the symlink listing and the kernel cross-check share the
+ * transport, but their output grows with the links on the host rather than
+ * with violations. They pass a larger cap of their own (`maxOutputBytes`), and
+ * a capture cut off at that cap still fails closed, with a message that says
+ * the destination holds too much to check.
  *
  * NUL delimiting is deliberate rather than incidental: it removes every
  * question about newlines inside paths, which is exactly the defect class that
@@ -73,6 +84,20 @@ export type BatchedProbeOutcome =
   { detail: string; kind: "failed"; truncated?: true } | { fields: string[]; kind: "ok" }
 
 /**
+ * Whether an exec rejection describes the probe's own transport (stdout that
+ * is not valid UTF-8, or stdin that cannot be sent under password sudo) rather
+ * than the connection, see {@link runBatchedProbe}.
+ *
+ * @param error - The exec rejection.
+ * @returns True when the probe reports the rejection as `failed`.
+ */
+function isProbeOwnRejection(
+  error: unknown
+): error is InvalidUtf8OutputError | SudoInputUnsupportedError {
+  return error instanceof InvalidUtf8OutputError || error instanceof SudoInputUnsupportedError
+}
+
+/**
  * Run one batched probe and return the reported violations.
  *
  * A non-zero exit is reported as `failed` rather than as an empty violation
@@ -85,8 +110,14 @@ export type BatchedProbeOutcome =
  * different invalid byte sequences to the same U+FFFD, so two distinct host
  * paths could collapse into one string. With the strict decode every accepted
  * string maps back to exactly the host's bytes; output that is not valid UTF-8
- * makes the exec reject, which is reported as `failed` like any other
- * rejected exec.
+ * makes the exec reject, which is reported as `failed`.
+ *
+ * Only two exec rejections become `failed`: that invalid-UTF-8 rejection and
+ * {@link SudoInputUnsupportedError}, both of which describe the probe's own
+ * transport rather than the connection. Every other rejection — a dropped
+ * connection, a timeout — is rethrown, so a `check` reports it as an error
+ * instead of reading it as "needs apply", and the apply path handles it where
+ * the probe was called (the same split `listArchiveMembers` makes).
  *
  * @param conn - The SSH connection.
  * @param parameters - Probe inputs.
@@ -95,6 +126,7 @@ export type BatchedProbeOutcome =
  *   with the host tree rather than with violations; the SSH default applies when omitted.
  * @param parameters.script - The remote script to execute.
  * @returns The decoded fields, or a failure with its diagnostic detail.
+ * @throws {Error} Any exec rejection other than the two mapped to `failed`.
  */
 export async function runBatchedProbe(
   conn: SshConnection,
@@ -110,7 +142,8 @@ export async function runBatchedProbe(
       ...(maxOutputBytes === undefined ? {} : { maxOutputBytes }),
     })
   } catch (error) {
-    return { detail: error instanceof Error ? error.message : String(error), kind: "failed" }
+    if (isProbeOwnRejection(error)) return { detail: error.message, kind: "failed" }
+    throw error
   }
   if (result.code !== 0) {
     const detail =
@@ -151,26 +184,45 @@ export function buildSymlinkProbeScript(): string {
 }
 
 /**
- * Issue #219: shell function `e` that emits one listing field, NUL-terminated.
+ * Issue #219: shell function `e` that encodes one listing field into `$v`,
+ * with the matching `printf` format in `$f`; the caller prints it with
+ * `printf "$f" "$v"`, which appends the terminating NUL.
  *
- * A field made only of printable ASCII (0x20–0x7E) is printed unchanged. Any
+ * A field made only of printable ASCII (0x20–0x7E) is kept unchanged. Any
  * other field — with a control character, DEL or any byte above 0x7F — is
  * printed as the marker byte 0x01 followed by the lowercase hex of its bytes,
  * from one `od` per such field. A plain field never contains 0x01, so the
  * marker is unambiguous, and the whole output stays printable ASCII plus the
  * marker and NUL: valid UTF-8 whatever bytes the host names hold, so the probe
- * keeps `strictUtf8Stdout`. The scripts run under `LC_ALL=C`, so the `case`
- * test sees bytes, not characters of some locale. `command -p od` is looked up
- * on the default system PATH like `readlink`; a failing `od` exits 1, which
- * fails the listing. `$\{` keeps the shell parameter expansion literal.
+ * keeps `strictUtf8Stdout`. The encoded value itself is plain ASCII; the
+ * marker and the NUL only enter through the format. The scripts run under
+ * `LC_ALL=C`, so the `case` test sees bytes, not characters of some locale.
+ * `command -p od` is looked up on the default system PATH like `readlink`.
+ *
+ * A failing `od` makes `e` return 1 instead of ending the script, so the
+ * caller decides how the failure is reported (see
+ * {@link SYMLINK_LISTING_INNER_SCRIPT}). Encoding before printing keeps a
+ * record whole: nothing of it is printed until every field of it is encoded.
+ * `$\{` keeps the shell parameter expansion literal.
  */
 const SYMLINK_LISTING_FIELD_FUNCTION = [
   "e() { case $1 in ",
-  "*[![:print:]]*) h=$(printf '%s' \"$1\" | command -p od -A n -v -t x1) || exit 1; ",
+  "*[![:print:]]*) h=$(printf '%s' \"$1\" | command -p od -A n -v -t x1) || return 1; ",
   // Unquoted `$h` splits the `od` columns on whitespace; `printf '%s'` joins them.
-  "h=$(printf '%s' $h); printf '\\001%s\\0' \"$h\";; ",
-  "*) printf '%s\\0' \"$1\";; ",
+  "v=$(printf '%s' $h); f='\\001%s\\0';; ",
+  "*) v=$1; f='%s\\0';; ",
   "esac; }; ",
+].join("")
+
+/**
+ * Issue #219: shell function `xr` that reports the current entry `$r` as an
+ * `x` record: an entry the batch found but could not read or encode. The path
+ * is encoded like an `l` record's; when even that fails, the record carries
+ * an empty path field. Either way the decoder refuses the whole listing.
+ */
+const SYMLINK_LISTING_FAILURE_FUNCTION = [
+  'xr() { if e "$r"; then printf \'x\\0\'; printf "$f" "$v"; ',
+  "else printf 'x\\0\\0'; fi; }; ",
 ].join("")
 
 /**
@@ -188,17 +240,22 @@ const SYMLINK_LISTING_FIELD_FUNCTION = [
  *   the single newline `readlink` itself appends is removed.
  * - Issue #219: a link that vanished between `find` and `readlink` (the read
  *   fails and `[ -L ]` is now false) is skipped: it is no longer there to
- *   judge. A link whose target cannot be read although it still exists makes
- *   the batch exit 1; `find` then exits non-zero, so the listing fails closed
- *   instead of silently omitting that link.
+ *   judge.
+ * - A link whose target cannot be read although it still exists, and a path
+ *   or target that cannot be encoded, are reported in-band as an `x` record
+ *   (see {@link SYMLINK_LISTING_FAILURE_FUNCTION}) and the batch carries on.
+ *   The decoder refuses any listing with such a record, so the failure stays
+ *   visible however the `find` in use passes on the exit status of a batch
+ *   that `-exec … {} +` ran before the last one — POSIX leaves that open.
  * - Issue #219: a missing or unusable `readlink` takes the same path: `command
  *   -p` exits 127 when it finds no `readlink`, the substitution fails, the link
- *   still exists and the batch exits 1. The post-merge backstop relies on
- *   this, because a link it never saw is a link it can neither judge nor
- *   report.
+ *   still exists and the batch reports it as an `x` record. The post-merge
+ *   backstop relies on this, because a link it never saw is a link it can
+ *   neither judge nor report.
  */
 const SYMLINK_LISTING_INNER_SCRIPT = [
   SYMLINK_LISTING_FIELD_FUNCTION,
+  SYMLINK_LISTING_FAILURE_FUNCTION,
   // `nl` holds one newline; the trailing `x` survives command substitution.
   "nl=$(printf '\\nx'); ",
   // `$\{` keeps the shell parameter expansion literal; a bare `${` would be
@@ -207,11 +264,14 @@ const SYMLINK_LISTING_INNER_SCRIPT = [
   "for l do ",
   `r=$\{l#"$d"/}; `,
   "case $k in ",
-  "u) printf 'u\\0'; e \"$r\";; ",
+  'u) if e "$r"; then printf \'u\\0\'; printf "$f" "$v"; else printf \'x\\0\\0\'; fi;; ',
   "l) ",
-  't=$(command -p readlink -- "$l" && printf x) || { if [ -L "$l" ]; then exit 1; fi; continue; }; ',
+  't=$(command -p readlink -- "$l" && printf x) || { if [ -L "$l" ]; then xr; fi; continue; }; ',
   `t=$\{t%x}; t=$\{t%"$nl"}; `,
-  'printf \'l\\0\'; e "$r"; e "$t";; ',
+  // Encode the path and the target before anything of the record is printed.
+  "if e \"$r\"; then rv=$v; rf=$f; else printf 'x\\0\\0'; continue; fi; ",
+  'if e "$t"; then printf \'l\\0\'; printf "$rf" "$rv"; printf "$f" "$v"; ',
+  'else printf \'x\\0\'; printf "$rf" "$rv"; fi;; ',
   '*) echo "unknown symlink listing batch kind" >&2; exit 64;; ',
   CASE_LOOP_END,
 ].join("")
@@ -258,11 +318,13 @@ export function encodeSymlinkListingEntry(kind: SymlinkListingEntryKind, path: s
  * {@link encodeSymlinkListingEntry}).
  *
  * `find` without `-L` never follows a symlink, so the walk stays inside the
- * destination tree. A traversal error, or a batch of the inner script that
- * exited non-zero, makes `find` exit non-zero, which the `|| exit $?` turns
- * into a failed probe rather than a partial listing read as complete. An entry
- * with an unknown kind exits non-zero as well, so a framing mistake on the
- * sending side fails closed.
+ * destination tree. A traversal error makes `find` exit non-zero, which the
+ * `|| exit $?` turns into a failed probe rather than a partial listing read as
+ * complete. A batch of the inner script reports the entries it could not read
+ * or encode in-band as `x` records instead of relying on its exit status,
+ * because not every `find` passes on the status of a batch that `-exec … {} +`
+ * ran before the last one. An entry with an unknown kind exits non-zero, so a
+ * framing mistake on the sending side fails closed.
  *
  * Issue #219: with GNU find — detected in the same exec by `find <dest>
  * -maxdepth 0 -readable`, which other finds reject as an unknown primary — a
@@ -274,7 +336,9 @@ export function encodeSymlinkListingEntry(kind: SymlinkListingEntryKind, path: s
  * error, an unreadable directory included.
  *
  * Issue #219: an `n` entry that is an existing real directory is emitted as an
- * `n` record with the path as it was sent.
+ * `n` record with the path as it was sent. The outer script runs outside
+ * `find`, so a path it cannot encode simply exits 1, which `xargs` reports as
+ * a non-zero exit.
  */
 const SYMLINK_LISTING_OUTER_SCRIPT = [
   "LC_ALL=C; export LC_ALL; ",
@@ -286,7 +350,7 @@ const SYMLINK_LISTING_OUTER_SCRIPT = [
   '-type d \\( ! -readable -o ! -executable \\) -prune -exec sh -c "$inner" sh u "$p" {} + ',
   '-o -type l -exec sh -c "$inner" sh l "$p" {} + || exit $?; ',
   'else find "$p" -type l -exec sh -c "$inner" sh l "$p" {} + || exit $?; fi;; ',
-  'n) if [ -d "$p" ] && [ ! -L "$p" ]; then printf \'n\\0\'; e "$p"; fi;; ',
+  'n) if [ -d "$p" ] && [ ! -L "$p" ]; then e "$p" || exit 1; printf \'n\\0\'; printf "$f" "$v"; fi;; ',
   '*) echo "unknown symlink listing entry kind" >&2; exit 64;; ',
   CASE_LOOP_END,
 ].join("")
@@ -330,17 +394,21 @@ const SYMLINK_LISTING_OUTER_SCRIPT = [
  * transported faithfully.
  *
  * Failure mode: fail closed. A traversal error (other than an unreadable
- * directory with GNU find), an unreadable target of an existing link, an
- * unknown entry kind or a failing `sh`/`xargs`/`od` makes the exec exit
- * non-zero; the caller treats that, a truncated capture and any output that
- * is not made of well-formed records as "containment cannot be proven".
+ * directory with GNU find), an unknown entry kind or a failing `sh`/`xargs`
+ * makes the exec exit non-zero. An unreadable target of an existing link, or
+ * a path or target `od` fails to encode, is reported as an `x` record. The
+ * caller treats a non-zero exit, a truncated capture, an `x` record and any
+ * output that is not made of well-formed records as "containment cannot be
+ * proven".
  *
  * @returns The remote script. Its output is a flat list of NUL-terminated
  *   fields forming records: `l, <link>, <target>` per symlink with the link
  *   path relative to the destination and the raw target exactly as stored,
  *   `u, <directory>` per unreadable directory relative to the destination
- *   (GNU find only), and `n, <path>` per `n` entry that is an existing real
- *   directory, with the path as sent. Every path and target field is plain
+ *   (GNU find only), `n, <path>` per `n` entry that is an existing real
+ *   directory, with the path as sent, and `x, <path>` per link or directory
+ *   the batch could not read or encode, with an empty path when the path
+ *   itself could not be encoded. Every path and target field is plain
  *   printable ASCII or 0x01 followed by the hex of its bytes. A tree without
  *   symlinks, unreadable directories and such directory hits produces no
  *   output.
