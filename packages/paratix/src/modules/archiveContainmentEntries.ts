@@ -1,11 +1,12 @@
 /**
  * Operations on the existing containment entries of `archive.extract`: clear the entries a fully
- * successful apply verified, the `check` test that no entry exists, and the record a failed apply
- * writes into its own entry.
+ * successful apply verified, the `check` test that no entry exists, the hint how to clear them by
+ * hand, and the record a failed apply writes into its own entry.
  */
 
 import type { ModuleResult, SshConnection } from "../types.js"
 import type { ContainmentLedger } from "./archiveContainmentEstablish.js"
+import type { MutexLockLostReason } from "./mutexLock.js"
 
 import { failed, failedCommand } from "../moduleFailure.js"
 import { shellQuote } from "../ssh.js"
@@ -14,6 +15,11 @@ import {
   type ContainmentFlagRecord,
   type ContainmentPaths,
 } from "./archiveContainmentFlag.js"
+import {
+  ARCHIVE_EXTRACT_LOCK_LOST_EXIT,
+  archiveExtractLockLostReason,
+} from "./archiveExtractLock.js"
+import { buildFlagLockRefreshGuard } from "./flagLockScripts.js"
 
 const CONTAINMENT_ENTRY_MODE = "0644"
 
@@ -26,14 +32,42 @@ export const CONTAINMENT_CLEAR_EXIT = {
   claimFailed: 5,
   claimTaken: 3,
   claimUnremovable: 4,
+  /** Issue #224: the embedded refresh guard refused; nothing was removed. */
+  lockLost: ARCHIVE_EXTRACT_LOCK_LOST_EXIT,
   ownEntry: 6,
 } as const
 
 /**
- * Issue #219: the clear script. Positional parameters: `$1` the own entry,
- * then one `<path> <sha256>` pair per removable entry.
+ * Issue #224: the lock the clear exec guards itself with: the holder token and
+ * the guard threshold of the destination's extract lock (see
+ * `archiveExtractLock.ts`).
+ */
+export type ContainmentClearLock = {
+  /** Guard age in seconds; a holder marker older than this refuses the clear. */
+  guardSeconds: number
+  /** The unquoted lock directory path. */
+  lockPath: string
+  /** Issue #224: why the lock handle was latched as lost, if it was. */
+  lostReason?: () => MutexLockLostReason | undefined
+  /** The holder token on marker line 1. */
+  token: string
+}
+
+/**
+ * Issue #219: the clear script. Positional parameters: `$1` the lock
+ * directory and `$2` the holder token of the destination's extract lock
+ * (issue #224), `$3` the own entry, then one `<path> <sha256>` pair per
+ * removable entry.
  *
- * For the n-th pair it claims the entry by renaming it to `$1-claim-<n>`
+ * Issue #224: before anything else, the embedded refresh guard checks that
+ * the lock still belongs to this apply — the lock directory exists, its
+ * holder marker carries the token on line 1 and is not older than the guard
+ * threshold — and refreshes the marker. When it refuses, the script exits
+ * {@link CONTAINMENT_CLEAR_EXIT}.lockLost before it renames or removes
+ * anything: another apply may hold the lock by now and rely on every entry it
+ * read.
+ *
+ * For the n-th pair it claims the entry by renaming it to `$own-claim-<n>`
  * (inside the entry directory, so the claim is still an entry), which is
  * atomic: a concurrent rewrite (a rename onto the path) after that point
  * creates a new entry that is never touched. The claim is removed only when
@@ -44,12 +78,19 @@ export const CONTAINMENT_CLEAR_EXIT = {
  * an odd number of arguments 64. The own entry is removed last (exit 6 when
  * that fails), so a failure before it can still rewrite the own entry.
  *
+ * @param guardSeconds - Issue #224: the guard threshold in seconds.
  * @returns The script, identical for every destination.
  */
-export function buildContainmentClearScript(): string {
+export function buildContainmentClearScript(guardSeconds: number): string {
   const exit = CONTAINMENT_CLEAR_EXIT
+  const guard = buildFlagLockRefreshGuard({
+    guardSeconds,
+    lockDirectory: { kind: "parameter", name: "1" },
+    token: { kind: "parameter", name: "2" },
+  })
   return [
     String.raw`LC_ALL=C; export LC_ALL; `,
+    `${guard} || exit ${String(exit.lockLost)}; shift 2; `,
     String.raw`own=$1; shift; n=0; `,
     String.raw`while [ "$#" -ge 2 ]; do `,
     String.raw`p=$1; h=$2; shift 2; c="$own-claim-$n"; n=$((n + 1)); `,
@@ -71,18 +112,39 @@ export function buildContainmentClearScript(): string {
  * {@link buildContainmentClearScript}.
  *
  * @param ledger - The own entry and the entries it may remove.
+ * @param lock - Issue #224: the extract lock the clear guards itself with.
  * @returns The `sh -c` command line with the quoted script and parameters.
  */
 export function buildContainmentClearCommand(
-  ledger: Pick<ContainmentLedger, "ownEntry" | "removable">
+  ledger: Pick<ContainmentLedger, "ownEntry" | "removable">,
+  lock: ContainmentClearLock
 ): string {
   return [
     "sh -c",
-    shellQuote(buildContainmentClearScript()),
+    shellQuote(buildContainmentClearScript(lock.guardSeconds)),
     "sh",
+    shellQuote(lock.lockPath),
+    shellQuote(lock.token),
     shellQuote(ledger.ownEntry),
     ...ledger.removable.flatMap(({ path, sha256 }) => [shellQuote(path), sha256]),
   ].join(" ")
+}
+
+/**
+ * Issue #224: the failure of a clear that removed nothing because the
+ * destination's extract lock is no longer this apply's.
+ *
+ * @param ownEntry - The own entry's absolute path.
+ * @param lock - The lock the apply took.
+ * @returns The failure.
+ */
+export function clearRefusedForLostLock(
+  ownEntry: string,
+  lock: Pick<ContainmentClearLock, "guardSeconds" | "lockPath" | "lostReason">
+): ModuleResult {
+  return failed(
+    `[archive.extract] refusing to remove containment entry ${ownEntry} and the entries it verified: ${archiveExtractLockLostReason(lock)}; no entry was removed, so check stays at needs-apply until a later apply verifies and clears them`
+  )
 }
 
 /**
@@ -92,19 +154,29 @@ export function buildContainmentClearCommand(
  * still unchanged, then its own entry. A failure fails the apply: an entry
  * left behind would keep `check` at needs-apply.
  *
+ * Issue #224: the exec first checks that the destination's extract lock is
+ * still this apply's. When it is not, nothing is removed and the failure
+ * names the lost lock; the caller records an empty `failed` list in the own
+ * entry, which is safe because this apply's own backstop already passed.
+ *
  * @param conn - The SSH connection.
  * @param ledger - What the establish exec read, see {@link ContainmentLedger}.
+ * @param lock - Issue #224: the extract lock the clear guards itself with.
  * @returns Null when the own entry is gone, otherwise a structured failure.
  */
 export async function clearContainmentEntries(
   conn: SshConnection,
-  ledger: Pick<ContainmentLedger, "ownEntry" | "removable">
+  ledger: Pick<ContainmentLedger, "ownEntry" | "removable">,
+  lock: ContainmentClearLock
 ): Promise<ModuleResult | null> {
-  const result = await conn.exec(buildContainmentClearCommand(ledger), {
+  const result = await conn.exec(buildContainmentClearCommand(ledger, lock), {
     ignoreExitCode: true,
     silent: true,
   })
   if (result.code === 0) return null
+  if (result.code === CONTAINMENT_CLEAR_EXIT.lockLost) {
+    return clearRefusedForLostLock(ledger.ownEntry, lock)
+  }
   return failedCommand(
     `[archive.extract] failed to remove containment entry ${ledger.ownEntry} and the entries it verified`,
     result
@@ -151,6 +223,48 @@ export function noContainmentEntriesCommand(
     "sh",
     shellQuote(paths.entryDirectory),
   ].join(" ")
+}
+
+/**
+ * Issue #219: the way out when the offending links are intended, for example
+ * a virtualenv interpreter link that points into `/usr/bin` after an
+ * interrupted apply forced a whole-destination check. Such a link fails every
+ * later check, so the operator first has to stop or wait for all applies to
+ * this destination to finish, with no new applies until inspection and state
+ * clearing are complete. No apply may be active when inspection begins: the
+ * tree must stay unchanged while it is checked, and clearing state must not
+ * remove a live apply's in-progress entry. The operator can then check the
+ * tree, clear the destination's containment entries and legacy flag, and
+ * retry. This hint is offered only when the current archive's normal scope
+ * passes without that state. Naming both concrete paths keeps the step
+ * copyable; it is not a recommendation to clear entries blindly.
+ *
+ * Issue #224: applies to one destination are serialized by its extract lock,
+ * so the hint names the lock directory: while it exists an apply runs or was
+ * interrupted. A lock an interrupted apply left is reclaimed by the next
+ * apply once its holder marker is stale; removing it by hand is safe only
+ * when no apply for the destination runs anywhere, because a live holder
+ * would then lose its lock to the next apply.
+ *
+ * @param paths - The destination's containment state paths.
+ * @param paths.entryDirectory - The destination's containment entry directory.
+ * @param paths.legacyFlag - The destination's containment flag from older versions.
+ * @param paths.lockPath - Issue #224: the destination's extract lock directory;
+ *   omitted, the hint does not name it.
+ * @returns The sentence appended to a post-merge violation message.
+ */
+export function intendedLinksHint(paths: {
+  entryDirectory: string
+  legacyFlag: string
+  lockPath?: string
+}): string {
+  const { entryDirectory, legacyFlag, lockPath } = paths
+  const holder = lockPath === undefined ? "" : shellQuote(`${lockPath}/holder`)
+  const lock =
+    lockPath === undefined
+      ? ""
+      : ` (while the extract lock ${shellQuote(lockPath)} exists, an apply to this destination runs or was interrupted; the next apply reclaims an interrupted apply's lock once it is stale, and removing it by hand with rm -f -- ${holder} && rmdir -- ${shellQuote(lockPath)} is safe only when no apply for this destination runs anywhere)`
+  return `if the offending symlinks are intended (for example a virtualenv's interpreter link), they keep failing this check: first stop or wait for all archive.extract applies to this destination to finish and prevent new applies until inspection and state clearing are complete${lock}; then check the destination yourself and, before retrying, clear its containment state with rm -f -- ${shellQuote(entryDirectory)}/run-* ${shellQuote(legacyFlag)}`
 }
 
 /**

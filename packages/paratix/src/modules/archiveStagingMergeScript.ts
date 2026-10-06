@@ -5,6 +5,7 @@
  */
 
 import { shellQuote } from "../ssh.js"
+import { ARCHIVE_EXTRACT_LOCK_LOST_EXIT } from "./archiveExtractLock.js"
 import { encodeNulPayload } from "./archiveProbe.js"
 
 /**
@@ -323,4 +324,29 @@ export function boundedStagingMergeCommand(
 ): string {
   const { killAfterSeconds, timeoutSeconds } = limits
   return `command -p timeout -k ${String(killAfterSeconds)} ${String(timeoutSeconds)} ${mergeCommand}; exit $?`
+}
+
+/**
+ * Issue #224: prefix a bounded staging merge with the extract lock's refresh
+ * guard: `<guard> || exit 75; command -p timeout …; exit $?`.
+ *
+ * The guard (see `buildFlagLockRefreshGuard`) passes only while the lock
+ * still belongs to this apply and refreshes its holder marker; it reads no
+ * stdin, so the guard paths on stdin still reach the merge, and it prints
+ * nothing. When it refuses, the exec exits
+ * {@link ARCHIVE_EXTRACT_LOCK_LOST_EXIT} before `timeout` starts, so nothing
+ * was copied. The merge itself stays the simple command
+ * {@link boundedStagingMergeCommand} requires.
+ *
+ * @param guard - The refresh guard fragment of the lock.
+ * @param mergeCommand - The merge command, see {@link boundedStagingMergeCommand}.
+ * @param limits - The time limits; defaults to {@link STAGING_MERGE_TIME_LIMITS}.
+ * @returns The guarded and bounded merge command.
+ */
+export function guardedStagingMergeCommand(
+  guard: string,
+  mergeCommand: string,
+  limits: Readonly<StagingMergeTimeLimits> = STAGING_MERGE_TIME_LIMITS
+): string {
+  return `${guard} || exit ${String(ARCHIVE_EXTRACT_LOCK_LOST_EXIT)}; ${boundedStagingMergeCommand(mergeCommand, limits)}`
 }

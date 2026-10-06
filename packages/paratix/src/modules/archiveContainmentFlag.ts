@@ -71,30 +71,40 @@
  * calls the entry written by an older version or damaged, which is misleading
  * but safe. This version reads a v1 `in-progress` entry as unknown too.
  *
- * Issue #219: remaining races, by design:
+ * Issue #219: remaining races, by design, as updated by issue #224, which
+ * serializes the applies to one destination with a per-destination extract
+ * lock (see `archiveExtractLock.ts`). The lock is taken before the own entry
+ * is created and released after the clear exec:
  *
- * 1. An `in-progress` entry of a live concurrent apply cannot be told apart
- *    from one a killed apply left. Another apply treats it as unknown,
- *    verifies the whole destination and removes it when that verification is
- *    clean and the entry is unchanged. If the live apply then fails, it
- *    re-creates its entry with its record; if it succeeds, it removes only its
- *    own (already removed) entry; if it is killed after that removal, links
- *    its merge published after the other apply's listing were verified by
- *    nobody. Issue #227: when the live apply extracts the same archive, its
- *    `in-progress` entry matches the other apply's scope digest, so the other
- *    apply removes it after its scoped verification alone, with the same
- *    outcomes; this is documented, not fixed. A concurrent claim right after
- *    `writeFile` renamed the record onto the entry can also make `writeFile`
- *    report a failure (its post-rename step no longer finds the file)
- *    although the record is kept, under the claim name.
+ * 1. Resolved by issue #224. An `in-progress` entry of a live concurrent apply
+ *    used to be indistinguishable from one a killed apply left, so another
+ *    apply could verify the destination and remove it while its owner was
+ *    still merging. Under the lock, an `in-progress` entry an apply reads
+ *    belongs to an apply that stopped without finishing and whose lock was
+ *    reclaimed as stale; verifying the whole destination — or, Issue #227,
+ *    only this apply's scope when the entry records the same scope digest —
+ *    and removing it is correct. Only a live holder that lost its lock anyway
+ *    — the target clock jumped forward by more than the gap between the guard
+ *    and the reclaim threshold, or a merge hung in uninterruptible I/O past
+ *    its timeout — can reopen the old race, and the guards in its merge and
+ *    clear execs then stop it visibly: a refused merge publishes nothing, a
+ *    refused clear removes nothing. Its failure record still goes through
+ *    `writeFile`, which re-creates an own entry removed meanwhile; a
+ *    concurrent claim right after `writeFile` renamed the record onto the
+ *    entry can make `writeFile` report a failure (its post-rename step no
+ *    longer finds the file) although the record is kept, under the claim
+ *    name.
  * 2. An entry created after an apply's establish read is never touched by
- *    that apply.
+ *    that apply. Under the lock no other apply creates an entry between this
+ *    apply's establish and clear execs; the rule stays as the safety net for
+ *    a lost lock.
  * 3. A crash inside the clear exec leaves a `run-…-claim-<n>` entry, which is
  *    a normal entry: `check` stays at needs-apply and the next apply reads it.
- * 4. Old and new paratix versions running concurrently on one destination do
- *    not coordinate: old versions still use the single flag file.
- * 5. Whoever can write the root-owned flags directory can remove entries;
- *    that is outside the model.
+ * 4. Still unsupported: old and new paratix versions running concurrently on
+ *    one destination do not coordinate. Old versions take no extract lock and
+ *    still use the single flag file.
+ * 5. Whoever can write the root-owned flags directory can remove entries and
+ *    the extract lock; that is outside the model.
  */
 import { randomBytes } from "node:crypto"
 
@@ -160,7 +170,7 @@ export type ParsedContainmentFlag =
 const NO_USABLE_LIST =
   "holds no usable list of offending links (it was written by an older paratix version or is damaged)"
 const IN_PROGRESS =
-  "records an apply that did not finish (it stopped after it started, possibly after its merge had begun, or another apply to this destination is still running)"
+  "records an apply that did not finish (it stopped after it started, possibly after its merge had begun, it lost its extract lock, or it is an apply of an older paratix version without the extract lock that is still running)"
 const SCOPE_MISMATCH =
   "records an apply that did not finish whose archive scope differs from this apply's (another archive, or a scope derived by another paratix or Unicode version)"
 

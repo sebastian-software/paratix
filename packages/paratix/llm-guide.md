@@ -300,9 +300,9 @@ links must be removed or pointed inside manually.
 
 Every apply records its outcome in its own containment entry, a file `run-<32 hex digits>` in the
 destination's entry directory `/var/lib/paratix/flags/archive-containment-<sha256>.d/` (`<sha256>`
-is the SHA-256 of the normalized destination path). It creates that entry as `in-progress` before it
-touches the destination, never replacing an existing name, and it only ever rewrites its own entry,
-never another apply's. The `in-progress` entry records the SHA-256 digest of the archive's
+is the SHA-256 of the normalized destination path). It creates that entry as `in-progress` once it
+holds the destination's extract lock (see below) and before it touches the destination, never
+replacing an existing name, and it only ever rewrites its own entry, never another apply's. The `in-progress` entry records the SHA-256 digest of the archive's
 containment scope (its symlinks and every path it writes, together with an algorithm identifier and
 the Unicode version of the Node.js runtime), so its size is fixed whatever the number of members. An
 apply that stops with an error after its merge started, before its post-merge check passed, rewrites
@@ -314,9 +314,8 @@ entry before it touches the destination and re-verifies the links all of them re
 post-merge check, with the same lexical resolution and kernel cross-check: each must be gone or now
 resolve inside `destination`, otherwise the apply fails naming it and its own entry records it. An
 entry of an earlier apply that did not finish (it was interrupted, stopped with an error after its
-merge started or could not record its outcome, or another apply to this destination is still
-running) records only that apply's scope digest. If the digest equals the current apply's own, the
-earlier apply extracted an archive with an equivalent containment scope (the same symlink paths and
+merge started or could not record its outcome) records only that apply's scope digest. If the
+digest equals the current apply's own, the earlier apply extracted an archive with an equivalent containment scope (the same symlink paths and
 written paths, compared by name variant; member contents and symlink targets are not part of the
 digest) and could only have published links the current apply judges anyway: its own symlinks and
 every link whose resolution passes through a path it writes. The
@@ -359,9 +358,10 @@ for entries without a usable digest or after the archive's containment scope cha
 message offers this step
 only after a fully readable whole-destination check when the current archive's normal scope
 would pass without recorded links, including the kernel
-cross-check. First stop or wait for all `archive.extract` applies to this destination to finish.
-Prevent new applies until both your inspection and state clearing are complete. An active apply
-can still publish more contents, so its entry must not be deleted through `run-*` while it is
+cross-check. First stop or wait for all `archive.extract` applies to this destination to finish;
+while its extract lock `/var/lib/paratix/flags/archive-extract-lock-<sha256>` exists, an apply runs
+or was interrupted (see below). Prevent new applies until both your inspection and state clearing
+are complete. An active apply can still publish more contents, so its entry must not be deleted through `run-*` while it is
 running. Only then check the destination yourself and delete its `run-*` entries and the old flag
 file with
 `rm -f -- '/var/lib/paratix/flags/archive-containment-<sha256>.d'/run-* '/var/lib/paratix/flags/archive-containment-<sha256>.failed'`.
@@ -370,28 +370,69 @@ the failure message names the exact command. Clearing state cannot resolve viola
 current archive's scope. On failure no extraction marker is written and no `owner` is applied.
 
 Only an apply that succeeds completely, including the re-verification of recorded links or of the
-whole destination, `owner` and the marker files, removes entries, in one last command: every entry
-it read whose content is unchanged since it read it (it claims each by an atomic rename and compares
-its SHA-256 with the one it read), the old flag file included, and then its own. An entry that was
-rewritten in the meantime stays, and the next apply reads it. A refusal while the destination is
-created or validated, by the checks before staging, by the pre-merge check, by the merge, or by the
-post-merge check leaves the apply's entry in place. While any entry or the old flag file exists, and
-while the entry directory is a symlink, not a directory or unreadable, `check` reports `needs-apply`
-for every archive extracting into that destination.
+whole destination, `owner` and the marker files, removes entries, in one command at the end, while
+it still holds the extract lock: every entry it read whose content is unchanged since it read it (it
+claims each by an atomic rename and compares its SHA-256 with the one it read), the old flag file
+included, and then its own. An entry that was rewritten in the meantime stays, and the next apply
+reads it. A refusal while the destination is created or validated, by the checks before staging, by
+the pre-merge check, by the merge, by the post-merge check, or because the apply lost its extract
+lock leaves the apply's entry in place. While any entry or the old flag file exists, and while the
+entry directory is a symlink, not a directory or unreadable, `check` reports `needs-apply` for every
+archive extracting into that destination. An apply that crashes while removing entries leaves a
+`run-…-claim-<n>` entry, which is an ordinary entry and keeps `check` at `needs-apply`.
 
-Running more than one `archive.extract` against the same destination at the same time is not
-supported: run at most one apply per destination at a time; parallel applies to different
-destinations are fine. If it happens anyway, known races remain.
-An `in-progress` entry of an apply that is
-still running cannot be told apart from one an interrupted apply left, so another apply whose
-whole-destination verification is clean may remove it; if both extract the same archive, their
-digests match, and the other apply removes it after its normal post-merge check alone. If the
-running apply then fails, it creates its entry again with its record, but if it is killed, links its
-merge published after that verification are checked by nobody. An entry created after an apply read
-the entries is never touched by that apply. An apply that crashes while removing entries leaves a
-`run-…-claim-<n>` entry, which is an ordinary entry and keeps `check` at `needs-apply`. Older and
-newer paratix versions running at the same time on one destination do not coordinate, because older
-versions still use the single flag file.
+Applies to one destination are serialized by a per-destination extract lock, the directory
+`/var/lib/paratix/flags/archive-extract-lock-<sha256>` (the same `<sha256>` as the entry directory).
+An apply takes it after the upload, the archive listing and the member checks, right before it
+creates its containment entry, and releases it after it removed the entries or recorded its
+failure, on every exit path the controller survives; the release removes the lock only while its
+marker still carries this apply's token. `check` takes no lock, and applies to different
+destinations still run in parallel. The lock holds a marker file `holder`: its first line is a
+random token, the only value paratix compares, and the lines after it name the owner for an
+operator: `controller <hostname> pid <pid>` (the controller host and its process ID),
+`started <ISO 8601 time>` and `entry run-<32 hex digits>` (the apply's containment entry). Taking
+and releasing the lock adds a few commands to every apply.
+
+An apply that finds the lock held first tries to reclaim a stale lock (see below) right away, then
+waits for up to 300 seconds, polling on the host in rounds of at most 60 seconds and trying to
+reclaim a stale lock again after every round. If the lock is freed in time, the apply takes it and
+proceeds. Otherwise it fails with a message that names the destination, the lock path, the owner
+lines, the marker's age and when the lock becomes reclaimable; retry once the other apply has
+finished.
+
+While it holds the lock, an apply refreshes the marker about every 60 seconds. Each refresh, and a
+guard that runs in the same command right before the merge and right before the entries are
+removed, passes only while the lock directory exists, the marker's first line is the apply's token
+and the marker is not older than 300 seconds. If the lock was lost anyway, the apply fails visibly
+and names the lock: a refused merge is not started and publishes nothing, and a refused removal
+removes no entry. Its own entry then records an empty list, so `check` reports `needs-apply` until
+a later apply verifies and clears the entries.
+
+A killed or disconnected apply cannot release its lock. A waiting or later apply reclaims a lock
+whose marker is older than 540 seconds (a lock directory without a marker by the directory's age);
+this lies above the guard's 300 seconds plus the host-side merge limit of 110 seconds, so a merge
+the guard let start has ended before its lock can be reclaimed. An apply started shortly after an
+interrupted one can therefore still fail with the wait message, which says when the lock becomes
+reclaimable. Under the lock, an `in-progress` entry belongs to an apply that stopped without
+finishing, so the apply that reclaimed the lock verifies the whole destination as described above,
+or only its own archive's scope when the scope digests match, and, after a success, removes the
+entries; `check` then converges. To inspect a held lock, read the
+owner lines in its `holder` file. Remove the lock by hand with
+`rm -f -- '/var/lib/paratix/flags/archive-extract-lock-<sha256>/holder' && rmdir -- '/var/lib/paratix/flags/archive-extract-lock-<sha256>'`
+only when no `archive.extract` apply for that destination runs anywhere, on any controller;
+otherwise the running apply loses its lock to the next one. The wait failure message names the
+exact command.
+
+Known limits remain. A forward jump of the target host's clock larger than the gap between the
+guard age and the reclaim age, or a merge stuck in uninterruptible I/O beyond its `timeout`, can
+make a live apply's lock look stale: another apply may then reclaim it and, after a clean
+whole-destination check, remove the live apply's `in-progress` entry; if both extract the same
+archive, their digests match, and the other apply removes it after its normal post-merge check
+alone. The guards stop the live apply at its next guarded step, but if it is killed, links its merge published after that check are
+checked by nobody. Nested destinations such as `/srv/a` and `/srv/a/b` use different locks and are
+not serialized against each other. Running older and newer paratix versions at the same time on one
+destination is not supported: older versions take no extract lock and still use the single flag
+file.
 
 ### `command`
 

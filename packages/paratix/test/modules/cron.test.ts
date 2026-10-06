@@ -7,6 +7,7 @@ import { createMockSsh as createBaseMockSsh } from "../helpers/mockSsh.js"
 import {
   isFlagLockHolderReadback,
   isFlagLockInternalSuccessCommand,
+  isFlagLockReclaimProbe,
   MOCK_FLAG_LOCK_HOLDER_TOKEN,
 } from "../helpers/mockSshFlagLock.js"
 
@@ -253,6 +254,9 @@ function createSharedCrontabMockSsh(
         return { code: 0, stderr: "", stdout: MOCK_FLAG_LOCK_HOLDER_TOKEN }
       }
       if (isFlagLockInternalSuccessCommand(command)) return { code: 0, stderr: "", stdout: "" }
+      // Issue #224: a contended acquirer tries one stale reclaim before its
+      // first poll; the lock this mock holds is always fresh, so it refuses.
+      if (isFlagLockReclaimProbe(command)) return { code: 1, stderr: "", stdout: "" }
       throw new Error(`unexpected shared crontab exec command: ${command}`)
     },
   }

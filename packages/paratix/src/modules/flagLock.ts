@@ -2,6 +2,13 @@ import type { ExecResult, ModuleResult, SshConnection } from "../types.js"
 
 import { failed, failedCommand } from "../moduleFailure.js"
 import { shellQuote } from "../ssh.js"
+import {
+  buildFlagLockHolderMarkerWrite,
+  buildStaleFlagLockReclaimCommand,
+  FLAG_LOCK_HOLDER_MARKER_NAME,
+  type FlagLockHolder,
+  validateFlagLockHolder,
+} from "./flagLockScripts.js"
 
 export const FLAGS_DIRECTORY = "/var/lib/paratix/flags"
 export const FLAG_LOCK_WAIT_SECONDS = 300
@@ -13,7 +20,7 @@ const FLAG_LOCK_STALE_HOURS = 4
 // marker mtime instead of the lock directory mtime because the latter can be
 // updated by tools traversing the parent directory.
 export const FLAG_LOCK_STALE_SECONDS = FLAG_LOCK_STALE_HOURS * MINUTES_PER_HOUR * SECONDS_PER_MINUTE
-const HOLDER_MARKER_NAME = "holder"
+const HOLDER_MARKER_NAME = FLAG_LOCK_HOLDER_MARKER_NAME
 
 // Flag names land directly in shell commands like `[ -f /var/lib/paratix/flags/<name> ]`
 // and `find ... -name '<prefix>*' -delete`. We therefore reject any name that could
@@ -101,20 +108,22 @@ type WriteHolderMarkerResult =
  * the caller can react instead of silently entering the critical section
  * without a verifiable holder token.
  *
+ * Issue #224: with a caller-supplied `holder`, the readback must equal its
+ * token. A different non-empty token fails the acquisition without removing
+ * the marker or the lock directory, because they belong to another holder;
+ * an empty or failed readback is still cleaned up eagerly.
+ *
  * @param ssh - The active SSH connection.
  * @param lockName - The validated lock identifier.
+ * @param holder - Optional caller-supplied token and owner lines.
  * @returns The verified holder token, or a structured failure when the
  *   marker could not be persisted or read back.
  */
 async function writeFlagLockHolderMarker(
   ssh: SshConnection,
-  lockName: string
+  lockName: string,
+  holder: FlagLockHolder | undefined
 ): Promise<WriteHolderMarkerResult> {
-  // R-0000494: capture hostname via ssh.output (not inline `$(hostname)`).
-  const hostname = await ssh
-    .output("hostname")
-    .then((rawHostname) => rawHostname.trim())
-    .catch(() => "")
   const lock = flagPath(lockName)
   const markerPath = `${lock}/${HOLDER_MARKER_NAME}`
   // R-0000803: `flagLockDisplayPath(lockName)` returns the un-shellQuoted
@@ -123,10 +132,10 @@ async function writeFlagLockHolderMarker(
   // so the awk argument is a single quoted token, defending against future
   // relaxations of `validateFlagName` that could allow shell metacharacters.
   const quotedMarker = shellQuote(`${flagLockDisplayPath(lockName)}/${HOLDER_MARKER_NAME}`)
-  const printfResult = await ssh.exec(
-    `printf '%s@%s %s\\n' "$$" ${shellQuote(hostname)} "$(date +%s)" > ${markerPath}`,
-    { ignoreExitCode: true, silent: true }
-  )
+  const printfResult = await ssh.exec(await holderMarkerWriteCommand(ssh, markerPath, holder), {
+    ignoreExitCode: true,
+    silent: true,
+  })
   if (printfResult.code !== 0) {
     // R-0000670: the marker write failed (ENOSPC, EROFS, transient EIO, ...).
     // Without a marker the verified-release fast path cannot work, so the
@@ -174,12 +183,64 @@ async function writeFlagLockHolderMarker(
     // mis-parsed as options.
     await ssh.exec(`rm -f -- ${markerPath}`, { ignoreExitCode: true, silent: true })
     await ssh.exec(`rmdir -- ${lock}`, { ignoreExitCode: true, silent: true })
-    return {
-      failure: buildReadbackFailure(lockName, readbackResult),
-      kind: "failed",
-    }
+    return { failure: buildReadbackFailure(lockName, readbackResult), kind: "failed" }
   }
-  return { holderToken, kind: "ok" }
+  return verifySuppliedHolderToken(lockName, holder, holderToken)
+}
+
+/**
+ * Issue #224: with a caller-supplied holder the readback must return exactly
+ * that token. A different, non-empty token means another holder owns the
+ * marker (for example after a reclaim raced in between the write and the
+ * readback), so the marker and the lock directory are left alone: removing
+ * them would break that holder's mutual exclusion.
+ *
+ * @param lockName - The validated lock identifier.
+ * @param holder - The caller-supplied holder, or `undefined` for the historic marker.
+ * @param holderToken - The non-empty token read back from marker line 1.
+ * @returns The token when it is acceptable, otherwise a failure that leaves
+ *   the lock in place.
+ */
+function verifySuppliedHolderToken(
+  lockName: string,
+  holder: FlagLockHolder | undefined,
+  holderToken: string
+): WriteHolderMarkerResult {
+  if (holder === undefined || holderToken === holder.token) return { holderToken, kind: "ok" }
+  return {
+    failure: failed(
+      `[moduleHelpers] flag lock holder marker for ${lockName} does not carry the supplied token`
+    ),
+    kind: "failed",
+  }
+}
+
+/**
+ * Render the holder marker write.
+ *
+ * Without a caller-supplied holder the marker keeps the historic
+ * `<pid>@<hostname> <epoch>` line, so other lock users and their mocks are
+ * unaffected. Issue #224: with a holder, marker line 1 is the caller's
+ * token and the owner lines follow it; no hostname lookup is needed.
+ *
+ * @param ssh - The active SSH connection (for the hostname lookup).
+ * @param markerPath - The partially quoted marker path.
+ * @param holder - Caller-supplied token and owner lines, or `undefined` for
+ *   the historic `<pid>@<hostname> <epoch>` marker.
+ * @returns The `printf` statement that writes the marker file.
+ */
+async function holderMarkerWriteCommand(
+  ssh: SshConnection,
+  markerPath: string,
+  holder: FlagLockHolder | undefined
+): Promise<string> {
+  if (holder !== undefined) return buildFlagLockHolderMarkerWrite(markerPath, holder)
+  // R-0000494: capture hostname via ssh.output (not inline `$(hostname)`).
+  const hostname = await ssh
+    .output("hostname")
+    .then((rawHostname) => rawHostname.trim())
+    .catch(() => "")
+  return `printf '%s@%s %s\\n' "$$" ${shellQuote(hostname)} "$(date +%s)" > ${markerPath}`
 }
 
 /**
@@ -223,11 +284,26 @@ export type FlagLockAcquireResult =
   | { holderToken: string; kind: "acquired" }
   | { kind: "contended" }
 
+/**
+ * Try to acquire a flag lock with one atomic `mkdir`.
+ *
+ * Issue #224: an optional caller-supplied `holder` replaces the historic
+ * `<pid>@<hostname> <epoch>` marker line: its token becomes marker line 1
+ * (the value compared on release and by the refresh guard) and its owner
+ * lines follow. The holder is validated strictly before any remote command.
+ *
+ * @param ssh - The active SSH connection.
+ * @param lockName - The validated lock identifier.
+ * @param holder - Optional caller-supplied token and owner lines.
+ * @returns `acquired` with the holder token, `contended`, or a structured failure.
+ */
 export async function acquireFlagLock(
   ssh: SshConnection,
-  lockName: string
+  lockName: string,
+  holder?: FlagLockHolder
 ): Promise<FlagLockAcquireResult> {
   validateFlagName(lockName, "lockName")
+  if (holder !== undefined) validateFlagLockHolder(holder)
   const ensureFailure = await ensureFlagsDirectory(ssh)
   if (ensureFailure) return { failure: ensureFailure, kind: "failed" }
   const result = await ssh.exec(`mkdir ${flagPath(lockName)}`, {
@@ -238,7 +314,7 @@ export async function acquireFlagLock(
     // R-0000670: surface a failed marker-write as a structured ModuleResult
     // failure. `writeFlagLockHolderMarker` already removed the lock
     // directory in that case so the caller does not need to clean up.
-    const markerResult = await writeFlagLockHolderMarker(ssh, lockName)
+    const markerResult = await writeFlagLockHolderMarker(ssh, lockName, holder)
     if (markerResult.kind === "failed") return { failure: markerResult.failure, kind: "failed" }
     return { holderToken: markerResult.holderToken, kind: "acquired" }
   }
@@ -353,8 +429,9 @@ export async function tryReclaimStaleFlagLock(
   const quotedMarker = shellQuote(`${flagLockDisplayPath(lockName)}/${HOLDER_MARKER_NAME}`)
   // Use `find -mmin` to detect a marker older than the threshold, falling
   // back to the lock directory mtime when the marker is missing entirely.
-  const staleMinutes = Math.max(1, Math.ceil(staleSeconds / SECONDS_PER_MINUTE))
-  const mminThreshold = String(staleMinutes - 1)
+  // Issue #224: the `-mmin +N` derivation lives in `flagLockAgeThreshold`
+  // (`N = max(1, ceil(staleSeconds / 60)) - 1`, matching ages strictly above
+  // `N × 60` s) so lock users can state invariants against the effective age.
   // R-0000671: the reclaim is gated on the holder marker's token still
   // matching the token observed when the marker was declared stale.
   // Without this check, a holder that became active again between the
@@ -374,61 +451,21 @@ export async function tryReclaimStaleFlagLock(
   // TOCTOU guard: if a fresh acquirer touched the lock directory between
   // the first age probe and the rmdir, the second probe fails and the
   // reclaim is aborted instead of destroying the new holder's lock.
+  // Missing marker is treated as stale only if the lock directory itself
+  // is older than the threshold to avoid racing with a holder that has
+  // not yet written its marker.
   // R-0000749: `rm -f --` and `rmdir --` so path arguments are never
   // mis-parsed as options, mirroring the convention used in archiveApply.ts /
   // compose.ts / aptKeyStaging.ts. `awk` does NOT support `--` (see issue
   // #35) and `find` is not affected here because its path argument is
   // followed by additional flags (`-maxdepth`), so `--` cannot be placed
   // without breaking the operand/expression split.
-  const command =
-    `if [ -d ${lock} ]; then ` +
-    `if [ -f ${markerPath} ]; then ` +
-    `STALE_TOKEN="$(awk 'NR==1{print $1}' ${quotedMarker} 2>/dev/null)"; ` +
-    `if find ${markerPath} -maxdepth 0 -mmin +${mminThreshold} -print -quit | grep -q .; then ` +
-    `[ "$(awk 'NR==1{print $1}' ${quotedMarker} 2>/dev/null)" = "$STALE_TOKEN" ] && ` +
-    `rm -f -- ${markerPath} && rmdir -- ${lock}; ` +
-    `else exit 1; fi; ` +
-    `else ` +
-    // Missing marker is treated as stale only if the lock directory itself
-    // is older than the threshold to avoid racing with a holder that has
-    // not yet written its marker. R-0000698: re-probe the directory mtime
-    // immediately before `rmdir` so a fresh acquirer that touched the
-    // directory between the two probes aborts the reclaim.
-    `if find ${lock} -maxdepth 0 -mmin +${mminThreshold} -print -quit | grep -q .; then ` +
-    `find ${lock} -maxdepth 0 -mmin +${mminThreshold} -print -quit | grep -q . && ` +
-    `rm -f -- ${markerPath} && rmdir -- ${lock}; ` +
-    `else exit 1; fi; ` +
-    `fi; ` +
-    `else exit 1; fi`
+  const command = buildStaleFlagLockReclaimCommand({
+    awkMarkerWord: quotedMarker,
+    lockWord: lock,
+    markerWord: markerPath,
+    staleSeconds,
+  })
   const result = await ssh.exec(command, { ignoreExitCode: true, silent: true })
   return result.code === 0
-}
-
-export async function waitForFlagLockResolution(
-  ssh: SshConnection,
-  parameters: {
-    flagName: string
-    lockName: string
-    staleSeconds: number
-    waitSeconds: number
-  }
-): Promise<"resolved" | ModuleResult> {
-  const flag = flagPath(parameters.flagName)
-  const lock = flagPath(parameters.lockName)
-  const waitSeconds = String(parameters.waitSeconds)
-  const command =
-    `i=0; while [ -d ${lock} ] && [ ! -f ${flag} ] && [ "$i" -lt ${waitSeconds} ]; do ` +
-    "sleep 1; i=$((i+1)); done; " +
-    `[ ! -d ${lock} ] || [ -f ${flag} ]`
-  const result = await ssh.exec(command, { ignoreExitCode: true, silent: true })
-  if (result.code === 0) return "resolved"
-  // Wait window expired — try to reclaim a stale lock so the next attempt
-  // can proceed instead of failing forever after a crashed holder.
-  if (await tryReclaimStaleFlagLock(ssh, parameters.lockName, parameters.staleSeconds)) {
-    return "resolved"
-  }
-  return failedCommand(
-    `[moduleHelpers] timed out waiting for flag lock ${parameters.lockName}`,
-    result
-  )
 }

@@ -17,12 +17,18 @@ import {
   validateResolvedDestinationPath,
 } from "./archiveDestinationValidation.js"
 import {
-  boundedStagingMergeCommand,
+  ARCHIVE_EXTRACT_LOCK_LOST_EXIT,
+  type ArchiveExtractLock,
+  archiveExtractLockLostReason,
+} from "./archiveExtractLock.js"
+import {
   buildStagingMergeExec,
   extractCommand,
+  guardedStagingMergeCommand,
   STAGING_MERGE_TIME_LIMITS,
   type StagingMergeParameters,
 } from "./archiveStagingMergeScript.js"
+import { flagLockRefreshGuard } from "./flagLockRefresh.js"
 
 const EXEC_OPTS = { ignoreExitCode: true, silent: true } as const
 const SILENT = { silent: true } as const
@@ -78,6 +84,32 @@ const TIMEOUT_EXIT_CODE = 124
 const TIMEOUT_KILLED_EXIT_CODE = 137
 
 /**
+ * Issue #224: what the staging merge exec reports: its failure (null on
+ * success) and whether the merge started. It did not start only when the
+ * lock guard refused, which proves that nothing was copied.
+ */
+type StagingMergeOutcome = { failure: ModuleResult | null; started: boolean }
+
+/**
+ * Issue #224: the failure of a merge that did not start because the lock was lost.
+ *
+ * @param parameters - The merge inputs and the lock.
+ * @param parameters.destination - The extraction target.
+ * @param parameters.lock - The lock this apply took.
+ * @param parameters.source - The archive source.
+ * @returns The failure.
+ */
+function mergeRefusedForLostLock(parameters: {
+  destination: string
+  lock: ArchiveExtractLock
+  source: string
+}): ModuleResult {
+  return failed(
+    `[archive.extract] refusing to merge ${parameters.source} into ${parameters.destination}: ${archiveExtractLockLostReason(parameters.lock)}; the merge was not started and nothing was published`
+  )
+}
+
+/**
  * Move the extracted archive contents from the paratix-controlled staging
  * directory into the destination using per-entry `cp -aT` so existing
  * destination directories are merged conflict-free. R-0000221: per-entry
@@ -89,23 +121,29 @@ const TIMEOUT_KILLED_EXIT_CODE = 137
  * {@link cleanupStagingDirectory} after this helper returns successfully.
  *
  * Issue #219: the merge is bounded on the host by
- * {@link boundedStagingMergeCommand} and on the client by
+ * `boundedStagingMergeCommand` and on the client by
  * {@link STAGING_MERGE_TIME_LIMITS}; a merge the host stopped is reported with
  * that reason. The guard paths travel on stdin, not as an argument (see
  * {@link buildStagingMergeExec}); the merge is still one exec.
+ *
+ * Issue #224: the exec starts with the extract lock's refresh guard (see
+ * {@link guardedStagingMergeCommand}); when it refuses, the merge did not
+ * start and the outcome says so.
  *
  * @param conn - The SSH connection.
  * @param parameters - Staging merge inputs.
  * @param parameters.destination - The final destination directory.
  * @param parameters.guardPaths - Destination paths that must not be symlinks during merge.
+ * @param parameters.lock - Issue #224: the extract lock this apply holds.
+ * @param parameters.source - Issue #224: the archive source, for a lost-lock failure.
  * @param parameters.staging - The staging directory holding the freshly extracted files.
- * @returns Either a failure {@link ModuleResult} or null on success.
+ * @returns The merge failure (null on success) and whether the merge started.
  */
 async function moveExtractedContentsIntoDestination(
   conn: SshConnection,
-  parameters: StagingMergeParameters
-): Promise<ModuleResult | null> {
-  const { destination } = parameters
+  parameters: { lock: ArchiveExtractLock; source: string } & StagingMergeParameters
+): Promise<StagingMergeOutcome> {
+  const { destination, lock } = parameters
   // R-0000751: defense-in-depth — `[ -L "$target_path" ]` runs immediately
   // before the `cp -aT` so a symlink planted between the first probe and
   // the copy cannot smuggle the merge through to an attacker-controlled
@@ -116,22 +154,30 @@ async function moveExtractedContentsIntoDestination(
   // invocation is preserved (and refused by the in-tree handling) instead
   // of being silently followed to an attacker-controlled location.
   const merge = buildStagingMergeExec(parameters)
-  const copyResult = await conn.exec(boundedStagingMergeCommand(merge.command), {
+  // Issue #224: the lock guard runs in the same exec, right before the merge.
+  const guard = flagLockRefreshGuard(lock)
+  const copyResult = await conn.exec(guardedStagingMergeCommand(guard, merge.command), {
     ...EXEC_OPTS,
     input: merge.input,
     timeout: STAGING_MERGE_TIME_LIMITS.clientTimeoutMs,
   })
+  if (copyResult.code === ARCHIVE_EXTRACT_LOCK_LOST_EXIT) {
+    return { failure: mergeRefusedForLostLock(parameters), started: false }
+  }
   if (copyResult.code !== 0) {
     const stopped =
       copyResult.code === TIMEOUT_EXIT_CODE || copyResult.code === TIMEOUT_KILLED_EXIT_CODE
         ? `: the merge was stopped on the host after ${String(STAGING_MERGE_TIME_LIMITS.timeoutSeconds)} seconds`
         : ""
-    return failedCommand(
-      `[archive.extract] failed to copy extracted files into ${destination}${stopped}`,
-      copyResult
-    )
+    return {
+      failure: failedCommand(
+        `[archive.extract] failed to copy extracted files into ${destination}${stopped}`,
+        copyResult
+      ),
+      started: true,
+    }
   }
-  return null
+  return { failure: null, started: true }
 }
 
 async function cleanupStagingDirectory(conn: SshConnection, staging: string): Promise<void> {
@@ -195,20 +241,24 @@ type StagedExtraction = { failure: ModuleResult | null; mergeStarted: boolean }
  * result, so the caller still runs the post-merge backstop.
  *
  * @param conn - The SSH connection.
- * @param parameters - Staging merge inputs.
- * @returns The merge failure, or null when the merge succeeded.
+ * @param parameters - Staging merge inputs, the lock and the source.
+ * @returns The merge failure (null on success) and whether the merge started.
  */
 async function runStagingMerge(
   conn: SshConnection,
-  parameters: StagingMergeParameters
-): Promise<ModuleResult | null> {
+  parameters: { lock: ArchiveExtractLock; source: string } & StagingMergeParameters
+): Promise<StagingMergeOutcome> {
   try {
     return await moveExtractedContentsIntoDestination(conn, parameters)
   } catch (error) {
+    // A thrown exec proves nothing about the guard, so the merge counts as started.
     const reason = error instanceof Error ? error.message : String(error)
-    return failed(
-      `[archive.extract] failed to copy extracted files into ${parameters.destination}: ${reason}`
-    )
+    return {
+      failure: failed(
+        `[archive.extract] failed to copy extracted files into ${parameters.destination}: ${reason}`
+      ),
+      started: true,
+    }
   }
 }
 
@@ -224,6 +274,9 @@ function mergeNotStarted(failure: ModuleResult): StagedExtraction {
  */
 type ContainmentPhase = "before-merge" | "merge-started" | "verified"
 
+/** Issue #219: the phase before the merge exec; nothing was published yet. */
+const BEFORE_MERGE: ContainmentPhase = "before-merge"
+
 /** Issue #219: the phase of an apply, advanced as it goes. */
 export type ContainmentProgress = {
   advance: (phase: ContainmentPhase) => void
@@ -233,10 +286,14 @@ export type ContainmentProgress = {
 /**
  * Issue #219: track the phase of an apply, starting before the merge.
  *
+ * Issue #224: the phase advances to `merge-started` right before the merge
+ * exec and returns to `before-merge` when that exec reports that its lock
+ * guard refused, which proves the merge never ran.
+ *
  * @returns The tracker.
  */
 export function containmentProgress(): ContainmentProgress {
-  let current: ContainmentPhase = "before-merge"
+  let current: ContainmentPhase = BEFORE_MERGE
   return {
     advance(phase) {
       current = phase
@@ -249,6 +306,8 @@ export function containmentProgress(): ContainmentProgress {
 export type StagedExtractionParameters = {
   /** The validated destination directory. */
   destination: string
+  /** Issue #224: the destination's extract lock this apply holds. */
+  lock: ArchiveExtractLock
   /** The validated archive members. */
   members: ArchiveMember[]
   /** Issue #219: updated to `merge-started` right before the merge runs. */
@@ -293,16 +352,25 @@ async function extractAndMergeStaging(
   })
   if (unsafeMergeTarget !== null) return mergeNotStarted(unsafeMergeTarget)
 
+  // Issue #224: a lock the heartbeat already lost refuses the merge without
+  // an exec; otherwise the guard in the merge exec decides.
+  const { lock } = parameters
+  if (lock.isLost()) return mergeNotStarted(mergeRefusedForLostLock({ destination, lock, source }))
   parameters.progress.advance("merge-started")
-  const failure = await runStagingMerge(conn, {
+  const merge = await runStagingMerge(conn, {
     destination,
     guardPaths: [
       ...destinationPathWithAncestors(destination),
       ...archiveMemberGuardPaths(destination, members),
     ],
+    lock,
+    source,
     staging,
   })
-  return { failure, mergeStarted: true }
+  // Issue #224: the refused guard proves the merge never ran, so a later
+  // throw must not record it as started.
+  if (!merge.started) parameters.progress.advance(BEFORE_MERGE)
+  return { failure: merge.failure, mergeStarted: merge.started }
 }
 
 /**

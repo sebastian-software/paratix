@@ -7,7 +7,13 @@ import { join, resolve } from "node:path"
 import { pathToFileURL } from "node:url"
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest"
 
-import type { Environment, Module, SshConfig, SshConnection } from "../../src/types.js"
+import type {
+  Environment,
+  Module,
+  ModuleResult,
+  SshConfig,
+  SshConnection,
+} from "../../src/types.js"
 
 import { archive, command, download, file, shellQuote } from "../../src/index.js"
 import { clearHostKeyCache, HostKeyVerificationError } from "../../src/knownHosts.js"
@@ -17,10 +23,22 @@ import {
   containmentScopeDigest,
 } from "../../src/modules/archiveContainmentScope.js"
 import {
+  archiveExtractLockName,
+  archiveExtractLockSettings,
+  resetArchiveExtractLockOverridesForTests,
+  setArchiveExtractLockOverridesForTests,
+} from "../../src/modules/archiveExtractLock.js"
+import {
   type ArchiveMember,
   listArchiveMembers,
 } from "../../src/modules/archiveMemberValidation.js"
 import { buildLargeDownloadFlagPrefix } from "../../src/modules/download.js"
+import { sha256String } from "../../src/modules/fileHelpers.js"
+import { flagLockDisplayPath } from "../../src/modules/flagLock.js"
+import {
+  FLAG_LOCK_HOLDER_MARKER_NAME,
+  flagLockAgeThreshold,
+} from "../../src/modules/flagLockScripts.js"
 import { runPlaybook } from "../../src/runner.js"
 import { server } from "../../src/server.js"
 import { SshConnectionImpl } from "../../src/ssh.js"
@@ -406,6 +424,130 @@ async function waitForRemoteHttpServer(
 
   await sleep(HTTP_SERVER_READY_DELAY_MS)
   await waitForRemoteHttpServer(ssh, url, retries - 1)
+}
+
+/**
+ * Issue #224: the holder another, foreign apply wrote into a destination's
+ * extract lock: the compared token on line 1, then owner lines for operators.
+ */
+const FOREIGN_LOCK_TOKEN = "paratix-integration-foreign-holder"
+const FOREIGN_LOCK_OWNER_LINES = [
+  "controller other-controller pid 4242",
+  "started 2026-01-01T00:00:00.000Z",
+  "entry run-0123456789abcdef0123456789abcdef",
+]
+const FOREIGN_LOCK_MARKER = `${[FOREIGN_LOCK_TOKEN, ...FOREIGN_LOCK_OWNER_LINES].join("\n")}\n`
+
+/** Issue #224: an `in-progress` entry an interrupted apply left behind. */
+const LEFTOVER_ENTRY_NAME = "run-00000000000000000000000000000224"
+
+/** Issue #224: the remote paths of one archive.extract lock scenario. */
+type ExtractLockFixture = {
+  archivePath: string
+  destination: string
+  /** The destination's containment entry directory, as `containmentPathsFor` derives it. */
+  entryDirectory: string
+  lockPath: string
+  markerPath: string
+  remoteBase: string
+}
+
+function extractLockFixture(): ExtractLockFixture {
+  const remoteBase = `/root/integration-${randomUUID()}`
+  const destination = `${remoteBase}/destination`
+  const lockPath = flagLockDisplayPath(archiveExtractLockName(destination))
+  return {
+    archivePath: `${remoteBase}/bundle.tar.gz`,
+    destination,
+    entryDirectory: `/var/lib/paratix/flags/archive-containment-${sha256String(destination)}.d`,
+    lockPath,
+    markerPath: `${lockPath}/${FLAG_LOCK_HOLDER_MARKER_NAME}`,
+    remoteBase,
+  }
+}
+
+/**
+ * Issue #224: build a one-member archive (`payload/member.txt`) and a
+ * destination that already holds `keep.txt`.
+ *
+ * @param ssh - A root connection.
+ * @param fixture - The scenario paths.
+ */
+async function createExtractLockArchive(
+  ssh: SshConnection,
+  fixture: ExtractLockFixture
+): Promise<void> {
+  const tree = `${fixture.remoteBase}/tree`
+  const payload = `${tree}/payload`
+  const member = `${payload}/member.txt`
+  const keep = `${fixture.destination}/keep.txt`
+  await ssh.exec(
+    [
+      `mkdir -p ${shellQuote(payload)} ${shellQuote(fixture.destination)}`,
+      `printf '%s\\n' 'archive member' > ${shellQuote(member)}`,
+      `printf '%s\\n' preexisting > ${shellQuote(keep)}`,
+      `tar -czf ${shellQuote(fixture.archivePath)} -C ${shellQuote(tree)} payload`,
+    ].join(" && "),
+    { silent: true }
+  )
+}
+
+/**
+ * Issue #224: plant the extract lock of a foreign apply, optionally with the
+ * marker and the lock directory backdated (a `touch -d` date such as
+ * `-10 minutes`).
+ *
+ * @param ssh - A root connection.
+ * @param fixture - The scenario paths.
+ * @param backdate - The `touch -d` date, or undefined for a fresh lock.
+ */
+async function plantForeignExtractLock(
+  ssh: SshConnection,
+  fixture: ExtractLockFixture,
+  backdate?: string
+): Promise<void> {
+  const lines = [FOREIGN_LOCK_TOKEN, ...FOREIGN_LOCK_OWNER_LINES].map((line) => shellQuote(line))
+  const steps = [
+    `mkdir -p ${shellQuote(fixture.lockPath)}`,
+    `printf '%s\\n' ${lines.join(" ")} > ${shellQuote(fixture.markerPath)}`,
+  ]
+  if (backdate !== undefined) {
+    steps.push(
+      `touch -d ${shellQuote(backdate)} ${shellQuote(fixture.markerPath)} ${shellQuote(fixture.lockPath)}`
+    )
+  }
+  await ssh.exec(steps.join(" && "), { silent: true })
+}
+
+async function remoteDirectoryExists(ssh: SshConnection, remotePath: string): Promise<boolean> {
+  return ssh.test(`[ -d ${shellQuote(remotePath)} ]`)
+}
+
+async function listContainmentEntries(
+  ssh: SshConnection,
+  fixture: ExtractLockFixture
+): Promise<string[]> {
+  const listing = await ssh.exec(`ls -A ${shellQuote(fixture.entryDirectory)} 2>/dev/null`, {
+    ignoreExitCode: true,
+    silent: true,
+  })
+  return listing.stdout.split("\n").filter((name) => name !== "")
+}
+
+function failureMessageOf(result: ModuleResult): string {
+  return result.error?.message ?? ""
+}
+
+function removeExtractLockStateStep(ssh: SshConnection, fixture: ExtractLockFixture): CleanupStep {
+  return {
+    name: "remove archive extract lock and containment entries",
+    async run() {
+      await ssh.exec(
+        `rm -rf -- ${shellQuote(fixture.lockPath)} ${shellQuote(fixture.entryDirectory)}`,
+        { silent: true }
+      )
+    },
+  }
 }
 
 describe("cleanup helper", () => {
@@ -1369,6 +1511,222 @@ describe.skipIf(SKIP_WITHOUT_DOCKER)("Paratix integration", () => {
         primaryError
       )
     }
+  })
+
+  describe("archive.extract destination lock (Issue #224)", () => {
+    afterEach(() => {
+      resetArchiveExtractLockOverridesForTests()
+    })
+
+    it("fails with the holder's details when a fresh foreign lock outlasts the wait", async () => {
+      // A fresh marker is far below the reclaim age, so the apply waits out the
+      // injected budget and must name the lock, its owner lines, the marker
+      // age and when the lock becomes reclaimable, without touching anything.
+      const ssh = await connectSsh([getEnvironment().primaryPort], {}, "root")
+      const fixture = extractLockFixture()
+      const waitSeconds = 2
+      const reclaimAge = flagLockAgeThreshold(
+        archiveExtractLockSettings().staleSeconds
+      ).effectiveAgeSeconds
+
+      let primaryError: unknown
+      try {
+        await createExtractLockArchive(ssh, fixture)
+        await plantForeignExtractLock(ssh, fixture)
+        setArchiveExtractLockOverridesForTests({ waitSeconds })
+        const extractModule = archive.extract(fixture.archivePath, fixture.destination)
+
+        const result = await extractModule.apply(ssh, emptyEnv)
+
+        expect(result.status).toBe("failed")
+        const message = failureMessageOf(result)
+        expect(message).toContain(
+          `failed to take the extract lock ${fixture.lockPath} of ${fixture.destination}`
+        )
+        expect(message).toContain(`after waiting ${String(waitSeconds)} s`)
+        expect(message).toContain(
+          `lock ${fixture.lockPath} is held (owner: ${FOREIGN_LOCK_OWNER_LINES.join("; ")})`
+        )
+        expect(message).toMatch(
+          /marker age \d+ s, reclaimable once older than \d+ s \(in about \d+ s\)/v
+        )
+        expect(message).toContain(`reclaimable once older than ${String(reclaimAge)} s`)
+        // Only line 1 is compared, and it is never exposed.
+        expect(message).not.toContain(FOREIGN_LOCK_TOKEN)
+
+        // Nothing was extracted, no containment entry was created, and the
+        // foreign lock is still in place unchanged.
+        await expectRemoteFileContent(ssh, `${fixture.destination}/keep.txt`, "preexisting\n")
+        const extractedPayload = `${fixture.destination}/payload`
+        await expect(ssh.test(`[ ! -e ${shellQuote(extractedPayload)} ]`)).resolves.toBe(true)
+        await expect(listContainmentEntries(ssh, fixture)).resolves.toStrictEqual([])
+        await expectRemoteFileContent(ssh, fixture.markerPath, FOREIGN_LOCK_MARKER)
+        await expect(extractModule.check(ssh, emptyEnv)).resolves.toBe("needs-apply")
+      } catch (error) {
+        primaryError = error
+        throw error
+      } finally {
+        await runCleanupSteps(
+          [
+            removeExtractLockStateStep(ssh, fixture),
+            removeRemoteDirectoryStep(
+              ssh,
+              fixture.remoteBase,
+              "remove remote archive test directory"
+            ),
+            disconnectSshStep(ssh),
+          ],
+          primaryError
+        )
+      }
+    })
+
+    it("reclaims a stale lock, verifies the whole destination and converges", async () => {
+      // An apply of another archive killed under the lock leaves the lock and
+      // its `in-progress` entry behind. Backdated past the production reclaim
+      // age (above 540 s), the next apply reclaims the lock. The leftover
+      // entry records another archive's scope digest (Issue #227), so it says
+      // nothing about which links need verification, and that apply must judge
+      // every symlink under the destination: an escaping link outside the
+      // archive's scope fails it, which only a whole-destination check can
+      // detect.
+      const ssh = await connectSsh([getEnvironment().primaryPort], {}, "root")
+      const fixture = extractLockFixture()
+      const unrelatedDirectory = `${fixture.destination}/unrelated`
+      const escapingLink = `${unrelatedDirectory}/escape`
+      const leftoverEntry = `${fixture.entryDirectory}/${LEFTOVER_ENTRY_NAME}`
+      const inProgressBody = containmentFlagBody({
+        scope: containmentScopeDigest({
+          archiveLinks: new Set(),
+          written: new Set(["another-archive"]),
+        }),
+        state: "in-progress",
+      })
+
+      let primaryError: unknown
+      try {
+        await createExtractLockArchive(ssh, fixture)
+        await ssh.exec(
+          [
+            `mkdir -p ${shellQuote(unrelatedDirectory)} ${shellQuote(fixture.entryDirectory)}`,
+            `ln -s /etc/hostname ${shellQuote(escapingLink)}`,
+            `printf '%s' ${shellQuote(inProgressBody)} > ${shellQuote(leftoverEntry)}`,
+          ].join(" && "),
+          { silent: true }
+        )
+        await plantForeignExtractLock(ssh, fixture, "-10 minutes")
+        // Production thresholds. The first contended result tries a reclaim
+        // before any poll, so the stale lock is reclaimed at once; the wait is
+        // still shortened so a reclaim that did not happen fails fast instead
+        // of polling for the production 300 s.
+        setArchiveExtractLockOverridesForTests({ waitSeconds: 5 })
+        const extractModule = archive.extract(fixture.archivePath, fixture.destination)
+
+        const blocked = await extractModule.apply(ssh, emptyEnv)
+
+        expect(blocked.status).toBe("failed")
+        const blockedMessage = failureMessageOf(blocked)
+        expect(blockedMessage).toContain("every symlink under the destination is checked")
+        expect(blockedMessage).toContain("unrelated/escape")
+        expect(blockedMessage).not.toContain("still holds its extract lock")
+        // The stale lock was reclaimed and this apply released its own lock.
+        await expect(remoteDirectoryExists(ssh, fixture.lockPath)).resolves.toBe(false)
+        // Nothing is cleared after a failed verification: the leftover entry
+        // stays, next to the entry this apply recorded.
+        const entriesAfterFailure = await listContainmentEntries(ssh, fixture)
+        expect(entriesAfterFailure).toContain(LEFTOVER_ENTRY_NAME)
+        expect(entriesAfterFailure).toHaveLength(2)
+        await expect(extractModule.check(ssh, emptyEnv)).resolves.toBe("needs-apply")
+
+        await ssh.exec(`rm -f -- ${shellQuote(escapingLink)}`, { silent: true })
+
+        await expect(extractModule.apply(ssh, emptyEnv)).resolves.toMatchObject({
+          status: "changed",
+        })
+        await expect(listContainmentEntries(ssh, fixture)).resolves.toStrictEqual([])
+        await expect(remoteDirectoryExists(ssh, fixture.lockPath)).resolves.toBe(false)
+        await expectRemoteFileContent(
+          ssh,
+          `${fixture.destination}/payload/member.txt`,
+          "archive member\n"
+        )
+        await expectRemoteFileContent(ssh, `${fixture.destination}/keep.txt`, "preexisting\n")
+        await expectModuleCheckOk(extractModule, ssh)
+      } catch (error) {
+        primaryError = error
+        throw error
+      } finally {
+        await runCleanupSteps(
+          [
+            removeExtractLockStateStep(ssh, fixture),
+            removeRemoteDirectoryStep(
+              ssh,
+              fixture.remoteBase,
+              "remove remote archive test directory"
+            ),
+            disconnectSshStep(ssh),
+          ],
+          primaryError
+        )
+      }
+    })
+
+    it("proceeds once a lock held from a background shell is released mid-wait", async () => {
+      // A detached shell on the host holds the lock for `holdSeconds` and then
+      // releases it itself. The apply cannot finish before that release, and it
+      // must not reclaim the fresh lock, so the release status proves the
+      // holder kept its lock until it let go.
+      const ssh = await connectSsh([getEnvironment().primaryPort], {}, "root")
+      const fixture = extractLockFixture()
+      const releaseStatus = `${fixture.remoteBase}/release-status`
+      const holdSeconds = 5
+      const release = `sleep ${String(holdSeconds)}; rm -f -- ${shellQuote(fixture.markerPath)} && rmdir -- ${shellQuote(fixture.lockPath)} && echo released > ${shellQuote(releaseStatus)}`
+
+      let primaryError: unknown
+      try {
+        await createExtractLockArchive(ssh, fixture)
+        const startedAt = Date.now()
+        await plantForeignExtractLock(ssh, fixture)
+        await ssh.exec(`nohup sh -c ${shellQuote(release)} >/dev/null 2>&1 </dev/null &`, {
+          silent: true,
+        })
+        setArchiveExtractLockOverridesForTests({ waitSeconds: 30 })
+        const extractModule = archive.extract(fixture.archivePath, fixture.destination)
+
+        await expect(extractModule.apply(ssh, emptyEnv)).resolves.toMatchObject({
+          status: "changed",
+        })
+
+        // The remote `sleep` started after `startedAt`, and the apply could
+        // only take the lock after it ended.
+        expect(Date.now() - startedAt).toBeGreaterThanOrEqual(holdSeconds * 1000)
+        await expectRemoteFileContent(ssh, releaseStatus, "released\n")
+        await expect(remoteDirectoryExists(ssh, fixture.lockPath)).resolves.toBe(false)
+        await expect(listContainmentEntries(ssh, fixture)).resolves.toStrictEqual([])
+        await expectRemoteFileContent(
+          ssh,
+          `${fixture.destination}/payload/member.txt`,
+          "archive member\n"
+        )
+        await expectModuleCheckOk(extractModule, ssh)
+      } catch (error) {
+        primaryError = error
+        throw error
+      } finally {
+        await runCleanupSteps(
+          [
+            removeExtractLockStateStep(ssh, fixture),
+            removeRemoteDirectoryStep(
+              ssh,
+              fixture.remoteBase,
+              "remove remote archive test directory"
+            ),
+            disconnectSshStep(ssh),
+          ],
+          primaryError
+        )
+      }
+    })
   })
 
   it("clears an unfinished containment entry of the same archive next to an intended outward link", async () => {

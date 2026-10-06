@@ -16,6 +16,7 @@ import {
 } from "./archiveContainedExtraction.js"
 import {
   clearContainmentEntries,
+  clearRefusedForLostLock,
   recordContainmentFailure,
   recordContainmentFailureAfterThrow,
 } from "./archiveContainmentEntries.js"
@@ -31,6 +32,7 @@ import {
   validatePreStagingPaths,
   validateResolvedDestinationPath,
 } from "./archiveDestinationValidation.js"
+import { type ArchiveExtractLock, withArchiveExtractLock } from "./archiveExtractLock.js"
 import { validatedArchiveMembers } from "./archiveListingValidation.js"
 import {
   type ArchiveExtractParameters,
@@ -223,6 +225,8 @@ async function finalizeExtraction(
 type EntryExtractionParameters = {
   /** What the establish exec read, and where the own entry is. */
   ledger: ContainmentLedger
+  /** Issue #224: the destination's extract lock this apply holds. */
+  lock: ArchiveExtractLock
   /** The serialized marker payloads. */
   markerPayloads: ArchiveMarkerPayloads
   /** The validated archive members. */
@@ -254,7 +258,7 @@ async function extractUnderContainmentEntry(
   conn: SshConnection,
   parameters: EntryExtractionParameters
 ): Promise<ModuleResult> {
-  const { destination, ledger, members, progress, remoteSource, source } = parameters
+  const { destination, ledger, lock, members, progress, remoteSource, source } = parameters
   const fail = async (
     failure: ModuleResult,
     record: ContainmentFlagRecord
@@ -282,6 +286,7 @@ async function extractUnderContainmentEntry(
   const staged = await extractAndValidateSymlinkContainment(conn, {
     destination,
     ledger,
+    lock,
     members,
     progress,
     remoteSource,
@@ -295,10 +300,33 @@ async function extractUnderContainmentEntry(
   // `check` at needs-apply. The clear exec is the last command: it removes
   // only the entries this apply read and verified that are still unchanged,
   // then its own.
+  // Issue #224: the clear exec guards itself with the extract lock and
+  // removes nothing once the lock is lost; a lock the heartbeat already lost
+  // skips it. Either way the own entry records no links, which is safe
+  // because this apply's own backstop already passed.
   const finalizeFailure =
-    (await finalizeExtraction(conn, parameters)) ?? (await clearContainmentEntries(conn, ledger))
+    (await finalizeExtraction(conn, parameters)) ?? (await clearUnderLock(conn, parameters))
   if (finalizeFailure !== null) return fail(finalizeFailure, { links: [], state: "failed" })
   return { status: "changed" }
+}
+
+/**
+ * Issue #224: run the clear exec while the extract lock is still this
+ * apply's, see {@link clearContainmentEntries}.
+ *
+ * @param conn - The SSH connection.
+ * @param parameters - The ledger and the lock.
+ * @param parameters.ledger - What the establish exec read.
+ * @param parameters.lock - The extract lock this apply holds.
+ * @returns Null when the entries were cleared, otherwise a failure.
+ */
+async function clearUnderLock(
+  conn: SshConnection,
+  parameters: { ledger: ContainmentLedger; lock: ArchiveExtractLock }
+): Promise<ModuleResult | null> {
+  const { ledger, lock } = parameters
+  if (lock.isLost()) return clearRefusedForLostLock(ledger.ownEntry, lock)
+  return clearContainmentEntries(conn, ledger, lock)
 }
 
 async function runExtraction(
@@ -306,7 +334,7 @@ async function runExtraction(
   parameters: ArchiveExtractParameters,
   remoteSource: string
 ): Promise<ModuleResult> {
-  const { containment, destination, source } = parameters
+  const { destination, source } = parameters
 
   const validatedDestination = await preflightExtractDestination(conn, { destination, source })
   if ("status" in validatedDestination) return validatedDestination
@@ -329,6 +357,42 @@ async function runExtraction(
   })
   if ("status" in markerPayloads) return markerPayloads
 
+  // Issue #224: the own entry name is generated before the lock is taken, so
+  // the lock's owner lines can name it.
+  const ownEntryName = newContainmentEntryName()
+  const locked = await withArchiveExtractLock(
+    conn,
+    { destination: validatedDestination.destination, entryName: ownEntryName, source },
+    async (lock) =>
+      extractUnderExtractLock(conn, {
+        ...parameters,
+        destination: validatedDestination.destination,
+        lock,
+        markerPayloads,
+        members,
+        ownEntryName,
+        remoteSource,
+      })
+  )
+  return locked.kind === "ok" ? locked.value : locked.failure
+}
+
+/**
+ * Issue #224: the part of an apply that runs under the destination's extract
+ * lock: from the establish exec, which creates the own `in-progress` entry,
+ * through the clear exec. Upload, listing and member validation ran before
+ * the lock was taken.
+ *
+ * @param conn - The SSH connection.
+ * @param parameters - The apply inputs with the validated destination, the
+ *   members, the marker payloads, the lock and the own entry name.
+ * @returns The module result; a thrown error is recorded and rethrown.
+ */
+async function extractUnderExtractLock(
+  conn: SshConnection,
+  parameters: { ownEntryName: string } & Omit<EntryExtractionParameters, "ledger" | "progress">
+): Promise<ModuleResult> {
+  const { containment, members, ownEntryName, source } = parameters
   // Issue #219: read every containment entry and create the own
   // `in-progress` entry, in one exec, before the destination is created,
   // resolved or probed. The only host checks that ran before it — the symlink
@@ -338,12 +402,14 @@ async function runExtraction(
   // before anything else is written. An entry without a usable list of
   // offending links does not: the apply runs and its post-merge backstop
   // verifies the whole destination before that entry is removed.
+  // Issue #224: under the extract lock, such an entry belongs to an apply
+  // that stopped without finishing.
   // Issue #227: the own entry records the digest of this archive's
   // containment scope; an entry an interrupted apply of the same archive
   // left records the same digest and is covered by the scoped backstop.
   const scopeDigest = containmentScopeDigest(archiveContainmentScope(members))
   const ledger = await establishContainmentEntry(conn, {
-    ownEntryName: newContainmentEntryName(),
+    ownEntryName,
     paths: containment,
     scopeDigest,
     source,
@@ -352,15 +418,7 @@ async function runExtraction(
 
   const progress = containmentProgress()
   try {
-    return await extractUnderContainmentEntry(conn, {
-      ...parameters,
-      destination: validatedDestination.destination,
-      ledger,
-      markerPayloads,
-      members,
-      progress,
-      remoteSource,
-    })
+    return await extractUnderContainmentEntry(conn, { ...parameters, ledger, progress })
   } catch (error) {
     // Issue #219: best effort; the error is rethrown whatever the write does.
     await recordContainmentFailureAfterThrow(

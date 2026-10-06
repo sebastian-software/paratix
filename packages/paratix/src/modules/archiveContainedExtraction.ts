@@ -18,12 +18,14 @@ import {
   type ContainmentFlagRecord,
   UNIDENTIFIED_OFFENDING_LINKS,
 } from "./archiveContainmentFlag.js"
+import { archiveExtractLockName } from "./archiveExtractLock.js"
 import { containmentPathsFor } from "./archiveMarker.js"
 import {
   type ContainmentProgress,
   extractViaStagingDirectory,
   type StagedExtractionParameters,
 } from "./archiveStagingMerge.js"
+import { flagLockDisplayPath } from "./flagLock.js"
 
 /**
  * Issue #219: combine the merge failure and the backstop failure into one
@@ -81,6 +83,7 @@ async function runContainmentBackstop(
       destination,
       entryDirectory: containmentPathsFor(destination).entryDirectory,
       legacyFlag: containmentPathsFor(destination).legacyFlag,
+      lockPath: flagLockDisplayPath(archiveExtractLockName(destination)),
       members,
       recordedLinks,
       source,

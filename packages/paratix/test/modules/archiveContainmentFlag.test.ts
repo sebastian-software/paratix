@@ -9,6 +9,8 @@ import {
   buildContainmentCheckScript,
   buildContainmentClearScript,
   clearContainmentEntries,
+  clearRefusedForLostLock,
+  CONTAINMENT_CLEAR_EXIT,
   noContainmentEntriesCommand,
   recordContainmentFailure,
 } from "../../src/modules/archiveContainmentEntries.js"
@@ -35,6 +37,7 @@ import {
   CONTAINMENT_SCOPE_DIGEST_ALGORITHM,
   containmentScopeDigest,
 } from "../../src/modules/archiveContainmentScope.js"
+import { ARCHIVE_EXTRACT_LOCK_LOST_EXIT } from "../../src/modules/archiveExtractLock.js"
 import { buildKernelCrossCheckScript } from "../../src/modules/archiveKernelCrossCheck.js"
 import { buildSymlinkListingProbeScript } from "../../src/modules/archiveProbe.js"
 import { shellQuote } from "../../src/ssh.js"
@@ -155,7 +158,7 @@ describe("containment flag body (Issue #219)", () => {
       parseContainmentFlag(body({ links: ["a/esc"], state: "in-progress", version: 1 }))
     ).toStrictEqual({
       kind: "unknown",
-      why: "records an apply that did not finish (it stopped after it started, possibly after its merge had begun, or another apply to this destination is still running)",
+      why: "records an apply that did not finish (it stopped after it started, possibly after its merge had begun, it lost its extract lock, or it is an apply of an older paratix version without the extract lock that is still running)",
     })
   })
 
@@ -209,6 +212,13 @@ const ownName = `run-${"1".repeat(32)}`
 const ownEntry = `${paths.entryDirectory}/${ownName}`
 const otherName = `run-${"a".repeat(32)}`
 const otherEntry = `${paths.entryDirectory}/${otherName}`
+
+/** Issue #224: the extract lock the clear exec guards itself with. */
+const clearLock = {
+  guardSeconds: 360,
+  lockPath: "/var/lib/paratix/flags/archive-extract-lock-0123",
+  token: "paratix-0123456789abcdef",
+}
 const hashA = "a".repeat(64)
 const hashB = "b".repeat(64)
 /** Issue #227: the scope digest of the apply under test. */
@@ -624,7 +634,7 @@ describe("containment flag body with a scope digest (Issue #227)", () => {
       parseContainmentFlag(body({ links: [], state: "in-progress", version: 1 }))
     ).toStrictEqual({
       kind: "unknown",
-      why: "records an apply that did not finish (it stopped after it started, possibly after its merge had begun, or another apply to this destination is still running)",
+      why: "records an apply that did not finish (it stopped after it started, possibly after its merge had begun, it lost its extract lock, or it is an apply of an older paratix version without the extract lock that is still running)",
     })
   })
 })
@@ -872,14 +882,20 @@ describe("clearContainmentEntries (Issue #219)", () => {
     }))
     const { conn, execs } = singleExecConnection({})
 
-    await expect(clearContainmentEntries(conn, { ownEntry, removable })).resolves.toBeNull()
+    await expect(
+      clearContainmentEntries(conn, { ownEntry, removable }, clearLock)
+    ).resolves.toBeNull()
 
     expect(execs).toHaveLength(1)
+    // Issue #224: the lock path and the holder token come first, ahead of
+    // the own entry and the `<path> <sha256>` pairs.
     expect(execs[0]?.command).toBe(
       [
         "sh -c",
-        shellQuote(buildContainmentClearScript()),
+        shellQuote(buildContainmentClearScript(clearLock.guardSeconds)),
         "sh",
+        `'${clearLock.lockPath}'`,
+        `'${clearLock.token}'`,
         `'${ownEntry}'`,
         ...removable.flatMap(({ path, sha256 }) => [`'${path}'`, sha256]),
       ].join(" ")
@@ -890,14 +906,75 @@ describe("clearContainmentEntries (Issue #219)", () => {
   it("fails with the exec's output when the clear exec fails", async () => {
     const { conn } = singleExecConnection({ code: 5, stderr: `cannot claim ${otherEntry}\n` })
 
-    const failure = await clearContainmentEntries(conn, {
-      ownEntry,
-      removable: [{ path: otherEntry, sha256: hashA }],
-    })
+    const failure = await clearContainmentEntries(
+      conn,
+      { ownEntry, removable: [{ path: otherEntry, sha256: hashA }] },
+      clearLock
+    )
 
     expect(failure?.error?.message).toBe(
       `[archive.extract] failed to remove containment entry ${ownEntry} and the entries it verified (exit code 5)\ncannot claim ${otherEntry}`
     )
+  })
+
+  it("names the lost extract lock when the embedded guard refused (Issue #224)", async () => {
+    const { conn } = singleExecConnection({ code: CONTAINMENT_CLEAR_EXIT.lockLost })
+
+    const failure = await clearContainmentEntries(
+      conn,
+      { ownEntry, removable: [{ path: otherEntry, sha256: hashA }] },
+      clearLock
+    )
+
+    expect(failure?.error?.message).toBe(
+      `[archive.extract] refusing to remove containment entry ${ownEntry} and the entries it verified: the extract lock ${clearLock.lockPath} of this destination is no longer held by this apply (its holder marker is gone, carries another token, or was not refreshed for more than 300 s); no entry was removed, so check stays at needs-apply until a later apply verifies and clears them`
+    )
+  })
+
+  it("names the marker state for a handle the guard refused (Issue #224)", () => {
+    const failure = clearRefusedForLostLock(ownEntry, {
+      ...clearLock,
+      lostReason: () => ({ kind: "refused" }),
+    })
+
+    expect(failure.error?.message).toContain(
+      `the extract lock ${clearLock.lockPath} of this destination is no longer held by this apply (its holder marker is gone, carries another token, or was not refreshed for more than 300 s); no entry was removed`
+    )
+  })
+
+  it("names the refresh error instead of a marker state for a handle a throwing refresh latched (Issue #224)", () => {
+    const failure = clearRefusedForLostLock(ownEntry, {
+      ...clearLock,
+      lostReason: () => ({ kind: "error", message: "channel closed" }),
+    })
+
+    expect(failure.error?.message).toBe(
+      `[archive.extract] refusing to remove containment entry ${ownEntry} and the entries it verified: this apply can no longer confirm that it holds the extract lock ${clearLock.lockPath} of this destination (refreshing its holder marker failed: channel closed); no entry was removed, so check stays at needs-apply until a later apply verifies and clears them`
+    )
+  })
+})
+
+describe("buildContainmentClearScript (Issue #224)", () => {
+  it("runs the lock guard on $1 and $2 before anything else and exits with its own code", () => {
+    const script = buildContainmentClearScript(360)
+
+    expect(CONTAINMENT_CLEAR_EXIT.lockLost).toBe(ARCHIVE_EXTRACT_LOCK_LOST_EXIT)
+    expect(
+      Object.entries(CONTAINMENT_CLEAR_EXIT).filter(
+        ([, code]) => code === CONTAINMENT_CLEAR_EXIT.lockLost
+      )
+    ).toStrictEqual([["lockLost", CONTAINMENT_CLEAR_EXIT.lockLost]])
+    expect(script.startsWith(`LC_ALL=C; export LC_ALL; { [ -d "$\{1}" ] && `)).toBe(true)
+    expect(script).toContain(
+      `; } || exit ${String(CONTAINMENT_CLEAR_EXIT.lockLost)}; shift 2; own=$1; shift; `
+    )
+    expect(script).toContain(
+      `[ "x$(awk 'NR==1{print $1}' "$\{1}"/holder 2>/dev/null </dev/null)" = x"$\{2}" ]`
+    )
+    // The guard threshold: 360 s is `-mmin +5`, above 300 s.
+    expect(script).toContain("! -mmin +5 ")
+    expect(script.indexOf("|| exit 75")).toBeLessThan(script.indexOf("mv --"))
+    expect(script.indexOf("|| exit 75")).toBeLessThan(script.indexOf("rm -f --"))
   })
 })
 

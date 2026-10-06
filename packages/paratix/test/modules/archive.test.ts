@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto"
 import { EventEmitter } from "node:events"
 import { posix } from "node:path"
-import { describe, expect, it, vi } from "vitest"
+import { describe, expect, it, onTestFinished, vi } from "vitest"
 
 import type { ExecOptions, ExecResult, ModuleResult, SshConnection } from "../../src/types.js"
 
@@ -37,6 +37,15 @@ import {
   archiveContainmentScope,
   containmentScopeDigest,
 } from "../../src/modules/archiveContainmentScope.js"
+import {
+  ARCHIVE_EXTRACT_LOCK_LOST_EXIT,
+  ARCHIVE_EXTRACT_LOCK_MERGE_SLACK_SECONDS,
+  ARCHIVE_EXTRACT_LOCK_SETTINGS,
+  type ArchiveExtractLockSettings,
+  archiveExtractLockSettings,
+  resetArchiveExtractLockOverridesForTests,
+  setArchiveExtractLockOverridesForTests,
+} from "../../src/modules/archiveExtractLock.js"
 import { buildKernelCrossCheckScript } from "../../src/modules/archiveKernelCrossCheck.js"
 import {
   ARCHIVE_CAPTURE_LIMIT_BYTES,
@@ -60,6 +69,11 @@ import {
 import { SYMLINK_LISTING_CAPTURE_LIMIT_BYTES } from "../../src/modules/archiveSymlinkListing.js"
 import { tarListingScript } from "../../src/modules/archiveTarListing.js"
 import { parseTarListing } from "../../src/modules/archiveTarListingParser.js"
+import {
+  buildFlagLockDiagnosticsCommand,
+  flagLockRefreshGuard,
+} from "../../src/modules/flagLockRefresh.js"
+import { flagLockAgeThreshold } from "../../src/modules/flagLockScripts.js"
 import { shellQuote, SudoInputUnsupportedError } from "../../src/ssh.js"
 import {
   CAPTURE_TRUNCATION_MARKER,
@@ -68,6 +82,10 @@ import {
   type StreamOutputParameters,
 } from "../../src/sshHelpers.js"
 import { createMockSsh as createBaseMockSsh, type ExecCall } from "../helpers/mockSsh.js"
+import {
+  makeIsVerifiedReleaseCall,
+  MOCK_FLAG_LOCK_HOLDER_TOKEN,
+} from "../helpers/mockSshFlagLock.js"
 
 const emptyEnv = {}
 
@@ -188,6 +206,77 @@ vi.mock("../../src/modules/archiveContainmentFlag.js", async (importOriginal) =>
 const flagsDirectory = "/var/lib/paratix/flags"
 
 /**
+ * Issue #224: every apply holds the destination's extract lock. Its holder
+ * token is the mock's readback token, so the strict mock's flag-lock
+ * defaults verify the acquire and match the release.
+ */
+const mockLockTokenOverrides = { newToken: () => MOCK_FLAG_LOCK_HOLDER_TOKEN }
+setArchiveExtractLockOverridesForTests(mockLockTokenOverrides)
+
+/**
+ * Issue #224: change the lock timing for the current test only; the mock
+ * token stays, and the overrides return to it when the test finishes.
+ *
+ * @param timing - The settings to override.
+ */
+function overrideExtractLockForThisTest(timing: Partial<ArchiveExtractLockSettings>): void {
+  setArchiveExtractLockOverridesForTests({ ...mockLockTokenOverrides, ...timing })
+  onTestFinished(() => {
+    setArchiveExtractLockOverridesForTests(mockLockTokenOverrides)
+  })
+}
+
+/**
+ * Issue #224: the extract lock name of a destination, derived independently
+ * of the module: the sha256 of the destination, like the containment entries.
+ *
+ * @param path - Normalized destination whose sha256 names the lock.
+ * @returns `archive-extract-lock-` followed by the hex digest.
+ */
+function extractLockNameFor(path: string): string {
+  return `archive-extract-lock-${createHash("sha256").update(path).digest("hex")}`
+}
+
+const extractLockName = extractLockNameFor(destination)
+const extractLockPath = `${flagsDirectory}/${extractLockName}`
+
+/** Issue #224: whether a command is the token-compared release of the extract lock. */
+const isExtractLockRelease = makeIsVerifiedReleaseCall(extractLockName)
+
+/**
+ * Issue #224: whether a command is the holder marker write of the extract
+ * lock; its owner lines name the run's entry, the controller and the time.
+ *
+ * @param command - The executed command.
+ * @returns True for the marker write.
+ */
+function isExtractLockHolderWrite(command: string): boolean {
+  return (
+    command.startsWith(`printf '%s\\n' '${MOCK_FLAG_LOCK_HOLDER_TOKEN}' `) &&
+    command.endsWith(`> ${flagsDirectory}/'${extractLockName}'/holder`)
+  )
+}
+
+/**
+ * Issue #224: assert that the extract lock was released last, and return
+ * the commands before that release.
+ *
+ * @param calls - A run's commands.
+ * @returns The commands without the final release.
+ */
+function callsBeforeLockRelease(calls: readonly string[]): string[] {
+  expect(isExtractLockRelease(calls.at(-1) ?? "")).toBe(true)
+  return calls.slice(0, -1)
+}
+
+/** Issue #224: the extract lock guard every merge exec of the destination starts with. */
+const mergeLockGuard = flagLockRefreshGuard({
+  guardSeconds: ARCHIVE_EXTRACT_LOCK_SETTINGS.refreshGuardSeconds,
+  lockName: extractLockName,
+  token: MOCK_FLAG_LOCK_HOLDER_TOKEN,
+})
+
+/**
  * Issue #219: where the containment state of a destination lives, derived
  * independently of the module so a changed key is caught.
  *
@@ -207,7 +296,7 @@ const containment = containmentPathsFor(destination)
  * how to clear the destination's containment entries when the offending links
  * are intended.
  */
-const intendedLinksHint = `; if the offending symlinks are intended (for example a virtualenv's interpreter link), they keep failing this check: first stop or wait for all archive.extract applies to this destination to finish and prevent new applies until inspection and state clearing are complete; then check the destination yourself and, before retrying, clear its containment state with rm -f -- '${containment.entryDirectory}'/run-* '${containment.legacyFlag}'`
+const intendedLinksHint = `; if the offending symlinks are intended (for example a virtualenv's interpreter link), they keep failing this check: first stop or wait for all archive.extract applies to this destination to finish and prevent new applies until inspection and state clearing are complete (while the extract lock '${flagsDirectory}/${extractLockNameFor(destination)}' exists, an apply to this destination runs or was interrupted; the next apply reclaims an interrupted apply's lock once it is stale, and removing it by hand with rm -f -- '${flagsDirectory}/${extractLockNameFor(destination)}/holder' && rmdir -- '${flagsDirectory}/${extractLockNameFor(destination)}' is safe only when no apply for this destination runs anywhere); then check the destination yourself and, before retrying, clear its containment state with rm -f -- '${containment.entryDirectory}'/run-* '${containment.legacyFlag}'`
 
 /** Issue #219: the single flag file of older paratix versions. */
 const legacyContainmentFlag = containment.legacyFlag
@@ -276,7 +365,7 @@ function containmentEstablishCommand(
 const containmentEstablishPrefix = `sh -c ${shellQuote(buildContainmentEstablishScript())} sh `
 
 /** Issue #219: every clear exec starts with its script. */
-const containmentClearPrefix = `sh -c ${shellQuote(buildContainmentClearScript())} sh `
+const containmentClearPrefix = `sh -c ${shellQuote(buildContainmentClearScript(ARCHIVE_EXTRACT_LOCK_SETTINGS.refreshGuardSeconds))} sh `
 
 /**
  * Issue #219: the clear execs among the issued commands.
@@ -396,12 +485,14 @@ const archiveStageMktempPattern = /^mktemp -d '\/opt\/app\/\.paratix-stage\.X{8}
 // (see `boundedStagingMergeCommand`) as `sh -c <outer> sh <staging> <merge
 // script> <destination> <guard count>`; the guard paths travel on stdin (see
 // `buildStagingMergeExec`).
+// Issue #224: the merge exec starts with the extract lock guard, `<guard> ||
+// exit 75; `, see `guardedStagingMergeCommand`.
 const archiveStageMovePattern =
-  /^command -p timeout -k 10 100 sh -c '.*' sh '\/opt\/app\/\.paratix-stage\.[^']+' '.*cp -aT --no-dereference --remove-destination "\$source_path" "\$target_path" \|\| exit \$\?; done' '\/opt\/app' \d+; exit \$\?$/sv
+  /^\{ \[ -d '\/var\/lib\/paratix\/flags\/archive-extract-lock-[\da-f]{64}' \] .*? \|\| exit 75; command -p timeout -k 10 100 sh -c '.*' sh '\/opt\/app\/\.paratix-stage\.[^']+' '.*cp -aT --no-dereference --remove-destination "\$source_path" "\$target_path" \|\| exit \$\?; done' '\/opt\/app' \d+; exit \$\?$/sv
 const archiveStageCleanupPattern = /^rm -rf -- '\/opt\/app\/\.paratix-stage\.[^']+'$/v
 const archiveAlternateStageMktempPattern = /^mktemp -d '\/opt\/app-alt\/\.paratix-stage\.X{8}'$/v
 const archiveAlternateStageMovePattern =
-  /^command -p timeout -k 10 100 sh -c '.*' sh '\/opt\/app-alt\/\.paratix-stage\.[^']+' '.*cp -aT --no-dereference --remove-destination "\$source_path" "\$target_path" \|\| exit \$\?; done' '\/opt\/app-alt' \d+; exit \$\?$/sv
+  /^\{ \[ -d '\/var\/lib\/paratix\/flags\/archive-extract-lock-[\da-f]{64}' \] .*? \|\| exit 75; command -p timeout -k 10 100 sh -c '.*' sh '\/opt\/app-alt\/\.paratix-stage\.[^']+' '.*cp -aT --no-dereference --remove-destination "\$source_path" "\$target_path" \|\| exit \$\?; done' '\/opt\/app-alt' \d+; exit \$\?$/sv
 const archiveAlternateStageCleanupPattern = /^rm -rf -- '\/opt\/app-alt\/\.paratix-stage\.[^']+'$/v
 const archiveMembersMarkerPattern =
   /^cat '\/var\/lib\/paratix\/flags\/archive-[a-f0-9]+\.sha256\.members'$/v
@@ -527,7 +618,7 @@ const archiveApplyResponseStubs: NonNullable<
   { command: kernelCrossCheckCommand, result: { code: 0, stdout: "" } },
   // Issue #219: a successful apply clears the containment entries in one
   // exec; the host model applies it when the test models files.
-  { command: /^sh -c 'LC_ALL=C; export LC_ALL; own=\$1;/v, result: { code: 0 } },
+  { command: /^sh -c 'LC_ALL=C; export LC_ALL; \{ \[ -d "\$\{1\}" \]/v, result: { code: 0 } },
   { command: extractedFileTypeProbe, result: { code: 0, stdout: "" } },
   { command: batchedChownCommand, result: { code: 0 } },
   {
@@ -635,6 +726,8 @@ const containmentFlagWritePattern =
 
 const createMockSsh: typeof createBaseMockSsh = (responses, options) => {
   const mockSsh = createBaseMockSsh(responses, {
+    // Issue #224: every apply acquires and releases the extract lock.
+    allowFlagLockInternalDefaults: true,
     ...options,
     allowWrites: [
       ...(options?.allowWrites ?? []),
@@ -971,7 +1064,8 @@ function modelContainmentEstablish(files: Map<string, string>, command: string):
  * @param command - The clear exec.
  */
 function modelContainmentClear(files: Map<string, string>, command: string): void {
-  const [own = "", ...pairs] = scriptArguments(command, containmentClearPrefix)
+  // Issue #224: the lock path and the holder token come first.
+  const [own = "", ...pairs] = scriptArguments(command, containmentClearPrefix).slice(2)
   for (let index = 0; index * 2 < pairs.length; index += 1) {
     const path = pairs[index * 2] ?? ""
     const content = files.get(path)
@@ -1082,11 +1176,142 @@ function scriptedBackstopAnswer(
  */
 type ExecHarness = {
   backstop?: BackstopScript
+  /**
+   * Issue #224: runs before an exec is answered; a returned promise holds the
+   * exec back, e.g. to let a heartbeat or a concurrent apply act meanwhile.
+   */
+  delayExec?: (command: string) => Promise<void> | undefined
   /** Issue #219: the host marker and containment files the containment execs model. */
   files?: Map<string, string>
   host?: HostLinkRun
+  /** Issue #224: the extract lock on a host shared by several runs. */
+  lock?: ExtractLockRun
   postMergeListings?: number[]
   throwOn?: ThrowingExec
+}
+
+/**
+ * Issue #224: the destination's extract lock on a modelled host, shared by the
+ * runs of one test. `mkdir` takes it or reports it held, the token-compared
+ * release frees it, a poll waits until it is free, and the reclaim probe
+ * removes it only when it is `stale`. Every transition is logged per run.
+ */
+type ExtractLockModel = {
+  events: string[]
+  held: boolean
+  /** A lock a killed apply left: polls report it held, the reclaim removes it. */
+  stale: boolean
+  waiters: Array<() => void>
+}
+
+/** Issue #224: one run's view of the shared lock model. */
+type ExtractLockRun = { model: ExtractLockModel; name: string }
+
+/**
+ * Issue #224: a free extract lock, or a stale one a killed apply left.
+ *
+ * @param state - Whether the lock starts free or left behind by a killed apply.
+ * @returns The shared lock state with an empty event log.
+ */
+function extractLockModel(state: "free" | "stale" = "free"): ExtractLockModel {
+  return { events: [], held: state === "stale", stale: state === "stale", waiters: [] }
+}
+
+const quotedExtractLockPath = `${flagsDirectory}/'${extractLockName}'`
+/** Issue #224: the atomic `mkdir` that takes the extract lock. */
+const extractLockMkdir = `mkdir ${quotedExtractLockPath}`
+/** Issue #224: the bounded poll of a contended acquisition starts like this. */
+const extractLockPollPrefix = `i=0; while [ -d ${quotedExtractLockPath} ] && `
+/** Issue #224: the stale-reclaim probe of a contended acquisition starts like this. */
+const extractLockReclaimPrefix = `if [ -d ${quotedExtractLockPath} ]; then if [ -f `
+
+/**
+ * Issue #224: an exec result with only an exit code.
+ *
+ * @param code - The exit code.
+ * @returns The result.
+ */
+function lockAnswer(code: number): ExecResult {
+  return { code, stderr: "", stdout: "" }
+}
+
+/**
+ * Issue #224: the atomic `mkdir`: take the lock or report it held.
+ *
+ * @param run - The run's view of the model.
+ * @returns The answer.
+ */
+function takeModelledLock(run: ExtractLockRun): ExecResult {
+  const { model, name } = run
+  model.events.push(`${name}:${model.held ? "contended" : "acquired"}`)
+  if (model.held) return lockAnswer(1)
+  model.held = true
+  return lockAnswer(0)
+}
+
+/**
+ * Issue #224: the token-compared release frees the lock and wakes the polls.
+ *
+ * @param run - The run's view of the model.
+ * @returns The answer.
+ */
+function releaseModelledLock(run: ExtractLockRun): ExecResult {
+  const { model, name } = run
+  model.events.push(`${name}:released`)
+  model.held = false
+  for (const resolve of model.waiters.splice(0)) resolve()
+  return lockAnswer(0)
+}
+
+/**
+ * Issue #224: a poll waits until a live holder released the lock; a stale
+ * lock is reported held at once.
+ *
+ * @param run - The run's view of the model.
+ * @returns The answer: 0 once the lock is free.
+ */
+async function pollModelledLock(run: ExtractLockRun): Promise<ExecResult> {
+  const { model, name } = run
+  model.events.push(`${name}:polled`)
+  if (model.held && !model.stale) {
+    await new Promise<void>((resolve) => {
+      model.waiters.push(resolve)
+    })
+  }
+  return lockAnswer(model.held ? 1 : 0)
+}
+
+/**
+ * Issue #224: the reclaim probe removes only a stale lock.
+ *
+ * @param run - The run's view of the model.
+ * @returns The answer: 0 when the lock was reclaimed.
+ */
+function reclaimModelledLock(run: ExtractLockRun): ExecResult {
+  const { model, name } = run
+  if (!model.stale) return lockAnswer(1)
+  model.events.push(`${name}:reclaimed`)
+  model.held = false
+  model.stale = false
+  return lockAnswer(0)
+}
+
+/**
+ * Issue #224: answer a lock command from the shared model.
+ *
+ * @param run - The run's view of the model.
+ * @param command - The executed command.
+ * @returns The answer, or undefined for a command the model does not own.
+ */
+async function answerFromLockModel(
+  run: ExtractLockRun,
+  command: string
+): Promise<ExecResult | undefined> {
+  if (command === extractLockMkdir) return takeModelledLock(run)
+  if (isExtractLockRelease(command)) return releaseModelledLock(run)
+  if (command.startsWith(extractLockPollPrefix)) return pollModelledLock(run)
+  if (command.startsWith(extractLockReclaimPrefix)) return reclaimModelledLock(run)
+  return undefined
 }
 
 /**
@@ -1114,6 +1339,14 @@ async function harnessedExec(
   const { command, options, originalExec } = exchange
   const { backstop, host } = harness
   const input = options?.input
+  await harness.delayExec?.(command)
+  const locked =
+    harness.lock === undefined ? undefined : await answerFromLockModel(harness.lock, command)
+  if (locked !== undefined) {
+    mockSsh.calls.push(command)
+    mockSsh.execCalls.push({ command, options })
+    return locked
+  }
   // Recorded before the exec, so a listing that throws is counted as well.
   if (isPostMergeListing(command, input)) harness.postMergeListings?.push(mockSsh.calls.length)
   rejectMatchingExec(mockSsh, { command, input }, harness)
@@ -1131,6 +1364,8 @@ async function harnessedExec(
  * @param hostSymlinks - Absolute host paths the probe reports as symlinks.
  * @param harness - Optional host link model and exec to reject.
  * @param harness.backstop - Issue #219: scripted post-merge listing answers.
+ * @param harness.delayExec - Issue #224: holds an exec back before it is answered.
+ * @param harness.lock - Issue #224: the shared extract lock model.
  * @param harness.files - Issue #219: host files the containment execs model.
  * @param harness.host - Host link model that the merge updates and both listings read.
  * @param harness.postMergeListings - Issue #219: collects the position in
@@ -1232,6 +1467,8 @@ function ownEntryOf(calls: readonly string[]): string | undefined {
 function commandsWithoutContainmentArguments(run: { mockSsh: MockSsh }): string[] {
   return run.mockSsh.calls.map((command) => {
     if (command.startsWith(containmentEstablishPrefix)) return "<establish>"
+    // Issue #224: the lock's owner lines name the run's entry and start time.
+    if (isExtractLockHolderWrite(command)) return "<lock holder>"
     return isContainmentClear(command) ? "<clear>" : command
   })
 }
@@ -1242,6 +1479,8 @@ type TarListingApplyOptions = {
    * repeats. The pre-merge listing is unaffected.
    */
   backstopListings?: ReadonlyArray<Partial<ExecResult>>
+  /** Issue #224: holds an exec back, see {@link ExecHarness}. */
+  delayExec?: (command: string) => Promise<void> | undefined
   /** `writeFile` rejects this path, e.g. to fail the containment-flag write. */
   failWrite?: string
   /**
@@ -1263,6 +1502,8 @@ type TarListingApplyOptions = {
    * when omitted.
    */
   listingModeLine?: string
+  /** Issue #224: the extract lock on a host shared by several runs. */
+  lock?: ExtractLockRun
   owner?: string
   /** Exact command responses that take priority over the shared stubs. */
   responses?: NonNullable<Parameters<typeof createBaseMockSsh>[0]>
@@ -1313,8 +1554,10 @@ async function applyTarListing(
   const backstop = { listings: [...(options.backstopListings ?? [])] }
   const probes = recordSymlinkProbes(mockSsh, hostSymlinks, {
     backstop,
+    delayExec: options.delayExec,
     files,
     host,
+    lock: options.lock,
     postMergeListings,
     throwOn: options.throwOn,
   })
@@ -5150,7 +5393,7 @@ describe("archive.extract containment-failure flag (Issue #219)", () => {
   })
 
   it("fails a fully extracted apply when the entries cannot be cleared", async () => {
-    const clearCommand = `${containmentClearPrefix}'${ownEntry()}'`
+    const clearCommand = `${containmentClearPrefix}'${extractLockPath}' '${MOCK_FLAG_LOCK_HOLDER_TOKEN}' '${ownEntry()}'`
     const run = await applyTarListing([tarFileLine("f")], {
       responses: {
         [clearCommand]: {
@@ -5168,7 +5411,7 @@ describe("archive.extract containment-failure flag (Issue #219)", () => {
     // Issue #219: after the failed clear, the own entry records the failure
     // without offending links.
     const clear = run.mockSsh.calls.indexOf(clearCommand)
-    expect(clear).toBe(run.mockSsh.calls.length - 1)
+    expect(clear).toBe(callsBeforeLockRelease(run.mockSsh.calls).length - 1)
     expect(run.writes.map(({ remotePath }) => remotePath)).toStrictEqual([
       marker,
       membersMarker,
@@ -6323,9 +6566,13 @@ describe("archive.extract containment flag lifecycle (Issue #219)", () => {
     for (const write of markerWrites) expect(write.callIndex).toBeGreaterThan(chown)
     // The clear exec is the very last command, after every marker write; the
     // apply read no other entry, so it removes only its own.
-    expect(calls.at(-1)).toBe(`${containmentClearPrefix}'${ownEntry()}'`)
+    // Issue #224: only the extract lock's release follows it.
+    const beforeRelease = callsBeforeLockRelease(calls)
+    expect(beforeRelease.at(-1)).toBe(
+      `${containmentClearPrefix}'${extractLockPath}' '${MOCK_FLAG_LOCK_HOLDER_TOKEN}' '${ownEntry()}'`
+    )
     for (const write of markerWrites) {
-      expect(calls.length - 1).toBeGreaterThanOrEqual(write.callIndex)
+      expect(beforeRelease.length - 1).toBeGreaterThanOrEqual(write.callIndex)
     }
     expect(hasContainmentState(files)).toBe(false)
   })
@@ -6448,7 +6695,10 @@ describe("archive.extract containment flag lifecycle (Issue #219)", () => {
  */
 function callsFromBackstop(run: TarListingApplyRun): string[] {
   if (run.postMergeListings.length === 0) return []
-  return run.mockSsh.calls.slice(run.postMergeListings[0])
+  // Issue #224: the extract lock's release follows the failed apply.
+  return run.mockSsh.calls
+    .slice(run.postMergeListings[0])
+    .filter((command) => !isExtractLockRelease(command))
 }
 
 describe("archive.extract post-merge backstop (Issue #219)", () => {
@@ -7380,6 +7630,8 @@ describe("archive.extract containment flag recording and verification (Issue #21
   })
 
   it("re-creates the own entry with the failure record when another apply removed it meanwhile", async () => {
+    // Issue #224: under the extract lock this is the lock-loss path: only an
+    // apply that took over a lost lock can remove a live apply's entry.
     // Issue #219: race 1: another apply read this apply's `in-progress`
     // entry, verified the whole destination and removed it. The failure record
     // goes through `writeFile`, which renames onto the entry path and so
@@ -7406,7 +7658,8 @@ describe("archive.extract containment flag recording and verification (Issue #21
     // Issue #219: the only throw that escapes after the merge started is one
     // the staging cleanup cannot contain: its warning to a closed stderr
     // throws again. Meanwhile a concurrent clean apply removed this apply's
-    // `in-progress` entry (race 1); the record must create it again.
+    // `in-progress` entry (race 1, which issue #224 leaves only after a lost
+    // lock); the record must create it again.
     const files = new Map<string, string>()
     const stderrWrite = vi.spyOn(process.stderr, "write").mockImplementation(() => {
       files.delete(ownEntry())
@@ -7513,14 +7766,15 @@ function hostWithPythonLink(): HostLinkTree {
 
 /**
  * Issue #227: the arguments of every clear exec of a run: the own entry, then
- * each removed entry with the hash it had when it was read.
+ * each removed entry with the hash it had when it was read. Issue #224: the
+ * lock path and the holder token that come first are left out.
  *
  * @param run - The recorded apply run.
  * @returns One argument list per clear exec.
  */
 function clearArguments(run: TarListingApplyRun): string[][] {
   return containmentClears(run.mockSsh.calls).map((command) =>
-    scriptArguments(command, containmentClearPrefix)
+    scriptArguments(command, containmentClearPrefix).slice(2)
   )
 }
 
@@ -7698,7 +7952,7 @@ describe("archive.extract unknown containment flag verifies the whole destinatio
       expect(run.postMergeListings).toHaveLength(1)
       expect(run.postMergeListings[0]).toBeGreaterThan(mergeIndex(run))
       expect(run.writes.some(({ remotePath }) => isContainmentFlagRecord(remotePath))).toBe(false)
-      expect(isContainmentClear(run.mockSsh.calls.at(-1))).toBe(true)
+      expect(isContainmentClear(callsBeforeLockRelease(run.mockSsh.calls).at(-1))).toBe(true)
       expect(hasContainmentState(files)).toBe(false)
       expect(files.get(marker)).toBe(archiveSha)
       await expect(checkAgainstHostFiles(src, files)).resolves.toMatchObject({ result: "ok" })
@@ -7750,7 +8004,7 @@ describe("archive.extract unknown containment flag verifies the whole destinatio
       expect(run.thrown).toBeUndefined()
       expect(extractionSummary(run)).toStrictEqual(extractedThroughStaging)
       expect(run.postMergeListings).toHaveLength(1)
-      expect(isContainmentClear(run.mockSsh.calls.at(-1))).toBe(true)
+      expect(isContainmentClear(callsBeforeLockRelease(run.mockSsh.calls).at(-1))).toBe(true)
     }
   )
 
@@ -7891,7 +8145,7 @@ describe("archive.extract unknown containment flag verifies the whole destinatio
       expect(extractionSummary(run)).toStrictEqual(extractedThroughStaging)
       expect(run.postMergeListings).toHaveLength(1)
       expect(crossCheckedLinksOf(run)).not.toContain(escapingElsewhere)
-      expect(isContainmentClear(run.mockSsh.calls.at(-1))).toBe(true)
+      expect(isContainmentClear(callsBeforeLockRelease(run.mockSsh.calls).at(-1))).toBe(true)
       expect(hasContainmentState(files)).toBe(false)
     }
   )
@@ -8458,7 +8712,12 @@ function onFirstWriteOf(
   }
 }
 
-describe("archive.extract concurrent applies to one destination (Issue #219)", () => {
+describe("archive.extract after an apply lost its extract lock (Issue #219, #224)", () => {
+  // Issue #224: applies to one destination are serialized by the extract lock
+  // (see "serialized applies" below), so the race these cases model can only
+  // happen once a live apply lost its lock anyway, for example after the
+  // target clock jumped forward. They keep the claim-by-hash rule of the
+  // clear exec covered as the safety net for that case.
   // Issue #219: A and B extract different sources into the same destination.
   // A created its `in-progress` entry first; B read it, created its own and,
   // after its clean post-merge listing, finishes successfully. In between, A
@@ -8607,6 +8866,8 @@ describe("archive.extract concurrent applies to one destination (Issue #219)", (
       expect(run.postMergeListings).toHaveLength(1)
       const [clear] = containmentClears(run.mockSsh.calls)
       expect(scriptArguments(clear, containmentClearPrefix)).toStrictEqual([
+        extractLockPath,
+        MOCK_FLAG_LOCK_HOLDER_TOKEN,
         ownEntry(2),
         `${containment.entryDirectory}/${claimedConcurrentEntry}`,
         sha256Of(recordedFlag(concurrentLinkKey)),
@@ -8618,6 +8879,578 @@ describe("archive.extract concurrent applies to one destination (Issue #219)", (
       })
     }
   )
+})
+
+/**
+ * Issue #224: wait until the shared lock model logged an event.
+ *
+ * @param model - Shared lock state whose event log is watched.
+ * @param event - The `<run>:<transition>` event.
+ */
+async function untilLockEvent(model: ExtractLockModel, event: string): Promise<void> {
+  if (model.events.includes(event)) return
+  await new Promise((resolve) => {
+    setTimeout(resolve, 1)
+  })
+  await untilLockEvent(model, event)
+}
+
+/**
+ * Issue #224: a delay for one kind of exec.
+ *
+ * @param matches - Which execs to hold back.
+ * @param wait - What they wait for.
+ * @returns A `delayExec` hook.
+ */
+function delayWhen(
+  matches: (command: string) => boolean,
+  wait: () => Promise<void>
+): (command: string) => Promise<void> | undefined {
+  return async (command) => (matches(command) ? wait() : undefined)
+}
+
+/**
+ * Issue #224: sleep for real milliseconds.
+ *
+ * @param milliseconds - How long.
+ */
+async function sleep(milliseconds: number): Promise<void> {
+  await new Promise((resolve) => {
+    setTimeout(resolve, milliseconds)
+  })
+}
+
+/** Issue #224: the failure of a merge refused for a lost lock. */
+const mergeRefusedForLostLock = `[archive.extract] refusing to merge ${src} into ${destination}: the extract lock ${extractLockPath} of this destination is no longer held by this apply (its holder marker is gone, carries another token, or was not refreshed for more than 300 s); the merge was not started and nothing was published`
+
+/**
+ * Issue #224: the failure of a clear refused for a lost lock.
+ *
+ * @param own - The own entry.
+ * @returns The message.
+ */
+function clearRefusedForLostLock(own: string): string {
+  return `[archive.extract] refusing to remove containment entry ${own} and the entries it verified: the extract lock ${extractLockPath} of this destination is no longer held by this apply (its holder marker is gone, carries another token, or was not refreshed for more than 300 s); no entry was removed, so check stays at needs-apply until a later apply verifies and clears them`
+}
+
+describe("archive.extract serialized applies to one destination (Issue #224)", () => {
+  const linesA = [tarDirectoryLine("a/"), tarFileLine("a/f")]
+  const linesB = [tarDirectoryLine("b/"), tarFileLine("b/g")]
+
+  it("names the lock after the destination like the containment entries and takes it around establish and clear", async () => {
+    expect(extractLockName.slice("archive-extract-lock-".length)).toBe(
+      posix.basename(containment.entryDirectory).slice("archive-containment-".length, -".d".length)
+    )
+    const files = new Map<string, string>()
+
+    const run = await applyTarListing(linesA, { files, hostLinks: new Map() })
+
+    expect(run.result.status).toBe("changed")
+    const { calls } = run.mockSsh
+    const acquire = calls.indexOf(extractLockMkdir)
+    const holderWrite = calls.findIndex((command) => isExtractLockHolderWrite(command))
+    const establish = calls.indexOf(containmentEstablishCommand(linesA))
+    const listing = calls.indexOf(tarListCommand(src))
+    expect(listing).toBeLessThan(acquire)
+    expect(acquire).toBeLessThan(holderWrite)
+    expect(holderWrite).toBeLessThan(establish)
+    expect(isContainmentClear(callsBeforeLockRelease(calls).at(-1))).toBe(true)
+    // Issue #224: line 1 is the token, then the owner lines name the
+    // controller, the start time and the own entry.
+    const holder = calls[holderWrite]
+    expect(holder.startsWith(`printf '%s\\n' '${MOCK_FLAG_LOCK_HOLDER_TOKEN}' 'controller `)).toBe(
+      true
+    )
+    expect(holder).toContain(` pid ${String(process.pid)}' 'started `)
+    expect(holder).toMatch(/ 'started \d{4}-\d{2}-\d{2}T[\d:.]+Z' /v)
+    expect(holder).toContain(` 'entry ${ownEntryName()}' > `)
+  })
+
+  it("serializes a second apply behind the first and never lets it see the first apply's in-progress entry", async () => {
+    const model = extractLockModel()
+    const files = new Map<string, string>()
+    let entriesWhileAMerges: Record<string, string> = {}
+
+    const [first, second] = await Promise.all([
+      applyTarListing(linesA, {
+        // A's merge waits until B is blocked on A's lock.
+        delayExec: delayWhen(
+          (command) => archiveStageMovePattern.test(command),
+          async () => {
+            await untilLockEvent(model, "B:polled")
+            entriesWhileAMerges = containmentState(files)
+          }
+        ),
+        files,
+        hostLinks: new Map(),
+        lock: { model, name: "A" },
+      }),
+      applyTarListing(linesB, {
+        // B starts only once A holds the lock.
+        delayExec: async () => untilLockEvent(model, "A:acquired"),
+        files,
+        hostLinks: new Map(),
+        lock: { model, name: "B" },
+        source: otherSrc,
+      }),
+    ])
+
+    expect([first.result, second.result]).toStrictEqual([
+      { status: "changed" },
+      { status: "changed" },
+    ])
+    expect(model.events).toStrictEqual([
+      "A:acquired",
+      "B:contended",
+      "B:polled",
+      "A:released",
+      "B:acquired",
+      "B:released",
+    ])
+    // A's entry stayed in place while A held the lock and B waited.
+    expect(entriesWhileAMerges).toStrictEqual({ [ownEntryName(1)]: scopedInProgress(linesA) })
+    // B read no entry of A: A had cleared its own before it released the lock.
+    const [clearB] = containmentClears(second.mockSsh.calls)
+    expect(scriptArguments(clearB, containmentClearPrefix)).toStrictEqual([
+      extractLockPath,
+      MOCK_FLAG_LOCK_HOLDER_TOKEN,
+      ownEntry(2),
+    ])
+    expect(second.postMergeListings).toStrictEqual([])
+    expect(hasContainmentState(files)).toBe(false)
+    await expect(checkAgainstHostFiles(otherSrc, files)).resolves.toMatchObject({ result: "ok" })
+  })
+
+  it("waits in bounded polls and fails with the holder's details once the wait runs out", async () => {
+    const pollCommand = `${extractLockPollPrefix}[ "$i" -lt 60 ]; do sleep 1; i=$((i+1)); done; [ ! -d ${quotedExtractLockPath} ]`
+    const diagnostics = buildFlagLockDiagnosticsCommand({
+      lockWord: shellQuote(extractLockPath),
+      markerWord: shellQuote(`${extractLockPath}/holder`),
+    })
+    const files = new Map<string, string>()
+
+    const run = await applyTarListing(linesA, {
+      files,
+      responses: {
+        [diagnostics]: {
+          code: 0,
+          stdout: `paratix-lock marker 100000 99880\ncontroller other-host pid 4242\nstarted 2026-10-01T20:00:00.000Z\nentry run-${"e".repeat(32)}\n`,
+        },
+        [extractLockMkdir]: { code: 1, stderr: "mkdir: File exists" },
+        [pollCommand]: { code: 1 },
+      },
+    })
+
+    expect(run.result.error?.message).toBe(
+      `[archive.extract] refusing to extract ${src}: failed to take the extract lock ${extractLockPath} of ${destination}: another archive.extract apply to ${destination} still holds its extract lock after waiting 300 s: lock ${extractLockPath} is held (owner: controller other-host pid 4242; started 2026-10-01T20:00:00.000Z; entry run-${"e".repeat(32)}), marker age 120 s, reclaimable once older than 540 s (in about 421 s); retry once that apply has finished, or remove the lock by hand (rm -f -- '${extractLockPath}/holder' && rmdir -- '${extractLockPath}') only when no archive.extract apply for this destination runs anywhere`
+    )
+    const { calls } = run.mockSsh
+    // Issue #224: one stale-reclaim attempt at the archive threshold
+    // (`-mmin +9`) before the first poll, then five polls of 60 s cover the
+    // 300 s wait, each followed by another reclaim attempt.
+    expect(calls.filter((command) => command === pollCommand)).toHaveLength(5)
+    const reclaims = calls.filter((command) => command.startsWith(extractLockReclaimPrefix))
+    expect(reclaims).toHaveLength(6)
+    for (const reclaim of reclaims) expect(reclaim).toContain(" -mmin +9 ")
+    // Nothing was established, written or extracted, and nothing was released.
+    expect(calls.some((command) => command.startsWith(containmentEstablishPrefix))).toBe(false)
+    expect(run.writes).toStrictEqual([])
+    expectNoTarExtractCalls(run.mockSsh)
+    expect(calls.some((command) => isExtractLockRelease(command))).toBe(false)
+    expect(hasContainmentState(files)).toBe(false)
+  })
+
+  it("asks for a retry, naming no holder, when the lock was released only after the wait ran out", async () => {
+    const pollCommand = `${extractLockPollPrefix}[ "$i" -lt 60 ]; do sleep 1; i=$((i+1)); done; [ ! -d ${quotedExtractLockPath} ]`
+    const diagnostics = buildFlagLockDiagnosticsCommand({
+      lockWord: shellQuote(extractLockPath),
+      markerWord: shellQuote(`${extractLockPath}/holder`),
+    })
+    const files = new Map<string, string>()
+
+    const run = await applyTarListing(linesA, {
+      files,
+      responses: {
+        // Every poll still saw the lock; it was gone when the details were read.
+        [diagnostics]: { code: 0, stdout: "paratix-lock absent\n" },
+        [extractLockMkdir]: { code: 1, stderr: "mkdir: File exists" },
+        [pollCommand]: { code: 1 },
+      },
+    })
+
+    expect(run.result.error?.message).toBe(
+      `[archive.extract] refusing to extract ${src}: failed to take the extract lock ${extractLockPath} of ${destination}: the extract lock ${extractLockPath} of ${destination} was released only after waiting 300 s ran out; retry the apply`
+    )
+    expect(run.result.error?.message).not.toContain("still holds")
+    expect(run.writes).toStrictEqual([])
+    expectNoTarExtractCalls(run.mockSsh)
+  })
+
+  it("reclaims a stale lock an interrupted apply left, verifies the whole destination and converges", async () => {
+    // Issue #224: a killed apply left its lock and its `in-progress` entry.
+    const model = extractLockModel("stale")
+    const files = new Map([[earlierEntry, inProgress()]])
+
+    const run = await applyTarListing(linesB, {
+      files,
+      hostLinks: new Map(),
+      lock: { model, name: "next" },
+      source: otherSrc,
+    })
+
+    expect(run.result).toStrictEqual({ status: "changed" })
+    // The lock is already stale, so it is reclaimed before any poll.
+    expect(model.events).toStrictEqual([
+      "next:contended",
+      "next:reclaimed",
+      "next:acquired",
+      "next:released",
+    ])
+    const reclaim = run.mockSsh.calls.find((command) =>
+      command.startsWith(extractLockReclaimPrefix)
+    )
+    expect(reclaim).toContain(" -mmin +9 ")
+    // The leftover entry reads as unknown, so the whole destination is verified.
+    expect(run.postMergeListings).toHaveLength(1)
+    expect(hasContainmentState(files)).toBe(false)
+    await expect(checkAgainstHostFiles(otherSrc, files)).resolves.toMatchObject({ result: "ok" })
+  })
+
+  it("lets check take no lock and report needs-apply while an interrupted apply's entry exists", async () => {
+    // Issue #224: an apply killed after its merge started under the lock
+    // leaves its `in-progress` entry and its lock.
+    const files = new Map([
+      [earlierEntry, inProgress()],
+      [markerFor(src), archiveSha],
+    ])
+
+    const check = await checkAgainstHostFiles(src, files)
+
+    expect(check.result).toBe("needs-apply")
+    // The one combined marker test decides, as without the lock, and the
+    // exec count stays that of #219: three destination probes, then that test.
+    expect(check.calls).toHaveLength(4)
+    expect(check.calls.at(-1)).toBe(markerCheckCommand(markerFor(src)))
+    expect(check.calls.some((command) => command.includes("archive-extract-lock-"))).toBe(false)
+  })
+})
+
+describe("archive.extract lost extract lock (Issue #224)", () => {
+  const lines = [tarDirectoryLine("a/"), tarFileLine("a/f"), tarSymlinkLine("a/l", "f")]
+
+  it("does not start the merge, skips the backstop and records that nothing was published when the merge guard refuses", async () => {
+    const files = new Map<string, string>()
+
+    const run = await applyTarListing(lines, {
+      files,
+      hostLinks: new Map(),
+      responseStubs: [
+        { command: archiveStageMovePattern, result: { code: ARCHIVE_EXTRACT_LOCK_LOST_EXIT } },
+      ],
+    })
+
+    expect(run.result.error?.message).toBe(mergeRefusedForLostLock)
+    expect(run.postMergeListings).toStrictEqual([])
+    expectContainmentFlagKept(run)
+    expect(containmentState(files)).toStrictEqual({ [ownEntryName()]: recordedFlag() })
+    expect(callsBeforeLockRelease(run.mockSsh.calls).length).toBeGreaterThan(0)
+  })
+
+  it("records nothing-published, not a started merge, when an error follows a refused merge guard", async () => {
+    // Issue #224: the refused guard proves the merge never ran; a throw from
+    // the staging cleanup afterwards must not record an unknown outcome.
+    const files = new Map<string, string>()
+    const stderrWrite = vi.spyOn(process.stderr, "write").mockImplementation(() => {
+      throw new Error("write EPIPE")
+    })
+    let run: TarListingApplyRun
+    try {
+      run = await applyTarListing(lines, {
+        files,
+        hostLinks: new Map(),
+        responseStubs: [
+          { command: archiveStageMovePattern, result: { code: ARCHIVE_EXTRACT_LOCK_LOST_EXIT } },
+          { command: archiveStageCleanupPattern, result: { code: 1, stderr: "rm: busy" } },
+        ],
+      })
+    } finally {
+      stderrWrite.mockRestore()
+    }
+
+    expect(run.thrown).toStrictEqual(new Error("write EPIPE"))
+    expect(run.postMergeListings).toStrictEqual([])
+    expect(containmentState(files)).toStrictEqual({ [ownEntryName()]: recordedFlag() })
+    // The lock is still released after the throw.
+    expect(callsBeforeLockRelease(run.mockSsh.calls).length).toBeGreaterThan(0)
+  })
+
+  it("removes no entry and records failed without links when the clear guard refuses", async () => {
+    const files = new Map([[earlierEntry, recordedFlag()]])
+
+    const run = await applyTarListing(lines, {
+      files,
+      hostLinks: new Map(),
+      responseStubs: [
+        {
+          command: /^sh -c 'LC_ALL=C; export LC_ALL; \{ \[ -d "\$\{1\}" \]/v,
+          result: { code: ARCHIVE_EXTRACT_LOCK_LOST_EXIT },
+        },
+      ],
+    })
+
+    expect(run.result.error?.message).toBe(clearRefusedForLostLock(ownEntry()))
+    expect(containmentClears(run.mockSsh.calls)).toHaveLength(1)
+    // The backstop passed, so an empty `failed` list is the right record; the
+    // earlier entry stays as it was.
+    expect(containmentState(files)).toStrictEqual({
+      [earlierEntryName]: recordedFlag(),
+      [ownEntryName()]: recordedFlag(),
+    })
+    await expect(checkAgainstHostFiles(src, files)).resolves.toMatchObject({
+      result: "needs-apply",
+    })
+  })
+})
+
+describe("archive.extract extract lock heartbeat (Issue #224)", () => {
+  const lines = [tarDirectoryLine("a/"), tarFileLine("a/f")]
+  /** How long the merge exec is held back: far longer than the guard window. */
+  const longMergeMilliseconds = 600
+  /** The modelled guard refuses a marker not refreshed for this long. */
+  const guardWindowMilliseconds = 300
+  /** How far {@link onFakeClock} advances the virtual clock per step. */
+  const fakeClockStepMilliseconds = 5
+
+  /**
+   * Issue #224: model the age check of the guards on top of the mock: the
+   * standalone refresh and the guards in the merge and clear execs pass only
+   * while the marker was refreshed within the window, and refresh it.
+   *
+   * @param refreshCode - What the standalone refresh exec answers.
+   * @returns The `delayExec` hook (which also holds the merge back), the
+   *   refusal stubs and the refresh count.
+   */
+  function guardModel(refreshCode = 0): {
+    delayExec: (command: string) => Promise<void> | undefined
+    refreshes: () => number
+    stubs: NonNullable<TarListingApplyOptions["responseStubs"]>
+  } {
+    let touchedAt = Date.now()
+    let refreshes = 0
+    let refused = false
+    const fresh = (): boolean => Date.now() - touchedAt <= guardWindowMilliseconds
+    const guarded = (command: string): boolean =>
+      archiveStageMovePattern.test(command) || isContainmentClear(command)
+    return {
+      async delayExec(command) {
+        if (command === extractLockMkdir) touchedAt = Date.now()
+        if (archiveStageMovePattern.test(command)) await sleep(longMergeMilliseconds)
+        if (command === mergeLockGuard) {
+          refreshes += 1
+          if (refreshCode === 0 && fresh()) touchedAt = Date.now()
+        }
+        if (guarded(command)) {
+          refused = !fresh()
+          if (!refused) touchedAt = Date.now()
+        }
+      },
+      refreshes: () => refreshes,
+      stubs: [
+        { command: mergeLockGuard, result: { code: refreshCode } },
+        {
+          command: { test: (command: string) => guarded(command) && refused } as RegExp,
+          result: { code: ARCHIVE_EXTRACT_LOCK_LOST_EXIT },
+        },
+      ],
+    }
+  }
+
+  /**
+   * Issue #224: hold the pre-staging probe back, then defer to another hook.
+   *
+   * @param milliseconds - How long the probe waits.
+   * @param next - The hook for every other exec.
+   * @returns The combined hook.
+   */
+  function preStagingDelayedBy(
+    milliseconds: number,
+    next: (command: string) => Promise<void> | undefined
+  ): (command: string) => Promise<void> | undefined {
+    return async (command) =>
+      command === preStagingProbeCommand ? sleep(milliseconds) : next(command)
+  }
+
+  /**
+   * Issue #224: run an apply on a fake clock. The heartbeat timer, the held
+   * merge and pre-staging probe and the modelled guard window then all share
+   * one virtual clock that advances in small steps, so event-loop stalls of a
+   * loaded test machine cannot push a fresh marker past the guard window.
+   *
+   * @param run - Starts the apply.
+   * @returns The apply's run.
+   */
+  async function onFakeClock(run: () => Promise<TarListingApplyRun>): Promise<TarListingApplyRun> {
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "Date"] })
+    try {
+      let settled = false
+      const pending = run().finally(() => {
+        settled = true
+      })
+      await advanceFakeClockUntil(() => settled)
+      return await pending
+    } finally {
+      vi.useRealTimers()
+    }
+  }
+
+  async function advanceFakeClockUntil(done: () => boolean): Promise<void> {
+    if (done()) return
+    await vi.advanceTimersByTimeAsync(fakeClockStepMilliseconds)
+    await advanceFakeClockUntil(done)
+  }
+
+  it("keeps the lock of a section that outlasts the guard window fresh and succeeds", async () => {
+    overrideExtractLockForThisTest({ heartbeatIntervalMilliseconds: 10 })
+    const guards = guardModel()
+    const files = new Map<string, string>()
+
+    const run = await onFakeClock(async () =>
+      applyTarListing(lines, {
+        delayExec: guards.delayExec,
+        files,
+        hostLinks: new Map(),
+        responseStubs: guards.stubs,
+      })
+    )
+
+    expect(run.result).toStrictEqual({ status: "changed" })
+    expect(guards.refreshes()).toBeGreaterThanOrEqual(3)
+    expect(hasContainmentState(files)).toBe(false)
+    // No refresh runs after the release.
+    expect(callsBeforeLockRelease(run.mockSsh.calls).length).toBeGreaterThan(0)
+  })
+
+  it("loses the lock of the same section without a heartbeat, so the merge guard refuses", async () => {
+    const guards = guardModel()
+    const files = new Map<string, string>()
+
+    const run = await onFakeClock(async () =>
+      applyTarListing(lines, {
+        delayExec: guards.delayExec,
+        files,
+        hostLinks: new Map(),
+        responseStubs: guards.stubs,
+      })
+    )
+
+    expect(guards.refreshes()).toBe(0)
+    expect(run.result.error?.message).toBe(mergeRefusedForLostLock)
+    expect(containmentState(files)).toStrictEqual({ [ownEntryName()]: recordedFlag() })
+  })
+
+  /**
+   * Issue #224: let every standalone refresh exec throw like a dropped
+   * channel, and defer every other exec to `next`.
+   *
+   * @param next - The hook for every other exec.
+   * @returns The combined hook.
+   */
+  function refreshThrows(
+    next: (command: string) => Promise<void> | undefined
+  ): (command: string) => Promise<void> | undefined {
+    return async (command) => {
+      if (command === mergeLockGuard) throw new Error("channel closed")
+      return next(command)
+    }
+  }
+
+  it("names the error of a refresh exec that threw, not a marker state, when it refuses the merge", async () => {
+    overrideExtractLockForThisTest({ heartbeatIntervalMilliseconds: 10 })
+    const guards = guardModel()
+    const files = new Map<string, string>()
+
+    const run = await onFakeClock(async () =>
+      applyTarListing(lines, {
+        // The pre-staging probe runs long enough for one refresh to throw.
+        delayExec: preStagingDelayedBy(300, refreshThrows(guards.delayExec)),
+        files,
+        hostLinks: new Map(),
+        responseStubs: guards.stubs,
+      })
+    )
+
+    expect(run.result.error?.message).toBe(
+      `[archive.extract] refusing to merge ${src} into ${destination}: this apply can no longer confirm that it holds the extract lock ${extractLockPath} of this destination (refreshing its holder marker failed: channel closed); the merge was not started and nothing was published`
+    )
+    expect(run.mockSsh.calls.some((command) => archiveStageMovePattern.test(command))).toBe(false)
+    expect(containmentState(files)).toStrictEqual({ [ownEntryName()]: recordedFlag() })
+  })
+
+  it("latches a failed refresh as lost, stops refreshing and refuses the merge without running it", async () => {
+    overrideExtractLockForThisTest({ heartbeatIntervalMilliseconds: 10 })
+    const guards = guardModel(1)
+    const files = new Map<string, string>()
+
+    const run = await onFakeClock(async () =>
+      applyTarListing(lines, {
+        // The pre-staging probe runs long enough for one refresh to fail.
+        delayExec: preStagingDelayedBy(300, guards.delayExec),
+        files,
+        hostLinks: new Map(),
+        responseStubs: guards.stubs,
+      })
+    )
+
+    expect(guards.refreshes()).toBe(1)
+    expect(run.result.error?.message).toBe(mergeRefusedForLostLock)
+    expect(run.mockSsh.calls.some((command) => archiveStageMovePattern.test(command))).toBe(false)
+    expect(run.postMergeListings).toStrictEqual([])
+    expect(containmentState(files)).toStrictEqual({ [ownEntryName()]: recordedFlag() })
+  })
+})
+
+describe("archive.extract extract lock thresholds (Issue #224)", () => {
+  it("keeps a guarded merge on the host well inside the reclaim threshold", () => {
+    expect(ARCHIVE_EXTRACT_LOCK_SETTINGS).toStrictEqual({
+      heartbeatIntervalMilliseconds: 60_000,
+      refreshGuardSeconds: 360,
+      staleSeconds: 600,
+      waitSeconds: 300,
+    })
+    const guard = flagLockAgeThreshold(ARCHIVE_EXTRACT_LOCK_SETTINGS.refreshGuardSeconds)
+    const reclaim = flagLockAgeThreshold(ARCHIVE_EXTRACT_LOCK_SETTINGS.staleSeconds)
+    expect(guard).toStrictEqual({ effectiveAgeSeconds: 300, mminMinutes: 5 })
+    expect(reclaim).toStrictEqual({ effectiveAgeSeconds: 540, mminMinutes: 9 })
+    const { killAfterSeconds, timeoutSeconds } = STAGING_MERGE_TIME_LIMITS
+    expect(
+      guard.effectiveAgeSeconds +
+        timeoutSeconds +
+        killAfterSeconds +
+        ARCHIVE_EXTRACT_LOCK_MERGE_SLACK_SECONDS
+    ).toBeLessThan(reclaim.effectiveAgeSeconds)
+    // A healthy heartbeat refreshes long before the guard would refuse.
+    expect(ARCHIVE_EXTRACT_LOCK_SETTINGS.heartbeatIntervalMilliseconds / 1000).toBeLessThan(
+      guard.effectiveAgeSeconds
+    )
+    expect(ARCHIVE_EXTRACT_LOCK_LOST_EXIT).toBe(75)
+    expect([1, 64, 124, 127, 129, 130, 137, 143, 3, 4, 5, 6]).not.toContain(
+      ARCHIVE_EXTRACT_LOCK_LOST_EXIT
+    )
+  })
+
+  it("applies test overrides on top of the constant and drops them on reset", () => {
+    onTestFinished(() => {
+      setArchiveExtractLockOverridesForTests(mockLockTokenOverrides)
+    })
+    setArchiveExtractLockOverridesForTests({ staleSeconds: 120, waitSeconds: 5 })
+    expect(archiveExtractLockSettings()).toStrictEqual({
+      ...ARCHIVE_EXTRACT_LOCK_SETTINGS,
+      staleSeconds: 120,
+      waitSeconds: 5,
+    })
+    resetArchiveExtractLockOverridesForTests()
+    expect(archiveExtractLockSettings()).toStrictEqual(ARCHIVE_EXTRACT_LOCK_SETTINGS)
+  })
 })
 
 describe("archive.extract bounded staging merge (Issue #219)", () => {
@@ -8689,7 +9522,10 @@ describe("archive.extract bounded staging merge (Issue #219)", () => {
     )
     expect(merges).toHaveLength(1)
     const [merge] = merges
-    expect(merge.command.startsWith("command -p timeout -k 10 100 sh -c '")).toBe(true)
+    // Issue #224: the extract lock guard runs first, in the same exec.
+    expect(
+      merge.command.startsWith(`${mergeLockGuard} || exit 75; command -p timeout -k 10 100 sh -c '`)
+    ).toBe(true)
     expect(merge.command.endsWith(" '/opt/app' 4; exit $?")).toBe(true)
     // Issue #219: the guard paths travel NUL-terminated on stdin.
     expect(merge.options).toStrictEqual({
@@ -8928,7 +9764,7 @@ describe("archive.extract round trips (Issue #219)", () => {
       const run = await applyTarListing(lines, { files, hostLinks: new Map() })
       const { calls } = run.mockSsh
       const clears = containmentClears(calls)
-      const [, ...pairs] = scriptArguments(clears[0], containmentClearPrefix)
+      const pairs = scriptArguments(clears[0], containmentClearPrefix).slice(3)
       return {
         calls: calls.length,
         clearedEntries: pairs
