@@ -1,5 +1,20 @@
 # Changelog
 
+## [0.22.0](https://github.com/sebastian-software/paratix/compare/paratix-v0.21.0...paratix-v0.22.0) (2026-10-07)
+
+
+### Features
+
+* **paratix:** serialize concurrent archive extracts to one destination ([#232](https://github.com/sebastian-software/paratix/issues/232)) ([72ad98d](https://github.com/sebastian-software/paratix/commit/72ad98d3cdd910f5b4ca344faa0695ffa9a1b817)), closes [#224](https://github.com/sebastian-software/paratix/issues/224)
+
+
+### Bug Fixes
+
+* **paratix:** clear an interrupted archive apply's entry on a retry of the same archive ([#230](https://github.com/sebastian-software/paratix/issues/230)) ([bcb994d](https://github.com/sebastian-software/paratix/commit/bcb994d0a80995419e0123433f60727ca93e158b))
+* **paratix:** harden archive.extract link checks and probe error handling ([#233](https://github.com/sebastian-software/paratix/issues/233)) ([de00be7](https://github.com/sebastian-software/paratix/commit/de00be779511a13efb737aefbcc2825de8893a98))
+* **paratix:** keep isFirstRun() true for the whole --first-run apply lifecycle ([#229](https://github.com/sebastian-software/paratix/issues/229)) ([f19b1a5](https://github.com/sebastian-software/paratix/commit/f19b1a54420ff2ac9ffb591d705a9c7978a61fe0))
+* **paratix:** share secret sink, abort signal and error identity across bundles ([#236](https://github.com/sebastian-software/paratix/issues/236)) ([0277708](https://github.com/sebastian-software/paratix/commit/0277708536b2a371294de0e832f79432961b5673))
+
 ## [0.21.0](https://github.com/sebastian-software/paratix/compare/paratix-v0.20.0...paratix-v0.21.0) (2026-10-01)
 
 
