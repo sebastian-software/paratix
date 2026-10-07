@@ -3,5 +3,37 @@
   "extends": [
     "local>sebastian-software/renovate-config",
     "helpers:pinGitHubActionDigests"
+  ],
+  "packageRules": [
+    {
+      "description": "Inactive Vitest canary preparation: replace the false match only after the reviewed issue 37 E enforcement, isolation and native-runtime gates pass.",
+      "matchManagers": [
+        "npm"
+      ],
+      "matchPackageNames": [
+        "vitest",
+        "@vitest/coverage-v8",
+        "@vitest/coverage-istanbul",
+        "@vitest/ui",
+        "@vitest/browser",
+        "@vitest/browser-playwright",
+        "@vitest/browser-preview",
+        "@vitest/browser-webdriverio"
+      ],
+      "matchJsonata": [
+        "false"
+      ],
+      "postUpgradeTasks": {
+        "commands": [
+          "/opt/renovate/toolchains/candidate43-consumer11/node/bin/node /opt/renovate/releases/vitest-eaf25235679c46bb3259f70babcfd1da4a8e7e70/scripts/vitest-lockstep.mjs"
+        ],
+        "dataFileTemplate": "{{{toJSON upgrades}}}",
+        "fileFilters": [
+          "**/package.json",
+          "pnpm-lock.yaml"
+        ],
+        "executionMode": "branch"
+      }
+    }
   ]
 }
