@@ -12,7 +12,13 @@
       ],
       "matchPackageNames": [
         "vitest",
-        "@vitest/**"
+        "@vitest/coverage-v8",
+        "@vitest/coverage-istanbul",
+        "@vitest/ui",
+        "@vitest/browser",
+        "@vitest/browser-playwright",
+        "@vitest/browser-preview",
+        "@vitest/browser-webdriverio"
       ],
       "matchJsonata": [
         "false"
