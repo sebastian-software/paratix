@@ -1,27 +1,15 @@
-/**
- * Reference handling for the `op` module: validate `op://` references, split
- * them by kind, and read a single reference through the run-scoped prewarm
- * cache with the normalization that kind requires.
- *
- * Extracted from `op.ts` — like `opSpawnRunner.ts`, `opSpawnError.ts`,
- * `opOutputCapture.ts` and `opFailureMasking.ts` — to keep that module within
- * the project max-lines cap. `op.ts` keeps the resolution loops and the module
- * definition that drive these helpers.
- */
+import type { SecretRequest } from "./secretResolution.js"
 
-import { resolveCachedSecret } from "../secretPrewarm.js"
-import { hasActiveRunScopedSecretScope, registerRunScopedSecret } from "../secretSink.js"
+/** 1Password reference validation and preparation for the shared lifecycle. */
+import { assertValidTotpSeed, generateTotpCode } from "../totp.js"
 import { spawnWithInput } from "./opSpawnRunner.js"
 
 const OTP_SUFFIX_PATTERN = /\/(?:one-time-password|otp)$/iv
-
 const REFERENCE_PREFIX = "op://"
 
 /**
- * Validate that all reference values start with `op://`.
- *
- * @param references - Map of logical names to 1Password references.
- * @throws {Error} If any reference does not start with `op://`.
+ * Preserve the legacy entry point's reference validation boundary.
+ * @param references - Logical names and unchanged provider references.
  */
 export function validateReferences(references: Record<string, string>): void {
   for (const [name, reference] of Object.entries(references)) {
@@ -34,102 +22,100 @@ export function validateReferences(references: Record<string, string>): void {
 }
 
 /**
- * Split references into regular secrets and OTP references.
- *
- * @param references - Map of logical names to 1Password references.
- * @returns A tuple of [regularEntries, otpEntries].
+ * Classify legacy unmarked references without interpreting a query string.
+ * @param references - Logical names and unchanged provider references.
+ * @returns Ordinary fields followed by legacy OTP fields.
  */
 export function splitReferences(
   references: Record<string, string>
 ): [Record<string, string>, Record<string, string>] {
   const regularEntries: Record<string, string> = {}
   const otpEntries: Record<string, string> = {}
-
   for (const [name, reference] of Object.entries(references)) {
-    if (OTP_SUFFIX_PATTERN.test(reference)) {
-      otpEntries[name] = reference
-    } else {
-      regularEntries[name] = reference
-    }
+    if (OTP_SUFFIX_PATTERN.test(reference)) otpEntries[name] = reference
+    else regularEntries[name] = reference
   }
-
   return [regularEntries, otpEntries]
 }
 
-function stripTrailingCliNewline(value: string): string {
-  return value.replace(/\r?\n$/v, "")
+async function readField(reference: string): Promise<string> {
+  const stdout = await spawnWithInput("op", ["read", "--", reference], { input: "" })
+  return stdout.replace(/\r?\n$/v, "")
 }
 
 /**
- * Read a single 1Password reference, routed through the run-scoped prewarm
- * cache so each reference costs exactly one `op read` per run — no matter how
- * many `op.resolve` modules name it, and no matter whether the prewarm phase or
- * the module's own `apply()` asks first.
- *
- * `normalize` post-processes the raw CLI stdout, and the **normalized** value —
- * not the raw stdout — is what gets cached and registered. That distinction is
- * load-bearing: the secret sink masks exactly the string it was handed, so a
- * raw value registered with its trailing newline would leave the trimmed value
- * that actually reaches the output unmasked.
- *
- * R-0000165 / R-0000850: the loader registers the value with the secret sink at
- * the moment it is first observed, so the window between the up-front phase and
- * the module's own execution is covered too. An empty value is cached and passed
- * on like any other but never registered.
- *
- * Every *observation* registers as well, not just the load. The loader runs once
- * per reference and run, so its registration is only as long-lived as whichever
- * `withRunScopedSecrets` bracket happened to be active back then. A cache hit
- * that re-registers inside the caller's own bracket makes each consumer
- * self-supporting again — exactly the property `apply()` had before the cache
- * existed — instead of depending on an ordering of scopes that nothing enforces.
- * The registration is reference-counted, so the extra registration is released
- * exactly as often as it was taken; the scope guard follows the precedent of the
- * TOTP closure in `resolveOtpReferences` (`op.ts`) and keeps a registration
- * without a scope (which nothing would ever release) from happening.
- *
- * @param reference - The `op://` reference to read.
- * @param normalize - Post-processing applied to the raw CLI stdout.
- * @returns The normalized value, served from cache once the reference was read.
- * @throws {Error} If the `op` CLI is not available or the session is not authenticated.
+ * Only query selection chooses the marked loader; the reference stays opaque.
+ * @param reference - Unchanged provider reference.
+ * @returns Whether the reference requests a stored seed or a current code.
  */
-async function readReference(
+function markedSourceKind(reference: string): "code" | "seed" {
+  const queryStart = reference.indexOf("?")
+  const query = queryStart === -1 ? "" : reference.slice(queryStart + 1)
+  const selectors = [...new URLSearchParams(query)].filter(
+    ([name]) => name === "attribute" || name === "attr"
+  )
+  if (selectors.length > 1) {
+    throw new Error("Marked 1Password TOTP reference has conflicting attribute selectors")
+  }
+  const attribute = selectors.length === 0 ? undefined : selectors[0][1]
+  if (attribute == null || attribute === "value") return "seed"
+  if (attribute === "otp") return "code"
+  throw new Error("Marked 1Password TOTP reference requires a value or otp attribute")
+}
+
+/**
+ * Prepare a reference without reading a secret or rewriting the CLI argument.
+ * @param name - Logical environment name.
+ * @param reference - Unchanged provider reference.
+ * @param markedTotp - Whether the caller explicitly requested per-access TOTP.
+ * @returns A provider request for the shared module lifecycle.
+ */
+export function prepareOpRequest(
+  name: string,
   reference: string,
-  normalize: (stdout: string) => string
-): Promise<string> {
-  const value = await resolveCachedSecret(reference, async () => {
-    const stdout = await spawnWithInput("op", ["read", "--", reference], { input: "" })
-    const loaded = normalize(stdout)
-    if (loaded.length > 0) registerRunScopedSecret(loaded)
-    return loaded
-  })
-  if (value.length > 0 && hasActiveRunScopedSecretScope()) registerRunScopedSecret(value)
-  return value
+  markedTotp = false
+): SecretRequest {
+  validateReferences({ [name]: reference })
+  if (markedTotp && markedSourceKind(reference) === "code") {
+    return {
+      name,
+      reference,
+      resolution: "per-access",
+      resolve: async () => readField(reference),
+    }
+  }
+  const request: SecretRequest = {
+    early: { cacheKey: reference, load: async () => readField(reference) },
+    name,
+    reference,
+  }
+  if (!markedTotp && !OTP_SUFFIX_PATTERN.test(reference)) return request
+  return {
+    ...request,
+    prepare: (value) => value.trim(),
+    ...(markedTotp ? ({ resolution: "per-access", validate: assertValidTotpSeed } as const) : {}),
+    resolve(value = "") {
+      // The seed is observed and registered before the shared core creates
+      // this lazy resolver. Preserve the legacy diagnostic and safe cause.
+      try {
+        return generateTotpCode(value)
+      } catch (error) {
+        throw new Error(`Failed to generate TOTP code for ${JSON.stringify(name)}`, {
+          cause: error,
+        })
+      }
+    },
+  }
 }
 
 /**
- * Read a regular (non-OTP) reference: the secret value with the trailing
- * newline the CLI appends removed.
- *
- * @param reference - The `op://` reference to read.
- * @returns The resolved secret value.
+ * Keep ordinary fields before all legacy or marked TOTP requests.
+ * @param requests - Prepared requests in binding order.
+ * @returns A stable ordinary-before-TOTP ordering.
  */
-export async function readSecretValue(reference: string): Promise<string> {
-  return readReference(reference, stripTrailingCliNewline)
-}
-
-/**
- * Read an OTP reference: the `otpauth://` seed URI, trimmed. Only the seed is
- * read here — the TOTP code itself stays lazy, see `resolveOtpReferences` in
- * `op.ts`.
- *
- * `splitReferences` assigns every reference to exactly one of the two branches
- * by its suffix, so a single reference can never be cached under both
- * normalizations.
- *
- * @param reference - The `op://` reference to read.
- * @returns The resolved `otpauth://` URI.
- */
-export async function readOtpauthUri(reference: string): Promise<string> {
-  return readReference(reference, (stdout) => stripTrailingCliNewline(stdout).trim())
+export function orderOpRequests(requests: SecretRequest[]): SecretRequest[] {
+  return [
+    ...requests.filter((request) => request.resolve == null),
+    ...requests.filter((request) => request.resolve != null),
+  ]
 }

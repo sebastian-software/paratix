@@ -1,19 +1,21 @@
 /**
  * Run-scoped secret cache and module-tree walk for the prewarm phase.
  *
- * A run resolves every secret it needs *before* it connects over SSH, so an
- * interactive secret provider prompts once — right after the command was
- * started — instead of somewhere in the middle of the run, possibly long after
- * the operator left the terminal. Modules that read secrets expose the internal
- * {@link Module._prewarmSecrets} hook; the runner walks the tree once, awaits
- * every hook it finds, and keeps the cache open for the remainder of the run so
- * the modules themselves reuse the already-resolved values instead of invoking
- * the provider a second time.
+ * A run resolves ordinary secrets and early seed requests *before* it connects
+ * over SSH, so each such interactive request prompts once — right after the
+ * command was started — instead of somewhere in the middle of the run, possibly
+ * long after the operator left the terminal. Explicitly marked late code
+ * requests bypass this phase and cache; they resolve only on actual access.
+ * Modules with early requests expose the internal {@link Module._prewarmSecrets}
+ * hook; the runner walks the tree once, awaits every hook it finds, and keeps
+ * the cache open for the remainder of the run so the modules themselves reuse
+ * the already-resolved values instead of invoking the provider a second time.
  *
  * This file stays provider-neutral: it knows nothing about 1Password or `op://`
  * references and only owns the walk, the async-context scope, and a generic
- * memoization keyed by an opaque reference string. A future secret provider
- * (Vault, SOPS, …) can reuse it without a runner change.
+ * memoization keyed by an opaque string or symbol. 1Password uses unchanged
+ * reference strings; manual facades use symbols scoped to their binding
+ * identities. Further providers can reuse it without a runner change.
  */
 
 import { AsyncLocalStorage } from "node:async_hooks"
@@ -23,11 +25,12 @@ import type { Module } from "./types.js"
 import { isRecipe } from "./recipeGuard.js"
 
 /**
- * Cache of resolved secrets, keyed by the opaque provider reference. The stored
- * value is the **post-processed** secret — the exact string a module hands on
- * and that the secret sink masks — never the raw provider output.
+ * Cache of early source values, keyed by an opaque provider string or symbol.
+ * The stored value has the provider's base normalization; seed-specific trimming
+ * and validation follow cache access. Both observed forms are registered with
+ * the secret sink. Completed explicitly marked codes never enter this cache.
  */
-type SecretCache = Map<string, Promise<string>>
+type SecretCache = Map<string | symbol, Promise<string>>
 
 /**
  * The cache is async-context-scoped, the same construction as
@@ -214,7 +217,7 @@ export async function prewarmSecrets(
  * @returns The resolved value, from cache on every call after the first.
  */
 export async function resolveCachedSecret(
-  reference: string,
+  reference: string | symbol,
   load: () => Promise<string>
 ): Promise<string> {
   const cache = secretCacheStorage.getStore()

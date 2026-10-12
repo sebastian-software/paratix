@@ -19,6 +19,8 @@ export type MetaEnvironmentValue = EnvironmentValue
 export type EnvironmentMetaEntry = {
   kind: "env"
   name: string
+  /** Missing preserves memoization; per-access retains only an in-flight resolution. */
+  resolution?: "per-access"
   resolve: () => Promise<boolean | number | string>
   valueType: "boolean" | "number" | "string"
   valueTypeExplicit?: boolean

@@ -81,6 +81,7 @@ const EXPECTED_PACKAGE_EXPORTS = [
   "restartSystemdUnit",
   "rsync",
   "script",
+  "secret",
   "server",
   "service",
   "shellQuote",
@@ -122,6 +123,7 @@ const EXPECTED_MODULE_EXPORTS = [
   "restartSystemdUnit",
   "rsync",
   "script",
+  "secret",
   "service",
   "ssh",
   "sshd",
@@ -1112,6 +1114,100 @@ console.log(JSON.stringify({
         exportName
       )
       expect(packageApi[exportName]).toBe(moduleApi[exportName])
+    }
+  })
+
+  it("shares early cache and scoped registrations between the actual CLI and library secret facades", async () => {
+    const tempDirectory = mkdtempSync(join(tmpdir(), "paratix-secret-cache-dist-"))
+    const nodeModulesDirectory = join(tempDirectory, "node_modules")
+    const binDirectory = join(tempDirectory, "bin")
+    const privateKeyPath = join(tempDirectory, "id_rsa")
+    const playbookPath = join(tempDirectory, "playbook.mjs")
+    const readsPath = join(tempDirectory, "reads.jsonl")
+    const observationsPath = join(tempDirectory, "observations.json")
+    const cleanupPath = join(tempDirectory, "cleanup.json")
+    const reference = "op://Synthetic Vault/Fixture/free field"
+    const value = "synthetic-dist-secret"
+    const unexpectedCommands: string[] = []
+    const testServer = await startTestSshServer((command) => {
+      unexpectedCommands.push(command)
+      return { code: 127 }
+    })
+    try {
+      mkdirSync(nodeModulesDirectory)
+      mkdirSync(binDirectory)
+      symlinkSync(packedPackageRootDirectory, join(nodeModulesDirectory, "paratix"))
+      writeFileSync(privateKeyPath, testServer.privateKey, { mode: 0o600 })
+      writeFileSync(join(tempDirectory, "package.json"), '{ "type": "module" }\n')
+      writeFileSync(
+        join(binDirectory, "op"),
+        `#!${process.execPath}
+import { appendFileSync } from "node:fs"
+appendFileSync(${JSON.stringify(readsPath)}, JSON.stringify(process.argv.slice(2)) + "\\n")
+process.stdout.write(${JSON.stringify(`${value}\n`)})
+`,
+        { mode: 0o700 }
+      )
+      writeFileSync(
+        playbookPath,
+        `
+import { writeFileSync } from "node:fs"
+import { op, resolveEnvironment, server } from "paratix"
+import { secret } from "paratix/modules"
+const state = () => globalThis[Symbol.for("paratix.secretSink.state")]
+process.once("beforeExit", () => writeFileSync(${JSON.stringify(cleanupPath)}, JSON.stringify({ count: state().counts.size, version: state().version })))
+export default server({
+  name: "dist-secret-cache", host: "127.0.0.1",
+  ssh: { ports: [${String(testServer.port)}], privateKey: ${JSON.stringify(privateKeyPath)}, strictHostKeyChecking: "no", user: "root" },
+  run: [
+    op.resolve({ OLD: ${JSON.stringify(reference)} }),
+    secret.provider("1password").resolve({ NEW: ${JSON.stringify(reference)} }),
+    {
+      name: "observe shared secret cache", local: true,
+      async check(_ssh, env) {
+        const values = await Promise.all([resolveEnvironment(env, "OLD"), resolveEnvironment(env, "NEW")])
+        writeFileSync(${JSON.stringify(observationsPath)}, JSON.stringify({ values, registered: state().counts.has(values[0]) }))
+        return "ok"
+      },
+      async apply() { return { status: "ok" } },
+    },
+  ],
+})
+`
+      )
+      const run = await execFileCapturingFailure(
+        process.execPath,
+        [join(packedPackageRootDirectory, "dist/cli.js"), "apply", playbookPath],
+        {
+          cwd: tempDirectory,
+          encoding: "utf8",
+          env: {
+            ...process.env,
+            PATH: `${binDirectory}:${String(process.env.PATH)}`,
+            SSH_AUTH_SOCK: "",
+          },
+          killSignal: "SIGTERM",
+          maxBuffer: CLI_COMMAND_MAX_BUFFER,
+          timeout: CLI_COMMAND_TIMEOUT_MS,
+        }
+      )
+      expect(run.exitCode).toBe(0)
+      expect(
+        readFileSync(readsPath, "utf8")
+          .trim()
+          .split("\n")
+          .map((line) => JSON.parse(line) as unknown)
+      ).toStrictEqual([["read", "--", reference]])
+      expect(JSON.parse(readFileSync(observationsPath, "utf8"))).toStrictEqual({
+        registered: true,
+        values: [value, value],
+      })
+      expect(JSON.parse(readFileSync(cleanupPath, "utf8"))).toStrictEqual({ count: 0, version: 1 })
+      expect(unexpectedCommands).toStrictEqual([])
+      expect(run.stdout + run.stderr).not.toContain(value)
+    } finally {
+      await testServer.close()
+      rmSync(tempDirectory, { force: true, recursive: true })
     }
   })
 
