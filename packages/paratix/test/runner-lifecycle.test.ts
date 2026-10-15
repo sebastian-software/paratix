@@ -225,10 +225,8 @@ describe("runPlaybook recipe exception handling", () => {
       consoleErrors.push(args.join(" "))
     })
 
-    const [{ runPlaybook }, { recipe }] = await Promise.all([
-      import("../src/runner.js"),
-      import("../src/recipe.js"),
-    ])
+    const { runPlaybook } = await import("../src/runner.js")
+    const { recipe } = await import("../src/recipe.js")
 
     const throwingChild: Module = {
       apply: vi.fn().mockResolvedValue({ status: "changed" } satisfies ModuleResult),
@@ -271,10 +269,8 @@ describe("runPlaybook recipe exception handling", () => {
       consoleErrors.push(args.join(" "))
     })
 
-    const [{ runPlaybook }, { recipe }] = await Promise.all([
-      import("../src/runner.js"),
-      import("../src/recipe.js"),
-    ])
+    const { runPlaybook } = await import("../src/runner.js")
+    const { recipe } = await import("../src/recipe.js")
 
     const throwingChild: Module = {
       apply: vi.fn().mockRejectedValue(new Error("recipe child apply exploded")),
@@ -332,10 +328,8 @@ describe("runPlaybook failed result diagnostics", () => {
       consoleErrors.push(args.join(" "))
     })
 
-    const [{ runPlaybook }, { CommandError }] = await Promise.all([
-      import("../src/runner.js"),
-      import("../src/sshHelpers.js"),
-    ])
+    const { runPlaybook } = await import("../src/runner.js")
+    const { CommandError } = await import("../src/sshHelpers.js")
 
     const failingModule: Module = {
       apply: vi.fn().mockResolvedValue({
@@ -375,10 +369,8 @@ describe("runPlaybook failed result diagnostics", () => {
       consoleErrors.push(args.join(" "))
     })
 
-    const [{ runPlaybook }, { hostname }] = await Promise.all([
-      import("../src/runner.js"),
-      import("../src/modules/hostname.js"),
-    ])
+    const { runPlaybook } = await import("../src/runner.js")
+    const { hostname } = await import("../src/modules/hostname.js")
 
     const definition: ServerDefinition = {
       host: "1.2.3.4",
@@ -411,7 +403,7 @@ describe("runPlaybook failed result diagnostics", () => {
       consoleErrors.push(args.join(" "))
     })
 
-    const [{ runPlaybook }] = await Promise.all([import("../src/runner.js")])
+    const { runPlaybook } = await import("../src/runner.js")
 
     const failingModule: Module = {
       apply: vi
@@ -455,11 +447,9 @@ describe("runPlaybook failed result diagnostics", () => {
       consoleErrors.push(args.join(" "))
     })
 
-    const [{ runPlaybook }, { hostname }, { recipe }] = await Promise.all([
-      import("../src/runner.js"),
-      import("../src/modules/hostname.js"),
-      import("../src/recipe.js"),
-    ])
+    const { runPlaybook } = await import("../src/runner.js")
+    const { hostname } = await import("../src/modules/hostname.js")
+    const { recipe } = await import("../src/recipe.js")
 
     const definition: ServerDefinition = {
       host: "1.2.3.4",
@@ -488,10 +478,8 @@ describe("runPlaybook failed result diagnostics", () => {
       consoleErrors.push(args.join(" "))
     })
 
-    const [{ runPlaybook }, { CommandError }] = await Promise.all([
-      import("../src/runner.js"),
-      import("../src/sshHelpers.js"),
-    ])
+    const { runPlaybook } = await import("../src/runner.js")
+    const { CommandError } = await import("../src/sshHelpers.js")
 
     const changedModule: Module = {
       apply: vi.fn().mockResolvedValue({ status: "changed" } satisfies ModuleResult),
@@ -538,7 +526,7 @@ describe("runPlaybook failed result diagnostics", () => {
       consoleErrors.push(args.join(" "))
     })
 
-    const [{ runPlaybook }] = await Promise.all([import("../src/runner.js")])
+    const { runPlaybook } = await import("../src/runner.js")
 
     const changedModule: Module = {
       apply: vi.fn().mockResolvedValue({ status: "changed" } satisfies ModuleResult),
@@ -593,11 +581,9 @@ describe("runPlaybook failed result diagnostics", () => {
       consoleErrors.push(args.join(" "))
     })
 
-    const [{ runPlaybook }, { recipe }, { CommandError }] = await Promise.all([
-      import("../src/runner.js"),
-      import("../src/recipe.js"),
-      import("../src/sshHelpers.js"),
-    ])
+    const { runPlaybook } = await import("../src/runner.js")
+    const { recipe } = await import("../src/recipe.js")
+    const { CommandError } = await import("../src/sshHelpers.js")
 
     const changedModule: Module = {
       apply: vi.fn().mockResolvedValue({ status: "changed" } satisfies ModuleResult),
@@ -647,10 +633,8 @@ describe("runPlaybook failed result diagnostics", () => {
       consoleLogs.push(args.join(" "))
     })
 
-    const [{ runPlaybook }, { recipe }] = await Promise.all([
-      import("../src/runner.js"),
-      import("../src/recipe.js"),
-    ])
+    const { runPlaybook } = await import("../src/runner.js")
+    const { recipe } = await import("../src/recipe.js")
 
     const changedModule: Module = {
       apply: vi.fn().mockResolvedValue({ status: "changed" } satisfies ModuleResult),
@@ -818,10 +802,8 @@ describe("runPlaybook rsync check error handling", () => {
       SshConnectionImpl: makeMockSshClass(capturedConfigs, { lifecycle: "permissive" }),
     }))
 
-    const [{ runPlaybook }, { rsync }] = await Promise.all([
-      import("../src/runner.js"),
-      import("../src/modules/rsync.js"),
-    ])
+    const { runPlaybook } = await import("../src/runner.js")
+    const { rsync } = await import("../src/modules/rsync.js")
 
     const subsequentModule: Module = {
       apply: vi.fn().mockResolvedValue({ status: "ok" } satisfies ModuleResult),

@@ -230,10 +230,8 @@ describe("runPlaybook dry-run recipe behaviour", () => {
       consoleLogs.push(args.join(" "))
     })
 
-    const [{ runPlaybook }, { sshd }] = await Promise.all([
-      import("../src/runner.js"),
-      import("../src/modules/sshd.js"),
-    ])
+    const { runPlaybook } = await import("../src/runner.js")
+    const { sshd } = await import("../src/modules/sshd.js")
 
     const definition: ServerDefinition = {
       host: "1.2.3.4",
@@ -261,11 +259,9 @@ describe("runPlaybook dry-run recipe behaviour", () => {
       consoleErrors.push(args.join(" "))
     })
 
-    const [{ runPlaybook }, { recipe }, { CommandError }] = await Promise.all([
-      import("../src/runner.js"),
-      import("../src/recipe.js"),
-      import("../src/sshHelpers.js"),
-    ])
+    const { runPlaybook } = await import("../src/runner.js")
+    const { recipe } = await import("../src/recipe.js")
+    const { CommandError } = await import("../src/sshHelpers.js")
 
     const failingChild: Module = {
       _dryRunBlocker: true,
@@ -303,10 +299,8 @@ describe("runPlaybook dry-run recipe behaviour", () => {
       SshConnectionImpl: makeMockSshClass(capturedConfigs, { lifecycle: "permissive" }),
     }))
 
-    const [{ runPlaybook }, { fail }] = await Promise.all([
-      import("../src/runner.js"),
-      import("../src/builtins.js"),
-    ])
+    const { runPlaybook } = await import("../src/runner.js")
+    const { fail } = await import("../src/builtins.js")
 
     const laterModule: Module = {
       apply: vi.fn().mockResolvedValue({ status: "changed" } satisfies ModuleResult),
@@ -336,10 +330,8 @@ describe("runPlaybook dry-run recipe behaviour", () => {
       SshConnectionImpl: makeMockSshClass(capturedConfigs, { lifecycle: "permissive" }),
     }))
 
-    const [{ runPlaybook }, { firstRun }] = await Promise.all([
-      import("../src/runner.js"),
-      import("../src/builtins.js"),
-    ])
+    const { runPlaybook } = await import("../src/runner.js")
+    const { firstRun } = await import("../src/builtins.js")
 
     const laterModule: Module = {
       apply: vi.fn().mockResolvedValue({ status: "changed" } satisfies ModuleResult),
@@ -370,10 +362,8 @@ describe("runPlaybook dry-run recipe behaviour", () => {
       SshConnectionImpl: makeMockSshClass(capturedConfigs, { lifecycle: "permissive" }),
     }))
 
-    const [{ runPlaybook }, { firstRun }] = await Promise.all([
-      import("../src/runner.js"),
-      import("../src/builtins.js"),
-    ])
+    const { runPlaybook } = await import("../src/runner.js")
+    const { firstRun } = await import("../src/builtins.js")
 
     const changedModule: Module = {
       apply: vi.fn().mockResolvedValue({ status: "changed" } satisfies ModuleResult),
@@ -417,10 +407,8 @@ describe("runPlaybook dry-run recipe behaviour", () => {
       SshConnectionImpl: makeMockSshClass(capturedConfigs, { lifecycle: "permissive" }),
     }))
 
-    const [{ runPlaybook }, { signals }] = await Promise.all([
-      import("../src/runner.js"),
-      import("../src/builtins.js"),
-    ])
+    const { runPlaybook } = await import("../src/runner.js")
+    const { signals } = await import("../src/builtins.js")
 
     const changedModule: Module = {
       apply: vi.fn().mockResolvedValue({ status: "changed" } satisfies ModuleResult),
@@ -455,10 +443,8 @@ describe("runPlaybook dry-run recipe behaviour", () => {
       SshConnectionImpl: makeMockSshClass(capturedConfigs, { lifecycle: "permissive" }),
     }))
 
-    const [{ runPlaybook }, { signals }] = await Promise.all([
-      import("../src/runner.js"),
-      import("../src/builtins.js"),
-    ])
+    const { runPlaybook } = await import("../src/runner.js")
+    const { signals } = await import("../src/builtins.js")
 
     const changedModule: Module = {
       apply: vi.fn().mockResolvedValue({ status: "changed" } satisfies ModuleResult),
@@ -493,10 +479,8 @@ describe("runPlaybook dry-run recipe behaviour", () => {
       SshConnectionImpl: makeMockSshClass(capturedConfigs, { lifecycle: "permissive" }),
     }))
 
-    const [{ runPlaybook }, { signals }] = await Promise.all([
-      import("../src/runner.js"),
-      import("../src/builtins.js"),
-    ])
+    const { runPlaybook } = await import("../src/runner.js")
+    const { signals } = await import("../src/builtins.js")
 
     const changedModule: Module = {
       apply: vi.fn().mockResolvedValue({ status: "changed" } satisfies ModuleResult),
@@ -591,10 +575,8 @@ describe("runPlaybook dry-run recipe behaviour", () => {
       consoleLogs.push(args.join(" "))
     })
 
-    const [{ runPlaybook }, { sshd }] = await Promise.all([
-      import("../src/runner.js"),
-      import("../src/modules/sshd.js"),
-    ])
+    const { runPlaybook } = await import("../src/runner.js")
+    const { sshd } = await import("../src/modules/sshd.js")
 
     const definition: ServerDefinition = {
       host: "1.2.3.4",
@@ -661,11 +643,9 @@ describe("runPlaybook dry-run recipe behaviour", () => {
       SshConnectionImpl: makeMockSshClass(capturedConfigs, { lifecycle: "permissive" }),
     }))
 
-    const [{ runPlaybook }, { assert }, { recipe }] = await Promise.all([
-      import("../src/runner.js"),
-      import("../src/builtins.js"),
-      import("../src/recipe.js"),
-    ])
+    const { runPlaybook } = await import("../src/runner.js")
+    const { assert } = await import("../src/builtins.js")
+    const { recipe } = await import("../src/recipe.js")
 
     const laterChild: Module = {
       apply: vi.fn().mockResolvedValue({ status: "changed" } satisfies ModuleResult),
@@ -698,10 +678,8 @@ describe("runPlaybook dry-run recipe behaviour", () => {
       SshConnectionImpl: makeMockSshClass(capturedConfigs, { lifecycle: "permissive" }),
     }))
 
-    const [{ runPlaybook }, { op }] = await Promise.all([
-      import("../src/runner.js"),
-      import("../src/modules/op.js"),
-    ])
+    const { runPlaybook } = await import("../src/runner.js")
+    const { op } = await import("../src/modules/op.js")
 
     let receivedEnvInCheck: Environment | undefined
     const dependentModule: Module = {
@@ -817,10 +795,8 @@ describe("runPlaybook dry-run recipe behaviour", () => {
       }),
     }))
 
-    const [{ runPlaybook }, { system }] = await Promise.all([
-      import("../src/runner.js"),
-      import("../src/modules/system.js"),
-    ])
+    const { runPlaybook } = await import("../src/runner.js")
+    const { system } = await import("../src/modules/system.js")
 
     let factsEnvInCheck: Environment | undefined
     let uptimeEnvInCheck: Environment | undefined
@@ -887,10 +863,8 @@ describe("runPlaybook dry-run recipe behaviour", () => {
       }),
     }))
 
-    const [{ runPlaybook }, { service }] = await Promise.all([
-      import("../src/runner.js"),
-      import("../src/modules/service.js"),
-    ])
+    const { runPlaybook } = await import("../src/runner.js")
+    const { service } = await import("../src/modules/service.js")
 
     let receivedEnvInCheck: Environment | undefined
     const dependentModule: Module = {
@@ -929,11 +903,9 @@ describe("runPlaybook dry-run recipe behaviour", () => {
       SshConnectionImpl: makeMockSshClass(capturedConfigs, { lifecycle: "permissive" }),
     }))
 
-    const [{ runPlaybook }, { op }, { recipe }] = await Promise.all([
-      import("../src/runner.js"),
-      import("../src/modules/op.js"),
-      import("../src/recipe.js"),
-    ])
+    const { runPlaybook } = await import("../src/runner.js")
+    const { op } = await import("../src/modules/op.js")
+    const { recipe } = await import("../src/recipe.js")
 
     let receivedEnvInCheck: Environment | undefined
     const dependentChild: Module = {
@@ -970,10 +942,8 @@ describe("runPlaybook dry-run recipe behaviour", () => {
       SshConnectionImpl: makeMockSshClass(capturedConfigs, { lifecycle: "permissive" }),
     }))
 
-    const [{ runPlaybook }, { assert, when }] = await Promise.all([
-      import("../src/runner.js"),
-      import("../src/builtins.js"),
-    ])
+    const { runPlaybook } = await import("../src/runner.js")
+    const { assert, when } = await import("../src/builtins.js")
 
     const laterModule: Module = {
       apply: vi.fn().mockResolvedValue({ status: "changed" } satisfies ModuleResult),
@@ -1009,10 +979,8 @@ describe("runPlaybook dry-run recipe behaviour", () => {
       SshConnectionImpl: makeMockSshClass(capturedConfigs, { lifecycle: "permissive" }),
     }))
 
-    const [{ runPlaybook }, { fail, when }] = await Promise.all([
-      import("../src/runner.js"),
-      import("../src/builtins.js"),
-    ])
+    const { runPlaybook } = await import("../src/runner.js")
+    const { fail, when } = await import("../src/builtins.js")
 
     const laterModule: Module = {
       apply: vi.fn().mockResolvedValue({ status: "changed" } satisfies ModuleResult),
@@ -1045,11 +1013,9 @@ describe("runPlaybook dry-run recipe behaviour", () => {
       SshConnectionImpl: makeMockSshClass(capturedConfigs, { lifecycle: "permissive" }),
     }))
 
-    const [{ runPlaybook }, { when }, { op }] = await Promise.all([
-      import("../src/runner.js"),
-      import("../src/builtins.js"),
-      import("../src/modules/op.js"),
-    ])
+    const { runPlaybook } = await import("../src/runner.js")
+    const { when } = await import("../src/builtins.js")
+    const { op } = await import("../src/modules/op.js")
 
     let receivedEnvInCheck: Environment | undefined
     const dependentModule: Module = {
@@ -1093,10 +1059,8 @@ describe("runPlaybook dry-run recipe behaviour", () => {
       SshConnectionImpl: makeMockSshClass(capturedConfigs, { lifecycle: "permissive" }),
     }))
 
-    const [{ runPlaybook }, { op }] = await Promise.all([
-      import("../src/runner.js"),
-      import("../src/modules/op.js"),
-    ])
+    const { runPlaybook } = await import("../src/runner.js")
+    const { op } = await import("../src/modules/op.js")
 
     let receivedEnvInCheck: Environment | undefined
     const dependentModule: Module = {
@@ -1141,10 +1105,8 @@ describe("runPlaybook dry-run recipe behaviour", () => {
       SshConnectionImpl: makeMockSshClass(capturedConfigs, { lifecycle: "permissive" }),
     }))
 
-    const [{ runPlaybook }, { op }] = await Promise.all([
-      import("../src/runner.js"),
-      import("../src/modules/op.js"),
-    ])
+    const { runPlaybook } = await import("../src/runner.js")
+    const { op } = await import("../src/modules/op.js")
 
     const definition: ServerDefinition = {
       host: "1.2.3.4",
