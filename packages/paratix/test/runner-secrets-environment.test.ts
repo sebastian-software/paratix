@@ -44,10 +44,8 @@ describe("runPlaybook secret sink cleanup", () => {
       SshConnectionImpl: makeMockSshClass(capturedConfigs, { lifecycle: "permissive" }),
     }))
 
-    const [{ runPlaybook }, { getRegisteredSecrets, withRegisteredSecrets }] = await Promise.all([
-      import("../src/runner.js"),
-      import("../src/secretSink.js"),
-    ])
+    const { runPlaybook } = await import("../src/runner.js")
+    const { getRegisteredSecrets, withRegisteredSecrets } = await import("../src/secretSink.js")
     const secret = "runner-success-secret"
     const module: Module = {
       apply: vi.fn(),
@@ -84,10 +82,8 @@ describe("runPlaybook secret sink cleanup", () => {
       SshConnectionImpl: makeMockSshClass(capturedConfigs, { lifecycle: "permissive" }),
     }))
 
-    const [{ runPlaybook }, { getRegisteredSecrets, withRegisteredSecrets }] = await Promise.all([
-      import("../src/runner.js"),
-      import("../src/secretSink.js"),
-    ])
+    const { runPlaybook } = await import("../src/runner.js")
+    const { getRegisteredSecrets, withRegisteredSecrets } = await import("../src/secretSink.js")
     const secret = "runner-failure-secret"
     const module: Module = {
       apply: vi.fn().mockImplementation(async () =>
@@ -147,11 +143,9 @@ describe("runPlaybook op.resolve integration", () => {
       SshConnectionImpl: makeMockSshClass(capturedConfigs, { lifecycle: "permissive" }),
     }))
 
-    const [{ runPlaybook }, { op }, { getRegisteredSecrets }] = await Promise.all([
-      import("../src/runner.js"),
-      import("../src/modules/op.js"),
-      import("../src/secretSink.js"),
-    ])
+    const { runPlaybook } = await import("../src/runner.js")
+    const { op } = await import("../src/modules/op.js")
+    const { getRegisteredSecrets } = await import("../src/secretSink.js")
 
     let receivedEnvInCheck: Environment | undefined
     const dependentModule: Module = {
@@ -224,10 +218,8 @@ describe("runPlaybook secret prewarm phase", () => {
       SshConnectionImpl: makeMockSshClass(capturedConfigs, { connect, lifecycle: "permissive" }),
     }))
 
-    const [{ runPlaybook }, { op }] = await Promise.all([
-      import("../src/runner.js"),
-      import("../src/modules/op.js"),
-    ])
+    const { runPlaybook } = await import("../src/runner.js")
+    const { op } = await import("../src/modules/op.js")
 
     const dependentModule: Module = {
       apply: vi.fn().mockResolvedValue({ status: "ok" } satisfies ModuleResult),
@@ -269,10 +261,8 @@ describe("runPlaybook secret prewarm phase", () => {
       SshConnectionImpl: makeMockSshClass(capturedConfigs, { connect, lifecycle: "permissive" }),
     }))
 
-    const [{ runPlaybook }, { op }] = await Promise.all([
-      import("../src/runner.js"),
-      import("../src/modules/op.js"),
-    ])
+    const { runPlaybook } = await import("../src/runner.js")
+    const { op } = await import("../src/modules/op.js")
 
     const definition: ServerDefinition = {
       host: "1.2.3.4",
@@ -317,10 +307,8 @@ describe("runPlaybook secret prewarm phase", () => {
       SshConnectionImpl: makeMockSshClass(capturedConfigs, { connect, lifecycle: "permissive" }),
     }))
 
-    const [{ runPlaybook }, { op }] = await Promise.all([
-      import("../src/runner.js"),
-      import("../src/modules/op.js"),
-    ])
+    const { runPlaybook } = await import("../src/runner.js")
+    const { op } = await import("../src/modules/op.js")
 
     const definition: ServerDefinition = {
       host: "1.2.3.4",
@@ -363,10 +351,8 @@ describe("runPlaybook secret prewarm phase", () => {
       SshConnectionImpl: makeMockSshClass(capturedConfigs, { connect, lifecycle: "permissive" }),
     }))
 
-    const [{ runPlaybook }, { op }] = await Promise.all([
-      import("../src/runner.js"),
-      import("../src/modules/op.js"),
-    ])
+    const { runPlaybook } = await import("../src/runner.js")
+    const { op } = await import("../src/modules/op.js")
 
     const definition: ServerDefinition = {
       host: "1.2.3.4",
@@ -391,11 +377,9 @@ describe("runPlaybook secret prewarm phase", () => {
       SshConnectionImpl: makeMockSshClass(capturedConfigs, { lifecycle: "permissive" }),
     }))
 
-    const [{ runPlaybook }, { op }, { getRegisteredSecrets }] = await Promise.all([
-      import("../src/runner.js"),
-      import("../src/modules/op.js"),
-      import("../src/secretSink.js"),
-    ])
+    const { runPlaybook } = await import("../src/runner.js")
+    const { op } = await import("../src/modules/op.js")
+    const { getRegisteredSecrets } = await import("../src/secretSink.js")
 
     const definition: ServerDefinition = {
       host: "1.2.3.4",
@@ -424,10 +408,8 @@ describe("runPlaybook secret prewarm phase", () => {
       SshConnectionImpl: makeMockSshClass(capturedConfigs, { lifecycle: "permissive" }),
     }))
 
-    const [{ runPlaybook }, { op }] = await Promise.all([
-      import("../src/runner.js"),
-      import("../src/modules/op.js"),
-    ])
+    const { runPlaybook } = await import("../src/runner.js")
+    const { op } = await import("../src/modules/op.js")
 
     const definition: ServerDefinition = {
       host: "1.2.3.4",
@@ -501,10 +483,8 @@ describe("runPlaybook secret prewarm phase", () => {
       SshConnectionImpl: makeMockSshClass(capturedConfigs, { lifecycle: "permissive" }),
     }))
 
-    const [{ runPlaybook }, { when }] = await Promise.all([
-      import("../src/runner.js"),
-      import("../src/builtins.js"),
-    ])
+    const { runPlaybook } = await import("../src/runner.js")
+    const { when } = await import("../src/builtins.js")
 
     const guardedModule: Module = {
       apply: vi.fn().mockResolvedValue({ status: "ok" } satisfies ModuleResult),

@@ -444,6 +444,19 @@ function makeSshInstanceWithAgent(
   return new SshConnectionImpl(overrides.host ?? "1.2.3.4", config)
 }
 
+function makeExecHandler(
+  executedCommands: string[],
+  output: string
+): (_command: string, callback: ExecCallback) => void {
+  return (cmd: string, callback: ExecCallback) => {
+    executedCommands.push(cmd)
+    const stream = makeStream()
+    callback(undefined, stream)
+    stream.emit("data", Buffer.from(output))
+    stream.emit("close", 0)
+  }
+}
+
 const emptyEnv = {}
 const mockExecFile = vi.mocked(execFile)
 
@@ -3220,19 +3233,6 @@ describe("SshConnectionImpl", () => {
     // the mocked command sequence is mktemp -d, mktemp, sudo cat, cleanup.
     const DOWNLOAD_STAGING_DIRECTORY = "/tmp/paratix-download.STAGING"
 
-    function makeExecHandler(
-      executedCommands: string[],
-      output: string
-    ): (_command: string, callback: ExecCallback) => void {
-      return (cmd: string, callback: ExecCallback) => {
-        executedCommands.push(cmd)
-        const stream = makeStream()
-        callback(undefined, stream)
-        stream.emit("data", Buffer.from(output))
-        stream.emit("close", 0)
-      }
-    }
-
     function stagedPathFor(suffix: string): string {
       return `${DOWNLOAD_STAGING_DIRECTORY}/paratix-download.${suffix}`
     }
@@ -4895,6 +4895,18 @@ function makeReadySsh(client: Client): SshConnectionImpl {
   return ssh
 }
 
+const failOnce = (_command: string, callback: ExecCallback): void => {
+  callback(new Error("boom"), makeStream())
+}
+
+const succeed = (_command: string, callback: ExecCallback): void => {
+  const stream = makeStream()
+  callback(undefined, stream)
+  setImmediate(() => {
+    stream.emit("close", 0)
+  })
+}
+
 describe("SshConnectionImpl session channel cap", () => {
   it("never holds more concurrent session channels open than the cap", async () => {
     // Issue #178: `exec` opens one ssh2 session channel each, and OpenSSH caps
@@ -4963,16 +4975,6 @@ describe("SshConnectionImpl session channel cap", () => {
   })
 
   it("releases the slot when a command fails so later callers still run", async () => {
-    const failOnce = (_command: string, callback: ExecCallback): void => {
-      callback(new Error("boom"), makeStream())
-    }
-    const succeed = (_command: string, callback: ExecCallback): void => {
-      const stream = makeStream()
-      callback(undefined, stream)
-      setImmediate(() => {
-        stream.emit("close", 0)
-      })
-    }
     // The first `cap` calls fail, the rest succeed. Queued as one-shot
     // implementations rather than a branch inside the spy, so the test stays
     // free of conditionals.

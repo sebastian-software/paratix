@@ -2076,6 +2076,9 @@ describe("mount.present — bind: correctly bound targets (#218)", () => {
   })
 })
 
+const tmpfsLive = (majMin: string): string =>
+  livePairs({ fstype: "tmpfs", majMin, options: "rw,relatime", source: "tmpfs" })
+
 describe("mount.present — bind: drift (#218)", () => {
   it.each([
     ["MAJ:MIN", { majMin: "253:2" }],
@@ -2107,8 +2110,6 @@ describe("mount.present — bind: drift (#218)", () => {
       containing: { fsroot: "/", majMin: "0:51", source: "tmpfs", target: tmpfsSrc },
       src: tmpfsSrc,
     })
-    const tmpfsLive = (majMin: string): string =>
-      livePairs({ fstype: "tmpfs", majMin, options: "rw,relatime", source: "tmpfs" })
     const options = bindOptions("bind", { src: tmpfsSrc })
 
     // Positive control: the same tmpfs instance (MAJ:MIN 0:51) is converged.

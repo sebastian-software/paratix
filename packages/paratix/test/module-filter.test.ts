@@ -117,34 +117,34 @@ describe("createSkipModule", () => {
   })
 })
 
-describe("applyModuleFilter", () => {
-  function buildTree(serviceLayerSignals?: Module[]): {
-    baseSetup: Module
-    containerRuntimes: Module
-    palamedes: Module
-    rybbit: Module
-    serviceLayer: Module
-    tree: Module[]
-  } {
-    const baseSetup = leaf("base-setup")
-    const containerRuntimes = recipe("container-runtimes", [leaf("docker")])
-    const rybbit = recipe("rybbit", [leaf("rybbit-file")])
-    const palamedes = recipe("palamedes-examples", [leaf("pe-file")])
-    const serviceLayer = recipe(
-      "service-layer",
-      [containerRuntimes, rybbit, palamedes],
-      serviceLayerSignals == null ? undefined : { signals: serviceLayerSignals }
-    )
-    return {
-      baseSetup,
-      containerRuntimes,
-      palamedes,
-      rybbit,
-      serviceLayer,
-      tree: [baseSetup, serviceLayer],
-    }
+function buildTree(serviceLayerSignals?: Module[]): {
+  baseSetup: Module
+  containerRuntimes: Module
+  palamedes: Module
+  rybbit: Module
+  serviceLayer: Module
+  tree: Module[]
+} {
+  const baseSetup = leaf("base-setup")
+  const containerRuntimes = recipe("container-runtimes", [leaf("docker")])
+  const rybbit = recipe("rybbit", [leaf("rybbit-file")])
+  const palamedes = recipe("palamedes-examples", [leaf("pe-file")])
+  const serviceLayer = recipe(
+    "service-layer",
+    [containerRuntimes, rybbit, palamedes],
+    serviceLayerSignals == null ? undefined : { signals: serviceLayerSignals }
+  )
+  return {
+    baseSetup,
+    containerRuntimes,
+    palamedes,
+    rybbit,
+    serviceLayer,
+    tree: [baseSetup, serviceLayer],
   }
+}
 
+describe("applyModuleFilter", () => {
   it("descends into an unselected recipe that holds selected children", () => {
     const { baseSetup, palamedes, rybbit, serviceLayer, tree } = buildTree()
     const filtered = applyModuleFilter(tree, new Set(["palamedes-examples", "rybbit"]))

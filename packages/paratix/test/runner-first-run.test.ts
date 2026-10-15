@@ -118,11 +118,9 @@ describe("runPlaybook first-run scope (#201)", () => {
   describe("opt-in", () => {
     it("exposes firstRun: true to module check and apply, recipe children, and when predicates", async () => {
       mockPermissiveSsh()
-      const [{ runPlaybook }, { recipe }, { when }] = await Promise.all([
-        importRunner(),
-        import("../src/recipe.js"),
-        import("../src/builtins.js"),
-      ])
+      const { runPlaybook } = await importRunner()
+      const { recipe } = await import("../src/recipe.js")
+      const { when } = await import("../src/builtins.js")
       const observations: string[] = []
       const definition = makeDefinition([
         recordingModule("top", observations),

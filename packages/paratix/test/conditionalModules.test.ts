@@ -564,10 +564,8 @@ describe("when(...) run summary", () => {
       /* noop */
     })
 
-    const [{ runPlaybook }, builtins] = await Promise.all([
-      import("../src/runner.js"),
-      import("../src/builtins.js"),
-    ])
+    const { runPlaybook } = await import("../src/runner.js")
+    const builtins = await import("../src/builtins.js")
 
     const guarded: Module = {
       apply: vi.fn().mockResolvedValue({ status: "changed" } satisfies ModuleResult),

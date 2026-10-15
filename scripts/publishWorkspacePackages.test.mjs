@@ -67,6 +67,11 @@ const STALE_SOURCE_MTIME = 1000
 const DEFAULT_PARATIX_FILES = ["dist", "llm-guide.md"]
 const DEFAULT_CREATE_PARATIX_FILES = ["dist"]
 
+const toMockPath = (path) => {
+  if (path === REPOSITORY_ROOT) return ""
+  return path.startsWith(`${REPOSITORY_ROOT}/`) ? path.slice(REPOSITORY_ROOT.length + 1) : path
+}
+
 function createFs(options) {
   const {
     createParatixFiles = DEFAULT_CREATE_PARATIX_FILES,
@@ -146,10 +151,6 @@ function createFs(options) {
   }
   const symlinkSet = new Set(symlinkPaths)
   const calls = []
-  const toMockPath = (path) => {
-    if (path === REPOSITORY_ROOT) return ""
-    return path.startsWith(`${REPOSITORY_ROOT}/`) ? path.slice(REPOSITORY_ROOT.length + 1) : path
-  }
   // R-0000740: the drift assertion calls `readdir(path, { withFileTypes: true })`
   // for the `packages/` directory and expects entries whose
   // `isDirectory()` returns true. The default Dirent factory below

@@ -26,21 +26,12 @@ async function harness() {
     shellQuote: (value: string) => `'${value}'`,
     SshConnectionImpl: makeMockSshClass([], { connect, lifecycle: "permissive" }),
   }))
-  const [
-    { runPlaybook },
-    { secret },
-    { when },
-    { recipe },
-    { resolveEnvironment },
-    { getRegisteredSecrets },
-  ] = await Promise.all([
-    import("../src/runner.js"),
-    import("../src/modules/secret.js"),
-    import("../src/builtins.js"),
-    import("../src/recipe.js"),
-    import("../src/environment.js"),
-    import("../src/secretSink.js"),
-  ])
+  const { runPlaybook } = await import("../src/runner.js")
+  const { secret } = await import("../src/modules/secret.js")
+  const { when } = await import("../src/builtins.js")
+  const { recipe } = await import("../src/recipe.js")
+  const { resolveEnvironment } = await import("../src/environment.js")
+  const { getRegisteredSecrets } = await import("../src/secretSink.js")
   return {
     chronology,
     connect,
