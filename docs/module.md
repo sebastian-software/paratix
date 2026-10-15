@@ -960,11 +960,124 @@ Die SSH-Optionen werden automatisch aus der Serverdefinition abgeleitet.
 
 ---
 
-## op — 1Password Secret-Aufloesung
+## secret – gemeinsame Secret-Auflösung
 
-| Modul        | Beschreibung                                                                                                                                                                                                                                                                               | Check-Strategie                                 | Aufwand |
-| ------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | ----------------------------------------------- | ------- |
-| `op.resolve` | Löst `op://`-Referenzen über die 1Password CLI (`op`) auf dem Controller auf. Akzeptiert ein `Record<string, string>` mit Env-Keys und `op://`-URIs als Werte. Die echten Werte werden als Meta-Einträge in den Env geschrieben. **Läuft lokal auf dem Controller, nicht auf dem Server.** | Immer `ok` (reines Lesen, keine Serveränderung) | mittel  |
+`secret` bietet eine lokale Facade für manuelle Eingabe und 1Password. Der verwendende
+Playbook- oder Recipe-Code behält dieselben Bindings; nur die Provider-Konfiguration wechselt.
+`secret` sowie die Typen `SecretResolver`, `SecretProvider`, `SecretInput`, `SecretTotpInput`
+und `ManualSecretProviderOptions` sind über `paratix/modules` und `paratix` verfügbar.
+
+| Aufruf                                | Vertrag                                                                                                                                                                            |
+| ------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `secret.provider("1password")`        | Erstellt eine unveränderliche Facade ohne I/O; keine Optionen.                                                                                                                     |
+| `secret.provider("manual", options?)` | Erstellt eine unveränderliche Facade; `options.labels` ordnet Environment-Namen Anzeigetexte zu.                                                                                   |
+| `secrets.resolve(bindings)`           | Nimmt eine nicht leere `Readonly<Record<string, SecretInput>>` entgegen und erstellt ein lokales Modul. `check` liefert immer `needs-apply`; `apply` gibt Environment-Meta zurück. |
+| `secret.totp(reference)`              | Erstellt ohne I/O einen unveränderlichen Deskriptor `{ kind: "totp", reference }` für einen aktuellen Code beim tatsächlichen Zugriff.                                             |
+
+`SecretProvider` ist `"manual" | "1password"`; `SecretInput` ist ein String oder ein
+`SecretTotpInput`. `SecretResolver` beschreibt die providerunabhängige `resolve`-Methode.
+`ManualSecretProviderOptions` enthält `labels?: Readonly<Record<string, string>>`.
+
+```typescript
+import type { Module } from "paratix"
+import { secret } from "paratix/modules"
+import type { SecretResolver } from "paratix/modules"
+
+const manualSecrets = secret.provider("manual", {
+  labels: { DB_PASSWORD: "Datenbankpasswort", MFA_CODE: "Aktueller Anmeldecode" },
+})
+const vaultSecrets = secret.provider("1password")
+
+function loginSecrets(secrets: SecretResolver): Module {
+  return secrets.resolve({
+    DB_PASSWORD: "op://prod/database/password",
+    MFA_CODE: secret.totp("op://prod/login/one-time-password"),
+  })
+}
+
+const manualModule = loginSecrets(manualSecrets)
+const vaultModule = loginSecrets(vaultSecrets)
+```
+
+Eines der konfigurierten Module kommt vor seine Consumer in `run`. Die Schlüssel sind
+Environment-Namen. Die Referenzen bezeichnen Quellen und sind keine bereits aufgelösten
+Secret-Werte. Die Facade reicht sie unverändert an den gewählten Provider weiter; sie wählt
+keinen Provider anhand des Schemas. Manual behandelt auch `op://`-Strings als opake Identität,
+liest und zeigt sie nicht an. Der Prompt verwendet das Label oder den Environment-Namen.
+Für rein manuelle Bindings funktionieren auch `secrets.resolve({ DB_PASSWORD: "" })` und
+`secrets.resolve({ MFA_CODE: secret.totp("") })`. Manual fragt den aktuellen Code ab, keinen Seed.
+Options-, Binding-Maps und Deskriptorfelder werden kopiert. Ungültige Namen, Eingaben,
+Provider/Optionen und leere Binding-Maps scheitern synchron vor Secret-I/O.
+
+**Frühe Secrets, späte Codes:** `runPlaybook` lädt gewöhnliche Secrets und markierte
+1Password-Seeds vor SSH, auch bei `--dry-run`, in Recipes, Signals und später nicht ausgeführten
+`when(...)`-Zweigen. Prewarm füllt nur den laufgebundenen Cache; Meta entsteht erst an der
+Modulposition. Ein früher Fehler verhindert die SSH-Verbindung. Identische reguläre
+Manual-Bindings teilen eine Abfrage pro Facade, Name, unveränderter Referenz und Lauf.
+Andere Referenzen, Facades oder Läufe bleiben getrennt. Frühe 1Password-Feldwerte teilen
+über beide APIs dieselbe exakte Referenz als Cache-Schlüssel.
+
+Factory, `resolve`, Prewarm, Modul-Apply und Meta-Merge fragen keinen markierten Code ab.
+Erst `await resolveEnvironment(env, "MFA_CODE")` oder ein verwendeter Template-Placeholder
+startet die Auflösung. Ungenutzte Keys und übersprungene Consumer fragen keinen Code ab.
+Nach jedem abgeschlossenen Zugriff löst eine unabhängige Nutzung erneut auf. Getrennte Zugriffe
+in `check` und `apply` können zwei Prompts erzeugen; auch ein Dry-run-Check kann einen Code
+benötigen. Eine erneute Berechnung kann im selben TOTP-Zeitfenster dieselben Ziffern liefern.
+Manual kennt die Restlaufzeit des eingegebenen Codes nicht. Consumer lesen unmittelbar vor
+Nutzung und halten das konkrete Ergebnis lokal, wenn ein Vorgang es mehrfach braucht.
+
+| Explizit markierte 1Password-Referenz                          | Zeitpunkt und Wert                                                                                                                                                                                                                   |
+| -------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| Feld ohne Attribut oder mit `?attribute=value` / `?attr=value` | Gespeicherte `otpauth://totp/...`-Seed-URI früh lesen, trimmen und ohne Codeerzeugung prüfen; Code beim Zugriff lokal berechnen. Freie Feldnamen und Feld-IDs sind möglich.                                                          |
+| Feld mit `?attribute=otp` / `?attr=otp`                        | Exakt diese Referenz erst beim unabhängigen Zugriff über `op read` lesen; Run-Cache umgehen, auch bei vorheriger unmarkierter Nutzung derselben Referenz. Späte CLI-Aufrufe können erneut Authentifizierung oder Biometrie auslösen. |
+
+Der Controller benötigt eine installierte, authentifizierte `op`-CLI. Konkurrierende
+Attributselektoren und andere Attribute als `value` oder `otp` werden bei markierten Referenzen
+vor I/O abgewiesen. Die Referenz wird nicht umgeschrieben. Der gemeinsam gecachte Feldwert
+verliert nur den letzten CLI-Zeilenumbruch; Seed-Trim und Prüfung folgen danach. Gewöhnliche
+und markierte Seed-Nutzung beeinflussen so nicht gegenseitig ihre Normalisierung.
+Unmarkierte Strings behalten den bisherigen Suffix- und Memoisierungsvertrag von `op.resolve`.
+
+**Meta und Templates:** Markierte Einträge tragen `resolution: "per-access"`. Gleichzeitige
+Zugriffe auf denselben gemergten Environment-Resolver teilen nur dessen laufenden Promise.
+Erfolg und Fehler geben ihn frei; getrennte Apply-Aufrufe und Läufe erhalten eigene Resolver.
+Meta-Merges und Environment→Meta→Environment-Roundtrips erhalten die Policy, ohne Werte
+aufzulösen. Sonstige Meta-Einträge bleiben nach erfolgreicher Auflösung memoisiert. Direkte
+Aufrufe verschiedener roher Meta-Resolver haben keine Zusammenfassungsgarantie.
+Templates mit markierten Keys prüfen zuerst Namen und Modifier und verarbeiten gewöhnliche
+Werte einschließlich fehleranfälliger Modifier vollständig. Erst danach lesen sie verschiedene
+markierte Keys nacheinander; doppelte markierte Placeholder teilen einen Wert pro Render.
+
+**Terminalgrenze:** Manual benötigt TTYs an stdin und stderr; umgeleitetes stdout ist erlaubt.
+Tippen und Einfügen zeigen weder Zeichen noch Sternchen. Unicode, Backspace, Leerzeichen und
+leere Eingabe bleiben erlaubt; kein Trim. `Ctrl+C`, EOF und das Runner-Abbruchsignal schließen
+den Prompt. Gleichzeitige Manual-Prompts im Prozess werden abgewiesen; es gibt keine
+Warteschlange. Eigene Consumer müssen unterschiedliche interaktive Keys nacheinander lesen
+und vollständig abwarten. Ein abgelehntes `Promise.all` beendet bereits gestartete Prompts
+nicht automatisch. Eigene Parallelität muss Abbruch und vollständiges Abwarten selbst sichern.
+Ein später Codefehler stoppt den Consumer; frühere Verbindungen und Änderungen bleiben bestehen.
+
+`--filter` entfernt ausgeschlossene Secret-Module vor der Auflösung. Bei entfernten frühen
+Secret-Trägern erscheint die bestehende Warnung. Reine Code-Module haben keinen Prewarm-Hook
+und keine solche Warnung. Ein Zugriff auf ihren entfernten Key scheitert am fehlenden
+Environment-Wert, sofern keine andere Quelle ihn bereitstellt.
+
+**Maskierungsgrenze:** Verdeckte Eingabe gilt für jede Länge. Eigene Provider-/Resolver-Fehler
+maskieren bekannte Werte auch unter acht Zeichen. Der globale Secret-Sink registriert weiterhin
+erst Strings ab acht Zeichen; typische sechsstellige Codes und andere kurze Werte haben deshalb
+keine allgemeine Maskierungsgarantie in späteren Modulausgaben, Diffs oder eigenen Logs.
+Secret-Werte niemals selbst ausgeben.
+
+**SSH und sudo:** Die Facade versorgt nachfolgende Module und Recipes. Initiale
+SSH-Anmeldedaten und `ssh.sudoPassword` werden bereits beim Erstellen von `SshConfig`
+festgelegt, vor Prewarm. Dafür eine Quelle verwenden, die schon vor dem Import der
+Serverdefinition verfügbar ist. Bestehende `op.resolve`-Consumer benötigen keine Migration.
+
+## op — 1Password Secret-Auflösung
+
+| Modul        | Beschreibung                                                                                                                                                                                                                                                                               | Check-Strategie                          | Aufwand |
+| ------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | ---------------------------------------- | ------- |
+| `op.resolve` | Löst `op://`-Referenzen über die 1Password CLI (`op`) auf dem Controller auf. Akzeptiert ein `Record<string, string>` mit Env-Keys und `op://`-URIs als Werte. Die echten Werte werden als Meta-Einträge in den Env geschrieben. **Läuft lokal auf dem Controller, nicht auf dem Server.** | Immer `needs-apply` (Meta bereitstellen) | mittel  |
 
 **Wichtig:** Dieses Modul ist ein **lokales Modul** — es nutzt kein SSH,
 sondern ruft `op` auf dem Controller-Rechner auf. Es implementiert dennoch
@@ -1035,7 +1148,7 @@ Prompt mitten im Lauf auftauchen kann.
 liegende `otpauth://`-URI (der TOTP-Seed) wird bereits in der
 Vorab-Auflösung einmalig per `op read` gelesen; der TOTP-**Code** selbst
 wird erst berechnet, wenn ein Modul oder Template tatsaechlich auf den
-Wert zugreift (via `resolveEnv`) — und das rein lokal, ohne weiteren
+Wert zugreift (via `resolveEnvironment`) – und das rein lokal, ohne weiteren
 `op`-Aufruf und ohne erneute Biometrie. Das ist notwendig, weil OTPs nur
 30 Sekunden gueltig sind und zwischen dem Lesen des Seeds und der
 tatsaechlichen Verwendung beliebig viel Zeit vergehen kann. Der Seed
@@ -1065,14 +1178,18 @@ die Ausgabe-Maskierung registriert.
   separat behandelt.
 - Für jedes OTP-Feld wird einmalig via `op read <reference>` die
   `otpauth://`-URI abgerufen (enthält das TOTP-Secret).
-- In den Env wird eine Funktion `() => string` geschrieben, die bei jedem
-  Zugriff aus dem Secret einen frischen TOTP-Code berechnet (lokal, ohne
-  erneuten `op`-Aufruf).
+- Das Modul liefert einen Lazy-Resolver. Nach dem Meta-Merge berechnet der erste
+  erfolgreiche Environment-Zugriff den Code lokal; weitere Consumer verwenden
+  das memoisierte Ergebnis ohne erneuten `op`-Aufruf. Ein aktueller Code bei jedem
+  unabhängigen Zugriff erfordert die neue Facade mit `secret.totp(...)`.
+  Die alte API bleibt unverändert unterstützt.
 
 **Sicherheit:**
 
-- Aufgeloeste Werte werden **nie in der Konsolenausgabe** angezeigt.
-  Das Modul zeigt nur die Keys an, nicht die Werte (`✓ op: db.password, api.token, admin.otp, backup.passphrase`).
+- Das Modul zeigt nur die Keys an, nicht die Werte. Die globale automatische
+  Ausgabe-Maskierung erfasst registrierte Strings ab acht Zeichen. Kürzere Werte,
+  insbesondere sechsstellige TOTP-Codes, unterliegen dieser Garantie nicht;
+  Consumer dürfen Secrets nicht selbst ausgeben.
 - Die `op`-CLI muss auf dem Controller installiert und authentifiziert sein
   (`op signin` oder biometrische Entsperrung).
 

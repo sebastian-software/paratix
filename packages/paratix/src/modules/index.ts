@@ -20,6 +20,14 @@ export { quadlet } from "./quadlet.js"
 export { releaseUpgrade } from "./releaseUpgrade.js"
 export { rsync } from "./rsync.js"
 export { script } from "./script.js"
+export { secret } from "./secret.js"
+export type {
+  ManualSecretProviderOptions,
+  SecretInput,
+  SecretProvider,
+  SecretResolver,
+  SecretTotpInput,
+} from "./secret.js"
 export { service } from "./service.js"
 export { ssh } from "./ssh.js"
 export { sshd } from "./sshd.js"

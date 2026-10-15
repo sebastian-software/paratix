@@ -67,6 +67,11 @@ import type {
   Module,
   ModuleMetaEntry,
   ModuleResult,
+  ManualSecretProviderOptions as RootManualSecretProviderOptions,
+  SecretInput as RootSecretInput,
+  SecretProvider as RootSecretProvider,
+  SecretResolver as RootSecretResolver,
+  SecretTotpInput as RootSecretTotpInput,
   ServerDefinition,
   ShutdownSignal,
   SshConfig,
@@ -99,6 +104,7 @@ import {
   restartSystemdUnit,
   rsync,
   script,
+  secret,
   service,
   ssh,
   sshd,
@@ -112,7 +118,12 @@ import {
 } from "paratix/modules"
 
 import type {
+  ManualSecretProviderOptions,
   PackageSpec,
+  SecretInput,
+  SecretProvider,
+  SecretResolver,
+  SecretTotpInput,
   UnifiedDiffOptions as ModulesUnifiedDiffOptions,
   UpgradeOptions,
 } from "paratix/modules"
@@ -120,7 +131,7 @@ import type {
 
 <!-- public-api-imports:end -->
 
-Use `paratix/modules` for built-in modules in new playbooks. The same 28 module values are also
+Use `paratix/modules` for built-in modules in new playbooks. The same 29 module values are also
 re-exported from `paratix` for compatibility with existing playbooks, and both entry points return
 the same references. Only these two package entry points are public; do not use deep imports.
 
@@ -587,6 +598,12 @@ this phase aborts the whole run before any connection is opened, with exit
 code 2, instead of surfacing as a failed module later on. This phase also
 runs during `--dry-run`, and `--filter` prints a warning (without changing
 run behavior) when it removes a module that would have resolved secrets.
+References ending in `/otp` or `/one-time-password` read their seed early and emit a lazy
+code resolver. After environment meta is merged, the first successful code is memoized by the
+normal meta policy; later consumers reuse it. An unmarked OTP-code attribute is an ordinary
+early cached string. For a new code per independent access, use [`secret.totp(...)`](#secret).
+Existing playbooks need no migration.
+
 This up-front timing does not change what `op.resolve()` can feed into
 `SshConfig` -- see [Anti-Pattern 16](#dos-and-donts) below.
 
@@ -742,6 +759,111 @@ rsync SSH process and does not depend on a local `known_hosts` entry.
 | Method        | Signature                                                                                    | Idempotent           |
 | ------------- | -------------------------------------------------------------------------------------------- | -------------------- |
 | `script.once` | `(name: string, localPath: string, options?: { args?: string[]; version?: string }): Module` | Yes (versioned flag) |
+
+### `secret`
+
+Use this local facade to keep the same consumer bindings with manual input or 1Password.
+`secret` and its public types are available from both `paratix/modules` and `paratix`.
+
+| Method            | Signature                                                                                                          | Behavior                                                                                                                           |
+| ----------------- | ------------------------------------------------------------------------------------------------------------------ | ---------------------------------------------------------------------------------------------------------------------------------- |
+| `secret.provider` | `(name: "1password"): SecretResolver` or `(name: "manual", options?: ManualSecretProviderOptions): SecretResolver` | Creates an immutable facade without I/O or a global provider change. A `SecretProvider` variable is also accepted without options. |
+| `secrets.resolve` | `(bindings: Readonly<Record<string, SecretInput>>): Module`                                                        | Creates a local module; `check` always returns `NEEDS_APPLY`, and `apply` emits environment meta.                                  |
+| `secret.totp`     | `(reference: string): SecretTotpInput`                                                                             | Creates a frozen `{ kind: "totp", reference }` descriptor without I/O; requests a current code at actual use.                      |
+
+`SecretProvider` is `"1password" | "manual"`. `SecretInput` is `string | SecretTotpInput`.
+`ManualSecretProviderOptions` accepts `labels?: Readonly<Record<string, string>>`.
+Use `SecretResolver` to pass the configured facade into a recipe or module builder:
+
+```typescript
+import { secret } from "paratix/modules"
+import type { Module } from "paratix"
+import type { ManualSecretProviderOptions, SecretResolver } from "paratix/modules"
+
+const manualOptions: ManualSecretProviderOptions = {
+  labels: { DB_PASSWORD: "Database password", MFA_CODE: "Current login code" },
+}
+const manualSecrets = secret.provider("manual", manualOptions)
+const vaultSecrets = secret.provider("1password")
+
+function loginSecrets(secrets: SecretResolver): Module {
+  return secrets.resolve({
+    DB_PASSWORD: "op://prod/database/password",
+    MFA_CODE: secret.totp("op://prod/login/one-time-password"),
+  })
+}
+
+const manualModule = loginSecrets(manualSecrets)
+const vaultModule = loginSecrets(vaultSecrets)
+```
+
+Choose one configured module for `run` before its consumers. The binding keys are environment
+names; reference strings identify sources, never resolved secret values. The facade passes them
+unchanged to the selected provider. Manual accepts the same `op://` strings as opaque identities,
+without reading or displaying them. Its prompt uses a configured label or the environment name.
+For manual-only bindings, `secrets.resolve({ DB_PASSWORD: "", MFA_CODE: secret.totp("") })`
+is valid. Manual asks for the current code, never a seed. Maps, options, and descriptor fields are
+copied when configuring the facade/module. Empty binding maps, invalid names, malformed inputs,
+and unsupported providers/options fail synchronously before secret I/O.
+
+**Early secrets and late codes:** In `runPlaybook`, ordinary secrets and marked 1Password seed
+fields are read before SSH, including during `--dry-run`, inside recipes and signals, and in
+`when(...)` branches whose condition may later be false. Prewarm fills the run cache; environment
+meta becomes available only when the secret module reaches its position. A prewarm failure
+aborts before SSH. Identical ordinary manual bindings share one read per facade, name, exact
+reference, and run; different facades, references, or runs remain separate. Early 1Password reads
+share the exact reference string as their cache key across this facade and `op.resolve`.
+
+A marked code is never materialized by facade construction, prewarm, module `apply`, or a meta
+merge. Only a consumer's `await resolveEnvironment(env, "MFA_CODE")` or a used template placeholder
+resolves it. An unused key or skipped consumer does not ask for a code. Each independent access
+after completion resolves again, including separate accesses in `check` and `apply`, and a
+check during `--dry-run`. A fresh calculation can still produce the same digits within a TOTP
+time window. Manual does not know the remaining lifetime of an entered code. Resolve immediately
+before use and retain the result locally if one operation needs it more than once.
+
+| Marked 1Password reference                                             | Resolution                                                                                                                                                                                                                       |
+| ---------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Field without an attribute, or with `?attribute=value` / `?attr=value` | Read and validate the stored `otpauth://totp/...` seed early; calculate the current code locally at use. Free field names and field IDs work.                                                                                    |
+| Field with `?attribute=otp` / `?attr=otp`                              | Read the exact reference through `op read` at each independent use; bypass the run cache, even if an unmarked binding read the same reference earlier. This can trigger later 1Password authentication or biometric interaction. |
+
+1Password requires an installed, authenticated `op` CLI on the controller. Marked references
+reject competing attribute selectors and attributes other than `value` or `otp` before I/O.
+The original reference is not rewritten. Base field reads remove only the CLI's final newline;
+seed trimming/validation happens after cache lookup, so ordinary and seed consumers can share
+a read without changing each other's value. Unmarked strings retain the legacy suffix and
+memoization behavior documented under [`op`](#op); use the explicit marker for late codes.
+
+**Environment and templates:** Marked entries carry `resolution: "per-access"`. Concurrent
+accesses to the same merged environment resolver share only its pending promise; success and
+failure both clear it. Separate applies/runs get separate resolvers. Meta merges, recipes,
+signals, and the environment-to-meta helpers preserve this policy. Other meta entries keep the
+existing successful-result memoization. Direct calls to separate raw meta resolvers have no
+shared-promise guarantee. Templates with marked keys validate names/modifiers and fully process
+ordinary placeholders, including fallible modifiers, before reading codes. Different marked
+keys resolve sequentially, and duplicate marked placeholders share one value for that render.
+
+**Terminal and failure boundaries:** Manual input requires TTYs on both stdin and stderr;
+redirecting stdout is allowed. Typing and pasting show neither characters nor asterisks. Unicode,
+backspace, whitespace, and empty input are accepted without trimming. `Ctrl+C`, EOF, or the
+runner's abort signal closes the prompt. Concurrent manual prompts in one process are rejected;
+there is no prompt queue. Custom consumers must await different interactive keys sequentially.
+A rejected `Promise.all` does not cancel other prompts it already started: consumer-owned
+parallelism must arrange cancellation and await every resolver it starts. A late code failure
+stops its consumer and does not roll back earlier connections or changes.
+
+`--filter` removes excluded secret modules before resolution. Removed early-secret carriers
+produce the existing warning; code-only modules have no prewarm hook or such warning. A consumer
+of a filtered-out key fails with a missing environment value unless another source supplies it.
+
+**Masking:** Hidden input is independent of length. Provider/resolver errors explicitly mask
+known values, including short codes. The global registered-secret sink accepts only strings of
+at least eight characters, so typical six-digit codes and other shorter values have no general
+masking guarantee in later modules, diffs, or custom logs. Never log secrets yourself.
+
+This facade supplies downstream modules and recipes. It cannot supply initial SSH credentials
+or `ssh.sudoPassword`, because `SshConfig` is constructed before prewarm; see
+[Anti-Pattern 16](#dos-and-donts). Existing `op.resolve` consumers remain supported without migration.
 
 ### `service`
 
@@ -950,6 +1072,13 @@ Use the `meta` object for normal module authoring. Its `env`, `sshdPort`, `syste
 `systemReboot` methods create the four public meta-entry variants. The same constructors are also
 available as `environmentMeta`, `sshdPortMeta`, `systemHostMeta`, and `systemRebootMeta` for
 advanced code that prefers standalone functions.
+
+`EnvironmentMetaEntry.resolution?: "per-access"` is an additive opt-in. Omission preserves
+successful-result memoization (including legacy `op.resolve` codes); `per-access` retains only
+an in-flight resolution and validates the resolved type on every access. Both success and
+failure release that promise. `mergeEnvironmentFromMeta`, `environmentToMetaEntries`, and
+`diffEnvironmentToMetaEntries` preserve this policy without evaluating resolvers. Explicitly
+marked `secret.totp` entries use it automatically.
 
 The remaining public helpers cover validation, narrowing, and conversion:
 
@@ -1310,7 +1439,8 @@ Rules:
   remote round-trips, no diff output.
 - Modules that do not opt in keep showing only `changed (dry-run)`.
 - Every diff line is masked through the registered-secret sink and a terminal
-  sanitizer before printing, so secret-laden file contents never leak verbatim.
+  sanitizer before printing. Only registered strings of at least eight characters are covered;
+  shorter secrets, including typical six-digit TOTP codes, are outside this global masking guarantee.
 - Inline status detail and multi-line diff blocks are independent output layers. A built-in module
   may emit both at once; the runner renders detail next to the status line and the diff below it.
 
@@ -1408,7 +1538,7 @@ and `apply` contract and may return a short `detail`; do not depend on internal 
 13. Do NOT call `server()` without all required fields (`name`, `host`, `ssh`, `run`) -- it throws at construction time. `name` and `host` must not be empty strings.
 14. Do NOT use empty arrays for `ssh.ports` or empty strings for `ssh.user`/`ssh.privateKey` -- validation rejects these. `ssh.privateKey` may be omitted entirely to use the SSH agent instead.
 15. Do NOT return loose `meta: { ... }` maps from custom modules -- always use typed meta entries.
-16. Do NOT set `ssh.sudoPassword` to a value from `op.resolve()` or `meta.env()` -- `SshConfig` is frozen at server construction time, before any module in `run` executes. This still holds even though `op.resolve` now resolves its references up front, right after the command starts: that up-front resolution runs inside `runPlaybook`, which is already after construction time, so it is exactly as unreachable for `SshConfig` as the module's own `apply()` step always was. Use a static source like `process.env.SUDO_PASSWORD` or a variable populated before the server definition is imported.
+16. Do NOT set `ssh.sudoPassword` or initial SSH credentials to values from `secret.provider(...).resolve(...)`, `op.resolve()`, or `meta.env()` -- `SshConfig` is frozen at server construction time, before any module in `run` executes. This still holds even though `op.resolve` now resolves its references up front, right after the command starts: that up-front resolution runs inside `runPlaybook`, which is already after construction time, so it is exactly as unreachable for `SshConfig` as the module's own `apply()` step always was. Use a static source like `process.env.SUDO_PASSWORD` or a variable populated before the server definition is imported.
 
 ## Testing Patterns
 

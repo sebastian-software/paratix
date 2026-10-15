@@ -9,6 +9,13 @@ import type {
 } from "./types.js"
 
 import { createNullPrototypeEnvironment, ENVIRONMENT_FORBIDDEN_KEYS } from "./environment.js"
+import {
+  createPerAccessEnvironmentResolver,
+  hasPerAccessResolution,
+  markPerAccessResolution,
+  PER_ACCESS_RESOLUTION,
+  validateResolvedMetaValue,
+} from "./environmentResolutionPolicy.js"
 import { describeHostValidationFailure, validateHostLabel } from "./hostValidation.js"
 import { isValidTcpPort } from "./serverDefinitionValidation.js"
 
@@ -35,37 +42,15 @@ function inferMetaValueType(
   return "string"
 }
 
-function isMetaValueType(value: string): value is MetaValueType {
-  return value === "boolean" || value === "number" || value === "string"
-}
-
-function validateResolvedMetaValue(parameters: {
-  actualType: string
-  declaredValueType: MetaValueType
-  enforceDeclaredValueType: boolean
-  entryKey: string
-}): void {
-  const { actualType, declaredValueType, enforceDeclaredValueType, entryKey } = parameters
-  if (!isMetaValueType(actualType)) {
-    throw new TypeError(
-      `Env meta entry ${JSON.stringify(entryKey)} resolved to typeof ${actualType}, expected boolean, number, or string`
-    )
-  }
-  if (enforceDeclaredValueType && actualType !== declaredValueType) {
-    throw new TypeError(
-      `Env meta entry ${JSON.stringify(entryKey)} resolved to typeof ${actualType}, expected ${declaredValueType}`
-    )
-  }
-}
-
 function normalizeMetaValueResolver(
   value: MetaEnvironmentValue
 ): () => Promise<boolean | number | string> {
   if (typeof value === "function") {
-    return async () => {
+    const resolver = async (): Promise<boolean | number | string> => {
       await Promise.resolve()
       return value()
     }
+    return hasPerAccessResolution(value) ? markPerAccessResolution(resolver) : resolver
   }
   return async () => {
     await Promise.resolve()
@@ -77,7 +62,14 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null
 }
 
+function assertValidResolutionPolicy(resolution: unknown): void {
+  if (resolution !== undefined && resolution !== PER_ACCESS_RESOLUTION) {
+    throw new TypeError("Invalid env meta entry: resolution must be per-access or undefined")
+  }
+}
+
 function assertValidEnvironmentMetaEntry(candidate: Record<string, unknown>): void {
+  assertValidResolutionPolicy(candidate.resolution)
   if (!hasValidMetaName(candidate.name)) {
     throw new TypeError("Invalid env meta entry: name must be a non-empty string")
   }
@@ -121,6 +113,7 @@ export function environmentMeta(
   return {
     kind: "env",
     name,
+    ...(hasPerAccessResolution(value) ? { resolution: PER_ACCESS_RESOLUTION } : {}),
     resolve: normalizeMetaValueResolver(value),
     valueType: inferMetaValueType(value, valueType),
     valueTypeExplicit: valueType != null,
@@ -283,8 +276,8 @@ function createMemoizedEnvironmentResolver(
   // of the same env key. Multiple modules reading the same key now share
   // a single round-trip. A rejection clears the cache so a later access
   // can retry once the underlying issue is resolved. Callers that need
-  // fresh values on every access (one-time passwords) must register a
-  // new meta entry for each access instead of reusing one.
+  // fresh values on every access (one-time passwords) use the separate
+  // per-access resolver instead of this default memoized wrapper.
   let cachedResolution: null | Promise<boolean | number | string> = null
   const declaredValueType = entry.valueType
   const enforceDeclaredValueType = entry.valueTypeExplicit !== false
@@ -334,8 +327,12 @@ export async function mergeEnvironmentFromMeta(
   const nextEnvironment = Object.assign(createNullPrototypeEnvironment(), environment)
   for (const entry of entries) {
     if (!isEnvironmentMetaEntry(entry)) continue
+    assertValidResolutionPolicy(entry.resolution)
     assertAllowedEnvironmentMetaName(entry.name)
-    nextEnvironment[entry.name] = createMemoizedEnvironmentResolver(entry)
+    nextEnvironment[entry.name] =
+      entry.resolution === PER_ACCESS_RESOLUTION || hasPerAccessResolution(entry.resolve)
+        ? createPerAccessEnvironmentResolver(entry)
+        : createMemoizedEnvironmentResolver(entry)
   }
   await Promise.resolve()
   return nextEnvironment

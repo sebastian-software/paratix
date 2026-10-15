@@ -229,6 +229,16 @@ function parseTotpParameters(otpauthUri: string): {
 }
 
 /**
+ * Validate a seed without reading the clock or generating a code.
+ * @param otpauthUri - URI to validate through the same parser as code generation.
+ */
+export function assertValidTotpSeed(otpauthUri: string): void {
+  const { secret } = parseTotpParameters(otpauthUri)
+  const key = decodeBase32(secret)
+  key.fill(0)
+}
+
+/**
  * Generate a TOTP code from an `otpauth://totp/...` URI according to RFC 6238.
  *
  * The URI is parsed for `secret`, `period` (default 30), `digits` (default 6),

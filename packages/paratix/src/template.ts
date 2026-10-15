@@ -1,6 +1,7 @@
 import type { Environment } from "./types.js"
 
 import { resolveEnvironment } from "./environment.js"
+import { hasPerAccessResolution } from "./environmentResolutionPolicy.js"
 import { shellQuote } from "./sshHelpers.js"
 
 /** Options for controlling template rendering behavior. */
@@ -96,6 +97,8 @@ type Token =
   | { kind: "escaped" }
   | { kind: "literal"; text: string }
   | { kind: "placeholder"; modifiers: string[]; varName: string }
+
+type PlaceholderToken = Extract<Token, { kind: "placeholder" }>
 
 /**
  * Pattern that matches a single placeholder anchored at a specific position.
@@ -233,6 +236,66 @@ function enforceStrictModifiers(tokens: Token[]): void {
   }
 }
 
+function validatePlaceholders(tokens: PlaceholderToken[], environment: Environment): void {
+  for (const token of tokens) {
+    if (!Object.hasOwn(environment, token.varName)) {
+      throw new Error(`Env key "${token.varName}" is not defined`)
+    }
+    for (const name of token.modifiers) {
+      if (!Object.hasOwn(modifiers, name)) throw new Error(`Unknown template modifier "${name}"`)
+    }
+  }
+}
+
+async function resolvePhasedPlaceholders(
+  tokens: PlaceholderToken[],
+  environment: Environment,
+  perAccessKeys: Set<string>
+): Promise<string[]> {
+  validatePlaceholders(tokens, environment)
+  const renderedValues: string[] = []
+  // Complete ordinary values and their fallible transforms before starting late reads.
+  await Promise.all(
+    tokens.map(async (token, index) => {
+      if (perAccessKeys.has(token.varName)) return
+      const value = await resolveEnvironment(environment, token.varName)
+      renderedValues[index] = applyModifiers(String(value), token.modifiers, token.varName)
+    })
+  )
+  // Set insertion order preserves first appearance. Each key is read once per render.
+  for (const key of perAccessKeys) {
+    // eslint-disable-next-line no-await-in-loop -- Complete each late read before starting another prompt.
+    const value = String(await resolveEnvironment(environment, key))
+    for (const [index, token] of tokens.entries()) {
+      if (token.varName === key) {
+        renderedValues[index] = applyModifiers(value, token.modifiers, token.varName)
+      }
+    }
+  }
+  return renderedValues
+}
+
+async function resolveTemplatePlaceholders(
+  tokens: Token[],
+  environment: Environment
+): Promise<{ phased: boolean; resolvedValues: Array<boolean | number | string> }> {
+  const placeholderTokens = tokens.filter(
+    (token): token is PlaceholderToken => token.kind === "placeholder"
+  )
+  const perAccessKeys = new Set(
+    placeholderTokens
+      .filter((token) => hasPerAccessResolution(environment[token.varName]))
+      .map((token) => token.varName)
+  )
+  const phased = perAccessKeys.size > 0
+  const resolvedValues = phased
+    ? await resolvePhasedPlaceholders(placeholderTokens, environment, perAccessKeys)
+    : await Promise.all(
+        placeholderTokens.map(async (token) => resolveEnvironment(environment, token.varName))
+      )
+  return { phased, resolvedValues }
+}
+
 /**
  * Render a template string by replacing all `\{\{key\}\}` (or `\{\{key|modifier\}\}`)
  * placeholders with the corresponding resolved env values.
@@ -261,7 +324,9 @@ function enforceStrictModifiers(tokens: Token[]): void {
  * over the merged output. Resolved values that happen to contain template syntax
  * or any internal sentinel string are therefore preserved verbatim.
  *
- * Placeholders are resolved concurrently via Promise.all; insertion order is preserved.
+ * Ordinary placeholders are resolved concurrently via Promise.all; insertion order is preserved.
+ * With per-access resolvers, names and modifiers are checked first, ordinary values
+ * are fully processed next, and per-access keys are read sequentially once per render.
  *
  * @param template - The template string containing placeholders.
  * @param environment - The env map used to resolve placeholder values.
@@ -282,13 +347,8 @@ export async function renderTemplate(
   // before resolving any values.
   if (strict) enforceStrictModifiers(tokens)
 
-  // Resolve all placeholder values concurrently, preserving token order.
-  const placeholderTokens = tokens.filter(
-    (token): token is Extract<Token, { kind: "placeholder" }> => token.kind === "placeholder"
-  )
-  const resolvedValues = await Promise.all(
-    placeholderTokens.map(async (token) => resolveEnvironment(environment, token.varName))
-  )
+  // Preserve token order while selecting concurrent or phased placeholder reads.
+  const { phased, resolvedValues } = await resolveTemplatePlaceholders(tokens, environment)
 
   // Build the output by concatenating segments in order. No second-pass replace
   // is performed, so resolved values can never collide with sentinel strings.
@@ -301,7 +361,7 @@ export async function renderTemplate(
       output += "{{"
     } else {
       const resolved = String(resolvedValues[placeholderIndex])
-      output += applyModifiers(resolved, token.modifiers, token.varName)
+      output += phased ? resolved : applyModifiers(resolved, token.modifiers, token.varName)
       placeholderIndex += 1
     }
   }

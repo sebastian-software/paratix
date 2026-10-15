@@ -52,6 +52,7 @@ export {
   restartSystemdUnit,
   rsync,
   script,
+  secret,
   service,
   ssh,
   sshd,
@@ -63,7 +64,14 @@ export {
   ufw,
   user,
 } from "./modules/index.js"
-export type { UnifiedDiffOptions } from "./modules/index.js"
+export type {
+  ManualSecretProviderOptions,
+  SecretInput,
+  SecretProvider,
+  SecretResolver,
+  SecretTotpInput,
+  UnifiedDiffOptions,
+} from "./modules/index.js"
 export { recipe } from "./recipe.js"
 /**
  * Paratix — public API entry point.
