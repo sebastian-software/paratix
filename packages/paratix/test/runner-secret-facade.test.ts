@@ -26,6 +26,11 @@ async function harness() {
     shellQuote: (value: string) => `'${value}'`,
     SshConnectionImpl: makeMockSshClass([], { connect, lifecycle: "permissive" }),
   }))
+  // Import sequentially: concurrent imports do not reliably wait for the
+  // pending doUnmock/doMock queue (Vitest 4 replayed it per import, so a stale
+  // replay of the previous test's doUnmock could drop the terminal mock;
+  // Vitest 5 drains it on the first import). A parallel import could then
+  // load the real terminal prompt, which blocks on stdin until the timeout.
   const { runPlaybook } = await import("../src/runner.js")
   const { secret } = await import("../src/modules/secret.js")
   const { when } = await import("../src/builtins.js")
