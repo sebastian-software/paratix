@@ -30,8 +30,8 @@
     "tsx": "^4.23.1"
   },
   "devDependencies": {
-    "@types/node": "24.13.3",
-    "@types/ssh2": "^1.15.4",
+    "@types/node": "24.19.2",
+    "@types/ssh2": "^1.15.6",
     "@vitest/coverage-v8": "4.1.11",
     "tsup": "^8.4.0",
     "typescript": "npm:@typescript/typescript6@^6.0.2",
