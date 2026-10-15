@@ -241,6 +241,32 @@ function debianApplyResponses(
 // CHECK phase
 // ---------------------------------------------------------------------------
 
+const captureWriteFile = (ssh: ReturnType<typeof createMockSsh>): WriteCapture[] => {
+  const writes: WriteCapture[] = []
+  // eslint-disable-next-line @typescript-eslint/require-await
+  const replacement = async (path: string, content: string): Promise<void> => {
+    writes.push({ content, path })
+  }
+  // Override the noop `writeFile` so the test can observe what content
+  // (and in which order) was written to disk. R-0000718: production
+  // code now writes apt sources files via `ssh.exec` with the
+  // NOFOLLOW pipeline and the new content as stdin, so the same
+  // capture intercept must hook `ssh.exec` to record the input
+  // payload from the matching command.
+  Object.assign(ssh, { writeFile: replacement })
+  const originalExec = ssh.exec.bind(ssh)
+  const interceptExec: typeof ssh.exec = async (command, execOptions) => {
+    const match = NOFOLLOW_WRITE_COMMAND_PATTERN.exec(command)
+    if (match?.groups != null) {
+      writes.push({ content: execOptions?.input ?? "", path: match.groups.path })
+      return originalExec(command, execOptions)
+    }
+    return originalExec(command, execOptions)
+  }
+  Object.assign(ssh, { exec: interceptExec })
+  return writes
+}
+
 describe("releaseUpgrade.upgrade — check", () => {
   beforeEach(resetDebianStableCodenameCache)
 
@@ -996,32 +1022,6 @@ describe("releaseUpgrade.upgrade — apply (Debian)", () => {
   // sources files back to the original suite so the host never ends up with
   // sources pointing at the new suite while the upgrade itself failed.
   describe("R-0000046: sources rollback on apt failure", () => {
-    const captureWriteFile = (ssh: ReturnType<typeof createMockSsh>): WriteCapture[] => {
-      const writes: WriteCapture[] = []
-      // eslint-disable-next-line @typescript-eslint/require-await
-      const replacement = async (path: string, content: string): Promise<void> => {
-        writes.push({ content, path })
-      }
-      // Override the noop `writeFile` so the test can observe what content
-      // (and in which order) was written to disk. R-0000718: production
-      // code now writes apt sources files via `ssh.exec` with the
-      // NOFOLLOW pipeline and the new content as stdin, so the same
-      // capture intercept must hook `ssh.exec` to record the input
-      // payload from the matching command.
-      Object.assign(ssh, { writeFile: replacement })
-      const originalExec = ssh.exec.bind(ssh)
-      const interceptExec: typeof ssh.exec = async (command, execOptions) => {
-        const match = NOFOLLOW_WRITE_COMMAND_PATTERN.exec(command)
-        if (match?.groups != null) {
-          writes.push({ content: execOptions?.input ?? "", path: match.groups.path })
-          return originalExec(command, execOptions)
-        }
-        return originalExec(command, execOptions)
-      }
-      Object.assign(ssh, { exec: interceptExec })
-      return writes
-    }
-
     it("apt-get update fails → restores the original /etc/apt/sources.list content", async () => {
       const originalSources = "deb http://deb.debian.org/debian bookworm main\n"
       const ssh = createMockSsh(

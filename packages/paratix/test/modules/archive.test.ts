@@ -1024,6 +1024,11 @@ function scriptArguments(command: string, prefix: string): string[] {
   ].map(({ groups }) => groups?.quoted ?? groups?.digest ?? "")
 }
 
+const readLine = (label: string, content: string): string =>
+  `${label} ${sha256Of(content)} ${Buffer.from(content)
+    .subarray(0, CONTAINMENT_FLAG_BODY_LIMIT_BYTES + 1)
+    .toString("hex")}`
+
 /**
  * Issue #219: model the establish exec on the host files: print one line per
  * entry (up to the read limit) and for the old flag file, create the own
@@ -1038,10 +1043,6 @@ function modelContainmentEstablish(files: Map<string, string>, command: string):
     command,
     containmentEstablishPrefix
   )
-  const readLine = (label: string, content: string): string =>
-    `${label} ${sha256Of(content)} ${Buffer.from(content)
-      .subarray(0, CONTAINMENT_FLAG_BODY_LIMIT_BYTES + 1)
-      .toString("hex")}`
   const entries = [...files.keys()]
     .filter((path) => path.startsWith(`${entryDirectory}/run-`))
     .toSorted()
@@ -2234,6 +2235,45 @@ describe("archive.extract — check", () => {
   })
 })
 
+const runSymlinkProbesWith = async (
+  memberCount: number,
+  extraLines: readonly string[] = []
+): Promise<{
+  crossChecks: number
+  listingProbes: number
+  postMergeListings: number
+  symlinkProbes: number
+}> => {
+  const memberPaths = Array.from(
+    { length: memberCount },
+    (_value, index) => `app/file-${String(index)}`
+  )
+  const mockSsh = createMockSsh({
+    [`tar --no-same-owner --no-overwrite-dir -xzf '${src}' -C '${archiveStageDirectory}'`]: {
+      code: 0,
+    },
+    [tarListCommand(src)]: {
+      code: 0,
+      stdout: gnuTarListing([tarListingForMemberPaths(memberPaths), ...extraLines].join("\n")),
+    },
+  })
+  vi.spyOn(mockSsh, "sha256").mockResolvedValue(archiveSha)
+  vi.spyOn(mockSsh, "writeFile").mockResolvedValue()
+
+  const result = await archive.extract(src, destination).apply(mockSsh, emptyEnv)
+  expect(result.status).toBe("changed")
+  const count = (probe: string): number =>
+    mockSsh.calls.filter((command) => command === probe).length
+  const listings = mockSsh.execCalls.filter(({ command }) => command === symlinkListingProbeCommand)
+  const postMerge = listings.filter(({ options }) => options?.input === postMergeListingInput)
+  return {
+    crossChecks: count(kernelCrossCheckCommand),
+    listingProbes: listings.length - postMerge.length,
+    postMergeListings: postMerge.length,
+    symlinkProbes: count(symlinkProbeCommand),
+  }
+}
+
 describe("archive.extract — apply", () => {
   it("returns failed when conn is null", async () => {
     const mod = archive.extract(src, destination)
@@ -2543,53 +2583,12 @@ describe("archive.extract — apply", () => {
     // The bound is deliberately a fixed number rather than a ratio: a
     // regression back to per-path probing would push this far past it, which is
     // what makes the assertion worth having.
-    const runWith = async (
-      memberCount: number,
-      extraLines: readonly string[] = []
-    ): Promise<{
-      crossChecks: number
-      listingProbes: number
-      postMergeListings: number
-      symlinkProbes: number
-    }> => {
-      const memberPaths = Array.from(
-        { length: memberCount },
-        (_value, index) => `app/file-${String(index)}`
-      )
-      const mockSsh = createMockSsh({
-        [`tar --no-same-owner --no-overwrite-dir -xzf '${src}' -C '${archiveStageDirectory}'`]: {
-          code: 0,
-        },
-        [tarListCommand(src)]: {
-          code: 0,
-          stdout: gnuTarListing([tarListingForMemberPaths(memberPaths), ...extraLines].join("\n")),
-        },
-      })
-      vi.spyOn(mockSsh, "sha256").mockResolvedValue(archiveSha)
-      vi.spyOn(mockSsh, "writeFile").mockResolvedValue()
-
-      const result = await archive.extract(src, destination).apply(mockSsh, emptyEnv)
-      expect(result.status).toBe("changed")
-      const count = (probe: string): number =>
-        mockSsh.calls.filter((command) => command === probe).length
-      const listings = mockSsh.execCalls.filter(
-        ({ command }) => command === symlinkListingProbeCommand
-      )
-      const postMerge = listings.filter(({ options }) => options?.input === postMergeListingInput)
-      return {
-        crossChecks: count(kernelCrossCheckCommand),
-        listingProbes: listings.length - postMerge.length,
-        postMergeListings: postMerge.length,
-        symlinkProbes: count(symlinkProbeCommand),
-      }
-    }
-
-    const few = await runWith(5)
-    const many = await runWith(500)
+    const few = await runSymlinkProbesWith(5)
+    const many = await runSymlinkProbesWith(500)
     // Issue #219: only an archive with a symlink member needs the listings.
     const symlinkLine = tarSymlinkLine("app/link", "file-0")
-    const fewWithSymlink = await runWith(5, [symlinkLine])
-    const manyWithSymlink = await runWith(500, [symlinkLine])
+    const fewWithSymlink = await runSymlinkProbesWith(5, [symlinkLine])
+    const manyWithSymlink = await runSymlinkProbesWith(500, [symlinkLine])
 
     expect(many.symlinkProbes).toBe(few.symlinkProbes)
     expect(many.symlinkProbes).toBeLessThanOrEqual(4)
@@ -5276,10 +5275,24 @@ describe("archive.extract — apply", () => {
   })
 })
 
+// Issue #219: a host link the archive's `a/up -> ..` makes escape; an
+// unrelated escaping host link would no longer refuse the apply.
+const escapingHostLinks = (): HostLinkTree => new Map([[`${destination}/a/esc`, "up/.."]])
+
+/**
+ * Issue #219: assert that an apply stopped before it created, resolved or
+ * probed the destination.
+ *
+ * @param run - The recorded apply run.
+ */
+function expectDestinationUntouched(run: TarListingApplyRun): void {
+  const { calls } = run.mockSsh
+  expect(calls).not.toContain(guardedArchiveDestinationMkdirCommand(destination))
+  expect(calls).not.toContain(`readlink -f -- '${destination}'`)
+  expect(calls).not.toContain(preStagingProbeCommand)
+}
+
 describe("archive.extract containment-failure flag (Issue #219)", () => {
-  // Issue #219: a host link the archive's `a/up -> ..` makes escape; an
-  // unrelated escaping host link would no longer refuse the apply.
-  const escapingHostLinks = (): HostLinkTree => new Map([[`${destination}/a/esc`, "up/.."]])
   const refusedArchive = [tarDirectoryLine("a/"), tarSymlinkLine("a/up", "..")]
   const escRefusal = `[archive.extract] refusing to extract ${src}: symlink "/opt/app/a/esc" -> "up/.." would resolve outside destination "/opt/app" once this archive is merged; the archive's symlinks and the existing symlinks whose resolution passes through a path it writes are checked together before anything is copied`
 
@@ -5424,19 +5437,6 @@ describe("archive.extract containment-failure flag (Issue #219)", () => {
     expect(recordWrite.callIndex).toBeGreaterThan(clear)
     expect(vi.mocked(run.mockSsh.writeFile).mock.calls.at(-1)?.[1]).toBe(recordedFlag())
   })
-
-  /**
-   * Issue #219: assert that an apply stopped before it created, resolved or
-   * probed the destination.
-   *
-   * @param run - The recorded apply run.
-   */
-  function expectDestinationUntouched(run: TarListingApplyRun): void {
-    const { calls } = run.mockSsh
-    expect(calls).not.toContain(guardedArchiveDestinationMkdirCommand(destination))
-    expect(calls).not.toContain(`readlink -f -- '${destination}'`)
-    expect(calls).not.toContain(preStagingProbeCommand)
-  }
 
   // Issue #219: the own entry is established before the destination is
   // created or probed, so an entry that cannot be created stops the apply
@@ -7300,6 +7300,19 @@ function isContainmentFlagRecord(path: string): boolean {
   return path.startsWith(`${containment.entryDirectory}/run-`)
 }
 
+/**
+ * Issue #219: the entry bodies an apply wrote through `writeFile`, in order.
+ *
+ * @param run - The recorded apply run.
+ * @returns The contents of every containment record write.
+ */
+function flagBodies(run: TarListingApplyRun): string[] {
+  return vi
+    .mocked(run.mockSsh.writeFile)
+    .mock.calls.filter(([path]) => isContainmentFlagRecord(path))
+    .map(([, content]) => content)
+}
+
 describe("archive.extract containment flag recording and verification (Issue #219)", () => {
   // Issue #219: `a/esc` walks through `a`, which these archives write, so the
   // backstop judges it; `x/esc` lies where none of them writes.
@@ -7308,19 +7321,6 @@ describe("archive.extract containment flag recording and verification (Issue #21
   const linesThroughA = [tarDirectoryLine("a/"), tarFileLine("a/f"), tarSymlinkLine("a/l", "f")]
   const linesThroughB = [tarDirectoryLine("b/"), tarFileLine("b/g"), tarSymlinkLine("b/s", "g")]
   const entryDirectory = containment.entryDirectory
-
-  /**
-   * Issue #219: the entry bodies an apply wrote through `writeFile`, in order.
-   *
-   * @param run - The recorded apply run.
-   * @returns The contents of every containment record write.
-   */
-  function flagBodies(run: TarListingApplyRun): string[] {
-    return vi
-      .mocked(run.mockSsh.writeFile)
-      .mock.calls.filter(([path]) => isContainmentFlagRecord(path))
-      .map(([, content]) => content)
-  }
 
   it.each([
     {
@@ -7803,6 +7803,38 @@ function scopedEntryBody(scope: unknown, state: string): string {
   return `${JSON.stringify({ scope, state, version: 2 })}\n`
 }
 
+/**
+ * Issue #219: the position of the staging merge in an apply run.
+ *
+ * @param run - The recorded apply run.
+ * @returns The index of the merge in `mockSsh.calls`, or -1 without a merge.
+ */
+function mergeIndex(run: TarListingApplyRun): number {
+  return run.mockSsh.calls.findIndex((command) => archiveStageMovePattern.test(command))
+}
+
+/**
+ * Issue #219: apply an archive of `src` on a host with the given flag files
+ * and host links.
+ *
+ * @param lines - The archive listing lines.
+ * @param host - The host state before the apply.
+ * @param host.files - The flag entries on the host; empty for an absent flag.
+ * @param host.links - The host symlinks below the destination.
+ * @returns The run and the host files after it.
+ */
+async function applyOnHost(
+  lines: readonly string[],
+  host: {
+    files: ReadonlyArray<readonly [string, string]>
+    links: ReadonlyArray<readonly [string, string]>
+  }
+): Promise<{ files: Map<string, string>; run: TarListingApplyRun }> {
+  const files = new Map<string, string>(host.files)
+  const run = await applyTarListing(lines, { files, hostLinks: new Map(host.links) })
+  return { files, run }
+}
+
 describe("archive.extract unknown containment flag verifies the whole destination (Issue #219)", () => {
   // Issue #219: a flag without a usable list of offending links no longer
   // refuses the apply. The apply runs normally; at its end the post-merge
@@ -7893,16 +7925,6 @@ describe("archive.extract unknown containment flag verifies the whole destinatio
   const insideHostLink = [`${destination}/x/in`, "f"] as const
 
   /**
-   * Issue #219: the position of the staging merge in an apply run.
-   *
-   * @param run - The recorded apply run.
-   * @returns The index of the merge in `mockSsh.calls`, or -1 without a merge.
-   */
-  function mergeIndex(run: TarListingApplyRun): number {
-    return run.mockSsh.calls.findIndex((command) => archiveStageMovePattern.test(command))
-  }
-
-  /**
    * Issue #219: the links every kernel cross-check of an apply run carried,
    * sorted.
    *
@@ -7914,28 +7936,6 @@ describe("archive.extract unknown containment flag verifies the whole destinatio
       .filter(({ command }) => command === kernelCrossCheckCommand)
       .flatMap(({ options }) => crossCheckedLinks(options?.input))
       .toSorted()
-  }
-
-  /**
-   * Issue #219: apply an archive of `src` on a host with the given flag files
-   * and host links.
-   *
-   * @param lines - The archive listing lines.
-   * @param host - The host state before the apply.
-   * @param host.files - The flag entries on the host; empty for an absent flag.
-   * @param host.links - The host symlinks below the destination.
-   * @returns The run and the host files after it.
-   */
-  async function applyOnHost(
-    lines: readonly string[],
-    host: {
-      files: ReadonlyArray<readonly [string, string]>
-      links: ReadonlyArray<readonly [string, string]>
-    }
-  ): Promise<{ files: Map<string, string>; run: TarListingApplyRun }> {
-    const files = new Map<string, string>(host.files)
-    const run = await applyTarListing(lines, { files, hostLinks: new Map(host.links) })
-    return { files, run }
   }
 
   it.each(flagCases)(
@@ -9212,6 +9212,40 @@ describe("archive.extract lost extract lock (Issue #224)", () => {
   })
 })
 
+const guarded = (command: string): boolean =>
+  archiveStageMovePattern.test(command) || isContainmentClear(command)
+
+/**
+ * Issue #224: hold the pre-staging probe back, then defer to another hook.
+ *
+ * @param milliseconds - How long the probe waits.
+ * @param next - The hook for every other exec.
+ * @returns The combined hook.
+ */
+function preStagingDelayedBy(
+  milliseconds: number,
+  next: (command: string) => Promise<void> | undefined
+): (command: string) => Promise<void> | undefined {
+  return async (command) =>
+    command === preStagingProbeCommand ? sleep(milliseconds) : next(command)
+}
+
+/**
+ * Issue #224: let every standalone refresh exec throw like a dropped
+ * channel, and defer every other exec to `next`.
+ *
+ * @param next - The hook for every other exec.
+ * @returns The combined hook.
+ */
+function refreshThrows(
+  next: (command: string) => Promise<void> | undefined
+): (command: string) => Promise<void> | undefined {
+  return async (command) => {
+    if (command === mergeLockGuard) throw new Error("channel closed")
+    return next(command)
+  }
+}
+
 describe("archive.extract extract lock heartbeat (Issue #224)", () => {
   const lines = [tarDirectoryLine("a/"), tarFileLine("a/f")]
   /** How long the merge exec is held back: far longer than the guard window. */
@@ -9239,8 +9273,6 @@ describe("archive.extract extract lock heartbeat (Issue #224)", () => {
     let refreshes = 0
     let refused = false
     const fresh = (): boolean => Date.now() - touchedAt <= guardWindowMilliseconds
-    const guarded = (command: string): boolean =>
-      archiveStageMovePattern.test(command) || isContainmentClear(command)
     return {
       async delayExec(command) {
         if (command === extractLockMkdir) touchedAt = Date.now()
@@ -9263,21 +9295,6 @@ describe("archive.extract extract lock heartbeat (Issue #224)", () => {
         },
       ],
     }
-  }
-
-  /**
-   * Issue #224: hold the pre-staging probe back, then defer to another hook.
-   *
-   * @param milliseconds - How long the probe waits.
-   * @param next - The hook for every other exec.
-   * @returns The combined hook.
-   */
-  function preStagingDelayedBy(
-    milliseconds: number,
-    next: (command: string) => Promise<void> | undefined
-  ): (command: string) => Promise<void> | undefined {
-    return async (command) =>
-      command === preStagingProbeCommand ? sleep(milliseconds) : next(command)
   }
 
   /**
@@ -9347,22 +9364,6 @@ describe("archive.extract extract lock heartbeat (Issue #224)", () => {
     expect(run.result.error?.message).toBe(mergeRefusedForLostLock)
     expect(containmentState(files)).toStrictEqual({ [ownEntryName()]: recordedFlag() })
   })
-
-  /**
-   * Issue #224: let every standalone refresh exec throw like a dropped
-   * channel, and defer every other exec to `next`.
-   *
-   * @param next - The hook for every other exec.
-   * @returns The combined hook.
-   */
-  function refreshThrows(
-    next: (command: string) => Promise<void> | undefined
-  ): (command: string) => Promise<void> | undefined {
-    return async (command) => {
-      if (command === mergeLockGuard) throw new Error("channel closed")
-      return next(command)
-    }
-  }
 
   it("names the error of a refresh exec that threw, not a marker state, when it refuses the merge", async () => {
     overrideExtractLockForThisTest({ heartbeatIntervalMilliseconds: 10 })
@@ -9705,33 +9706,33 @@ function leftoverEntryOf(lines: readonly string[]): Array<readonly [string, stri
   return [[earlierEntry, scopedInProgress(lines)]]
 }
 
+const runRoundTripWith = async (
+  memberCount: number
+): Promise<{ calls: number; crossChecks: number; writes: number }> => {
+  const lines = Array.from({ length: memberCount }, (_value, index) => [
+    tarDirectoryLine(`d${String(index)}/`),
+    tarFileLine(`d${String(index)}/f`),
+    tarSymlinkLine(`d${String(index)}/l`, "f"),
+  ]).flat()
+  // Issue #219: with a host model the merge publishes the shipped links,
+  // so the backstop lists them and runs its kernel cross-check.
+  const run = await applyTarListing(lines, {
+    hostLinks: new Map(),
+    owner: "www-data:www-data",
+  })
+  expect(extractionSummary(run)).toStrictEqual(extractedThroughStaging)
+  const crossChecks = run.mockSsh.calls.filter((command) => command === kernelCrossCheckCommand)
+  return {
+    calls: run.mockSsh.calls.length,
+    crossChecks: crossChecks.length,
+    writes: run.writes.length,
+  }
+}
+
 describe("archive.extract round trips (Issue #219)", () => {
   it("keeps the total exec count of an apply constant as the member count grows", async () => {
-    const runWith = async (
-      memberCount: number
-    ): Promise<{ calls: number; crossChecks: number; writes: number }> => {
-      const lines = Array.from({ length: memberCount }, (_value, index) => [
-        tarDirectoryLine(`d${String(index)}/`),
-        tarFileLine(`d${String(index)}/f`),
-        tarSymlinkLine(`d${String(index)}/l`, "f"),
-      ]).flat()
-      // Issue #219: with a host model the merge publishes the shipped links,
-      // so the backstop lists them and runs its kernel cross-check.
-      const run = await applyTarListing(lines, {
-        hostLinks: new Map(),
-        owner: "www-data:www-data",
-      })
-      expect(extractionSummary(run)).toStrictEqual(extractedThroughStaging)
-      const crossChecks = run.mockSsh.calls.filter((command) => command === kernelCrossCheckCommand)
-      return {
-        calls: run.mockSsh.calls.length,
-        crossChecks: crossChecks.length,
-        writes: run.writes.length,
-      }
-    }
-
-    const few = await runWith(3)
-    const many = await runWith(300)
+    const few = await runRoundTripWith(3)
+    const many = await runRoundTripWith(300)
 
     expect(many).toStrictEqual(few)
     // Issue #219: the backstop costs two execs on a converged tree with links:

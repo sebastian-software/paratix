@@ -4096,37 +4096,37 @@ describe.skipIf(SKIP_PLATFORM)(
   }
 )
 
+/**
+ * Issue #219: run the `check` part that tests for containment entries.
+ *
+ * @param prepare - Sets up the scratch paths.
+ * @returns Whether the test passed (no entry).
+ */
+function noEntries(prepare: (paths: ContainmentPaths) => void): boolean {
+  const scratch = scratchContainment()
+  try {
+    mkdirSync(scratch.paths.directory)
+    prepare(scratch.paths)
+    const result = spawnSync("/bin/sh", ["-c", noContainmentEntriesCommand(scratch.paths)], {
+      timeout: 5000,
+    })
+    return result.status === 0
+  } finally {
+    chmodSync(scratch.root, 0o700)
+    if (existsSync(scratch.paths.entryDirectory)) {
+      try {
+        chmodSync(scratch.paths.entryDirectory, 0o755)
+      } catch {
+        // A symlink or file needs no mode change.
+      }
+    }
+    rmSync(scratch.root, { force: true, recursive: true })
+  }
+}
+
 describe.skipIf(SKIP_PLATFORM)(
   "archive.extract containment check shell smoke tests (Issue #219)",
   () => {
-    /**
-     * Issue #219: run the `check` part that tests for containment entries.
-     *
-     * @param prepare - Sets up the scratch paths.
-     * @returns Whether the test passed (no entry).
-     */
-    function noEntries(prepare: (paths: ContainmentPaths) => void): boolean {
-      const scratch = scratchContainment()
-      try {
-        mkdirSync(scratch.paths.directory)
-        prepare(scratch.paths)
-        const result = spawnSync("/bin/sh", ["-c", noContainmentEntriesCommand(scratch.paths)], {
-          timeout: 5000,
-        })
-        return result.status === 0
-      } finally {
-        chmodSync(scratch.root, 0o700)
-        if (existsSync(scratch.paths.entryDirectory)) {
-          try {
-            chmodSync(scratch.paths.entryDirectory, 0o755)
-          } catch {
-            // A symlink or file needs no mode change.
-          }
-        }
-        rmSync(scratch.root, { force: true, recursive: true })
-      }
-    }
-
     it.each([
       { name: "no entry directory", prepare: (): void => undefined },
       {

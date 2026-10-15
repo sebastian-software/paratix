@@ -1086,6 +1086,43 @@ describe("setVersionedFlag – persist failures surface as ModuleResult", () => 
   })
 })
 
+function buildHolderMarkerFailureSsh(
+  lockDirectoryName: string,
+  printfBehaviour: "fail" | "succeed-but-empty-readback"
+): ReturnType<typeof createMockSsh> {
+  const lockPath = `${FLAGS_DIRECTORY}/'${lockDirectoryName}'`
+  const markerPath = `${lockPath}/holder`
+  const printfFailureStderr = "printf: write error: No space left on device\n"
+  // R-0000749: production code now emits `rm -f --` / `rmdir --` so path
+  // arguments are never mis-parsed as options.
+  const mkdirCommand = `mkdir ${lockPath}`
+  const rmdirCommand = `rmdir -- ${lockPath}`
+  const rmMarkerCommand = `rm -f -- ${markerPath}`
+  const printfPattern = /^printf '%s@%s %s\\n' "\$\$" [^"]+ "\$\(date \+%s\)" > \S+\/holder$/v
+  return createMockSsh(
+    {},
+    {
+      allowUnstubbedDefaults: true,
+      defaultExecResult: { code: 0 },
+      defaultOutputResult: "",
+      defaultTestResult: false,
+      responseStubs: [
+        { command: "mkdir -p /var/lib/paratix/flags", result: { code: 0 } },
+        { command: mkdirCommand, result: { code: 0 } },
+        {
+          command: printfPattern,
+          result:
+            printfBehaviour === "fail"
+              ? { code: 1, stderr: printfFailureStderr, stdout: "" }
+              : { code: 0, stderr: "", stdout: "" },
+        },
+        { command: rmMarkerCommand, result: { code: 0 } },
+        { command: rmdirCommand, result: { code: 0 } },
+      ],
+    }
+  )
+}
+
 // R-0000670: when the holder marker write fails (printf non-zero) or the
 // readback yields an empty token, acquireFlagLock now removes the lock
 // directory immediately and surfaces a structured failure. Without this,
@@ -1093,43 +1130,6 @@ describe("setVersionedFlag – persist failures surface as ModuleResult", () => 
 // holder token and the lock would sit untouched until the four-hour stale
 // threshold expired.
 describe("acquireFlagLock – holder marker write failures (R-0000670)", () => {
-  function buildHolderMarkerFailureSsh(
-    lockDirectoryName: string,
-    printfBehaviour: "fail" | "succeed-but-empty-readback"
-  ): ReturnType<typeof createMockSsh> {
-    const lockPath = `${FLAGS_DIRECTORY}/'${lockDirectoryName}'`
-    const markerPath = `${lockPath}/holder`
-    const printfFailureStderr = "printf: write error: No space left on device\n"
-    // R-0000749: production code now emits `rm -f --` / `rmdir --` so path
-    // arguments are never mis-parsed as options.
-    const mkdirCommand = `mkdir ${lockPath}`
-    const rmdirCommand = `rmdir -- ${lockPath}`
-    const rmMarkerCommand = `rm -f -- ${markerPath}`
-    const printfPattern = /^printf '%s@%s %s\\n' "\$\$" [^"]+ "\$\(date \+%s\)" > \S+\/holder$/v
-    return createMockSsh(
-      {},
-      {
-        allowUnstubbedDefaults: true,
-        defaultExecResult: { code: 0 },
-        defaultOutputResult: "",
-        defaultTestResult: false,
-        responseStubs: [
-          { command: "mkdir -p /var/lib/paratix/flags", result: { code: 0 } },
-          { command: mkdirCommand, result: { code: 0 } },
-          {
-            command: printfPattern,
-            result:
-              printfBehaviour === "fail"
-                ? { code: 1, stderr: printfFailureStderr, stdout: "" }
-                : { code: 0, stderr: "", stdout: "" },
-          },
-          { command: rmMarkerCommand, result: { code: 0 } },
-          { command: rmdirCommand, result: { code: 0 } },
-        ],
-      }
-    )
-  }
-
   it("returns a failed ModuleResult and removes the lock when printf fails", async () => {
     const flagName = "marker-write-failure"
     const lockDirectoryName = `${flagName}.lock`
@@ -1857,24 +1857,24 @@ function useFakeHeartbeatClock(): void {
   })
 }
 
+function heartbeatSsh(
+  lockName: string,
+  refresh: () => number | Promise<number>
+): ReturnType<typeof createScriptedMutexSsh> {
+  return createScriptedMutexSsh(lockName, {
+    mkdir: () => true,
+    poll: () => true,
+    readbackToken: CUSTOM_HOLDER_TOKEN,
+    reclaim: () => false,
+    refresh,
+  })
+}
+
 describe("withMutexLock – heartbeat (issue #224)", () => {
   /** The heartbeat interval of these tests, on the fake clock. */
   const intervalMilliseconds = 1000
   /** How far past the section's end the clock runs to catch a late refresh. */
   const afterwardMilliseconds = 10 * intervalMilliseconds
-
-  function heartbeatSsh(
-    lockName: string,
-    refresh: () => number | Promise<number>
-  ): ReturnType<typeof createScriptedMutexSsh> {
-    return createScriptedMutexSsh(lockName, {
-      mkdir: () => true,
-      poll: () => true,
-      readbackToken: CUSTOM_HOLDER_TOKEN,
-      reclaim: () => false,
-      refresh,
-    })
-  }
 
   /**
    * Issue #224: advance the fake clock one heartbeat interval at a time until

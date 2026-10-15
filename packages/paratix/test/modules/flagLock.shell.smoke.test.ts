@@ -87,6 +87,15 @@ function backdate(path: string, ageSeconds: number): number {
   return statSync(path).mtimeMs
 }
 
+function withRoot(body: (root: string) => void): void {
+  const root = makeFlagsRoot()
+  try {
+    body(root)
+  } finally {
+    rmSync(root, { force: true, recursive: true })
+  }
+}
+
 const SKIP_PLATFORM = process.platform === "win32"
 const SKIP_NO_AWK = !isAwkAvailable()
 
@@ -300,15 +309,6 @@ describe.skipIf(SKIP_PLATFORM || SKIP_NO_AWK)("flagLock shell-level smoke tests"
         markerWord: shellQuote(markerPath),
         staleSeconds,
       })
-    }
-
-    function withRoot(body: (root: string) => void): void {
-      const root = makeFlagsRoot()
-      try {
-        body(root)
-      } finally {
-        rmSync(root, { force: true, recursive: true })
-      }
     }
 
     it("writes the caller-supplied token on line 1 and the owner lines after it", () => {
