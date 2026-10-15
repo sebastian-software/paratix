@@ -20,7 +20,7 @@ If you already know tools like Ansible, the core idea will feel familiar. The di
 ## Prerequisites
 
 - Node.js `>=24.0.0`
-- pnpm 11 or newer (the repo pins the exact version in the `packageManager` field; use Corepack to activate it automatically)
+- pnpm 12, or pnpm 11.28.6 or newer (the repo pins the exact version in the `packageManager` field and a global pnpm switches to it automatically; see [pnpm installation](https://pnpm.io/installation))
 
 ## Usage
 

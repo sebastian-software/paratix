@@ -11,8 +11,9 @@ Bug reports and feature requests go through [GitHub Issues](https://github.com/s
 **Requirements**
 
 - Node.js `>=24.0.0`
-- pnpm — the exact version is pinned in the `packageManager` field (`pnpm@11.5.3`). Run `corepack enable`
-  once and Corepack will activate the right version automatically.
+- pnpm 12, or pnpm 11.28.6 or newer — the exact version is pinned in the `packageManager` field of
+  `package.json`, and a globally installed pnpm switches to it automatically. Older pnpm 11 releases
+  install a broken launcher when switching to pnpm 12. See [pnpm installation](https://pnpm.io/installation).
 
 **Clone and install**
 
