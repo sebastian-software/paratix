@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.22.1](https://github.com/sebastian-software/paratix/compare/paratix-v0.22.0...paratix-v0.22.1) (2026-10-16)
+
+
+### Bug Fixes
+
+* **deps:** apply pending Renovate dashboard updates ([#241](https://github.com/sebastian-software/paratix/issues/241)) ([2e369df](https://github.com/sebastian-software/paratix/commit/2e369dfe1aac4df5e23280b4770ce3abee473dc5))
+
 ## [0.22.0](https://github.com/sebastian-software/paratix/compare/paratix-v0.21.0...paratix-v0.22.0) (2026-10-15)
 
 
