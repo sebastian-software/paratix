@@ -214,6 +214,7 @@ export async function createNativeRegistry(
     client = await connectForwarder()
     const name = `127.0.0.1:${String(await forwardRegistry(client, localPort))}`
     const certificatePath = `/etc/containers/certs.d/${name}`
+    await ssh.exec("mkdir -p -m 0755 -- /etc/containers/certs.d", { silent: true })
     await ssh.exec(`mkdir -m 0755 -- ${shellQuote(certificatePath)}`, { silent: true })
     certificateDirectory = certificatePath
     await ssh.exec(`cat > ${shellQuote(`${certificatePath}/ca.crt`)}`, {
