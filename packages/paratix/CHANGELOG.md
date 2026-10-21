@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.23.0](https://github.com/sebastian-software/paratix/compare/paratix-v0.22.0...paratix-v0.23.0) (2026-10-21)
+
+
+### Features
+
+* **paratix:** add persistent Podman registry authentication ([28fe77b](https://github.com/sebastian-software/paratix/commit/28fe77bea5e7dfa1ed5d3d783f9436c4a0794874))
+
+
+### Bug Fixes
+
+* **deps:** apply pending Renovate dashboard updates ([#241](https://github.com/sebastian-software/paratix/issues/241)) ([2e369df](https://github.com/sebastian-software/paratix/commit/2e369dfe1aac4df5e23280b4770ce3abee473dc5))
+
 ## [0.22.0](https://github.com/sebastian-software/paratix/compare/paratix-v0.21.0...paratix-v0.22.0) (2026-10-15)
 
 
