@@ -1,8 +1,13 @@
 # Context7-Konfiguration für Paratix
 
-**Planungsstatus:** Nicht umgesetzt
+**Planungsstatus:** Umgesetzt
 **Quelle:** `effective-flow plan`
 **Empfohlener Workflow:** Feature (`effective-flow build`)
+**Archiviert:** 21. Oktober 2026
+
+Die Planung und der erste lokale Umsetzungsnachweis beschreiben den Stand vom 23. September 2026.
+Der Abschlussnachweis vom 21. Oktober 2026 ergänzt die inzwischen erfolgte Veröffentlichung und
+Remote-Prüfung sowie die separat umgesetzten Folgeschritte.
 
 ## Anforderung
 
@@ -153,32 +158,33 @@ und ein dauerhafter GitHub-Actions-Refresh bleiben außerhalb dieses Arbeitspake
 
 ## Akzeptanzkriterien
 
-- [ ] Der vollständige Scope besteht aus der neuen Root-Datei `context7.json` und genau einer
+- [x] Der vollständige Scope besteht aus der neuen Root-Datei `context7.json` und genau einer
       ergänzten `.DS_Store`-Regel in der vorhandenen Root-`.gitignore`; andere Projektdateien und die
       beiden `.DS_Store`-Dateien bleiben unverändert.
-- [ ] `git check-ignore -v .DS_Store website/.DS_Store` weist für beide Dateien dieselbe neue
+- [x] `git check-ignore -v .DS_Store website/.DS_Store` weist für beide Dateien dieselbe neue
       Root-Regel `.DS_Store` nach.
-- [ ] Die Datei ist valides JSON und enthält ausschließlich `$schema`, `projectTitle`, `description`,
+- [x] Die Parsing-Konfiguration ist valides JSON und enthält `$schema`, `projectTitle`, `description`,
       `folders`, `excludeFolders`, `excludeFiles` und `rules` mit den im Plan vollständig
-      festgelegten Werten.
-- [ ] Die Instanz validiert ohne Fehler gegen das aktuelle Draft-07-Schema unter
+      festgelegten Werten. Die später separat ergänzten Claiming-Felder `url` und `public_key`
+      sind im Abschlussnachweis eingeordnet.
+- [x] Die Instanz validiert ohne Fehler gegen das aktuelle Draft-07-Schema unter
       `https://context7.com/schema/context7.json`.
-- [ ] Die lokal aus Allowlist, unterstützten Dateitypen und Ausschlüssen abgeleitete
+- [x] Die lokal aus Allowlist, unterstützten Dateitypen und Ausschlüssen abgeleitete
       Kandidatenmenge umfasst `README.md` sowie genau die sieben aktuellen Dokumente
       `packages/paratix/README.md`, `packages/paratix/llm-guide.md`,
       `packages/create-paratix/README.md`, `docs/user-guide/README.md`,
       `docs/user-guide/troubleshooting.md`, `docs/user-guide/comparison.md` und
       `docs/user-guide/migration.md`.
-- [ ] Pläne, Reviews, ADRs, historische Designdokumente, interne Agent-Anweisungen, Changelogs,
+- [x] Pläne, Reviews, ADRs, historische Designdokumente, interne Agent-Anweisungen, Changelogs,
       Contribution-/Security-Dokumente sowie Website-Quellen werden durch Allowlist und Ausschlüsse
       nicht als aktuelle Context7-Produktreferenz indexiert.
-- [ ] Jede Regel in `rules` ist direkt durch `packages/paratix/llm-guide.md` belegt und bleibt kurz
+- [x] Jede Regel in `rules` ist direkt durch `packages/paratix/llm-guide.md` belegt und bleibt kurz
       genug, um als langlebige Agent-Anweisung zu funktionieren.
-- [ ] `pnpm exec prettier --check context7.json` und `pnpm agent:check` enden jeweils mit Exit-Code 0.
-- [ ] Die Context7-API bestätigt den Eintrag `/sebastian-software/paratix`; eine Neueinreichung
+- [x] `pnpm exec prettier --check context7.json` und `pnpm agent:check` enden jeweils mit Exit-Code 0.
+- [x] Die Context7-API bestätigt den Eintrag `/sebastian-software/paratix`; eine Neueinreichung
       liefert `200` mit dieser Library-ID oder ein bestehender Eintrag wird nach `409` ohne Duplikat
       aktualisiert.
-- [ ] Nach dem Refresh liefern konkrete Context-Abfragen verwertbare Paratix-Dokumentation für
+- [x] Nach dem Refresh liefern konkrete Context-Abfragen verwertbare Paratix-Dokumentation für
       Playbook/API-Importe, Projekt-Scaffolding, Troubleshooting, Migration und den Vergleich mit
       Ansible beziehungsweise pyinfra. Soweit Context7 Quellenpfade ausgibt, stammt kein Treffer aus
       einem ausgeschlossenen Pfad oder Dateinamen.
@@ -325,12 +331,46 @@ ajv-cli@5.0.0 validate --spec=draft7` mit der temporären Schema-Datei und `cont
   9 regulär übersprungenen Tests, 268 bestandene `create-paratix`-Tests, 2 bestandene Website-Tests
   und 36 bestandene Skripttests.
 
-### Verbleibender End-to-End-Nachweis
+### Damals verbleibender End-to-End-Nachweis
 
-`CONTEXT7_API_KEY` war im Umsetzungslauf nicht gesetzt. Außerdem liegt `context7.json` vor dem
-Merge noch nicht auf dem öffentlichen Default-Branch, von dem Context7 indexiert. Deshalb wurden
-weder Einreichung noch Refresh ausgelöst und die fünf Remote-Abfragen noch nicht ausgeführt. Der
-Plan bleibt bis zu diesem Nachweis im Status „Nicht umgesetzt“ und wird noch nicht archiviert.
+`CONTEXT7_API_KEY` war im Umsetzungslauf vom 23. September 2026 nicht gesetzt. Außerdem lag
+`context7.json` vor dem Merge noch nicht auf dem öffentlichen Default-Branch, von dem Context7
+indexiert. Deshalb wurden damals weder Einreichung noch Refresh ausgelöst und die fünf
+Remote-Abfragen noch nicht ausgeführt. Der Plan blieb bis zum nachfolgenden Abschlussnachweis
+offen.
+
+## Abschlussnachweis vom 21. Oktober 2026
+
+Die Konfiguration ist seit Commit `676d8171` auf `main` vorhanden. Die Nachprüfung erfolgte gegen
+`e300a31f` und bestätigt:
+
+- `context7.json` validiert gegen das aktuelle offizielle Draft-07-Schema. Die Prüfung nutzte den
+  bereits installierten Ajv-Validator; eine zusätzliche Projektabhängigkeit war nicht nötig.
+- Die lokale Kandidatenmenge umfasst weiterhin exakt die acht vorgesehenen Dokumente. Beide
+  `.DS_Store`-Pfade werden von derselben Root-Regel ignoriert.
+- Die Library-Suche findet den kanonischen Eintrag `/sebastian-software/paratix`.
+- Der [Refresh-Job nach Release-PR #234](https://github.com/sebastian-software/paratix/actions/runs/38801754121/job/116930765397)
+  wurde erfolgreich ausgeführt. Der frühere fehlende Remote-Nachweis ist damit überholt.
+- `pnpm agent:check` bestand am selben Tag im Archivierungslauf dieses PRs. Der abschließende
+  Formatcheck umfasst auch `context7.json` und den verschobenen Plan.
+
+Die Remote-Abfragen über Context7 liefern folgende Inhalte und Quellen:
+
+| Prüfbereich              | Beobachtetes Ergebnis                                                                                                                                                   |
+| ------------------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Playbook und API-Importe | Aktuelle Exporte und Secret-Provider aus `packages/paratix/llm-guide.md`                                                                                                |
+| Projekt-Scaffolding      | Root-Bootstrap und CLI-Aufruf aus `packages/create-paratix/README.md` und `README.md`                                                                                   |
+| SSH-Troubleshooting      | Diagnose und Behebung fehlender Host-Key-Vertrauensanker aus `docs/user-guide/troubleshooting.md`, ergänzt um Reconnect-Referenzen                                      |
+| Migration                | Verweise auf die Migration Notes aus `packages/paratix/README.md` und `docs/user-guide/README.md`; die Abfrage lieferte keine eigenständigen Auszüge aus `migration.md` |
+| Vergleich                | Kriterien und Einsatzgrenzen für Paratix, Ansible und pyinfra aus `docs/user-guide/comparison.md`                                                                       |
+
+Alle ausgegebenen Quellen liegen in der erlaubten Dokumentationsmenge. Die Prüfung belegt die
+Nutzbarkeit repräsentativer Inhalte; sie ist kein vollständiges Remote-Dateiinventar.
+
+Die separat umgesetzten Folgeschritte erweitern den ursprünglichen Scope: [PR #207](https://github.com/sebastian-software/paratix/pull/207)
+ergänzte die öffentlichen Claiming-Felder `url` und `public_key`; Commit `7d155b35` ergänzte den
+automatischen Refresh nach Releases. Beide sind inzwischen Teil des aktuellen Stands und stehen
+der Archivierung dieses Plans nicht entgegen.
 
 ## Review-Befunde
 
