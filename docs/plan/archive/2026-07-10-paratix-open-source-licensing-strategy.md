@@ -1,10 +1,20 @@
 # Open-Source-Lizenzstrategie für Paratix
 
-**Planungsstatus:** Nicht umgesetzt
+**Planungsstatus:** Verworfen
 **Quelle:** `$firmo plan`
 **Empfohlener Workflow:** Dokumentation (`$firmo docs`)
 **Doku-Kategorie:** developer-guide
 **Ziel-Pfad:** docs/developer-guide/open-source-licensing-strategy.md
+**Archiviert:** 21. Oktober 2026
+
+## Entscheidung vom 21. Oktober 2026
+
+Paratix bleibt unter der bestehenden MIT-Lizenz. Ein Lizenzwechsel wird nicht weiterverfolgt;
+das geplante Strategiepapier entfällt. Der Plan wird deshalb verworfen und archiviert.
+
+Die folgenden Anforderungen, Empfehlungen und Review-Ergebnisse dokumentieren den damaligen
+Planungsstand. Sie sind durch diese Entscheidung überholt. Die ursprünglichen Akzeptanzkriterien
+bleiben als nicht umgesetzter historischer Umfang erhalten und begründen keine offenen Aufgaben.
 
 ## Anforderung
 
