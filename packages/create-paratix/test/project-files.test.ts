@@ -203,6 +203,7 @@ describe("writeProjectFiles", () => {
         "eslint-config-setup": expect.stringMatching(/^\^/v),
         jiti: expect.stringMatching(/^\^/v),
         prettier: expect.stringMatching(/^\^/v),
+        tslib: "^2.8.1",
         tsx: expect.stringMatching(/^\^/v),
         typescript: expect.stringMatching(/^npm:@typescript\/typescript6@\^/v),
       },
