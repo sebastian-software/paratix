@@ -109,6 +109,53 @@ For Podman-native services, Paratix now also includes `quadlet.container(...)`. 
 
 When you need a targeted image refresh outside the normal deploy flow, `quadlet.updateImage(...)` pulls exactly one image, reuses existing Podman registry auth on the host, optionally supports `authFile`, and only restarts the generated service when the pull actually downloaded a newer image. Changed runs now also print the new registry digest in parentheses in the CLI output, with a local image ID fallback when no repo digest is available.
 
+### Podman registry authentication
+
+Use `podman.login(...)` before a private image update and pass the same explicit `authFile` to
+`quadlet.updateImage(...)`. Preload the trusted helper image on the Linux target in its
+rootful Podman store first; the module never pulls it automatically:
+
+```bash
+sudo podman pull docker.io/library/python@sha256:db3231d3fce4c59182f8364dbec08b8bad4fdfca673dfb226f3c9e77b6b48cd2
+```
+
+For an existing `app` Quadlet unit, add this sequence to your playbook:
+
+```typescript
+import { podman, quadlet, secret } from "paratix/modules"
+
+const secrets = secret.provider("1password")
+const authFile = "/root/.config/containers/auth.json"
+
+const run = [
+  secrets.resolve({
+    REGISTRY_USERNAME: "op://prod/registry/username",
+    REGISTRY_TOKEN: "op://prod/registry/token",
+  }),
+  podman.login({
+    registry: "registry.example",
+    usernameEnv: "REGISTRY_USERNAME",
+    passwordEnv: "REGISTRY_TOKEN",
+    authFile,
+  }),
+  quadlet.updateImage({ name: "app", image: "registry.example/app:latest", authFile }),
+]
+```
+
+Pass `run` to `server({ ... })` with your host configuration. The authenticated `op` CLI runs
+only on the controller. For hidden input instead, replace the resolver with
+`secret.provider("manual", { labels: { REGISTRY_USERNAME: "Registry username", REGISTRY_TOKEN: "Registry token" } })`.
+Neither provider needs a credential file on the controller. Login compares local credentials;
+server-side revocation alone does not trigger it. `podman.logout("registry.example", { authFile })`
+removes the complete direct entry without a token.
+
+This API uses effective-root execution and dedicated, trusted target directories. Rootless and
+SELinux Enforcing targets are unsupported. The addressed registry object belongs to Paratix;
+other registry objects and JSON fields outside it are preserved. See the
+[Podman reference](./llm-guide.md#podman) for `0400` controller/target token-file alternatives,
+fixed username plus manual token, permissions, runtime versions, and failure/security boundaries,
+including username visibility in host Podman argv and unknown completion after interruption.
+
 ### Guards
 
 Paratix also supports declarative host-state guards. Use `when.packageInstalled(...)`, `when.commandExists(...)`, `when.fileExists(...)`, `when.pathExists(...)`, `when.symlinkExists(...)`, or `when.socketExists(...)` and their inverted forms to gate modules or recipes on remote host state without shell-heavy playbooks.

@@ -67,6 +67,8 @@ import type {
   Module,
   ModuleMetaEntry,
   ModuleResult,
+  PodmanLoginOptions as RootPodmanLoginOptions,
+  PodmanOptions as RootPodmanOptions,
   ManualSecretProviderOptions as RootManualSecretProviderOptions,
   SecretInput as RootSecretInput,
   SecretProvider as RootSecretProvider,
@@ -99,6 +101,7 @@ import {
   net,
   op,
   package as pkg,
+  podman,
   quadlet,
   releaseUpgrade,
   restartSystemdUnit,
@@ -120,6 +123,8 @@ import {
 import type {
   ManualSecretProviderOptions,
   PackageSpec,
+  PodmanLoginOptions,
+  PodmanOptions,
   SecretInput,
   SecretProvider,
   SecretResolver,
@@ -131,7 +136,7 @@ import type {
 
 <!-- public-api-imports:end -->
 
-Use `paratix/modules` for built-in modules in new playbooks. The same 29 module values are also
+Use `paratix/modules` for built-in modules in new playbooks. The same 30 module values are also
 re-exported from `paratix` for compatibility with existing playbooks, and both entry points return
 the same references. Only these two package entry points are public; do not use deep imports.
 
@@ -729,6 +734,248 @@ Valid versions start with an alphanumeric character and may contain `[A-Za-z0-9]
 `. + ~ : _ -`. This covers apt epoch/revision values such as `1:2.3-1ubuntu0.2` and RPM
 `version-release` values such as `13.1.0-1.el9`. Whitespace and shell metacharacters are rejected.
 `package.absent` is name-based; passing a `PackageSpec` with `version` produces a clear error.
+
+### `podman`
+
+Use `podman.login` to maintain persistent credentials for one direct registry entry and
+`podman.logout` to remove it. `podman`, `PodmanLoginOptions`, and `PodmanOptions` are public
+from both entry points.
+
+| Method          | Signature                                             | Idempotent                                         |
+| --------------- | ----------------------------------------------------- | -------------------------------------------------- |
+| `podman.login`  | `(options: PodmanLoginOptions): Module`               | Yes, compares local credentials and auth-file mode |
+| `podman.logout` | `(registry: string, options?: PodmanOptions): Module` | Yes, checks whether the direct entry exists        |
+
+#### Runtime and helper image
+
+The target must run native Linux Podman with Paratix's existing effective-root SSH execution.
+Changing `authFile` does not select another user. Rootless execution is unsupported. Host Python
+is not required: a short-lived file helper runs Python 3.15.0 inside the pinned upstream image.
+Host Podman performs login/logout using its own registry, CA, and transport configuration.
+The native fixture pins Ubuntu 24.04 package `podman=4.9.3+ds1-1ubuntu0.2` (Podman 4.9.3),
+including its `--compat-auth-file` behavior. This is the tested fixture, not a compatibility
+promise for every Podman version or platform. SELinux Enforcing is unsupported in V1; the
+module refuses it before auth mutation. It does not change host policy or recursively relabel files.
+
+Before using the module, explicitly preload this public image **on the target in the same
+rootful Podman store**:
+
+```bash
+sudo podman pull docker.io/library/python@sha256:db3231d3fce4c59182f8364dbec08b8bad4fdfca673dfb226f3c9e77b6b48cd2
+```
+
+A rootless pull does not satisfy this prerequisite. Every helper start uses `--pull=never`;
+check and apply never pull or install anything. A missing image is an error. `helperImage` may
+select a trusted equivalent mirror, but must be fully qualified and pinned by SHA-256 digest.
+The image needs the compatible Python standard library and `python3` entry point. Treat its
+contents as trusted: it can read all credentials in the explicitly mounted directories.
+
+#### Options and credential sources
+
+| Option                         | Contract                                                                                                                                                                                                                             |
+| ------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `registry`                     | Required for login; positional for logout. DNS hostname, IPv4, or `localhost`, optionally with port 1–65535. No scheme, path, userinfo, IPv6, or whitespace. Hostnames become lowercase; Docker Hub host aliases become `docker.io`. |
+| `username` / `usernameEnv`     | Exactly one. A fixed username or a Paratix environment binding name. Username must be a nonempty string without colon, whitespace, or control characters, at most 64 KiB in UTF-8.                                                   |
+| `passwordFile` / `passwordEnv` | Exactly one for login. A token file or a Paratix environment binding name. There is no plaintext `password` option. Logout needs neither source.                                                                                     |
+| `passwordFileLocation`         | Only with `passwordFile`: `"controller"` (default) or `"target"`. Forbidden with `passwordEnv`.                                                                                                                                      |
+| `authFile`                     | Persistent target auth JSON, default `/root/.config/containers/auth.json`. Pass the same explicit path to consumers such as `quadlet.updateImage`.                                                                                   |
+| `helperImage`                  | Optional fully qualified digest-pinned replacement for the image above. Default is the exact reference in the preload command.                                                                                                       |
+
+Username and token sources are independent: a fixed username plus a manually entered token,
+or `usernameEnv` plus `passwordFile`, are supported. Binding names follow the [`secret`](#secret)
+facade rules, including dotted names. They are keys, not `op://` references, resolved values, or
+OS environment exports. The consumer reads them sequentially through `resolveEnvironment`;
+there is no `process.env` or alternate-source fallback. Missing keys, non-string values, empty
+values, and invalid credentials fail without echoing their contents.
+
+Tokens must be nonempty single-line UTF-8 strings, at most **65,535 bytes (64 KiB − 1)**,
+without control characters or leading/trailing whitespace. This is the tested
+`--password-stdin` scanner limit of the supported Podman 4.9.3 fixture, within the module's
+64 KiB safety ceiling. A 65,536-byte token is rejected before auth mutation for every credential
+source. Provider values are used unchanged and rejected if invalid. Only the file path removes
+one optional final LF or CRLF before validating the token length. A token file must be a regular
+non-symlink file with mode **exactly `0400`**, owned by the effective controller UID for a
+controller file or root for a target file. Target token files also require a single hard link
+and must differ from the auth file by path and file identity. Check and apply each read the
+selected file again; no credential value is cached in the module object.
+
+#### Use 1Password or manual input before an image update
+
+This example assumes the matching `app` Quadlet unit already exists. Replace the example host,
+image, and vault references with your configuration. Install and authenticate the `op` CLI
+on the controller for 1Password; the target and helper need no 1Password access.
+
+```typescript
+import { server } from "paratix"
+import { podman, quadlet, secret } from "paratix/modules"
+import type { SecretResolver } from "paratix/modules"
+
+const secrets: SecretResolver = secret.provider("1password")
+const authFile = "/root/.config/containers/auth.json"
+
+export default server({
+  name: "app-host",
+  host: "server.example",
+  ssh: { user: "root", ports: [22] },
+  run: [
+    secrets.resolve({
+      REGISTRY_USERNAME: "op://prod/registry/username",
+      REGISTRY_TOKEN: "op://prod/registry/token",
+    }),
+    podman.login({
+      registry: "registry.example",
+      usernameEnv: "REGISTRY_USERNAME",
+      passwordEnv: "REGISTRY_TOKEN",
+      authFile,
+    }),
+    quadlet.updateImage({ name: "app", image: "registry.example/app:latest", authFile }),
+  ],
+})
+```
+
+For hidden manual input, replace only the resolver above; the same bindings and consumer work:
+
+```typescript
+const secrets: SecretResolver = secret.provider("manual", {
+  labels: { REGISTRY_USERNAME: "Registry username", REGISTRY_TOKEN: "Registry token" },
+})
+```
+
+For a known username, replace the resolver and login pair with this `run` array:
+
+```typescript
+const run = [
+  secret.provider("manual", { labels: { REGISTRY_TOKEN: "Registry token" } }).resolve({
+    REGISTRY_TOKEN: "",
+  }),
+  podman.login({
+    registry: "registry.example",
+    username: "deployment",
+    passwordEnv: "REGISTRY_TOKEN",
+    authFile,
+  }),
+]
+```
+
+`SecretResolver.resolve(...)` must precede the consumer in `run`. Ordinary provider bindings
+are prewarmed before SSH, including in `--dry-run`, even if login later reports `ok`. Their
+values are reused across check/apply in that run; a new run reads again and detects rotation.
+Filtering out the resolver can leave the consumer without its binding and causes a safe
+failure. Manual input keeps the existing TTY, hidden-input, cancellation, and run-cache rules
+in [`secret`](#secret). The environment path reads/writes no credential file on the controller;
+credentials travel only in SSH stdin. Private transaction files still exist on the target.
+
+#### File alternatives and logout
+
+After provisioning a controller-owned `0400` token file, use:
+
+```typescript
+podman.login({
+  registry: "registry.example",
+  username: "deployment",
+  passwordFile: "/private/registry/token",
+  authFile,
+})
+```
+
+For a root-owned `0400` token already on the target, add `passwordFileLocation: "target"`
+and use its absolute target path:
+
+```typescript
+podman.login({
+  registry: "registry.example",
+  username: "deployment",
+  passwordFile: "/root/registry-token/token",
+  passwordFileLocation: "target",
+  authFile,
+})
+```
+
+Its token stays on the target, including during check; it is never downloaded or sent through
+SSH stdin. Remove the complete direct entry without credentials using
+`podman.logout("registry.example", { authFile })`.
+
+#### Filesystem, state, and failure boundaries
+
+- Target auth and token files must be in dedicated directories. Parent-directory bind mounts
+  allow atomic replacement, so do not place unrelated sensitive files there. Broad parents
+  such as `/`, `/etc`, `/root`, `/home/<user>`, and `/var/lib` are rejected. Paths are absolute,
+  normalized, at most 512 characters, and contain only ASCII letters/digits, `_`, `.`, `/`,
+  and `-`; no spaces, `.`/`..` segments, colons, commas, or control characters.
+- Existing target ancestors must be root-owned directories without symlinks or group/other
+  write permission. Existing safe modes such as `0755` remain unchanged. Apply creates missing
+  auth directories as `0700` and publishes auth files as `0600`; check does not create auth
+  directories. Auth leaves must be regular, root-owned, non-symlink files with one hard link.
+- The helper uses no network, socket, or privileged mode; it runs as `0:0` with host user
+  namespace, read-only rootfs, no writable rootfs tmpfs, all capabilities dropped,
+  `no-new-privileges`, disabled container logging, and `label=disable`. Only required auth,
+  target-token, and private work directories are mounted, with read-only mounts where possible.
+  Host commands resolve through the existing SSH execution `PATH`; the module does not sanitize
+  it or pin executable paths. Trust the target's executables, configuration, and helper image.
+- Login is `ok` when the local encoded credentials and mode `0600` match. It does not contact
+  the registry during check, so server-side revocation alone does not trigger another login.
+  Credential or mode drift needs apply; mode-only repair does not run a network login.
+  Logout is `ok` for a missing file or entry without running host logout. A missing auth file
+  allows logout without the helper image, subject to the identity/path/SELinux preflight.
+- Paratix owns the **whole addressed registry object**: a credential update replaces it and
+  logout removes it, including unknown fields inside it. JSON values outside that object,
+  including other registries and unknown top-level fields, are preserved semantically;
+  formatting and key order may change. Malformed/empty JSON, duplicate keys, invalid base64,
+  relevant identity-token/credential-helper settings, global credential stores, and legacy
+  alias/URL entries are refused without automatic repair. Existing auth JSON and the published
+  candidate are each limited to **8 MiB**. JSON serialization can expand Unicode values into
+  ASCII escape sequences; any candidate that exceeds 8 MiB is refused before publication,
+  preserving the original file byte for byte. Private transaction state has a separate, larger
+  derived bound that accounts for the base64-encoded original plus expected credentials and
+  metadata; compat results have their own bounded read. The 8 MiB auth-file read limit is not
+  applied to those private files. Every published candidate remains within that auth read limit.
+- Apply prepares a root-private target transaction and gives host Podman only a private compat
+  file without foreign credentials or helper mappings. Login uses `--password-stdin` with TLS
+  verification enabled. External credential-helper store/erase operations are excluded by the
+  compat edit path; host configuration can still cause helper get operations. The checked
+  result is merged and published by atomic replacement after a conflict check.
+- Ensure exclusive writing to the auth file during apply. Observed content/identity/metadata
+  changes cause a conflict failure; this is not a compare-and-swap guarantee against an
+  uncooperative root writer in the final rename window. Privileged path/mount replacement is
+  outside the trust boundary. Ordinary pre-publication failures preserve the original file.
+- Normal completion cleans up owned work files and containers; abrupt host/process loss may
+  leave protected files. An interrupted transport or post-publication failure reports unknown
+  completion: the change may already be applied. Inspect target state before deciding to rerun.
+  There is no automatic retry or snapshot rollback and no diff containing auth contents.
+- Resolved usernames and tokens, including short values, are explicitly masked in module output
+  and errors. Raw helper/host output is discarded on the target before SSH; only fixed exit
+  statuses cross that boundary. The username is nevertheless visible in the actual host
+  Podman process argv because its CLI requires `--username`. The token is never passed in argv.
+  Neither value is interpolated into the controller-built SSH/helper command text. Custom logs
+  and unrelated consumers retain the general masking limits documented under [`secret`](#secret).
+
+`quadlet.updateImage` supports this auth file explicitly. A Compose provider must itself be
+configured to use the matching credentials; `podman.login` makes no blanket Compose-provider
+compatibility promise.
+
+#### Native integration validation
+
+The existing integration command is `pnpm --filter paratix test:integration`. Docker remains
+required for the existing SSH/SFTP fixture. Native Podman cases additionally use an isolated
+Linux SSH target, passwordless effective-root sudo, a preloaded helper, and a dedicated
+root-owned test directory. Never point these tests at production auth data. The controller
+needs `openssl` for the synthetic HTTPS registry and the target must permit loopback remote
+SSH forwarding for it.
+
+Set `PARATIX_PODMAN_HOST`, `PARATIX_PODMAN_PORT`, `PARATIX_PODMAN_USER`,
+`PARATIX_PODMAN_PRIVATE_KEY` (controller path), `PARATIX_PODMAN_EXPECTED_VERSION`, and
+`PARATIX_PODMAN_TEST_ROOT` for an explicitly provisioned local test target. Also set
+`PARATIX_PODMAN_HOST_PUBLIC_KEY` to pin its SSH host key; without it the local harness disables
+strict host-key checking. `PARATIX_PODMAN_HELPER_IMAGE` optionally overrides the pinned image;
+`PARATIX_PODMAN_REQUIRE_NO_HOST_PYTHON=1` asserts that host Python is absent. Without a configured
+target these cases skip locally; in CI missing configuration fails.
+
+The existing Ubuntu integration and publish-validation jobs invoke
+`bash scripts/runPodmanIntegration.sh pnpm agent:check:integration`. This wrapper installs the
+exact Podman fixture package and SSH prerequisites, preloads the helper, starts an owned
+loopback SSH fixture, verifies effective root and a real restricted helper start, and removes
+its temporary user, service, keys, sudo rule, and test files after the supplied command.
+It does not expand release/deployment permissions.
 
 ### `quadlet`
 
