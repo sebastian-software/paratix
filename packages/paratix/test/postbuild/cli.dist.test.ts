@@ -74,6 +74,7 @@ const EXPECTED_PACKAGE_EXPORTS = [
   "op",
   "package",
   "pause",
+  "podman",
   "quadlet",
   "recipe",
   "releaseUpgrade",
@@ -118,6 +119,7 @@ const EXPECTED_MODULE_EXPORTS = [
   "net",
   "op",
   "package",
+  "podman",
   "quadlet",
   "releaseUpgrade",
   "restartSystemdUnit",
@@ -1294,8 +1296,8 @@ export default server({
         consumerScriptPath,
         `
 import { resolveEnvironment } from "paratix"
-import { file, package as pkg, service, swap, timer } from "paratix/modules"
-import { swap as rootSwap, timer as rootTimer } from "paratix"
+import { file, package as pkg, podman, service, swap, timer } from "paratix/modules"
+import { podman as rootPodman, swap as rootSwap, timer as rootTimer } from "paratix"
 
 if (typeof resolveEnvironment !== "function") {
   throw new Error("paratix did not export resolveEnvironment")
@@ -1315,6 +1317,15 @@ if (rootSwap !== swap || typeof rootSwap?.file !== "function") {
 if (rootTimer !== timer || typeof rootTimer?.scheduled !== "function") {
   throw new Error("paratix did not re-export timer from paratix/modules")
 }
+
+if (rootPodman !== podman) throw new Error("Podman entrypoints differ")
+let helperShipped = false
+const fakeSsh = { async exec(command) {
+  helperShipped = command.includes("os.replace") && command.includes("--pull=never") && command.includes("docker.io/library/python@sha256:")
+  return { code: 81, stdout: "", stderr: "" }
+} }
+await podman.login({ registry: "localhost", username: "u", passwordEnv: "TOKEN" }).check(fakeSsh, { TOKEN: "synthetic-token" })
+if (!helperShipped) throw new Error("Podman file helper was not shipped")
 
 const resolved = await resolveEnvironment({ async SECRET() { return "resolved-secret" } }, "SECRET")
 if (resolved !== "resolved-secret") {
@@ -1407,6 +1418,8 @@ import {
   mergeEnvironmentFromMeta,
   meta,
   recipe,
+  podman as rootPodman,
+  server,
   sshdPortMeta,
   systemHostMeta,
   systemRebootMeta,
@@ -1445,6 +1458,7 @@ import {
   net,
   op,
   package as pkg,
+  podman,
   quadlet,
   releaseUpgrade,
   restartSystemdUnit,
@@ -1637,6 +1651,23 @@ const moduleWithOptions: Module = {
   },
 }
 
+const logins: Module[] = [
+  rootPodman.login({ registry: "localhost", username: "u", passwordFile: "/private/pat" }),
+  podman.login({ registry: "localhost", usernameEnv: "USER", passwordEnv: "TOKEN" }),
+  podman.login({ registry: "localhost", username: "u", passwordEnv: "TOKEN", helperImage: "mirror.example/python@sha256:" + "a".repeat(64) }),
+  podman.login({ registry: "localhost", usernameEnv: "USER", passwordFile: "/root/token/pat", passwordFileLocation: "target" }),
+  rootPodman.logout("localhost"),
+  podman.logout("localhost", { authFile: "/root/auth/auth.json" }),
+]
+// @ts-expect-error Both username sources are forbidden.
+podman.login({ registry: "localhost", username: "u", usernameEnv: "USER", passwordEnv: "TOKEN" })
+// @ts-expect-error Both token sources are forbidden.
+podman.login({ registry: "localhost", username: "u", passwordEnv: "TOKEN", passwordFile: "/private/pat" })
+// @ts-expect-error File location is forbidden for environment tokens.
+podman.login({ registry: "localhost", username: "u", passwordEnv: "TOKEN", passwordFileLocation: "target" })
+// @ts-expect-error A token source is required.
+podman.login({ registry: "localhost", username: "u" })
+server({ name: "typed podman", host: "localhost", ssh: { user: "root", ports: [22] }, run: logins })
 const grouped = recipe("typed public recipe", [moduleWithOptions])
 void grouped
 `

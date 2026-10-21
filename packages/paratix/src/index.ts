@@ -47,6 +47,7 @@ export {
   net,
   op,
   package,
+  podman,
   quadlet,
   releaseUpgrade,
   restartSystemdUnit,
@@ -72,6 +73,7 @@ export type {
   SecretTotpInput,
   UnifiedDiffOptions,
 } from "./modules/index.js"
+export type { PodmanLoginOptions, PodmanOptions } from "./modules/podman.js"
 export { recipe } from "./recipe.js"
 /**
  * Paratix — public API entry point.

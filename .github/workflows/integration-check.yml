@@ -43,4 +43,4 @@ jobs:
         run: docker info
 
       - name: Run full review check including integration tests
-        run: pnpm agent:check:integration
+        run: bash scripts/runPodmanIntegration.sh pnpm agent:check:integration

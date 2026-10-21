@@ -314,7 +314,7 @@ export default function Home(): ReactElement {
             <p className="kicker">What you get</p>
             <h2 id="features-title">A compact tool with practical depth.</h2>
             <p>
-              Twenty-eight exported module groups cover common server resources, from packages and
+              Paratix's exported module groups cover common server resources, from packages and
               files to systemd, firewalls, containers, and users.
             </p>
           </div>

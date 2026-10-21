@@ -168,6 +168,7 @@ export function writeScaffoldFiles(
       "eslint-config-setup": "^0.5.2",
       jiti: "^2.7.0",
       prettier: "^3.9.6",
+      tslib: "^2.8.1",
       tsx: "^4.23.1",
       typescript: "npm:@typescript/typescript6@^6.0.2",
     },
