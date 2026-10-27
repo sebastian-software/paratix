@@ -109,6 +109,46 @@ If you are starting on GitHub, use this README as the overview and then jump int
 - [`docs/review-areas.md`](./docs/review-areas.md) — the current internal review scope
 - [`docs/module.md`](./docs/module.md) and [`docs/initialbeschreibung.md`](./docs/initialbeschreibung.md) — historical design documents
 
+## Vitest dependency compatibility in CI
+
+`pnpm check:vitest` checks resolved, installed Vitest tools in every workspace importer,
+including the root, `packages/*`, and `website`. `pnpm agent:check` runs it first in the
+existing `CI` workflow's required `check` job, after `pnpm install --frozen-lockfile`.
+A mismatch exits with status 1 and identifies the importer and incompatible peer.
+Ordinary tests and a frozen install alone do not establish peer compatibility.
+
+The supported input is this repository's pnpm 12 workspace with its isolated,
+symlinked `node_modules` layout and Node.js 24 or newer. Use the pinned package
+manager from `package.json`. The checker reads installed package manifests after
+installation; it does not parse the pnpm 12 lockfile's two YAML documents. The
+frozen install in CI connects those installed files to the committed lockfile.
+It uses `pnpm --recursive list --depth -1 --json` to discover all importers and
+checks declared `vitest`, coverage V8/Istanbul, UI, and browser packages
+(`@vitest/browser`, `browser-playwright`, `browser-preview`, `browser-webdriverio`).
+Their applicable family peer requirements are checked with SemVer against both
+direct tools used together and their resolved pnpm peer contexts. Different
+compatible contexts may use different versions. An absent optional peer is allowed;
+`@vitest/eslint-plugin` is independently versioned and is excluded. Missing declared
+links, invalid metadata, unsupported peer ranges, and filesystem errors fail the
+check. Other package managers and nonstandard layouts are outside this check's
+supported scope; adapt and verify the checker before changing that input contract.
+This is a repository quality check within the existing CI trust model.
+
+Renovate's regular Vitest grouping does not guarantee inclusion of non-vulnerable
+companions in a security PR. Its vulnerability-alert defaults use `groupName: null`
+and `rangeStrategy: update-lockfile`. If such a PR fails the compatibility check:
+
+1. Review the advisory and its fixed Vitest version.
+2. Update only the required installed companions in that same security PR.
+3. Regenerate the lockfile with the pinned pnpm version, avoiding unrelated updates.
+4. Run `pnpm check:vitest` and `pnpm agent:check`, then wait for required CI checks.
+
+This manual repair can delay a security update; automatic or zero-delay repair is
+not promised. See the [shared Renovate preset guidance](https://github.com/sebastian-software/renovate-config#vitest-grouping-and-verification)
+for the grouping and security-update policy. The regression fixtures simulate
+installed package trees, including an incomplete security update and its paired
+repair; they do not prove deployed CI enforcement or reproduce a real advisory.
+
 ## License
 
 MIT — Copyright 2026 [Sebastian Software GmbH](https://sebastian-software.com)
