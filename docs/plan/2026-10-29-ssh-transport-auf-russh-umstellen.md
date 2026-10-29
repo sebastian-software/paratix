@@ -36,8 +36,9 @@ Entscheidungen des Nutzers vom 29.10.2026:
 6. **Toolchain:** `pnpm build` baut die Anbindung immer, inkrementell. Die Rust-Toolchain ist damit für alle Pflicht, die das Repo bauen. `cargo fmt`, `clippy` und `test` laufen lokal nur bei Rust-Änderungen, in CI immer.
 7. **Erstveröffentlichung mit Platzhaltern:**
    - Der Nutzer legt die npm-Scope `@paratix` an.
-   - Er veröffentlicht einmalig mit einem kurzlebigen Token `0.0.0`-Platzhalter für die sieben neuen Pakete.
-   - Danach richtet er je Paket einen Trusted Publisher ein und sperrt Tokens.
+   - Er veröffentlicht einmalig `0.0.0`-Platzhalter für die sieben neuen Pakete, mit seiner interaktiven npm-Sitzung und 2FA, ohne Token.
+   - Erst unmittelbar vor dem ersten echten Release aus B richtet er je Paket einen Trusted Publisher ein und sperrt Tokens. npm lässt eine neue Trusted-Publisher-Konfiguration nach 2 Tagen verfallen, wenn bis dahin kein Publish darüber gelaufen ist.
+   - Stand 29.10.2026: Scope und Platzhalter sind angelegt (erledigt).
 8. **RUSTSEC-2023-0071** (Marvin-Angriff, `rsa`-Crate, kein Fix verfügbar): Dafür gibt es eine begründete Ausnahme in `deny.toml`. Advisories prüft ein eigener, nicht blockierender, zeitgesteuerter Job. Lizenzen, Bans und Quellen blockieren weiter.
 9. **Tarballs:** Das Publish-Skript erzeugt alle Pakete per `pnpm pack` und setzt die `optionalDependencies` in einer Staging-Kopie. Veröffentlicht wird mit `npm publish <tgz>`.
 10. **C in zwei Schritten mit eigenem Release:**
@@ -139,7 +140,8 @@ Als Workflow passt Feature. Die öffentliche API verhält sich gleich, aber es k
 - Agent, Passwort, `agentForward`, Abbruch während Exec und Kanal-Ablehnung sind nicht integrationsgetestet.
 - Zum SSH-Transport gibt es kein ADR. Die ADRs 0001–0007 sind englisch (`language.project: en`).
 - `docs/initialbeschreibung.md:1013-1021` und `docs/review-areas.md:22` nennen `ssh2`. `packages/paratix/AGENTS.md:5-7` spricht allgemein von „real SSH/SFTP code paths“.
-- Die npm-Scope `@paratix` ist am 29.10.2026 nicht vergeben („Scope not found“).
+- Die npm-Scope `@paratix` gehört seit dem 29.10.2026 dem Projekt. Alle sieben Pakete existieren als `0.0.0`-Platzhalter (Maintainer `fastner`, `repository` zeigt auf `sebastian-software/paratix`, `packages/ssh-native`).
+- npm-Regeln (Stand 29.10.2026): Neue Trusted-Publisher-Konfigurationen verfallen nach 2 Tagen ohne erfolgreichen Publish. Tokens, die 2FA umgehen, dürfen kein Trusted Publishing mehr verwalten und verlieren ab Januar 2027 auch den direkten Publish.
 - russh 0.65.0 laut docs.rs:
   - `authenticate_openssh_cert`, `authenticate_certificate_with`, `authenticate_keyboard_interactive_start` und `Handler::check_server_key(&PublicKeyOrCertificate)`
   - `Preferred.host_key_certificates` ist standardmäßig leer.
@@ -332,9 +334,9 @@ Als Workflow passt Feature. Die öffentliche API verhält sich gleich, aber es k
 
 **Voraussetzung (Nutzer, vor dem ersten Release aus B):**
 
-1. Die npm-Scope `@paratix` anlegen.
-2. Ein granulares Token nur für `@paratix` mit kurzer Laufzeit erzeugen. Damit `0.0.0`-Platzhalter der sieben neuen Pakete veröffentlichen. Danach das Token widerrufen.
-3. Je Paket einen Trusted Publisher einrichten (`sebastian-software/paratix`, `publish.yml`, Environment `npm`) und „Require 2FA and disallow tokens“ aktivieren.
+1. ~~Die npm-Scope `@paratix` anlegen.~~ Erledigt am 29.10.2026.
+2. ~~`0.0.0`-Platzhalter der sieben neuen Pakete veröffentlichen, mit interaktiver Sitzung und 2FA, ohne Token.~~ Erledigt am 29.10.2026.
+3. **Erst unmittelbar vor dem ersten echten Release aus B**, damit die 2-Tage-Frist von npm nicht abläuft: je Paket einen Trusted Publisher einrichten (`sebastian-software/paratix`, `publish.yml`, Environment `npm`, `--allow-publish`) und danach „Require two-factor authentication and disallow tokens“ aktivieren. Das geht interaktiv mit `npm trust github <paket> --repo sebastian-software/paratix --file publish.yml --env npm --allow-publish`. Verfällt eine Konfiguration, wird sie gelöscht und neu angelegt.
 
 **Arbeitspaket A – ADR und Spike (neues Issue, blockiert B)**
 
@@ -506,7 +508,7 @@ Nicht relevant: keine Oberfläche.
 ## Annahmen und offene Punkte
 
 - „Nicht verifiziert“ wird in A bestätigt oder widerlegt, bevor B beginnt.
-- Ist `@paratix` bei der Umsetzung doch vergeben, muss der Name an diesen Stellen neu gewählt werden: Loader, `optionalDependencies`, Publish-Skript und Trusted-Publisher-Einstellungen.
+- Die Paketnamen unter `@paratix` sind reserviert. Eine Namensänderung ist nicht mehr zu erwarten.
 - Aufwand laut Schätzung aus der Session: etwa 2–4 Wochen bis zur Parität. Dazu kommen Release-Pipeline, Paritätsmatrix und der Zwischenschritt C1.
 - `~/.ssh/config` und `ProxyJump` nutzt Paratix heute nicht. Beides bleibt außerhalb des Umfangs und ist später über `direct-tcpip` nachrüstbar.
 - Neuordnung des Epics #252, mit dem Nutzer abgestimmt:
@@ -577,7 +579,7 @@ Mehrfach zugeordnete Befunde zählen in jedem betroffenen Bereich.
 - In der Vorlage entfallen `ssh2` und `cpu-features` ganz.
 - Die Angabe zu `packages/paratix/AGENTS.md` ist korrigiert.
 - Toolchain für glibc und macOS-Mindestversion sind festgelegt und werden geprüft.
-- Das Token für die Platzhalter ist abgesichert.
+- Die Platzhalter werden ohne Token veröffentlicht (Nachtrag vom 29.10.2026: interaktive Sitzung mit 2FA, dazu die 2-Tage-Frist der Trusted-Publisher-Konfiguration).
 - Unklare Formulierungen zu Event-Loop, Test-Agent, Abbruch und Callback-Timeout sind präzisiert.
 - Die Bedingung für `rust:check` ist präzisiert.
 
