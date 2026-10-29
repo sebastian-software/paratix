@@ -1,0 +1,611 @@
+# THROWAWAY SPIKE (issue #254): evidence for ADR 0008. Builds the napi-rs
+# binding in packages/ssh-native for every supported target, smoke-tests each
+# shipped artifact, and runs the proof suite against a Docker sshd and a local
+# non-root sshd. Removed together with packages/ssh-native.
+name: SSH Native Spike
+
+on:
+  push:
+    branches:
+      - firmo/build/russh-spike-adr-0008
+
+concurrency:
+  group: "${{ github.workflow }}-${{ github.ref }}"
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  # Single switch for the crypto backend: "aws-lc-rs" (default) or "ring".
+  CRYPTO_BACKEND: aws-lc-rs
+  # Highest glibc symbol version the gnu targets may require (Ubuntu 22.04).
+  GLIBC_MAX: "2.35"
+  # Node 24's macOS floor; verified against LC_BUILD_VERSION minos after the build.
+  MACOSX_DEPLOYMENT_TARGET: "11.0"
+  # Node 24 used inside the ubuntu:22.04 smoke containers (official tarball).
+  CONTAINER_NODE_VERSION: v24.22.2
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  build:
+    name: build (${{ matrix.target }})
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: linux-x64-gnu
+            runner: ubuntu-24.04
+            triple: x86_64-unknown-linux-gnu
+            cargo_target: x86_64-unknown-linux-gnu.2.35
+            builder: zigbuild
+            elf_machine: X86-64
+            rustflags: ""
+          - target: linux-arm64-gnu
+            runner: ubuntu-24.04
+            triple: aarch64-unknown-linux-gnu
+            cargo_target: aarch64-unknown-linux-gnu.2.35
+            builder: zigbuild
+            elf_machine: AArch64
+            rustflags: ""
+          - target: linux-x64-musl
+            runner: ubuntu-24.04
+            triple: x86_64-unknown-linux-musl
+            cargo_target: x86_64-unknown-linux-musl
+            builder: zigbuild
+            elf_machine: X86-64
+            # The cdylib must link musl dynamically; crt-static forbids cdylib output.
+            rustflags: "-C target-feature=-crt-static"
+          - target: linux-arm64-musl
+            runner: ubuntu-24.04
+            triple: aarch64-unknown-linux-musl
+            cargo_target: aarch64-unknown-linux-musl
+            builder: zigbuild
+            elf_machine: AArch64
+            rustflags: "-C target-feature=-crt-static"
+          - target: darwin-arm64
+            runner: macos-15
+            triple: aarch64-apple-darwin
+            cargo_target: aarch64-apple-darwin
+            builder: cargo
+            rustflags: ""
+          - target: darwin-x64
+            runner: macos-15-intel
+            triple: x86_64-apple-darwin
+            cargo_target: x86_64-apple-darwin
+            builder: cargo
+            rustflags: ""
+    defaults:
+      run:
+        working-directory: packages/ssh-native
+    env:
+      RUSTUP_TOOLCHAIN: "1.99.1"
+      CARGO_TERM_COLOR: always
+      ZIG_VERSION: "0.17.0"
+      ZIG_SHA256: 1cbe9df9f27e6b78d14ccbca43b6703a404ef79ef1c463de901d7f088d4e2026
+      CARGO_ZIGBUILD_VERSION: "0.24.0"
+      CARGO_ZIGBUILD_SHA256: 3ca25ee4348f9abd0932ed4debe826d246e20fb616d0201de5bd05e7f965e9d9
+      TARGET: ${{ matrix.target }}
+      TRIPLE: ${{ matrix.triple }}
+      CARGO_BUILD_TARGET_ARG: ${{ matrix.cargo_target }}
+    steps:
+      - name: Checkout
+        # actions/checkout@v6.0.2
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd
+        with:
+          persist-credentials: false
+
+      - name: Install Rust toolchain
+        run: |
+          rustup toolchain install "$RUSTUP_TOOLCHAIN" --profile minimal --target "$TRIPLE"
+          rustc --version
+          cargo --version
+
+      - name: Cache Rust build
+        # Swatinem/rust-cache@v2.9.3
+        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0
+        with:
+          workspaces: packages/ssh-native -> target
+          key: ${{ matrix.target }}-${{ env.CRYPTO_BACKEND }}
+          cache-on-failure: true
+
+      - name: Install zig and cargo-zigbuild
+        if: matrix.builder == 'zigbuild'
+        run: |
+          tools="$RUNNER_TEMP/spike-tools"
+          mkdir -p "$tools/zig" "$tools/bin"
+          curl -fsSL --retry 5 -o "$tools/zig.tar.xz" \
+            "https://ziglang.org/download/${ZIG_VERSION}/zig-x86_64-linux-${ZIG_VERSION}.tar.xz"
+          echo "${ZIG_SHA256}  $tools/zig.tar.xz" | sha256sum -c -
+          tar -xJf "$tools/zig.tar.xz" -C "$tools/zig" --strip-components=1
+          curl -fsSL --retry 5 -o "$tools/cargo-zigbuild.tar.xz" \
+            "https://github.com/rust-cross/cargo-zigbuild/releases/download/v${CARGO_ZIGBUILD_VERSION}/cargo-zigbuild-x86_64-unknown-linux-gnu.tar.xz"
+          echo "${CARGO_ZIGBUILD_SHA256}  $tools/cargo-zigbuild.tar.xz" | sha256sum -c -
+          tar -xJf "$tools/cargo-zigbuild.tar.xz" -C "$tools/bin" --strip-components=1 \
+            cargo-zigbuild-x86_64-unknown-linux-gnu/cargo-zigbuild
+          echo "$tools/zig" >> "$GITHUB_PATH"
+          echo "$tools/bin" >> "$GITHUB_PATH"
+
+      - name: Show tool versions
+        run: |
+          if [ "${{ matrix.builder }}" = zigbuild ]; then
+            zig version
+            cargo zigbuild --version
+          else
+            xcrun --show-sdk-version
+            clang --version | head -1
+          fi
+
+      - name: Show crypto backend in the dependency graph
+        run: |
+          echo "CRYPTO_BACKEND=$CRYPTO_BACKEND"
+          for crate in aws-lc-rs ring; do
+            echo "::group::cargo tree -i $crate"
+            cargo tree --locked -e normal --target "$TRIPLE" \
+              --no-default-features --features "$CRYPTO_BACKEND" -i "$crate" \
+              || echo "$crate is not in the normal dependency graph"
+            echo "::endgroup::"
+          done
+
+      - name: Build
+        env:
+          RUSTFLAGS: ${{ matrix.rustflags }}
+        run: |
+          # --no-default-features + --features covers both backends with one code path.
+          if [ "${{ matrix.builder }}" = zigbuild ]; then
+            cargo zigbuild --release --locked --target "$CARGO_BUILD_TARGET_ARG" \
+              --no-default-features --features "$CRYPTO_BACKEND"
+          else
+            cargo build --release --locked --target "$CARGO_BUILD_TARGET_ARG" \
+              --no-default-features --features "$CRYPTO_BACKEND"
+          fi
+
+      - name: Package as loader-named .node file
+        run: |
+          case "$RUNNER_OS" in
+            macOS) lib="target/$TRIPLE/release/libparatix_ssh_native.dylib" ;;
+            *) lib="target/$TRIPLE/release/libparatix_ssh_native.so" ;;
+          esac
+          node_file="ssh-native.$TARGET.node"
+          cp "$lib" "$node_file"
+          file "$node_file"
+          ls -l "$node_file"
+
+      - name: Inspect and gate binary
+        run: |
+          node_file="ssh-native.$TARGET.node"
+          size=$(wc -c < "$node_file" | tr -d ' ')
+          sha256=$(shasum -a 256 "$node_file" | cut -d' ' -f1)
+          gate="n/a"
+          violation=""
+          case "$TARGET" in
+            linux-*)
+              machine=$(readelf -h "$node_file" | awk -F: '/Machine:/ {gsub(/^ +/, "", $2); print $2}')
+              echo "ELF machine: $machine"
+              case "$machine" in
+                *"${{ matrix.elf_machine }}"*) ;;
+                *) violation="ELF machine '$machine' is not ${{ matrix.elf_machine }}" ;;
+              esac
+              echo "::group::readelf -d (NEEDED)"
+              readelf -d "$node_file" | grep NEEDED || true
+              echo "::endgroup::"
+              ;;
+          esac
+          case "$TARGET" in
+            linux-*-gnu)
+              # readelf is architecture-independent, so it reads the arm64 ELF on the x64 runner.
+              versions=$(readelf -V -W "$node_file" | grep -oE 'GLIBC_[0-9]+(\.[0-9]+)+' \
+                | sed 's/^GLIBC_//' | sort -u -V || true)
+              echo "Required GLIBC versions (sorted):"
+              echo "$versions" | sed 's/^/  GLIBC_/'
+              max=$(echo "$versions" | tail -1)
+              gate="GLIBC_${max:-none} (limit ${GLIBC_MAX})"
+              if [ -z "$max" ]; then
+                violation="no GLIBC_ version requirement found"
+              elif [ "$(printf '%s\n' "$max" "$GLIBC_MAX" | sort -V | tail -1)" != "$GLIBC_MAX" ]; then
+                violation="max GLIBC_$max exceeds GLIBC_$GLIBC_MAX"
+              fi
+              if [ "$TARGET" = linux-x64-gnu ]; then
+                echo "objdump -T cross-check: $(objdump -T "$node_file" \
+                  | grep -oE 'GLIBC_[0-9]+(\.[0-9]+)+' | sort -u -V | tail -1)"
+              fi
+              ;;
+            linux-*-musl)
+              needed=$(readelf -d "$node_file" | grep NEEDED | sed -E 's/.*\[(.*)\]/\1/' | tr '\n' ' ')
+              gate="NEEDED: ${needed:-none}"
+              case "$needed" in
+                *libc.so.6*) echo "::warning::musl artifact references glibc libc.so.6" ;;
+                *libc.so* | *libc.musl-*) ;;
+                *) echo "::warning::no musl libc in NEEDED entries: ${needed:-none}" ;;
+              esac
+              ;;
+            darwin-*)
+              lipo -archs "$node_file"
+              vtool -show-build "$node_file" || true
+              minos=$(otool -l "$node_file" | awk '/LC_BUILD_VERSION/ {b=1} b && $1 == "minos" {print $2; exit}')
+              if [ -z "$minos" ]; then
+                minos=$(otool -l "$node_file" | awk '/LC_VERSION_MIN_MACOSX/ {b=1} b && $1 == "version" {print $2; exit}')
+              fi
+              gate="minos ${minos:-none} (expected ${MACOSX_DEPLOYMENT_TARGET})"
+              if [ "$minos" != "$MACOSX_DEPLOYMENT_TARGET" ]; then
+                violation="minos '${minos:-none}' differs from MACOSX_DEPLOYMENT_TARGET $MACOSX_DEPLOYMENT_TARGET"
+              fi
+              ;;
+          esac
+          mkdir -p "$RUNNER_TEMP/build-info"
+          jq -n --arg target "$TARGET" --arg triple "$TRIPLE" --arg backend "$CRYPTO_BACKEND" \
+            --arg size "$size" --arg sha256 "$sha256" --arg gate "$gate" --arg violation "$violation" \
+            '{target: $target, triple: $triple, backend: $backend, size: ($size | tonumber),
+              sha256: $sha256, gate: $gate, status: (if $violation == "" then "pass" else "fail" end),
+              violation: $violation}' > "$RUNNER_TEMP/build-info/build-info-$TARGET.json"
+          cat "$RUNNER_TEMP/build-info/build-info-$TARGET.json"
+          {
+            echo "| target | size (bytes) | sha256 | gate |"
+            echo "| --- | --- | --- | --- |"
+            echo "| $TARGET | $size | \`$sha256\` | $gate |"
+          } >> "$GITHUB_STEP_SUMMARY"
+          if [ -n "$violation" ]; then
+            echo "::error::$TARGET: $violation"
+            exit 1
+          fi
+
+      - name: Upload build info
+        if: always()
+        # actions/upload-artifact@v7.0.2
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+        with:
+          name: build-info-${{ matrix.target }}
+          path: ${{ runner.temp }}/build-info/build-info-${{ matrix.target }}.json
+          if-no-files-found: ignore
+
+      - name: Upload .node artifact
+        # actions/upload-artifact@v7.0.2
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+        with:
+          name: ssh-native-${{ matrix.target }}
+          path: packages/ssh-native/ssh-native.${{ matrix.target }}.node
+          if-no-files-found: error
+
+  smoke:
+    name: smoke (${{ matrix.target }}, ${{ matrix.variant }})
+    needs: build
+    # Smoke every target that did build, even if another target failed.
+    if: ${{ !cancelled() }}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: linux-x64-gnu
+            runner: ubuntu-24.04
+            variant: host
+          - target: linux-x64-gnu
+            runner: ubuntu-24.04
+            variant: ubuntu-22.04
+            node_arch: x64
+          - target: linux-arm64-gnu
+            runner: ubuntu-24.04-arm
+            variant: host
+          - target: linux-arm64-gnu
+            runner: ubuntu-24.04-arm
+            variant: ubuntu-22.04
+            node_arch: arm64
+          - target: linux-x64-musl
+            runner: ubuntu-24.04
+            variant: alpine
+          - target: linux-arm64-musl
+            runner: ubuntu-24.04-arm
+            variant: alpine
+          - target: darwin-x64
+            runner: macos-15-intel
+            variant: host
+          - target: darwin-arm64
+            runner: macos-15
+            variant: host
+    env:
+      TARGET: ${{ matrix.target }}
+      VARIANT: ${{ matrix.variant }}
+      NODE_ARCH: ${{ matrix.node_arch }}
+    steps:
+      - name: Checkout
+        # actions/checkout@v6.0.2
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd
+        with:
+          persist-credentials: false
+
+      - name: Setup Node.js
+        # actions/setup-node@v6.4.0
+        uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e
+        with:
+          node-version: 24
+
+      - name: Download .node artifact
+        # actions/download-artifact@v8.0.2
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333
+        with:
+          name: ssh-native-${{ matrix.target }}
+          path: ${{ runner.temp }}/artifact
+
+      - name: Prepare scratch dir with the shipped artifact
+        run: |
+          smoke_dir="$RUNNER_TEMP/smoke"
+          mkdir -p "$smoke_dir"
+          cp packages/ssh-native/index.js packages/ssh-native/spike-test/smoke.mjs "$smoke_dir/"
+          cp "$RUNNER_TEMP/artifact/ssh-native.$TARGET.node" "$smoke_dir/"
+          # Pure-JS ssh2 is enough for the in-process server; skip its optional native build.
+          (cd "$smoke_dir" && npm install --no-save --no-package-lock --ignore-scripts --no-audit --no-fund ssh2@1.17.0)
+          ls -l "$smoke_dir"
+          echo "SMOKE_DIR=$smoke_dir" >> "$GITHUB_ENV"
+
+      - name: Run smoke test
+        run: |
+          out="$RUNNER_TEMP/smoke-output.txt"
+          set +e
+          case "$VARIANT" in
+            host)
+              if [ "$RUNNER_OS" = Linux ]; then ldd --version | head -1; fi
+              node --version
+              node "$SMOKE_DIR/smoke.mjs" "$SMOKE_DIR" 2>&1 | tee "$out"
+              status=${PIPESTATUS[0]}
+              ;;
+            ubuntu-22.04)
+              docker run --rm -v "$SMOKE_DIR:/smoke:ro" -e CONTAINER_NODE_VERSION -e NODE_ARCH ubuntu:22.04 \
+                bash -euo pipefail -c '
+                  export DEBIAN_FRONTEND=noninteractive
+                  apt-get update -qq
+                  apt-get install -y -qq --no-install-recommends ca-certificates curl xz-utils >/dev/null
+                  cd /tmp
+                  base="https://nodejs.org/dist/${CONTAINER_NODE_VERSION}"
+                  tarball="node-${CONTAINER_NODE_VERSION}-linux-${NODE_ARCH}.tar.xz"
+                  curl -fsSL --retry 5 -O "$base/$tarball" -O "$base/SHASUMS256.txt"
+                  grep " ${tarball}\$" SHASUMS256.txt | sha256sum -c -
+                  mkdir -p /opt/node
+                  tar -xJf "$tarball" -C /opt/node --strip-components=1
+                  ldd --version | head -1
+                  /opt/node/bin/node --version
+                  /opt/node/bin/node /smoke/smoke.mjs /smoke
+                ' 2>&1 | tee "$out"
+              status=${PIPESTATUS[0]}
+              ;;
+            alpine)
+              docker run --rm -v "$SMOKE_DIR:/smoke:ro" node:24-alpine \
+                sh -euc 'cat /etc/alpine-release; ls /lib/ld-musl-*; node --version; node /smoke/smoke.mjs /smoke' \
+                2>&1 | tee "$out"
+              status=${PIPESTATUS[0]}
+              ;;
+            *)
+              echo "::error::unknown smoke variant $VARIANT"
+              status=1
+              ;;
+          esac
+          set -e
+          line=$(grep '^{"smoke"' "$out" | tail -1 || true)
+          backend=$(printf '%s' "$line" | jq -r '.cryptoBackend // ""' 2>/dev/null || true)
+          if [ "$status" -eq 0 ] && [ "$backend" != "$CRYPTO_BACKEND" ]; then
+            echo "::error::binding reports crypto backend '$backend', expected '$CRYPTO_BACKEND'"
+            status=1
+          fi
+          mkdir -p "$RUNNER_TEMP/smoke-result"
+          jq -n --arg target "$TARGET" --arg variant "$VARIANT" --arg runner "${{ matrix.runner }}" \
+            --arg status "$([ "$status" -eq 0 ] && echo pass || echo fail)" --arg line "$line" \
+            '{target: $target, variant: $variant, runner: $runner, status: $status,
+              output: (try ($line | fromjson) catch null)}' \
+            > "$RUNNER_TEMP/smoke-result/smoke-$TARGET-$VARIANT.json"
+          cat "$RUNNER_TEMP/smoke-result/smoke-$TARGET-$VARIANT.json"
+          exit "$status"
+
+      - name: Upload smoke result
+        if: always()
+        # actions/upload-artifact@v7.0.2
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+        with:
+          name: smoke-result-${{ matrix.target }}-${{ matrix.variant }}
+          path: ${{ runner.temp }}/smoke-result/smoke-${{ matrix.target }}-${{ matrix.variant }}.json
+          if-no-files-found: ignore
+
+  proofs:
+    name: proofs (linux-x64-gnu artifact)
+    needs: build
+    # Run on the x64 gnu artifact even if another target failed to build.
+    if: ${{ !cancelled() }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - name: Checkout
+        # actions/checkout@v6.0.2
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd
+        with:
+          persist-credentials: false
+
+      - name: Setup pnpm
+        # pnpm/action-setup@v6.1.0
+        uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413
+
+      - name: Setup Node.js
+        # actions/setup-node@v6.4.0
+        uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e
+        with:
+          node-version: 24
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Check Docker availability
+        run: docker info
+
+      - name: Ensure OpenSSH client and server
+        run: |
+          if ! command -v ssh-agent >/dev/null || ! command -v ssh-keyscan >/dev/null || [ ! -x /usr/sbin/sshd ]; then
+            sudo apt-get update -qq
+            sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq --no-install-recommends \
+              openssh-client openssh-server
+          fi
+          ssh -V
+          /usr/sbin/sshd -V 2>&1 | head -1 || true
+
+      - name: Download linux-x64-gnu artifact
+        # actions/download-artifact@v8.0.2
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333
+        with:
+          name: ssh-native-linux-x64-gnu
+          path: packages/ssh-native
+
+      - name: Verify the loader picks the shipped artifact
+        working-directory: packages/ssh-native
+        run: |
+          ls -l ssh-native.linux-x64-gnu.node
+          sha256sum ssh-native.linux-x64-gnu.node
+          node -e '
+            const binding = require("./index.js")
+            const backend = binding.cryptoBackend()
+            console.log(JSON.stringify({ target: binding.currentTarget(), backend }))
+            if (binding.currentTarget() !== "linux-x64-gnu") process.exit(1)
+            if (backend !== process.env.CRYPTO_BACKEND) {
+              console.error(`::error::backend ${backend} != ${process.env.CRYPTO_BACKEND}`)
+              process.exit(1)
+            }
+          '
+
+      - name: Start Docker sshd fixture
+        working-directory: packages/ssh-native
+        run: |
+          fix="$RUNNER_TEMP/spike-fixtures"
+          bash spike-fixture/generate.sh "$fix"
+          docker build -t paratix-spike-sshd "$fix"
+          docker run -d --name spike-sshd \
+            -p 127.0.0.1:2222:22 -p 127.0.0.1:2223:2223 -p 127.0.0.1:2224:2224 -p 127.0.0.1:2225:2225 \
+            paratix-spike-sshd
+          if ! timeout 60 bash -c 'until ssh-keyscan -T 2 -p 2222 127.0.0.1 >/dev/null 2>&1; do sleep 1; done'; then
+            echo "::error::Docker sshd did not answer on 127.0.0.1:2222 within 60s"
+            exit 1
+          fi
+          echo "SPIKE_FIXTURE_DIR=$fix" >> "$GITHUB_ENV"
+
+      - name: Run proof suite against Docker sshd
+        run: |
+          SPIKE_SSH_HOST=127.0.0.1 SPIKE_RESULTS="$RUNNER_TEMP/spike-results-docker.jsonl" \
+            pnpm --filter @paratix/ssh-native spike:test
+
+      - name: Run proof suite against local non-root sshd
+        if: ${{ !cancelled() }}
+        run: |
+          # Local mode generates its own fixtures (with the runner user as principal).
+          env -u SPIKE_FIXTURE_DIR SPIKE_RESULTS="$RUNNER_TEMP/spike-results-local.jsonl" \
+            pnpm --filter @paratix/ssh-native spike:test
+
+      - name: Dump Docker sshd logs
+        if: always()
+        run: docker logs spike-sshd || true
+
+      - name: Summarize proof results and enforce hard proofs
+        if: always()
+        run: |
+          node - "$RUNNER_TEMP/spike-results-docker.jsonl" "$RUNNER_TEMP/spike-results-local.jsonl" <<'NODE'
+          const fs = require("node:fs")
+          const cell = (value) =>
+            String(value ?? "").replace(/\|/g, "\\|").replace(/\s+/g, " ").slice(0, 240)
+          let out = `## Proof results (backend ${process.env.CRYPTO_BACKEND})\n\n`
+          let hardFailures = 0
+          let missing = 0
+          for (const file of process.argv.slice(2)) {
+            out += `### ${file.split("/").pop()}\n\n`
+            if (!fs.existsSync(file) || fs.statSync(file).size === 0) {
+              out += "_missing or empty: the suite recorded no result_\n\n"
+              missing += 1
+              continue
+            }
+            const rows = fs.readFileSync(file, "utf8").split("\n").filter(Boolean).map((l) => JSON.parse(l))
+            const counts = {}
+            out += "| id | level | status | detail |\n| --- | --- | --- | --- |\n"
+            for (const row of rows) {
+              counts[row.status] = (counts[row.status] ?? 0) + 1
+              if (row.level === "hard" && row.status === "fail") hardFailures += 1
+              const status =
+                row.status === "fail" ? (row.level === "soft" ? "fail (soft)" : "**FAIL**") : row.status
+              out += `| ${cell(row.id)} | ${cell(row.level)} | ${status} | ${cell(JSON.stringify(row.detail))} |\n`
+            }
+            out += `\n${Object.entries(counts).map(([k, v]) => `${k}: ${v}`).join(", ")}\n\n`
+          }
+          fs.appendFileSync(process.env.GITHUB_STEP_SUMMARY, out)
+          if (hardFailures > 0) console.log(`::error::${hardFailures} hard proof(s) failed`)
+          if (missing > 0) console.log(`::error::${missing} result file(s) missing or empty`)
+          process.exitCode = hardFailures > 0 || missing > 0 ? 1 : 0
+          NODE
+
+      - name: Upload proof results
+        if: always()
+        # actions/upload-artifact@v7.0.2
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+        with:
+          name: spike-proof-results
+          path: |
+            ${{ runner.temp }}/spike-results-docker.jsonl
+            ${{ runner.temp }}/spike-results-local.jsonl
+          if-no-files-found: warn
+
+  summary:
+    name: summary
+    needs: [build, smoke, proofs]
+    if: always()
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - name: Download build info
+        continue-on-error: true
+        # actions/download-artifact@v8.0.2
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333
+        with:
+          pattern: build-info-*
+          path: ${{ runner.temp }}/info
+          merge-multiple: true
+
+      - name: Download smoke results
+        continue-on-error: true
+        # actions/download-artifact@v8.0.2
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333
+        with:
+          pattern: smoke-result-*
+          path: ${{ runner.temp }}/smoke
+          merge-multiple: true
+
+      - name: Write per-target summary
+        env:
+          BUILD_RESULT: ${{ needs.build.result }}
+          SMOKE_RESULT: ${{ needs.smoke.result }}
+          PROOFS_RESULT: ${{ needs.proofs.result }}
+        run: |
+          mkdir -p "$RUNNER_TEMP/info" "$RUNNER_TEMP/smoke"
+          {
+            echo "## SSH native spike (backend $CRYPTO_BACKEND)"
+            echo
+            echo "Jobs: build **$BUILD_RESULT**, smoke **$SMOKE_RESULT**, proofs **$PROOFS_RESULT**"
+            echo
+            echo "### Build"
+            echo
+            echo "| target | status | size (bytes) | gate | sha256 |"
+            echo "| --- | --- | --- | --- | --- |"
+            for target in linux-x64-gnu linux-arm64-gnu linux-x64-musl linux-arm64-musl darwin-x64 darwin-arm64; do
+              f="$RUNNER_TEMP/info/build-info-$target.json"
+              if [ -f "$f" ]; then
+                jq -r '"| \(.target) | \(.status) | \(.size) | \(.gate) | `\(.sha256)` |"' "$f"
+              else
+                echo "| $target | missing | | | |"
+              fi
+            done
+            echo
+            echo "### Smoke"
+            echo
+            echo "| target | variant | runner | status | node | backend |"
+            echo "| --- | --- | --- | --- | --- | --- |"
+            for f in "$RUNNER_TEMP"/smoke/*.json; do
+              [ -f "$f" ] || continue
+              jq -r '"| \(.target) | \(.variant) | \(.runner) | \(.status) | \(.output.node // "") | \(.output.cryptoBackend // "") |"' "$f"
+            done
+          } >> "$GITHUB_STEP_SUMMARY"
