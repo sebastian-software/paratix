@@ -210,20 +210,20 @@ Als Workflow passt Feature. Die öffentliche API verhält sich gleich, aber es k
      - Ein Panic oder `JoinError` wird zu `INTERNAL`, damit jeder Promise endet.
    - Fehlercodes mit secret-freien Texten:
 
-     | Code | Bedeutung |
-     |---|---|
-     | `AUTH_FAILED` | Anmeldung abgelehnt |
-     | `HOST_KEY_REJECTED` | Host-Key abgelehnt |
-     | `TIMEOUT` | Zeitlimit überschritten |
-     | `ABORTED` | per Signal abgebrochen |
-     | `CONNECT_FAILED` | Verbindungsaufbau gescheitert, mit errno |
-     | `PROTOCOL` | KEX- oder Protokollfehler |
-     | `CHANNEL_OPEN_FAILED` | Kanal abgelehnt |
-     | `DISCONNECTED` | Verbindung getrennt |
-     | `SFTP_STATUS` | SFTP-Fehler, mit Statuscode |
-     | `UNSUPPORTED_KEY` | Schlüsselformat nicht unterstützt |
-     | `ENCRYPTED_KEY` | verschlüsselter Schlüssel |
-     | `INTERNAL` | interner Fehler oder Panic |
+     | Code                  | Bedeutung                                |
+     | --------------------- | ---------------------------------------- |
+     | `AUTH_FAILED`         | Anmeldung abgelehnt                      |
+     | `HOST_KEY_REJECTED`   | Host-Key abgelehnt                       |
+     | `TIMEOUT`             | Zeitlimit überschritten                  |
+     | `ABORTED`             | per Signal abgebrochen                   |
+     | `CONNECT_FAILED`      | Verbindungsaufbau gescheitert, mit errno |
+     | `PROTOCOL`            | KEX- oder Protokollfehler                |
+     | `CHANNEL_OPEN_FAILED` | Kanal abgelehnt                          |
+     | `DISCONNECTED`        | Verbindung getrennt                      |
+     | `SFTP_STATUS`         | SFTP-Fehler, mit Statuscode              |
+     | `UNSUPPORTED_KEY`     | Schlüsselformat nicht unterstützt        |
+     | `ENCRYPTED_KEY`       | verschlüsselter Schlüssel                |
+     | `INTERNAL`            | interner Fehler oder Panic               |
 
    - Native Ursachen laufen durch den Secret-Sink.
    - `CHANNEL_OPEN_FAILED` ersetzt das Regex-Muster aus #178.
@@ -290,41 +290,41 @@ Als Workflow passt Feature. Die öffentliche API verhält sich gleich, aber es k
 
 ## Betroffene Dateien
 
-| Datei | Beschreibung |
-|---|---|
-| `docs/adr/0008-ssh-transport-russh-napi.md` | neu (A), englisch. Inhalt: Entscheidung, Alternativen, Spike-Ergebnisse, Plattformen (glibc 2.35, macOS-Mindestversion), Krypto-Backend, Fehlercodes, Aufteilung der Host-Zertifikate zwischen Rust und TS, `zeroize`-Grenzen, Advisory-Ausnahme, Update-Regel, Abbruchkriterien |
-| `packages/ssh-native/` (`Cargo.toml`, `src/*.rs`, `package.json`, `index.js`, `index.d.ts`, `npm/<triple>/package.json`, `test/`, `tsconfig*.json`) | neu (B). napi-rs-Anbindung mit russh und russh-sftp sowie zeroize. Loader von Hand, `index.d.ts` erzeugt. |
-| `Cargo.toml` (Workspace), `rust-toolchain.toml`, `Cargo.lock`, `deny.toml`, `.gitignore` | neu bzw. geändert (B). Rust-Workspace, Toolchain-Pin, Prüfregeln, `target/` |
-| `pnpm-workspace.yaml` | B/C2: Paket aufnehmen, `ssh2: false`, `cpu-features: false` |
-| `release-please-config.json`, `.release-please-manifest.json` | B: linked-versions, `extra-files` für Plattform-Manifeste |
-| `renovate.json` | B: Gruppe für `russh` und `russh-sftp` |
-| `eslint.config.ts`, `oxlint.config.ts`, `.prettierignore`, `cspell.json` | B: Ignore-Regeln für `target/` und `npm/*`, neue Begriffe |
-| `.github/workflows/ci.yml` | B: Rust-Toolchain, `rust-cache`, `rust:check`, Diff-Check für `index.d.ts`, Timeout |
-| `.github/workflows/integration-check.yml` | B: Rust-Toolchain, Anbindung bauen |
-| `.github/workflows/rust-advisories.yml` | neu (B): zeitgesteuert `cargo deny check advisories`, nicht blockierend, mit Meldung |
-| `.github/workflows/publish.yml` | B: Build-Matrix und Smoke-Test je Ziel mit dem Artefakt, das veröffentlicht wird. Binaries an `validate`, `verify` und `publish` weitergeben. `cancel-in-progress: false` |
-| `scripts/publishWorkspacePackages.mjs`, `scripts/publishWorkspacePackages.test.mjs` | B: neun Pakete mit Reihenfolge, Drift-Prüfung für Plattformverzeichnisse, `pnpm pack` plus Staging, `npm publish <tgz>`, Frische-Prüfung des `.node` gegen `src/*.rs`/`Cargo.*`, Idempotenz und Recovery |
-| `package.json` (Wurzel) | B: `rust:check`, Bedingung in `agent:check`, `test:integration` um `ssh-native` erweitert |
-| `packages/paratix/src/transport.ts` | neu (C1): interne Transport-Schnittstelle |
-| `packages/paratix/src/transportSsh2.ts` | neu (C1), in C2 gelöscht: temporärer Adapter auf `ssh2` |
-| `packages/paratix/src/transportNative.ts` | neu (C2): Adapter auf `@paratix/ssh-native` mit dynamischem Import, Abbildung der Fehlercodes, Weitergabe der Fehler aus dem Verifier |
-| `packages/paratix/src/ssh.ts` | C1: `Client` durch die Schnittstelle ersetzen. C2: `CHANNEL_OPEN_FAILED` statt Regex, Key-Buffer nach Übergabe leeren |
-| `packages/paratix/src/sshHelpers.ts` | C1: auf Transport-Optionen umstellen, `ssh2`-Typen entfernen |
-| `packages/paratix/src/sftp.ts` | C1: SFTP-Sitzung des Transports. C2: prüfen, ob die #37-Workarounds entfallen; Timeout 120 s bleibt |
-| `packages/paratix/src/knownHosts.ts` | C2: keine Änderung außer Tests. E: `@cert-authority` und `@revoked` für CA-Schlüssel |
-| `packages/paratix/src/runner.ts`, `packages/paratix/src/cli.ts` | C1: `destroy()` des Transports. C2: Ladeprüfung vor `prewarmSecrets` |
-| `packages/paratix/src/modules/rsync.ts` | D/E: `CertificateFile` bzw. `@cert-authority` |
-| `packages/paratix/src/types.ts` | D: `SshConfig.certificate?: string` |
-| `packages/paratix/package.json`, `packages/create-paratix/package.json` | C2: `ssh2`/`@types/ssh2` aus der Laufzeit entfernen (in `paratix` bleibt `ssh2` als devDependency), `@paratix/ssh-native` aufnehmen |
-| `packages/create-paratix/src/hostFingerprintBootstrap.ts`, `interactivePrompts.ts`, `index.ts`, `templates.ts` | C2: `scan()` über dynamischen Import, neutrale Namen und Prompt-Text, Vorlage ohne `ssh2`/`cpu-features` |
-| `packages/paratix/test/ssh.test.ts`, `sshHelpers.test.ts`, `sftp.test.ts`, `knownHosts.test.ts`, `runner-reconnect.test.ts`, `runner-signals.test.ts`, `writeFile.test.ts` | C1: Fakes auf die Schnittstelle. `R-000xxxx` bleiben inhaltlich, Ausnahmen mit Begründung |
-| `packages/paratix/test/transportSsh2.test.ts`, `transportNative.test.ts` | neu (C1 bzw. C2): Adapter-Tests, in C2 gegen ein gefälschtes natives Modul mit jedem Fehlercode |
-| `packages/paratix/test/integration/*`, `test/integration/docker/*` | C1: Paritätsmatrix auf `ssh2`. C2: dieselbe Matrix auf der Anbindung. sshd-Profile: Passwort/Keyboard-Interactive, `MaxSessions` niedrig, je ein Profil nur mit ed25519-, RSA- oder ECDSA-Host-Key. Der Agent läuft im Testprozess, das Forwarding wird im Container geprüft. D/E: Test-CA |
-| `packages/create-paratix/test/helpers.ts`, `host-fingerprint.test.ts` | C2: Fake-Factory, Test für eine nicht ladbare Anbindung |
-| `packages/create-paratix/test/integration/generated-project.install.test.ts`, `test/scaffoldFixtures.ts` | C2: Overrides um `@paratix/ssh-native` und das Host-Plattformpaket aus dem Arbeitsbaum erweitern, damit unveröffentlichte Versionen funktionieren |
-| `packages/paratix/llm-guide.md`, `docs/user-guide/*` | C2: Plattformen, glibc- und macOS-Mindestversion. D/E: Zertifikate |
-| `docs/initialbeschreibung.md`, `docs/review-areas.md` | C2: `ssh2` durch russh/`@paratix/ssh-native` ersetzen, Rust-Abhängigkeiten als Prüfbereich |
-| `AGENTS.md`, `packages/paratix/AGENTS.md` | B: Rust-Toolchain ist Pflicht zum Bauen. Der Integrationstest-Hinweis gilt auch für `packages/ssh-native`. |
+| Datei                                                                                                                                                                      | Beschreibung                                                                                                                                                                                                                                                                               |
+| -------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `docs/adr/0008-ssh-transport-russh-napi.md`                                                                                                                                | neu (A), englisch. Inhalt: Entscheidung, Alternativen, Spike-Ergebnisse, Plattformen (glibc 2.35, macOS-Mindestversion), Krypto-Backend, Fehlercodes, Aufteilung der Host-Zertifikate zwischen Rust und TS, `zeroize`-Grenzen, Advisory-Ausnahme, Update-Regel, Abbruchkriterien           |
+| `packages/ssh-native/` (`Cargo.toml`, `src/*.rs`, `package.json`, `index.js`, `index.d.ts`, `npm/<triple>/package.json`, `test/`, `tsconfig*.json`)                        | neu (B). napi-rs-Anbindung mit russh und russh-sftp sowie zeroize. Loader von Hand, `index.d.ts` erzeugt.                                                                                                                                                                                  |
+| `Cargo.toml` (Workspace), `rust-toolchain.toml`, `Cargo.lock`, `deny.toml`, `.gitignore`                                                                                   | neu bzw. geändert (B). Rust-Workspace, Toolchain-Pin, Prüfregeln, `target/`                                                                                                                                                                                                                |
+| `pnpm-workspace.yaml`                                                                                                                                                      | B/C2: Paket aufnehmen, `ssh2: false`, `cpu-features: false`                                                                                                                                                                                                                                |
+| `release-please-config.json`, `.release-please-manifest.json`                                                                                                              | B: linked-versions, `extra-files` für Plattform-Manifeste                                                                                                                                                                                                                                  |
+| `renovate.json`                                                                                                                                                            | B: Gruppe für `russh` und `russh-sftp`                                                                                                                                                                                                                                                     |
+| `eslint.config.ts`, `oxlint.config.ts`, `.prettierignore`, `cspell.json`                                                                                                   | B: Ignore-Regeln für `target/` und `npm/*`, neue Begriffe                                                                                                                                                                                                                                  |
+| `.github/workflows/ci.yml`                                                                                                                                                 | B: Rust-Toolchain, `rust-cache`, `rust:check`, Diff-Check für `index.d.ts`, Timeout                                                                                                                                                                                                        |
+| `.github/workflows/integration-check.yml`                                                                                                                                  | B: Rust-Toolchain, Anbindung bauen                                                                                                                                                                                                                                                         |
+| `.github/workflows/rust-advisories.yml`                                                                                                                                    | neu (B): zeitgesteuert `cargo deny check advisories`, nicht blockierend, mit Meldung                                                                                                                                                                                                       |
+| `.github/workflows/publish.yml`                                                                                                                                            | B: Build-Matrix und Smoke-Test je Ziel mit dem Artefakt, das veröffentlicht wird. Binaries an `validate`, `verify` und `publish` weitergeben. `cancel-in-progress: false`                                                                                                                  |
+| `scripts/publishWorkspacePackages.mjs`, `scripts/publishWorkspacePackages.test.mjs`                                                                                        | B: neun Pakete mit Reihenfolge, Drift-Prüfung für Plattformverzeichnisse, `pnpm pack` plus Staging, `npm publish <tgz>`, Frische-Prüfung des `.node` gegen `src/*.rs`/`Cargo.*`, Idempotenz und Recovery                                                                                   |
+| `package.json` (Wurzel)                                                                                                                                                    | B: `rust:check`, Bedingung in `agent:check`, `test:integration` um `ssh-native` erweitert                                                                                                                                                                                                  |
+| `packages/paratix/src/transport.ts`                                                                                                                                        | neu (C1): interne Transport-Schnittstelle                                                                                                                                                                                                                                                  |
+| `packages/paratix/src/transportSsh2.ts`                                                                                                                                    | neu (C1), in C2 gelöscht: temporärer Adapter auf `ssh2`                                                                                                                                                                                                                                    |
+| `packages/paratix/src/transportNative.ts`                                                                                                                                  | neu (C2): Adapter auf `@paratix/ssh-native` mit dynamischem Import, Abbildung der Fehlercodes, Weitergabe der Fehler aus dem Verifier                                                                                                                                                      |
+| `packages/paratix/src/ssh.ts`                                                                                                                                              | C1: `Client` durch die Schnittstelle ersetzen. C2: `CHANNEL_OPEN_FAILED` statt Regex, Key-Buffer nach Übergabe leeren                                                                                                                                                                      |
+| `packages/paratix/src/sshHelpers.ts`                                                                                                                                       | C1: auf Transport-Optionen umstellen, `ssh2`-Typen entfernen                                                                                                                                                                                                                               |
+| `packages/paratix/src/sftp.ts`                                                                                                                                             | C1: SFTP-Sitzung des Transports. C2: prüfen, ob die #37-Workarounds entfallen; Timeout 120 s bleibt                                                                                                                                                                                        |
+| `packages/paratix/src/knownHosts.ts`                                                                                                                                       | C2: keine Änderung außer Tests. E: `@cert-authority` und `@revoked` für CA-Schlüssel                                                                                                                                                                                                       |
+| `packages/paratix/src/runner.ts`, `packages/paratix/src/cli.ts`                                                                                                            | C1: `destroy()` des Transports. C2: Ladeprüfung vor `prewarmSecrets`                                                                                                                                                                                                                       |
+| `packages/paratix/src/modules/rsync.ts`                                                                                                                                    | D/E: `CertificateFile` bzw. `@cert-authority`                                                                                                                                                                                                                                              |
+| `packages/paratix/src/types.ts`                                                                                                                                            | D: `SshConfig.certificate?: string`                                                                                                                                                                                                                                                        |
+| `packages/paratix/package.json`, `packages/create-paratix/package.json`                                                                                                    | C2: `ssh2`/`@types/ssh2` aus der Laufzeit entfernen (in `paratix` bleibt `ssh2` als devDependency), `@paratix/ssh-native` aufnehmen                                                                                                                                                        |
+| `packages/create-paratix/src/hostFingerprintBootstrap.ts`, `interactivePrompts.ts`, `index.ts`, `templates.ts`                                                             | C2: `scan()` über dynamischen Import, neutrale Namen und Prompt-Text, Vorlage ohne `ssh2`/`cpu-features`                                                                                                                                                                                   |
+| `packages/paratix/test/ssh.test.ts`, `sshHelpers.test.ts`, `sftp.test.ts`, `knownHosts.test.ts`, `runner-reconnect.test.ts`, `runner-signals.test.ts`, `writeFile.test.ts` | C1: Fakes auf die Schnittstelle. `R-000xxxx` bleiben inhaltlich, Ausnahmen mit Begründung                                                                                                                                                                                                  |
+| `packages/paratix/test/transportSsh2.test.ts`, `transportNative.test.ts`                                                                                                   | neu (C1 bzw. C2): Adapter-Tests, in C2 gegen ein gefälschtes natives Modul mit jedem Fehlercode                                                                                                                                                                                            |
+| `packages/paratix/test/integration/*`, `test/integration/docker/*`                                                                                                         | C1: Paritätsmatrix auf `ssh2`. C2: dieselbe Matrix auf der Anbindung. sshd-Profile: Passwort/Keyboard-Interactive, `MaxSessions` niedrig, je ein Profil nur mit ed25519-, RSA- oder ECDSA-Host-Key. Der Agent läuft im Testprozess, das Forwarding wird im Container geprüft. D/E: Test-CA |
+| `packages/create-paratix/test/helpers.ts`, `host-fingerprint.test.ts`                                                                                                      | C2: Fake-Factory, Test für eine nicht ladbare Anbindung                                                                                                                                                                                                                                    |
+| `packages/create-paratix/test/integration/generated-project.install.test.ts`, `test/scaffoldFixtures.ts`                                                                   | C2: Overrides um `@paratix/ssh-native` und das Host-Plattformpaket aus dem Arbeitsbaum erweitern, damit unveröffentlichte Versionen funktionieren                                                                                                                                          |
+| `packages/paratix/llm-guide.md`, `docs/user-guide/*`                                                                                                                       | C2: Plattformen, glibc- und macOS-Mindestversion. D/E: Zertifikate                                                                                                                                                                                                                         |
+| `docs/initialbeschreibung.md`, `docs/review-areas.md`                                                                                                                      | C2: `ssh2` durch russh/`@paratix/ssh-native` ersetzen, Rust-Abhängigkeiten als Prüfbereich                                                                                                                                                                                                 |
+| `AGENTS.md`, `packages/paratix/AGENTS.md`                                                                                                                                  | B: Rust-Toolchain ist Pflicht zum Bauen. Der Integrationstest-Hinweis gilt auch für `packages/ssh-native`.                                                                                                                                                                                 |
 
 ## Implementierungsdetails
 
@@ -533,15 +533,15 @@ Geprüft mit `effective-delivery` und `effective-engineering`. 29 Befunde: 2 kri
 
 Es bleiben keine offenen Punkte.
 
-| Bereich | Kritisch | Wichtig | Hinweis |
-|---|---:|---:|---:|
-| Architektur | 1 | 3 | 0 |
-| Sicherheit | 0 | 4 | 1 |
-| Datenschutz | 0 | 1 | 1 |
-| Fehlerfälle | 0 | 4 | 1 |
-| Testbarkeit | 1 | 3 | 1 |
-| Umfang | 0 | 2 | 2 |
-| Wartbarkeit | 0 | 4 | 5 |
+| Bereich     | Kritisch | Wichtig | Hinweis |
+| ----------- | -------: | ------: | ------: |
+| Architektur |        1 |       3 |       0 |
+| Sicherheit  |        0 |       4 |       1 |
+| Datenschutz |        0 |       1 |       1 |
+| Fehlerfälle |        0 |       4 |       1 |
+| Testbarkeit |        1 |       3 |       1 |
+| Umfang      |        0 |       2 |       2 |
+| Wartbarkeit |        0 |       4 |       5 |
 
 Mehrfach zugeordnete Befunde zählen in jedem betroffenen Bereich.
 
@@ -587,15 +587,15 @@ Mehrfach zugeordnete Befunde zählen in jedem betroffenen Bereich.
 
 24 Befunde: 1 kritisch, 11 wichtig, 12 Hinweise. Alle sind eingearbeitet. Vier davon hat der Nutzer entschieden: glibc 2.35, Laden bei Bedarf in `create-paratix`, Rust-Prüfungen bei Änderungen, Platzhalter-Erstveröffentlichung.
 
-| Bereich | Kritisch | Wichtig | Hinweis |
-|---|---:|---:|---:|
-| Architektur | 1 | 4 | 2 |
-| Sicherheit | 0 | 2 | 0 |
-| Datenschutz | 0 | 0 | 1 |
-| Fehlerfälle | 0 | 3 | 4 |
-| Testbarkeit | 0 | 2 | 1 |
-| Umfang | 0 | 2 | 1 |
-| Wartbarkeit | 0 | 2 | 3 |
+| Bereich     | Kritisch | Wichtig | Hinweis |
+| ----------- | -------: | ------: | ------: |
+| Architektur |        1 |       4 |       2 |
+| Sicherheit  |        0 |       2 |       0 |
+| Datenschutz |        0 |       0 |       1 |
+| Fehlerfälle |        0 |       3 |       4 |
+| Testbarkeit |        0 |       2 |       1 |
+| Umfang      |        0 |       2 |       1 |
+| Wartbarkeit |        0 |       2 |       3 |
 
 Die Befunde betrafen:
 
@@ -626,15 +626,15 @@ Die Befunde betrafen:
 
 ### Zusammenfassung
 
-| Bereich | Kritisch | Wichtig | Hinweis |
-|---|---:|---:|---:|
-| Architektur | 0 | 0 | 0 |
-| Sicherheit | 0 | 0 | 0 |
-| Datenschutz | 0 | 0 | 0 |
-| Fehlerfälle | 0 | 0 | 0 |
-| Testbarkeit | 0 | 0 | 0 |
-| Umfang | 0 | 0 | 0 |
-| Wartbarkeit | 0 | 0 | 0 |
+| Bereich     | Kritisch | Wichtig | Hinweis |
+| ----------- | -------: | ------: | ------: |
+| Architektur |        0 |       0 |       0 |
+| Sicherheit  |        0 |       0 |       0 |
+| Datenschutz |        0 |       0 |       0 |
+| Fehlerfälle |        0 |       0 |       0 |
+| Testbarkeit |        0 |       0 |       0 |
+| Umfang      |        0 |       0 |       0 |
+| Wartbarkeit |        0 |       0 |       0 |
 
 Offene Befunde nach beiden Runden: keine.
 
