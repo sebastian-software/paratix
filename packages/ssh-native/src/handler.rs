@@ -26,8 +26,9 @@ use crate::js::JsObjectBuilder;
 use crate::signal::Flag;
 
 /// Async JS host-key verifier (the wrapper always returns a promise of a
-/// boolean). Weak: the pending `connect()` promise already keeps the event
-/// loop alive while the verifier runs.
+/// boolean that never rejects). Weak: while the verifier runs, the ref'd
+/// `DisconnectFn` of the same connection keeps the event loop alive (a
+/// pending promise alone does not).
 pub type VerifyFn =
     ThreadsafeFunction<HostKeyInfo, Promise<bool>, sys::napi_value, Status, false, true>;
 
@@ -271,7 +272,16 @@ impl ClientHandler {
                 let cancel = self.shared.verifier_cancel.clone();
                 let verdict = async move {
                     match verifier.call_async_catch(info).await {
-                        Ok(promise) => promise.await.unwrap_or(false),
+                        // The wrapper's promise never rejects. An error here
+                        // means no verdict will ever come (for example the
+                        // promise was garbage-collected while pending), so
+                        // wait for the abort or the deadline instead of
+                        // reporting a rejection the verifier never made.
+                        // The host key stays unaccepted either way.
+                        Ok(promise) => match promise.await {
+                            Ok(accepted) => accepted,
+                            Err(_) => std::future::pending().await,
+                        },
                         Err(_) => false,
                     }
                 };
@@ -358,18 +368,21 @@ impl Handler for ClientHandler {
         &mut self,
         reason: DisconnectReason<Self::Error>,
     ) -> Result<(), Self::Error> {
-        let info = match reason {
-            DisconnectReason::ReceivedDisconnect(_) => DisconnectInfo {
-                reason: "remote",
-                code: None,
-            },
-            DisconnectReason::Error(e) => DisconnectInfo {
-                reason: "error",
-                code: Some(e.into_binding_error().code),
-            },
-        };
-        self.shared.set_reason(info);
-        Ok(())
+        protect(async move {
+            let info = match reason {
+                DisconnectReason::ReceivedDisconnect(_) => DisconnectInfo {
+                    reason: "remote",
+                    code: None,
+                },
+                DisconnectReason::Error(e) => DisconnectInfo {
+                    reason: "error",
+                    code: Some(e.into_binding_error().code),
+                },
+            };
+            self.shared.set_reason(info);
+            Ok(())
+        })
+        .await
     }
 
     async fn server_channel_open_agent_forward(
@@ -469,7 +482,13 @@ impl Handler for ClientHandler {
         _id: russh::ChannelId,
         channel_type: &str,
     ) -> bool {
-        self.shared.record_rejected(channel_type);
+        // Never accepted; a panic while recording is caught and also rejects.
+        let shared = &self.shared;
+        let _ = protect(async move {
+            shared.record_rejected(channel_type);
+            Ok(())
+        })
+        .await;
         false
     }
 }

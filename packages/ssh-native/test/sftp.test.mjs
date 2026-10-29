@@ -4,7 +4,7 @@ import { Readable } from "node:stream"
 import { pipeline } from "node:stream/promises"
 import { after, before, describe, it } from "node:test"
 
-import { collect, connectWithKey } from "./helpers/binding.mjs"
+import { collect, connectWithKey, within } from "./helpers/binding.mjs"
 import { clientKey, payload, sha256, startServer } from "./helpers/server.mjs"
 
 // SFTP status codes (SSH File Transfer Protocol, version 3).
@@ -99,5 +99,28 @@ describe("sftp", () => {
     const stream = sftp.createReadStream("/missing")
     const [error] = await once(stream, "error")
     assert.equal(error.code, "SFTP_STATUS")
+  })
+
+  it("keeps the numeric status when a multi-chunk WRITE fails", async () => {
+    const chunk = payload(64 * 1024)
+    const chunks = Array.from({ length: 128 }, () => chunk)
+    await assert.rejects(
+      pipeline(Readable.from(chunks), sftp.createWriteStream("/write-fails-large")),
+      { code: "SFTP_STATUS", sftpStatus: FAILURE }
+    )
+  })
+
+  it("rejects a refused SFTP subsystem with CHANNEL_OPEN_FAILED", async () => {
+    server.behaviour.refuseSftp = true
+    try {
+      await assert.rejects(within(session.sftp(), 5000, "sftp()"), {
+        code: "CHANNEL_OPEN_FAILED",
+        detail: "subsystem-refused",
+      })
+    } finally {
+      server.behaviour.refuseSftp = false
+    }
+    const again = await session.sftp()
+    await again.end()
   })
 })

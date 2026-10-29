@@ -37,7 +37,7 @@ use napi::threadsafe_function::{ThreadsafeFunction, ThreadsafeFunctionCallMode};
 use napi::{sys, Env, Status};
 use napi_derive::napi;
 use russh::client::{Handle, Msg};
-use russh::{ChannelMsg, ChannelReadHalf, ChannelWriteHalf, Sig};
+use russh::{Channel, ChannelMsg, ChannelReadHalf, ChannelWriteHalf, Sig};
 use tokio::sync::watch;
 
 use crate::connect::MAXIMUM_PACKET_SIZE;
@@ -154,10 +154,18 @@ impl MessageSource for ChannelReadHalf {
     }
 }
 
-/// Stdout credit and cancellation shared by the reader and `ExecChannel`.
+impl MessageSource for Channel<Msg> {
+    async fn next(&mut self) -> Option<ChannelMsg> {
+        self.wait().await
+    }
+}
+
+/// Stdout credit, cancellation and close requests shared by the reader and
+/// `ExecChannel`.
 pub struct Flow {
     acked: watch::Sender<u64>,
     cancel: Flag,
+    close: Flag,
 }
 
 impl Flow {
@@ -166,6 +174,7 @@ impl Flow {
         Arc::new(Self {
             acked,
             cancel: Flag::new(),
+            close: Flag::new(),
         })
     }
 
@@ -186,10 +195,22 @@ pub struct SessionLink {
 enum ReadEnd {
     /// `CHANNEL_CLOSE` arrived.
     Closed,
-    /// The channel ended without `CHANNEL_CLOSE`: the session is gone.
+    /// The channel ended without `CHANNEL_CLOSE`, or the session ended or
+    /// was killed (`destroy()`, `close()` fallback) while the reader waited
+    /// for stdout credit: the exit reports the lost connection.
     Lost,
-    /// JS cancelled the channel (or `destroy()` while waiting for credit).
+    /// JS called `close()`: the reader sends `CHANNEL_CLOSE` itself.
+    CloseRequested,
+    /// JS cancelled the channel: no exit event.
     Cancelled,
+}
+
+/// Why the reader stopped waiting before it could read the next message.
+enum Interrupt {
+    Cancel,
+    Close,
+    Ended,
+    Killed,
 }
 
 struct ReadState {
@@ -198,21 +219,64 @@ struct ReadState {
     signal: Option<String>,
 }
 
-/// Waits until one more full chunk fits under [`STDOUT_QUEUE_LIMIT`].
-/// Returns `false` when the channel was cancelled or the session killed.
-async fn wait_for_credit(state: &ReadState, flow: &Flow, link: &SessionLink) -> bool {
+/// Waits until one more full chunk fits under [`STDOUT_QUEUE_LIMIT`], or
+/// until something ends the wait.
+async fn wait_for_credit(
+    state: &ReadState,
+    flow: &Flow,
+    link: &SessionLink,
+) -> Result<(), Interrupt> {
     let sent = state.sent;
     let fits = move |acked: &u64| sent.saturating_sub(*acked) + MAX_CHUNK <= STDOUT_QUEUE_LIMIT;
     let mut acked = flow.acked.subscribe();
     if fits(&acked.borrow()) {
-        return true;
+        return Ok(());
     }
     tokio::select! {
         biased;
-        () = flow.cancel.fired() => false,
-        () = link.killed.fired() => false,
-        result = acked.wait_for(fits) => result.is_ok(),
+        () = flow.cancel.fired() => Err(Interrupt::Cancel),
+        () = flow.close.fired() => Err(Interrupt::Close),
+        () = link.killed.fired() => Err(Interrupt::Killed),
+        // The connection dropped while stdout was paused: russh's session
+        // loop was not blocked on this channel, so it could end.
+        () = link.ended.fired() => Err(Interrupt::Ended),
+        result = acked.wait_for(fits) => result.map(|_| ()).map_err(|_| Interrupt::Cancel),
     }
+}
+
+/// Forwards one channel message. Returns `true` for `CHANNEL_CLOSE`.
+fn forward(msg: ChannelMsg, sink: &ExecEventFn, state: &mut ReadState) -> bool {
+    match msg {
+        ChannelMsg::Data { data } => {
+            state.sent += data.len() as u64;
+            send(sink, ExecEvent::Stdout(data.to_vec()));
+        }
+        ChannelMsg::ExtendedData { data, ext: 1 } => {
+            send(sink, ExecEvent::Stderr(data.to_vec()));
+        }
+        ChannelMsg::ExitStatus { exit_status } => state.code = Some(exit_status),
+        ChannelMsg::ExitSignal { signal_name: s, .. } => {
+            state.signal = Some(signal_name(&s));
+        }
+        ChannelMsg::Close => return true,
+        _ => {}
+    }
+    false
+}
+
+/// Forwards every message that is already queued, without waiting and
+/// without stdout credit. Returns `true` if `CHANNEL_CLOSE` was among them.
+fn drain_queued<S: MessageSource>(
+    source: &mut S,
+    sink: &ExecEventFn,
+    state: &mut ReadState,
+) -> bool {
+    while let Some(Some(msg)) = source.next().now_or_never() {
+        if forward(msg, sink, state) {
+            return true;
+        }
+    }
+    false
 }
 
 async fn read_loop<S: MessageSource>(
@@ -225,8 +289,18 @@ async fn read_loop<S: MessageSource>(
 ) -> ReadEnd {
     let mut prefix = prefix;
     loop {
-        if !wait_for_credit(state, flow, link).await {
-            return ReadEnd::Cancelled;
+        match wait_for_credit(state, flow, link).await {
+            Ok(()) => {}
+            Err(Interrupt::Cancel) => return ReadEnd::Cancelled,
+            Err(Interrupt::Close) => return ReadEnd::CloseRequested,
+            Err(Interrupt::Killed) => return ReadEnd::Lost,
+            Err(Interrupt::Ended) => {
+                return if drain_queued(source, sink, state) {
+                    ReadEnd::Closed
+                } else {
+                    ReadEnd::Lost
+                };
+            }
         }
         let msg = if let Some(msg) = prefix.pop_front() {
             Some(msg)
@@ -234,93 +308,108 @@ async fn read_loop<S: MessageSource>(
             tokio::select! {
                 biased;
                 () = flow.cancel.fired() => return ReadEnd::Cancelled,
+                () = flow.close.fired() => return ReadEnd::CloseRequested,
                 msg = source.next() => msg,
             }
         };
         match msg {
-            Some(ChannelMsg::Data { data }) => {
-                state.sent += data.len() as u64;
-                send(sink, ExecEvent::Stdout(data.to_vec()));
+            Some(msg) => {
+                if forward(msg, sink, state) {
+                    return ReadEnd::Closed;
+                }
             }
-            Some(ChannelMsg::ExtendedData { data, ext: 1 }) => {
-                send(sink, ExecEvent::Stderr(data.to_vec()));
-            }
-            Some(ChannelMsg::ExitStatus { exit_status }) => state.code = Some(exit_status),
-            Some(ChannelMsg::ExitSignal { signal_name: s, .. }) => {
-                state.signal = Some(signal_name(&s));
-            }
-            Some(ChannelMsg::Close) => return ReadEnd::Closed,
-            Some(_) => {}
             None => return ReadEnd::Lost,
         }
     }
 }
 
-/// The exec reader. Also used by `__internalPanicProbe("execReader")` with
-/// an internal message source, so the probe runs exactly this code.
-pub async fn run_reader<S: MessageSource>(
+/// Sends `CHANNEL_CLOSE` for a JS `close()`. russh forgets a channel as
+/// soon as the client closes it, so the server's `CHANNEL_CLOSE` never
+/// reaches the reader; the exit is therefore sent here, after the messages
+/// that were already queued.
+async fn close_requested<S: MessageSource>(
+    source: &mut S,
+    sink: &ExecEventFn,
+    state: &mut ReadState,
+    closer: Option<&ChannelWriteHalf<Msg>>,
+) {
+    if let Some(closer) = closer {
+        let close = closer.close();
+        tokio::pin!(close);
+        // Keep taking messages while the close is queued, so russh's session
+        // loop is never blocked on this channel meanwhile.
+        loop {
+            tokio::select! {
+                biased;
+                _ = &mut close => break,
+                msg = source.next() => match msg {
+                    Some(msg) => {
+                        if forward(msg, sink, state) {
+                            break;
+                        }
+                    }
+                    None => break,
+                },
+            }
+        }
+    }
+    drain_queued(source, sink, state);
+}
+
+/// Waits for the end of the session and reports the lost connection.
+async fn report_lost(sink: &ExecEventFn, link: &SessionLink) {
+    link.ended.fired().await;
+    let info = link
+        .shared
+        .as_ref()
+        .map(|shared| shared.disconnect_info())
+        .unwrap_or(DisconnectInfo {
+            reason: "error",
+            code: Some(Code::Disconnected),
+        });
+    // A channel that ended through connection loss never reports an exit
+    // code.
+    send(
+        sink,
+        ExecEvent::Exit {
+            code: None,
+            signal: None,
+            disconnected: Some(info),
+        },
+    );
+}
+
+async fn read_and_finish<S: MessageSource>(
     mut source: S,
     prefix: VecDeque<ChannelMsg>,
-    sink: Arc<ExecEventFn>,
-    flow: Arc<Flow>,
-    link: SessionLink,
-    closer: Option<Arc<ChannelWriteHalf<Msg>>>,
+    sink: &ExecEventFn,
+    flow: &Flow,
+    link: &SessionLink,
+    closer: Option<&ChannelWriteHalf<Msg>>,
 ) {
     let mut state = ReadState {
         sent: 0,
         code: None,
         signal: None,
     };
-    let outcome = AssertUnwindSafe(read_loop(
-        &mut source,
-        prefix,
-        &sink,
-        &flow,
-        &link,
-        &mut state,
-    ))
-    .catch_unwind()
-    .await;
-    // Release the channel receiver first: russh's session loop may be
-    // blocked on delivering into it.
+    let end = read_loop(&mut source, prefix, sink, flow, link, &mut state).await;
+    if let ReadEnd::CloseRequested = end {
+        close_requested(&mut source, sink, &mut state, closer).await;
+    }
+    // Release the channel receiver: russh's session loop may be blocked on
+    // delivering into it.
     drop(source);
-    match outcome {
-        Ok(ReadEnd::Closed) => send(
-            &sink,
+    match end {
+        ReadEnd::Closed | ReadEnd::CloseRequested => send(
+            sink,
             ExecEvent::Exit {
                 code: state.code,
                 signal: state.signal,
                 disconnected: None,
             },
         ),
-        Ok(ReadEnd::Lost) => {
-            link.ended.fired().await;
-            let info = link
-                .shared
-                .as_ref()
-                .map(|shared| shared.disconnect_info())
-                .unwrap_or(DisconnectInfo {
-                    reason: "error",
-                    code: Some(Code::Disconnected),
-                });
-            // A channel that ended through connection loss never reports
-            // an exit code.
-            send(
-                &sink,
-                ExecEvent::Exit {
-                    code: None,
-                    signal: None,
-                    disconnected: Some(info),
-                },
-            );
-        }
-        Ok(ReadEnd::Cancelled) => {
-            if let Some(closer) = closer {
-                let _ = closer.close().await;
-            }
-        }
-        Err(_) => {
-            send(&sink, ExecEvent::Internal);
+        ReadEnd::Lost => report_lost(sink, link).await,
+        ReadEnd::Cancelled => {
             if let Some(closer) = closer {
                 let _ = closer.close().await;
             }
@@ -328,10 +417,40 @@ pub async fn run_reader<S: MessageSource>(
     }
 }
 
+/// The exec reader. Also used by `__internalPanicProbe("execReader")` with
+/// an internal message source, so the probe runs exactly this code. The
+/// event sink (a ref'd threadsafe function) is dropped right after the final
+/// event, which releases the event loop.
+pub async fn run_reader<S: MessageSource>(
+    source: S,
+    prefix: VecDeque<ChannelMsg>,
+    sink: Arc<ExecEventFn>,
+    flow: Arc<Flow>,
+    link: SessionLink,
+    closer: Option<Arc<ChannelWriteHalf<Msg>>>,
+) {
+    let outcome = AssertUnwindSafe(read_and_finish(
+        source,
+        prefix,
+        &sink,
+        &flow,
+        &link,
+        closer.as_deref(),
+    ))
+    .catch_unwind()
+    .await;
+    if outcome.is_err() {
+        send(&sink, ExecEvent::Internal);
+        if let Some(closer) = closer {
+            let _ = closer.close().await;
+        }
+    }
+}
+
 /// Native side of one exec channel, handed to JS as an external.
 pub struct ExecCore {
-    write: Arc<ChannelWriteHalf<Msg>>,
     flow: Arc<Flow>,
+    write: Arc<ChannelWriteHalf<Msg>>,
 }
 
 pub type ExecChannel = External<ExecCore>;
@@ -340,20 +459,17 @@ fn channel_closed() -> BindingError {
     BindingError::new(Code::Disconnected, "the exec channel is closed")
 }
 
-/// Waits for the server's reply to the exec request. Data that arrives
-/// before it is kept for the reader.
-async fn await_exec_reply(read: &mut ChannelReadHalf) -> BindingResult<VecDeque<ChannelMsg>> {
+/// Waits for the server's reply to a channel request (`want_reply`). Data
+/// that arrives before it is kept for the reader.
+pub async fn await_request_reply<S: MessageSource>(
+    read: &mut S,
+    refused: BindingError,
+) -> BindingResult<VecDeque<ChannelMsg>> {
     let mut prefix = VecDeque::new();
     loop {
-        match read.wait().await {
+        match read.next().await {
             Some(ChannelMsg::Success) => return Ok(prefix),
-            Some(ChannelMsg::Failure) => {
-                return Err(BindingError::with_detail(
-                    Code::ChannelOpenFailed,
-                    "exec-refused",
-                    "the server refused the exec request",
-                ))
-            }
+            Some(ChannelMsg::Failure) => return Err(refused),
             Some(ChannelMsg::Close) | None => return Err(channel_closed()),
             Some(other) => prefix.push_back(other),
         }
@@ -367,36 +483,30 @@ pub struct ExecRequest {
     pub agent_forward: bool,
 }
 
-async fn open_exec(
-    handle: &Handle<ClientHandler>,
+/// Requests exec on an open channel and writes the initial stdin.
+async fn request_exec(
+    read: &mut ChannelReadHalf,
+    write: &ChannelWriteHalf<Msg>,
     request: &ExecRequest,
-) -> BindingResult<(
-    ChannelReadHalf,
-    Arc<ChannelWriteHalf<Msg>>,
-    VecDeque<ChannelMsg>,
-)> {
-    let channel = handle.channel_open_session().await?;
+) -> BindingResult<VecDeque<ChannelMsg>> {
     if request.agent_forward {
         // auth-agent-req@openssh.com without want_reply, as OpenSSH does.
-        channel.agent_forward(false).await?;
+        write.agent_forward(false).await?;
     }
-    channel.exec(true, request.command.as_bytes()).await?;
-    let (mut read, write) = channel.split();
-    let write = Arc::new(write);
-    let prefix = match await_exec_reply(&mut read).await {
-        Ok(prefix) => prefix,
-        Err(err) => {
-            let _ = write.close().await;
-            return Err(err);
-        }
-    };
+    write.exec(true, request.command.as_bytes()).await?;
+    let refused = BindingError::with_detail(
+        Code::ChannelOpenFailed,
+        "exec-refused",
+        "the server refused the exec request",
+    );
+    let prefix = await_request_reply(read, refused).await?;
     if let Some(stdin) = &request.stdin {
         write
             .data_bytes(Bytes::copy_from_slice(stdin))
             .await
             .map_err(|_| channel_closed())?;
     }
-    Ok((read, write, prefix))
+    Ok(prefix)
 }
 
 pub async fn start_exec(
@@ -406,13 +516,29 @@ pub async fn start_exec(
     abort: Flag,
     sink: Arc<ExecEventFn>,
 ) -> BindingResult<ExecChannel> {
-    let opened = tokio::select! {
+    let channel = tokio::select! {
         biased;
         () = abort.fired() => return Err(BindingError::aborted()),
-        opened = open_exec(handle, &request) => opened?,
+        channel = handle.channel_open_session() => channel?,
+    };
+    let (mut read, write) = channel.split();
+    let write = Arc::new(write);
+    // From here on the channel is open: an abort or a failed request closes
+    // it again.
+    let prefix = tokio::select! {
+        biased;
+        () = abort.fired() => Err(BindingError::aborted()),
+        prefix = request_exec(&mut read, &write, &request) => prefix,
     };
     drop(request);
-    let (read, write, prefix) = opened;
+    let prefix = match prefix {
+        Ok(prefix) => prefix,
+        Err(err) => {
+            drop(read);
+            let _ = write.close().await;
+            return Err(err);
+        }
+    };
     let flow = Flow::new();
     let link = SessionLink {
         ended: shared.ended.clone(),
@@ -427,7 +553,7 @@ pub async fn start_exec(
         link,
         Some(write.clone()),
     ));
-    Ok(External::new(ExecCore { write, flow }))
+    Ok(External::new(ExecCore { flow, write }))
 }
 
 /// Acknowledges stdout bytes the JS `Readable` has taken.
@@ -465,17 +591,16 @@ pub fn exec_end<'env>(env: &'env Env, channel: &ExecChannel) -> napi::Result<Pro
     }))
 }
 
-/// Sends `CHANNEL_CLOSE`; the exit follows once the server confirms.
+/// Closes the channel through the reader, which sends `CHANNEL_CLOSE` and
+/// then the exit (`disconnected: false`, with the exit status if one
+/// arrived before). The promise resolves once the request is registered.
 #[napi(js_name = "execClose", skip_typescript, catch_unwind)]
 pub fn exec_close<'env>(
     env: &'env Env,
     channel: &ExecChannel,
 ) -> napi::Result<PromiseRaw<'env, ()>> {
-    let write = channel.write.clone();
-    env.spawn_future(guarded(async move {
-        let _ = write.close().await;
-        Ok(())
-    }))
+    channel.flow.close.fire();
+    env.spawn_future(async { Ok(()) })
 }
 
 /// Stops the reader without an exit event and closes the channel.

@@ -30,7 +30,8 @@ use russh_sftp::client::{Config, RawSftpSession};
 use russh_sftp::protocol::{FileAttributes, OpenFlags, StatusCode};
 use tokio::sync::{mpsc, oneshot};
 
-use crate::error::{from_sftp, BindingError, BindingResult};
+use crate::error::{from_sftp, BindingError, BindingResult, Code};
+use crate::exec::await_request_reply;
 use crate::guarded;
 use crate::handler::ClientHandler;
 use crate::signal::Flag;
@@ -58,8 +59,22 @@ pub struct SftpCore {
 pub type NativeSftp = External<SftpCore>;
 
 pub async fn open_sftp(handle: &Handle<ClientHandler>) -> BindingResult<NativeSftp> {
-    let channel = handle.channel_open_session().await?;
-    channel.request_subsystem(true, "sftp").await?;
+    let mut channel = handle.channel_open_session().await?;
+    let refused = BindingError::with_detail(
+        Code::ChannelOpenFailed,
+        "subsystem-refused",
+        "the server refused the SFTP subsystem",
+    );
+    // Wait for the reply: a refused subsystem would otherwise leave the SFTP
+    // init request pending forever.
+    let requested = match channel.request_subsystem(true, "sftp").await {
+        Ok(()) => await_request_reply(&mut channel, refused).await.map(|_| ()),
+        Err(err) => Err(err.into()),
+    };
+    if let Err(err) = requested {
+        let _ = channel.close().await;
+        return Err(err);
+    }
     // No per-request timeout: like ssh2, a slow server is waited for. The
     // connection-level controls (destroy, close) still end pending requests.
     let config = Config {
@@ -138,23 +153,31 @@ async fn open_writer(
     let failure = Arc::new(Mutex::new(None));
     let failure_task = failure.clone();
     tokio::spawn(async move {
-        let result = write_all(&raw, &handle, rx).await;
-        let result = match result {
+        let mut rx = rx;
+        let store = |err: &BindingError| {
+            if let Ok(mut slot) = failure_task.lock() {
+                *slot = Some(err.clone());
+            }
+        };
+        let result = match write_all(&raw, &handle, &mut rx).await {
             Ok(total) => raw
                 .close(handle.as_str())
                 .await
                 .map(|_| total)
                 .map_err(|e| sftp_err(&e)),
             Err(err) => {
+                // Record the failure before the queue closes, so a pending
+                // or later JS `write()` reports it instead of DISCONNECTED.
+                store(&err);
+                rx.close();
                 let _ = raw.close(handle.as_str()).await;
                 Err(err)
             }
         };
         if let Err(err) = &result {
-            if let Ok(mut slot) = failure_task.lock() {
-                *slot = Some(err.clone());
-            }
+            store(err);
         }
+        drop(rx);
         let _ = done_tx.send(result);
     });
 
@@ -169,7 +192,7 @@ async fn open_writer(
 async fn write_all(
     raw: &RawSftpSession,
     handle: &str,
-    mut rx: mpsc::Receiver<Vec<u8>>,
+    rx: &mut mpsc::Receiver<Vec<u8>>,
 ) -> BindingResult<f64> {
     let mut offset: u64 = 0;
     let mut pending: VecDeque<(u64, Vec<u8>)> = VecDeque::new();

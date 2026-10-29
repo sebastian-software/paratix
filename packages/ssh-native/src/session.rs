@@ -74,6 +74,9 @@ struct SessionInner {
     agent_forward: bool,
 }
 
+/// How long `close()` waits for a graceful end before it shuts the socket.
+const CLOSE_TIMEOUT: Duration = Duration::from_secs(5);
+
 /// Native side of one connection, handed to JS as an external.
 pub struct SessionCore {
     inner: Arc<SessionInner>,
@@ -288,13 +291,18 @@ pub fn session_close<'env>(
     inner.shared.mark_local_close();
     env.spawn_future(guarded(async move {
         if !inner.shared.is_ended() {
-            let _ = inner
-                .handle
-                .disconnect(Disconnect::ByApplication, "", "en")
-                .await;
-            let waited =
-                tokio::time::timeout(Duration::from_secs(5), inner.shared.ended.fired()).await;
-            if waited.is_err() {
+            // One deadline for both steps: queueing the disconnect can block
+            // too, when russh's handle queue is full during a stdout stall.
+            let graceful = async {
+                let _ = inner
+                    .handle
+                    .disconnect(Disconnect::ByApplication, "", "en")
+                    .await;
+                inner.shared.ended.fired().await;
+            };
+            if tokio::time::timeout(CLOSE_TIMEOUT, graceful).await.is_err() {
+                // Readers waiting for stdout credit see the kill and report
+                // a disconnected exit.
                 inner.shared.kill();
             }
         }

@@ -76,19 +76,27 @@ await session.close() // or session.destroy() right before process.exit()
   An `AbortSignal` ends a pending connect with `ABORTED`; an already aborted signal does so without
   opening TCP. `agentForward: true` bridges server-opened agent channels to `agent`.
 - `privateKey`, `password`, the exec `stdin` option and every Buffer written to `stdin` are
-  zero-filled by the binding in every path, including success.
+  zero-filled by the binding in every path, including success. A stdin chunk is zero-filled once the
+  binding copied it, immediately if `stdin` no longer accepts data, and on exit, `cancel()` or
+  destroy if it is still queued.
 - `Session`: `authInfo`, `closed`, `onDisconnect(listener)` (fires exactly once; late subscribers
-  are notified asynchronously; returns an unsubscribe function), `exec()`, `sftp()`, `close()`, the
-  synchronous `destroy()` (safe right before `process.exit()`, releases the event loop) and the
+  are notified asynchronously; returns an unsubscribe function that also cancels a pending late
+  notification), `exec()`, `sftp()`, `close()` (graceful, at most about 5 s before the socket is
+  shut down; open exec channels then end with `disconnected: true`), the synchronous `destroy()` (safe right before `process.exit()`, releases the event loop) and the
   diagnostics `channelStats()`. An open connection keeps the Node event loop alive.
 - `ExecChannel`: `stdout` (with backpressure), `stderr`, `stdin`, `exit`, `cancel()` and
   `close()`. `exit` resolves exactly once with `{ code, signal, disconnected }` after all stdout and
   stderr data. `signal` is the raw name, for example `TERM`. When the connection is lost, the session
   disconnect is reported first and the channel exits with `disconnected: true` and `code: null`.
-  `cancel()` and the `signal` option end the channel with `ABORTED`.
+  `cancel()` and the `signal` option end the channel with `ABORTED`. `close()` sends
+  `CHANNEL_CLOSE`; the exit follows with `disconnected: false` and the exit status if one arrived
+  before (otherwise `code: null`). Destroying `stdout` (also by leaving a `for await` loop early or
+  through a failed pipeline) discards the rest of the output without stalling the connection.
 - `SftpSession`: `createReadStream(path)`, `createWriteStream(path, { mode })` and `end()`. Streams
   are created synchronously and open the remote file lazily; errors arrive as `error` events. `mode`
-  is applied on create and through an fchmod after open, so an existing file gets it too.
+  is applied on create and through an fchmod after open, so an existing file gets it too. A server
+  that refuses the SFTP subsystem makes `sftp()` reject with `CHANNEL_OPEN_FAILED` (detail
+  `subsystem-refused`).
 - `cryptoBackend()`, `SUPPORTED_TARGETS` and `currentTarget()` describe the binary.
 
 Keepalive and an inactivity timeout are off. Channels the server opens are rejected, except
@@ -100,20 +108,20 @@ stderr clean.
 Every error of the binding is an `Error` with a `code` from this set, and messages never contain
 secrets:
 
-| Code                  | Meaning                                                               |
-| --------------------- | --------------------------------------------------------------------- |
-| `AUTH_FAILED`         | login refused, or no usable agent identity                            |
-| `HOST_KEY_REJECTED`   | the verifier did not return `true`                                    |
-| `TIMEOUT`             | `readyTimeoutMs` / `timeoutMs` elapsed                                |
-| `ABORTED`             | an `AbortSignal` fired or `cancel()` was called                       |
-| `CONNECT_FAILED`      | TCP connect failed; `errno` and `syscallCode` (e.g. `ECONNREFUSED`)   |
-| `PROTOCOL`            | SSH or SFTP protocol error                                            |
-| `CHANNEL_OPEN_FAILED` | the server refused a channel or the exec request; `detail` names why  |
-| `DISCONNECTED`        | the connection is closed or was lost                                  |
-| `SFTP_STATUS`         | the SFTP server returned an error status; `sftpStatus` holds its code |
-| `UNSUPPORTED_KEY`     | the private key type or format is not supported                       |
-| `ENCRYPTED_KEY`       | the private key is encrypted (passphrases are not supported)          |
-| `INTERNAL`            | a bug in the binding, including a caught panic                        |
+| Code                  | Meaning                                                                                                     |
+| --------------------- | ----------------------------------------------------------------------------------------------------------- |
+| `AUTH_FAILED`         | login refused, or no usable agent identity                                                                  |
+| `HOST_KEY_REJECTED`   | the verifier did not return `true`                                                                          |
+| `TIMEOUT`             | `readyTimeoutMs` / `timeoutMs` elapsed                                                                      |
+| `ABORTED`             | an `AbortSignal` fired or `cancel()` was called                                                             |
+| `CONNECT_FAILED`      | TCP connect failed; `errno` and `syscallCode` (e.g. `ECONNREFUSED`)                                         |
+| `PROTOCOL`            | SSH or SFTP protocol error                                                                                  |
+| `CHANNEL_OPEN_FAILED` | the server refused a channel, the exec request (`exec-refused`) or the SFTP subsystem (`subsystem-refused`) |
+| `DISCONNECTED`        | the connection is closed or was lost                                                                        |
+| `SFTP_STATUS`         | the SFTP server returned an error status; `sftpStatus` holds its code                                       |
+| `UNSUPPORTED_KEY`     | the private key type or format is not supported                                                             |
+| `ENCRYPTED_KEY`       | the private key is encrypted (passphrases are not supported)                                                |
+| `INTERNAL`            | a bug in the binding, including a caught panic                                                              |
 
 `INTERNAL` always carries the fixed message `internal error in the native SSH binding`; the native
 text is discarded. Invalid arguments (wrong types, missing credentials) throw a `TypeError`.
@@ -127,7 +135,8 @@ text is discarded. Invalid arguments (wrong types, missing credentials) throw a 
   next channel message only while fewer than `STDOUT_QUEUE_LIMIT` (1 MiB) bytes of stdout wait in
   JS. Because russh reopens the SSH window on receipt and its session loop blocks once a channel
   buffer is full, a paused stdout stops all channels, SFTP and the detection of a lost connection.
-  `destroy()` and an `AbortSignal` still work while stalled. stderr has no bound of its own: it
+  `destroy()`, `close()`, an `AbortSignal` and destroying `stdout` still work while stalled; a
+  connection that drops while stdout is paused still ends the channel. stderr has no bound of its own: it
   flows into a JS buffer, even without a reader, but only while stdout flows, and a very large
   unread stderr uses memory.
 - **russh keeps its own, non-zeroized copies of secrets.** The binding holds private keys,

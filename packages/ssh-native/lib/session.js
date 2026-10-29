@@ -39,9 +39,15 @@ function rethrowLater(error) {
  * @returns the handle and its cleanup
  */
 function linkAbort(signal) {
-  const handle = native.abortHandleCreate()
+  const handle = callNativeSync(() => native.abortHandleCreate())
   if (signal === undefined) return { handle, release() {} }
-  const onAbort = () => native.abortHandleFire(handle)
+  const onAbort = () => {
+    try {
+      native.abortHandleFire(handle)
+    } catch {
+      // An abort listener must not throw; the operation ends on its own.
+    }
+  }
   signal.addEventListener("abort", onAbort, { once: true })
   return { handle, release: () => signal.removeEventListener("abort", onAbort) }
 }
@@ -149,8 +155,11 @@ class Session {
    * @returns resolves once the connection is gone
    */
   async close() {
-    await callNative(() => native.sessionClose(this.#native))
-    this.reportDisconnect({ reason: "local" })
+    try {
+      await callNative(() => native.sessionClose(this.#native))
+    } finally {
+      this.#endChannels()
+    }
   }
 
   /**
@@ -164,9 +173,7 @@ class Session {
     } catch (error) {
       throw toError(error)
     } finally {
-      this.reportDisconnect({ reason: "local" })
-      const event = /** @type {DisconnectInfo} */ (this.#disconnect)
-      for (const channel of this.#channels) channel.finishDisconnected(event)
+      this.#endChannels()
     }
   }
 
@@ -209,14 +216,15 @@ class Session {
     if (typeof listener !== "function") throw new TypeError("listener must be a function")
     const event = this.#disconnect
     if (event !== null) {
-      setImmediate(() => {
+      const late = setImmediate(() => {
         try {
           listener(event)
         } catch (error) {
           rethrowLater(error)
         }
       })
-      return () => {}
+      // Unsubscribing before the late notification ran cancels it.
+      return () => clearImmediate(late)
     }
     // A fresh wrapper per subscription, so unsubscribing removes exactly it.
     const entry = (info) => listener(info)
@@ -286,6 +294,16 @@ class Session {
     })
     this.#channels.add(channel)
     return channel
+  }
+
+  /**
+   * Reports the local disconnect and ends the channels that are still open
+   * with a disconnected exit (the disconnect comes first).
+   */
+  #endChannels() {
+    this.reportDisconnect({ reason: "local" })
+    const event = /** @type {DisconnectInfo} */ (this.#disconnect)
+    for (const channel of this.#channels) channel.finishDisconnected(event)
   }
 
   /**

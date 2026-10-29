@@ -1,8 +1,10 @@
 import assert from "node:assert/strict"
 import { once } from "node:events"
+import { Writable } from "node:stream"
+import { pipeline } from "node:stream/promises"
 import { after, before, describe, it } from "node:test"
 
-import { connectWithKey, delay } from "./helpers/binding.mjs"
+import { connectWithKey, delay, within } from "./helpers/binding.mjs"
 import { clientKey, payload, sha256, startServer } from "./helpers/server.mjs"
 
 // Mirrors of the crate's flow-control constants (src/exec.rs, src/connect.rs);
@@ -141,6 +143,71 @@ describe("stdout backpressure", () => {
       next.stdout.resume()
       const exit = await next.exit
       assert.equal(exit.code, 5)
+    } finally {
+      session.destroy()
+    }
+  })
+
+  /**
+   * Runs `stopReading` on a stalled flood and checks that the channel still
+   * ends and the connection stays usable.
+   *
+   * @param stopReading ends the consumer of stdout
+   */
+  async function abandonStdout(stopReading) {
+    const session = await connectWithKey(server, key)
+    try {
+      const flood = await pausedFlood(session)
+      await assertStalled(flood)
+      await stopReading(flood.channel.stdout)
+      const exit = await within(flood.channel.exit, 10_000, "exit after stdout was abandoned")
+      assert.deepEqual(exit, { code: 0, disconnected: false, signal: null })
+      const next = await session.exec("exit 6")
+      next.stdout.resume()
+      const nextExit = await next.exit
+      assert.equal(nextExit.code, 6)
+    } finally {
+      session.destroy()
+    }
+  }
+
+  it("stdout.destroy() while stalled releases the connection", () =>
+    abandonStdout(async (stdout) => {
+      stdout.destroy()
+    }))
+
+  it("leaving a for-await loop early while stalled releases the connection", () =>
+    abandonStdout(async (stdout) => {
+      // What `for await (...) { break }` does: take one chunk, then return.
+      const iterator = stdout[Symbol.asyncIterator]()
+      const first = await iterator.next()
+      assert.ok(first.value.length > 0)
+      await iterator.return?.()
+    }))
+
+  it("a failed pipeline while stalled releases the connection", () =>
+    abandonStdout(async (stdout) => {
+      const failing = new Writable({
+        write(_chunk, _encoding, callback) {
+          callback(new Error("disk full"))
+        },
+      })
+      await assert.rejects(pipeline(stdout, failing), /disk full/v)
+    }))
+
+  it("close() during a stall settles in time and ends the channel as disconnected", async () => {
+    const session = await connectWithKey(server, key)
+    try {
+      const flood = await pausedFlood(session)
+      await assertStalled(flood)
+      // Fill russh's handle queue too: the server never reads this stdin.
+      flood.channel.stdin.write(Buffer.alloc(1024 * 1024, 1))
+      const started = Date.now()
+      await within(session.close(), 7000, "close() during a stall")
+      assert.ok(Date.now() - started < 6500, `close() took ${Date.now() - started} ms`)
+      const exit = await within(flood.channel.exit, 2000, "exit after close()")
+      assert.deepEqual(exit, { code: null, disconnected: true, signal: null })
+      assert.equal(session.closed, true)
     } finally {
       session.destroy()
     }

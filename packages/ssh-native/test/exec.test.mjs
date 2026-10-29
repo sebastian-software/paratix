@@ -1,7 +1,8 @@
 import assert from "node:assert/strict"
+import { once } from "node:events"
 import { after, before, describe, it } from "node:test"
 
-import { collect, connectWithKey, delay } from "./helpers/binding.mjs"
+import { collect, connectWithKey, delay, within } from "./helpers/binding.mjs"
 import { clientKey, payload, sha256, startServer } from "./helpers/server.mjs"
 
 describe("exec", () => {
@@ -147,4 +148,56 @@ describe("exec", () => {
       assert.equal(channel.stderr.readableLength, size, "all stderr data arrived unread")
       assert.equal(sha256(await collect(channel.stderr)), sha256(payload(size)))
     }))
+
+  it("close() ends the channel with a regular exit and keeps the session usable", () =>
+    withSession(async (session) => {
+      const silent = await session.exec("sleep")
+      silent.stdout.resume()
+      await silent.close()
+      const exit = await within(silent.exit, 2000, "exit after close()")
+      assert.deepEqual(exit, { code: null, disconnected: false, signal: null })
+
+      const reported = await session.exec("status 4")
+      const [line] = await once(reported.stdout, "data")
+      assert.equal(line.toString(), "status sent\n")
+      reported.stdout.resume()
+      // Let the exit status arrive before closing.
+      await delay(50)
+      await reported.close()
+      const reportedExit = await within(reported.exit, 2000, "exit after close()")
+      assert.deepEqual(reportedExit, { code: 4, disconnected: false, signal: null })
+
+      assert.equal(session.closed, false)
+      const next = await session.exec("exit 0")
+      next.stdout.resume()
+      const nextExit = await next.exit
+      assert.equal(nextExit.code, 0)
+    }))
+
+  it("reports a disconnected exit when the connection drops while stdout is paused", async () => {
+    const session = await connectWithKey(server, key)
+    try {
+      // 2 MiB: more than JS takes while paused, little enough that russh's
+      // session loop is not blocked and notices the dropped connection.
+      const channel = await session.exec(`flood-then-drop ${2 * 1024 * 1024}`)
+      channel.stdout.pause()
+      const exit = await within(channel.exit, 5000, "exit after the connection dropped")
+      assert.deepEqual(exit, { code: null, disconnected: true, signal: null })
+      assert.equal(session.closed, true)
+    } finally {
+      session.destroy()
+    }
+  })
+
+  it("does not notify a late subscriber that unsubscribed right away", async () => {
+    const session = await connectWithKey(server, key)
+    await session.close()
+    let notified = false
+    const unsubscribe = session.onDisconnect(() => {
+      notified = true
+    })
+    unsubscribe()
+    await delay(20)
+    assert.equal(notified, false)
+  })
 })

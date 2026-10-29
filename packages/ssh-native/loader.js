@@ -34,30 +34,75 @@ const INSTALL_HINT =
 
 /**
  * @typedef {Platform & {
+ *   glibcVersion?: string | null,
  *   exists: (file: string) => boolean,
  *   requireModule: (id: string) => unknown,
  *   dirname: string,
  * }} LoaderEnvironment
  */
 
+/** Oldest glibc the gnu binaries run on. */
+const MIN_GLIBC = [2, 35]
+
 /**
- * Reads the libc from the process report.
- *
- * @returns `true` for musl, `false` for glibc, `null` if unknown
+ * @typedef {object} Libc
+ * @property {boolean} isMusl whether the process runs on musl
+ * @property {string | null} glibcVersion the glibc version, if known
  */
-function muslFromReport() {
+
+/** @type {Libc | null} */
+let cachedLibc = null
+
+/**
+ * Reads the libc from the process report, without network information
+ * (collecting it can be slow).
+ *
+ * @returns what the report shows, or `null` if it shows nothing
+ */
+function libcFromReport() {
+  const reporter = /** @type {typeof process.report & { excludeNetwork?: boolean }} */ (
+    process.report
+  )
+  const previous = reporter.excludeNetwork
   try {
+    reporter.excludeNetwork = true
     const report =
       /** @type {{ header?: { glibcVersionRuntime?: string }, sharedObjects?: string[] }} */ (
-        process.report.getReport()
+        reporter.getReport()
       )
-    if (report.header?.glibcVersionRuntime) return false
+    const glibcVersion = report.header?.glibcVersionRuntime
+    if (glibcVersion) return { glibcVersion, isMusl: false }
     const shared = Array.isArray(report.sharedObjects) ? report.sharedObjects : []
-    if (shared.some((file) => file.includes("libc.musl-") || file.includes("ld-musl-"))) return true
+    if (shared.some((file) => file.includes("libc.musl-") || file.includes("ld-musl-"))) {
+      return { glibcVersion: null, isMusl: true }
+    }
   } catch {
     // Fall through to the ldd probe.
+  } finally {
+    reporter.excludeNetwork = previous
   }
   return null
+}
+
+/**
+ * Detects the libc of the running Linux process (cached).
+ *
+ * @returns musl or glibc, with the glibc version when the report has it
+ */
+function detectLibc() {
+  if (cachedLibc !== null) return cachedLibc
+  let libc = libcFromReport()
+  if (libc === null) {
+    let isMusl = false
+    try {
+      isMusl = fs.readFileSync("/usr/bin/ldd", "utf8").includes("musl")
+    } catch {
+      // Assume glibc.
+    }
+    libc = { glibcVersion: null, isMusl }
+  }
+  cachedLibc = libc
+  return libc
 }
 
 /**
@@ -67,14 +112,26 @@ function muslFromReport() {
  * @returns `true` on musl, `false` on glibc and on every other platform
  */
 function detectMusl(platform = process.platform) {
-  if (platform !== "linux") return false
-  const fromReport = muslFromReport()
-  if (fromReport !== null) return fromReport
-  try {
-    return fs.readFileSync("/usr/bin/ldd", "utf8").includes("musl")
-  } catch {
-    return false
-  }
+  return platform === "linux" && detectLibc().isMusl
+}
+
+/**
+ * @param version a glibc version such as `2.31`
+ * @returns whether it is older than the gnu binaries require
+ */
+function isGlibcTooOld(version) {
+  const [major = 0, minor = 0] = version.split(".").map(Number)
+  return major < MIN_GLIBC[0] || (major === MIN_GLIBC[0] && minor < MIN_GLIBC[1])
+}
+
+/**
+ * @param target platform, libc and glibc version of the process
+ * @returns a sentence about a too old glibc, or an empty string
+ */
+function glibcHint(target) {
+  const { glibcVersion, isMusl, platform } = target
+  if (platform !== "linux" || isMusl || !glibcVersion || !isGlibcTooOld(glibcVersion)) return ""
+  return `This system has glibc ${glibcVersion}; the gnu targets require glibc >= ${MIN_GLIBC.join(".")}. `
 }
 
 /**
@@ -120,7 +177,8 @@ function unsupportedMessage(target) {
 function missingMessage(target, triple) {
   return (
     `${PACKAGE_NAME}: the native binary for ${triple} could not be loaded ` +
-    `(${describePlatform(target)}). Supported targets: ${SUPPORTED_TARGETS.join(", ")}. ` +
+    `(${describePlatform(target)}). ${glibcHint(target)}` +
+    `Supported targets: ${SUPPORTED_TARGETS.join(", ")}. ` +
     `Expected a locally built ssh-native.${triple}.node next to the loader or the package ` +
     `${PACKAGE_NAME}-${triple}. ${INSTALL_HINT}`
   )
@@ -170,11 +228,13 @@ function currentTarget() {
  * @returns the binding of the running process
  */
 function loadBinding() {
+  const libc = process.platform === "linux" ? detectLibc() : { glibcVersion: null, isMusl: false }
   return resolveBinding({
     arch: process.arch,
     dirname: __dirname,
     exists: fs.existsSync,
-    isMusl: detectMusl(),
+    glibcVersion: libc.glibcVersion,
+    isMusl: libc.isMusl,
     platform: process.platform,
     requireModule: require,
   })

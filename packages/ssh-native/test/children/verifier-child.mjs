@@ -1,6 +1,8 @@
 // Child process of verifier-abort.test.mjs. It holds no handle of its own
 // except the SSH connection attempt (mode `never`), or additionally the
-// timer that settles the verifier late (mode `late`).
+// timer that settles the verifier late (mode `late`), or a timer that forces
+// garbage collection while the verifier is pending (mode `gc`, run with
+// --expose-gc); that timer stops once connect() settled.
 import { createRequire } from "node:module"
 
 const require = createRequire(import.meta.url)
@@ -27,6 +29,9 @@ function verifyHost() {
   return promise
 }
 
+const collector =
+  mode === "gc" ? setInterval(() => /** @type {() => void} */ (globalThis.gc)(), 2) : undefined
+
 const started = Date.now()
 try {
   await binding.connect(
@@ -43,3 +48,4 @@ try {
 } catch (error) {
   say(JSON.stringify({ code: error.code, elapsedMs: Date.now() - started, outcome: "rejected" }))
 }
+clearInterval(collector)

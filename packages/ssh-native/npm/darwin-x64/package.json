@@ -19,7 +19,7 @@
   "repository": {
     "type": "git",
     "url": "git+https://github.com/sebastian-software/paratix.git",
-    "directory": "packages/ssh-native/npm/darwin-x64"
+    "directory": "packages/ssh-native"
   },
   "bugs": {
     "url": "https://github.com/sebastian-software/paratix/issues"

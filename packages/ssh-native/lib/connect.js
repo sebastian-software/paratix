@@ -22,6 +22,14 @@ class ConnectAttempt {
   abort = null
   /** @type {DisconnectInfo | null} */
   pendingDisconnect = null
+  /**
+   * Verdict promises handed to native code, held until they settle: napi
+   * keeps no strong reference to them, and a collected pending verdict would
+   * end the verification early.
+   *
+   * @type {Set<Promise<boolean>>}
+   */
+  pendingVerdicts = new Set()
   /** @type {SessionInstance | null} */
   session = null
   settled = false
@@ -98,7 +106,18 @@ class ConnectAttempt {
    * @param info the presented host key
    * @returns the verdict
    */
-  verify = async (info) => {
+  verify = (info) => {
+    const verdict = this.#decide(info)
+    this.pendingVerdicts.add(verdict)
+    verdict.then(() => this.pendingVerdicts.delete(verdict))
+    return verdict
+  }
+
+  /**
+   * @param info the presented host key
+   * @returns resolves with the verdict; never rejects
+   */
+  async #decide(info) {
     if (this.settled) return false
     try {
       const verdict = await this.verifyHost(info)
@@ -131,6 +150,27 @@ class ConnectAttempt {
 }
 
 /**
+ * Wraps the native session; if that fails, the native connection is
+ * destroyed so it does not stay open without an owner.
+ *
+ * @param nativeSession the native handle
+ * @param pendingDisconnect a disconnect that arrived before the wrapper existed
+ * @returns the wrapper
+ */
+function createSession(nativeSession, pendingDisconnect) {
+  try {
+    return new Session(nativeSession, pendingDisconnect)
+  } catch (error) {
+    try {
+      native.sessionDestroy(nativeSession)
+    } catch {
+      // Best effort: the original error is what matters.
+    }
+    throw error
+  }
+}
+
+/**
  * Connects and authenticates.
  *
  * @param options host, port, user, credentials, timeout, signal
@@ -142,7 +182,7 @@ async function connect(options, verifyHost) {
   const pending = attempt.start(options)
   try {
     const nativeSession = await callNative(() => pending)
-    const session = new Session(nativeSession, attempt.pendingDisconnect)
+    const session = createSession(nativeSession, attempt.pendingDisconnect)
     attempt.session = session
     return session
   } catch (error) {

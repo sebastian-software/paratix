@@ -82,17 +82,24 @@ export interface ExecExit {
 }
 
 export interface ExecChannel {
-  /** Backpressured: a paused stdout stalls the whole connection. */
+  /**
+   * Backpressured: a paused stdout stalls the whole connection. Destroying it
+   * (also by leaving a for-await loop or a failed pipeline) releases the stall.
+   */
   readonly stdout: Readable
   /** Unbounded; flows while stdout flows. */
   readonly stderr: Readable
-  /** Buffer chunks are zero-filled once handed to the binding. */
+  /**
+   * Every Buffer written is zero-filled in every path: once the binding copied
+   * it, immediately if the stream no longer accepts data, and on exit, cancel
+   * or destroy if it is still queued.
+   */
   readonly stdin: Writable
   /** Resolves exactly once, after all stdout and stderr data. */
   readonly exit: Promise<ExecExit>
   /** Stops the channel: streams end and `exit` rejects with ABORTED. */
   cancel(): void
-  /** Sends CHANNEL_CLOSE; `exit` follows. */
+  /** Sends CHANNEL_CLOSE; `exit` follows with `disconnected: false` and the exit status, if one arrived. */
   close(): Promise<void>
 }
 
@@ -115,11 +122,17 @@ export interface SftpSession {
 export interface Session {
   readonly authInfo: AuthInfo
   readonly closed: boolean
-  /** Fires exactly once; late subscribers are notified asynchronously. Returns an unsubscribe function. */
+  /**
+   * Fires exactly once; late subscribers are notified asynchronously. Returns an
+   * unsubscribe function, which also cancels a pending late notification.
+   */
   onDisconnect(listener: (event: DisconnectEvent) => void): () => void
   exec(command: string, options?: ExecOptions): Promise<ExecChannel>
   sftp(): Promise<SftpSession>
-  /** Graceful close; resolves once the connection is gone. */
+  /**
+   * Graceful close, at most about 5 s (then the socket is shut down); resolves
+   * once the connection is gone. Open exec channels end with `disconnected: true`.
+   */
   close(): Promise<void>
   /** Synchronous hard stop, safe right before `process.exit()`. */
   destroy(): void

@@ -8,6 +8,9 @@ const { resolveBinding, SUPPORTED_TARGETS, targetFor } = require("../loader.js")
 
 const DIRNAME = "/opt/ssh-native"
 const NOT_FOUND = "module not found"
+const LOCAL_GNU_BINARY = join(DIRNAME, "ssh-native.linux-x64-gnu.node")
+const BROKEN_BINARY = "invalid ELF header"
+const GNU_PACKAGE = "@paratix/ssh-native-linux-x64-gnu"
 
 /**
  * Throws like `require` for a missing module.
@@ -28,7 +31,7 @@ function thrownBy(run) {
   try {
     run()
   } catch (error) {
-    return /** @type {Error & { cause: Error }} */ (error)
+    return /** @type {Error & { cause: Error & { errors: Error[] } }} */ (error)
   }
   throw new Error("expected a throw")
 }
@@ -79,17 +82,59 @@ describe("loader", () => {
   })
 
   it("prefers a locally built binary next to the loader", () => {
-    const local = join(DIRNAME, "ssh-native.linux-x64-gnu.node")
     const binding = { local: true }
     const { options, required } = environment({
-      exists: (file) => file === local,
+      exists: (file) => file === LOCAL_GNU_BINARY,
       requireModule(/** @type {string} */ id) {
         required.push(id)
-        return id === local ? binding : notFound()
+        return id === LOCAL_GNU_BINARY ? binding : notFound()
       },
     })
     assert.equal(resolveBinding(options), binding)
-    assert.deepEqual(required, [local])
+    assert.deepEqual(required, [LOCAL_GNU_BINARY])
+  })
+
+  it("falls back to the platform package when the local binary fails to load", () => {
+    const binding = { package: true }
+    const { options, required } = environment({
+      exists: (file) => file === LOCAL_GNU_BINARY,
+      requireModule(/** @type {string} */ id) {
+        required.push(id)
+        if (id === LOCAL_GNU_BINARY) throw new Error(BROKEN_BINARY)
+        return id === GNU_PACKAGE ? binding : notFound()
+      },
+    })
+    assert.equal(resolveBinding(options), binding)
+    assert.deepEqual(required, [LOCAL_GNU_BINARY, GNU_PACKAGE])
+  })
+
+  it("reports both causes when the local binary and the package fail", () => {
+    const { options } = environment({
+      exists: (file) => file === LOCAL_GNU_BINARY,
+      requireModule(/** @type {string} */ id) {
+        if (id === LOCAL_GNU_BINARY) throw new Error(BROKEN_BINARY)
+        return notFound()
+      },
+    })
+    const error = thrownBy(() => resolveBinding(options))
+    assert.ok(error.cause instanceof AggregateError)
+    assert.deepEqual(
+      error.cause.errors.map((cause) => cause.message),
+      [BROKEN_BINARY, NOT_FOUND]
+    )
+  })
+
+  it("names the glibc floor on a gnu system with an older glibc", () => {
+    const { options } = environment({ glibcVersion: "2.31" })
+    const error = thrownBy(() => resolveBinding(options))
+    assert.match(error.message, /glibc 2\.31; the gnu targets require glibc >= 2\.35/v)
+    assertHints(error.message)
+  })
+
+  it("does not mention the glibc floor for a recent glibc", () => {
+    const { options } = environment({ glibcVersion: "2.39" })
+    const error = thrownBy(() => resolveBinding(options))
+    assert.doesNotMatch(error.message, /require glibc/v)
   })
 
   it("falls back to the platform package", () => {
@@ -129,7 +174,7 @@ describe("loader", () => {
     assert.match(error.message, /@paratix\/ssh-native-linux-x64-gnu/v)
     assertHints(error.message)
     assert.equal(error.cause.message, NOT_FOUND)
-    assert.deepEqual(required, ["@paratix/ssh-native-linux-x64-gnu"])
+    assert.deepEqual(required, [GNU_PACKAGE])
   })
 
   it("reports musl as libc", () => {

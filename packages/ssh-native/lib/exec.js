@@ -7,7 +7,7 @@
 
 const { Readable, Writable } = require("node:stream")
 
-const { abortedError, createError, internalError, toError } = require("./errors.js")
+const { abortedError, callNative, createError, internalError, toError } = require("./errors.js")
 
 /** highWaterMark of the stdout Readable; part of the backpressure bound. */
 const STDOUT_HIGH_WATER_MARK = 64 * 1024
@@ -91,12 +91,73 @@ function settle(start, callback) {
   )
 }
 
+/**
+ * stdin that zero-fills every Buffer written to it in every path: once the
+ * binding copied it, immediately when the stream no longer accepts data,
+ * and on destroy for chunks still queued.
+ */
+class StdinWritable extends Writable {
+  /** @type {Set<Uint8Array>} */
+  #pending = new Set()
+
+  /**
+   * @param options `write` and `final` for the underlying Writable
+   */
+  constructor(options) {
+    super({
+      ...options,
+      destroy: (error, callback) => {
+        for (const chunk of this.#pending) chunk.fill(0)
+        this.#pending.clear()
+        callback(error)
+      },
+    })
+  }
+
+  /**
+   * @param chunk data to end with (optional)
+   * @param args encoding and callback, as for Writable
+   * @returns this stream
+   */
+  end(chunk, ...args) {
+    this.#track(chunk)
+    return super.end(chunk, ...args)
+  }
+
+  /**
+   * Zero-fills a chunk and forgets it.
+   *
+   * @param chunk a chunk the binding has taken or refused
+   */
+  wipe(chunk) {
+    if (chunk instanceof Uint8Array) chunk.fill(0)
+    this.#pending.delete(chunk)
+  }
+
+  /**
+   * @param chunk data to write
+   * @param args encoding and callback, as for Writable
+   * @returns whether more data may be written now
+   */
+  write(chunk, ...args) {
+    this.#track(chunk)
+    return super.write(chunk, ...args)
+  }
+
+  /** @param chunk a chunk handed to `write()` or `end()` */
+  #track(chunk) {
+    if (!(chunk instanceof Uint8Array)) return
+    if (this.destroyed || this.writableEnded) chunk.fill(0)
+    else this.#pending.add(chunk)
+  }
+}
+
 class ExecChannelImpl {
   /** @type {Promise<ExecExit>} */
   exit
   /** @type {Readable} */
   stderr
-  /** @type {Writable} */
+  /** @type {StdinWritable} */
   stdin
   /** @type {Readable} */
   stdout
@@ -126,13 +187,21 @@ class ExecChannelImpl {
     this.#resolveExit = exit.resolve
     this.#rejectExit = exit.reject
     this.stdout = new Readable({
+      // A destroyed stdout (early exit from an async iterator, a failed
+      // pipeline, an explicit destroy) releases its outstanding credit;
+      // later stdout is acknowledged on arrival. Otherwise the native reader
+      // and the whole connection would stay stalled.
+      destroy: (error, callback) => {
+        this.#flushAck()
+        callback(error)
+      },
       highWaterMark: STDOUT_HIGH_WATER_MARK,
       read: () => this.#flushAck(),
     })
     // stderr is unbounded: data is always taken, so an unread stderr never
     // blocks stdout or the exit.
     this.stderr = new Readable({ read: ignore })
-    this.stdin = new Writable({
+    this.stdin = new StdinWritable({
       final: (callback) => settle(() => this.#api.end(this.#channel), callback),
       write: (chunk, _encoding, callback) => this.#writeStdin(chunk, callback),
     })
@@ -170,7 +239,7 @@ class ExecChannelImpl {
    */
   async close() {
     if (this.#finished || !this.#attached) return
-    await this.#api.close(this.#channel)
+    await callNative(() => this.#api.close(this.#channel))
   }
 
   /**
@@ -218,7 +287,11 @@ class ExecChannelImpl {
 
   /** @param event one native event */
   #dispatch(event) {
-    if (this.#finished) return
+    if (this.#finished) {
+      // Late stdout after a failure: keep the native reader going.
+      if (event?.kind === "stdout" && event.data) this.#ack(event.data.length)
+      return
+    }
     switch (event?.kind) {
       case "exit": {
         this.#onExit(event)
@@ -243,6 +316,14 @@ class ExecChannelImpl {
   #fail(error) {
     if (this.#finished) return
     this.#finished = true
+    // Stop the native reader too; it would otherwise wait for credit.
+    if (this.#attached) {
+      try {
+        this.#api.cancel(this.#channel)
+      } catch {
+        // Already ended.
+      }
+    }
     this.stdout.destroy(error)
     this.stderr.destroy(error)
     this.stdin.destroy(error)
@@ -299,7 +380,7 @@ class ExecChannelImpl {
    */
   #writeStdin(chunk, callback) {
     if (this.#finished || !this.#attached) {
-      chunk.fill(0)
+      this.stdin.wipe(chunk)
       callback(createError("DISCONNECTED", "the exec channel is closed"))
       return
     }
@@ -308,7 +389,7 @@ class ExecChannelImpl {
         return this.#api.write(this.#channel, chunk)
       } finally {
         // The native side copied the chunk synchronously.
-        chunk.fill(0)
+        this.stdin.wipe(chunk)
       }
     }, callback)
   }

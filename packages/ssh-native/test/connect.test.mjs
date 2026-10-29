@@ -308,5 +308,36 @@ describe("connect", () => {
         await session.close()
       }
     })
+
+    it("zero-fills stdin chunks still queued when the channel is cancelled", async () => {
+      const session = await connectWithKey(server, key)
+      try {
+        const channel = await session.exec("sleep")
+        const chunks = [Buffer.from("first"), Buffer.from("queued"), Buffer.from("also queued")]
+        for (const chunk of chunks) channel.stdin.write(chunk)
+        channel.cancel()
+        await assert.rejects(channel.exit, { code: "ABORTED" })
+        for (const chunk of chunks) assert.ok(isZeroed(chunk), chunk.toString())
+      } finally {
+        await session.close()
+      }
+    })
+
+    it("zero-fills stdin chunks written after the channel ended", async () => {
+      const session = await connectWithKey(server, key)
+      try {
+        const channel = await session.exec("exit 0")
+        channel.stdout.resume()
+        await channel.exit
+        const late = Buffer.from("written too late")
+        channel.stdin.write(late, () => {})
+        assert.ok(isZeroed(late))
+        const ended = Buffer.from("after end")
+        channel.stdin.end(ended)
+        assert.ok(isZeroed(ended))
+      } finally {
+        await session.close()
+      }
+    })
   })
 })

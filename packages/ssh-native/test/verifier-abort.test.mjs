@@ -18,7 +18,8 @@ const READY_TIMEOUT_MS = 1000
  */
 function runChild(mode, port) {
   return new Promise((resolve) => {
-    const child = spawn(process.execPath, [CHILD, mode], {
+    const flags = mode === "gc" ? ["--expose-gc"] : []
+    const child = spawn(process.execPath, [...flags, CHILD, mode], {
       env: {
         ...process.env,
         READY_TIMEOUT_MS: String(READY_TIMEOUT_MS),
@@ -56,8 +57,13 @@ describe("verifier abort (child process)", () => {
   })
   after(() => server.close())
 
-  it("rejects a never-settling verifier with TIMEOUT and lets the process exit", async () => {
-    const result = await runChild("never", server.port)
+  /**
+   * Asserts TIMEOUT after readyTimeout and a natural exit shortly after.
+   *
+   * @param mode `never` or `gc`
+   */
+  async function assertTimesOutAndExits(mode) {
+    const result = await runChild(mode, server.port)
     assert.equal(result.stderr, "")
     assert.equal(result.signal, null)
     assert.equal(result.code, 0)
@@ -71,7 +77,13 @@ describe("verifier abort (child process)", () => {
     )
     const exitDelay = result.exitedAt - result.lines[0].at
     assert.ok(exitDelay < 2000, `process exited ${exitDelay} ms after the rejection`)
-  })
+  }
+
+  it("rejects a never-settling verifier with TIMEOUT and lets the process exit", () =>
+    assertTimesOutAndExits("never"))
+
+  it("keeps waiting for a pending verifier while garbage collection runs", () =>
+    assertTimesOutAndExits("gc"))
 
   it("discards a verdict that arrives after the timeout", async () => {
     const attempts = server.stats.authAttempts

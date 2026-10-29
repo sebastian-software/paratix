@@ -22,7 +22,7 @@
   "repository": {
     "type": "git",
     "url": "git+https://github.com/sebastian-software/paratix.git",
-    "directory": "packages/ssh-native/npm/linux-arm64-gnu"
+    "directory": "packages/ssh-native"
   },
   "bugs": {
     "url": "https://github.com/sebastian-software/paratix/issues"

@@ -465,7 +465,10 @@ settled.
   `connect()` rejects with `TIMEOUT`, the russh session task ends, the handler and its ref'd
   threadsafe function drop, and the process can exit. A late verdict is discarded without an
   unhandled rejection. An `AbortSignal` gives `ABORTED`; an already-aborted signal gives `ABORTED`
-  without opening TCP.
+  without opening TCP. napi holds no strong reference to the pending verdict promise, so the
+  wrapper keeps it until it settles; an error from the verdict future (for example a collected
+  promise) counts as "no verdict yet", and `check_server_key` keeps waiting for the deadline or
+  the abort instead of rejecting the key early (fail closed either way).
 - **Exec backpressure and stderr rule:**
   - stdout uses a bounded queue, `STDOUT_QUEUE_LIMIT` = 1 MiB. The Rust exec reader reads the next
     channel message only after JS has taken stdout.
@@ -475,7 +478,12 @@ settled.
   - **Known limit:** paused stdout stalls the whole connection (all channels, SFTP and disconnect
     detection). russh refills the SSH window on receipt, has no per-channel window, and its session
     loop blocks when the channel queue is full. stderr flows only while stdout flows, and large
-    unread stderr uses memory. `destroy()` and `AbortSignal` still work during such a stall.
+    unread stderr uses memory. `destroy()`, `AbortSignal`, `cancel()` and destroying `stdout`
+    (also an early exit from `for await` or a failed pipeline) still work during such a stall; a
+    destroyed `stdout` releases its outstanding credit and acknowledges later data on arrival.
+    `session.close()` puts the disconnect and the wait for the end under one 5 s deadline, then
+    shuts the socket down; channels still open end with `disconnected: true`. A connection that
+    drops while stdout is paused (russh's loop not blocked) also ends the channel as disconnected.
   - **Rule for C2:** Paratix never pauses stdout while it waits for something else on the same
     connection.
   - **Measured** in the B1 unit test: the server sent 6,422,528 bytes against a bound of 6,488,064
@@ -485,22 +493,33 @@ settled.
   affected channel. That exit reports `code: null` with `disconnected: true`, never exit 0. The
   exit comes exactly once and after all stdout and stderr data, because it travels through the same
   threadsafe-function queue as the data. Signals are raw names (`TERM`); the C2 adapter adds `SIG`.
+  Exec `close()`: russh 0.65 forgets a channel as soon as the client closes it, so the server's
+  `CHANNEL_CLOSE` never reaches the reader. The reader therefore sends `CHANNEL_CLOSE` itself,
+  forwards the messages already queued and then reports the exit once, with `disconnected: false`
+  and the exit status if one arrived (otherwise `code: null`). russh keeps the channel's sender in
+  its session map until the session ends.
 - **Panic coverage:** every synchronous `#[napi]` entry point uses `catch_unwind`; threadsafe-function
   callbacks build their JS values inside `catch_unwind`; the exec reader and the handler
   callbacks are guarded. The JS wrapper maps any error without a valid `CODE|detail|message` reason
   to `INTERNAL` with the fixed message "internal error in the native SSH binding". The internal
   probe `__internalPanicProbe(kind)` (`sync`, `convert`, `async`, `event`, `execReader`, `handler`)
-  in the shipped binary proves this. Limits: a panic during an unwind aborts the process, and
+  in the shipped binary proves this. napi 3.15 converts the value of a resolved promise
+  (`settle_deferred`) outside `catch_unwind`; the binding therefore resolves only trivially
+  convertible values (externals, `()`, numbers, optional Buffers and derived `#[napi(object)]`
+  structs of strings, numbers and booleans). Limits: a panic during an unwind aborts the process, and
   panics in tasks that russh-sftp spawns itself surface as `DISCONNECTED`. B1 drives SFTP through
   `RawSftpSession`, so this is limited to russh-sftp's own internal tasks.
 - **SFTP status:** the finding "SFTP status on write is lost" is resolved. WRITE, READ and CLOSE run
   through russh-sftp's `RawSftpSession` (pipelined, at most 16 requests of 32 KiB in flight), whose
   status replies keep the numeric code. Failures surface as `SFTP_STATUS` with `sftpStatus` (unit
-  tests: WRITE 4, CLOSE 3, OPEN of a missing file 2).
+  tests: WRITE 4, also for a failure in the middle of a multi-chunk write, CLOSE 3, OPEN of a
+  missing file 2). The binding waits for the reply to the subsystem request; a refused SFTP
+  subsystem rejects `sftp()` with `CHANNEL_OPEN_FAILED` (detail `subsystem-refused`).
 - **zeroize:** the private key, the password, exec stdin (including sudo stdin) and
   keyboard-interactive answers sit in `Zeroizing` buffers in the binding; `cargo test` asserts this
   through the types. The JS wrapper zero-fills the caller's buffers in every path, success
-  included. russh keeps its own non-zeroized copies: key decoding (`String`/`Vec`),
+  included; a stdin chunk is zero-filled once copied, immediately if `stdin` no longer accepts
+  data, and on exit, cancel or destroy if it is still queued. russh keeps its own non-zeroized copies: key decoding (`String`/`Vec`),
   keyboard-interactive answers (`Vec<String>` in `Msg::AuthInfoResponse`) and exec/sudo stdin
   (`Bytes` in `ChannelMsg::Data`).
 - **Rekey gap:** russh does not re-check the host key on rekey and offers no hook for it. This

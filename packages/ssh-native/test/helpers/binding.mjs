@@ -76,3 +76,25 @@ export async function collect(readable) {
 export function delay(ms) {
   return sleep(ms)
 }
+
+/**
+ * Settles like `promise`, or rejects if that takes longer than `ms`.
+ *
+ * @template T
+ * @param promise the operation under test
+ * @param ms deadline in milliseconds
+ * @param label what is awaited, for the failure message
+ * @returns the outcome of `promise`
+ */
+export async function within(promise, ms, label) {
+  /** @type {ReturnType<typeof setTimeout> | undefined} */
+  let timer
+  const deadline = new Promise((_resolve, reject) => {
+    timer = setTimeout(() => reject(new Error(`${label} did not settle within ${ms} ms`)), ms)
+  })
+  try {
+    return await Promise.race([promise, deadline])
+  } finally {
+    clearTimeout(timer)
+  }
+}

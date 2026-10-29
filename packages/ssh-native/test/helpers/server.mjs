@@ -189,6 +189,10 @@ const COMMANDS = {
     stream.stderr.write("err\n")
     finish(stream, Number(argument))
   },
+  floodThenDrop(stream, argument, client) {
+    // stdout data, then the connection vanishes without CHANNEL_CLOSE.
+    pump(stream, Number(argument), () => setTimeout(() => client._sock.destroy(), 50))
+  },
   signal(stream, argument) {
     stream.write("terminated\n")
     stream.exit(argument, false, "")
@@ -196,6 +200,11 @@ const COMMANDS = {
   },
   sleep() {
     // Stays open and silent.
+  },
+  status(stream, argument) {
+    // Reports an exit status but never closes the channel.
+    stream.write("status sent\n")
+    stream.exit(Number(argument))
   },
   stderrFlood(stream, argument) {
     stream.write("stdout-before\n")
@@ -376,6 +385,7 @@ function countStdout(client, stats) {
  * @property {ServerStats} stats counters
  * @property {string} hostKeyBase64 base64 of the host key blob
  * @property {() => Promise<void>} close stops the server
+ * @property {{ refuseSftp: boolean }} behaviour switches read on each request
  */
 
 /**
@@ -389,6 +399,7 @@ export async function startServer(options = {}) {
   /** @type {Map<string, RemoteFile>} */
   const files = new Map()
   const hostPrivateKey = hostKey()
+  const behaviour = { refuseSftp: false }
   /** @type {ServerStats} */
   const stats = { authAttempts: 0, connections: 0, stdoutSent: 0 }
   const clients = []
@@ -400,7 +411,10 @@ export async function startServer(options = {}) {
       stream.on("error", () => {})
       runCommand(info.command, stream, client)
     })
-    session.on("sftp", (acceptSftp) => handleSftp(acceptSftp(), files))
+    session.on("sftp", (acceptSftp, rejectSftp) => {
+      if (behaviour.refuseSftp) rejectSftp()
+      else handleSftp(acceptSftp(), files)
+    })
   }
   const server = new Server({ hostKeys: [hostPrivateKey] }, (client) => {
     stats.connections += 1
@@ -419,6 +433,7 @@ export async function startServer(options = {}) {
   server.listen(0, "127.0.0.1")
   await once(server, "listening")
   return {
+    behaviour,
     async close() {
       for (const client of clients) client.end()
       server.close()
