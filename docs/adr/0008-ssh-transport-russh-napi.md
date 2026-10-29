@@ -273,7 +273,9 @@ lifecycle and panic evidence therefore covers all six targets, not only linux-x6
 - **linux-x64-gnu, linux-arm64-gnu:** glibc 2.35 or newer, which means Ubuntu 22.04 and Debian 12
   or newer. RHEL 8 and 9 are deliberately unsupported as controllers.
 - **linux-x64-musl, linux-arm64-musl:** for Alpine and other musl systems.
-- **darwin-x64, darwin-arm64:** macOS 11.0 or newer, which is Node 24's own floor.
+- **darwin-x64, darwin-arm64:** macOS 13.5 or newer, which is Node 24's own floor and therefore
+  the minimum supported controller OS. The native binary keeps the deployment target macOS 11.0
+  (`minos 11.0`), so the binding itself never sets a stricter floor than Node.
 - **No Windows**, and no other platforms such as FreeBSD.
 
 On an unsupported platform, `import "paratix"`, `--help`, `--version`, playbook unit tests and
