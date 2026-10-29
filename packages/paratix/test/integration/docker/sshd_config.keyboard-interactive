@@ -1,0 +1,14 @@
+Port 2229
+PidFile /run/sshd-keyboard-interactive.pid
+HostKey /etc/ssh/ssh_host_ed25519_key
+ListenAddress 0.0.0.0
+AuthorizedKeysFile .ssh/authorized_keys
+PermitRootLogin prohibit-password
+AllowUsers paratix root
+PermitUserEnvironment no
+Subsystem sftp internal-sftp
+LogLevel VERBOSE
+PubkeyAuthentication no
+PasswordAuthentication no
+KbdInteractiveAuthentication yes
+UsePAM yes

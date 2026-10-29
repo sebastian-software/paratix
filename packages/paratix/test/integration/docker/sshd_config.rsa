@@ -1,0 +1,14 @@
+Port 2227
+PidFile /run/sshd-rsa.pid
+HostKey /etc/ssh/ssh_host_rsa_key
+ListenAddress 0.0.0.0
+AuthorizedKeysFile .ssh/authorized_keys
+PermitRootLogin prohibit-password
+AllowUsers paratix root
+PermitUserEnvironment no
+Subsystem sftp internal-sftp
+LogLevel VERBOSE
+PubkeyAuthentication yes
+PasswordAuthentication no
+KbdInteractiveAuthentication no
+UsePAM no
