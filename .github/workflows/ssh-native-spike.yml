@@ -130,7 +130,7 @@ jobs:
             cargo-zigbuild --version
           else
             xcrun --show-sdk-version
-            clang --version | head -1
+            clang --version | sed -n 1p
           fi
 
       - name: Show crypto backend in the dependency graph
@@ -343,7 +343,7 @@ jobs:
           set +e
           case "$VARIANT" in
             host)
-              if [ "$RUNNER_OS" = Linux ]; then ldd --version | head -1; fi
+              if [ "$RUNNER_OS" = Linux ]; then ldd --version | sed -n 1p; fi
               node --version
               node "$SMOKE_DIR/smoke.mjs" "$SMOKE_DIR" 2>&1 | tee "$out"
               status=${PIPESTATUS[0]}
@@ -361,7 +361,7 @@ jobs:
                   grep " ${tarball}\$" SHASUMS256.txt | sha256sum -c -
                   mkdir -p /opt/node
                   tar -xJf "$tarball" -C /opt/node --strip-components=1
-                  ldd --version | head -1
+                  ldd --version | sed -n 1p
                   /opt/node/bin/node --version
                   /opt/node/bin/node /smoke/smoke.mjs /smoke
                 ' 2>&1 | tee "$out"
@@ -450,7 +450,7 @@ jobs:
               openssh-client openssh-server
           fi
           ssh -V
-          /usr/sbin/sshd -V 2>&1 | head -1 || true
+          /usr/sbin/sshd -V 2>&1 | sed -n 1p || true
 
       - name: Download linux-x64-gnu artifact
         # actions/download-artifact@v8.0.2
