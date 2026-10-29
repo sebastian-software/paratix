@@ -92,7 +92,7 @@ jobs:
       CARGO_ZIGBUILD_SHA256: 3ca25ee4348f9abd0932ed4debe826d246e20fb616d0201de5bd05e7f965e9d9
       TARGET: ${{ matrix.target }}
       TRIPLE: ${{ matrix.triple }}
-      CARGO_BUILD_TARGET_ARG: ${{ matrix.cargo_target }}
+      SPIKE_CARGO_TARGET: ${{ matrix.cargo_target }}
     steps:
       - name: Checkout
         # actions/checkout@v6.0.2
@@ -127,7 +127,7 @@ jobs:
         run: |
           if [ "${{ matrix.builder }}" = zigbuild ]; then
             zig version
-            cargo zigbuild --version
+            cargo-zigbuild --version
           else
             xcrun --show-sdk-version
             clang --version | head -1
@@ -150,10 +150,10 @@ jobs:
         run: |
           # --no-default-features + --features covers both backends with one code path.
           if [ "${{ matrix.builder }}" = zigbuild ]; then
-            cargo zigbuild --release --locked --target "$CARGO_BUILD_TARGET_ARG" \
+            cargo zigbuild --release --locked --target "$SPIKE_CARGO_TARGET" \
               --no-default-features --features "$CRYPTO_BACKEND"
           else
-            cargo build --release --locked --target "$CARGO_BUILD_TARGET_ARG" \
+            cargo build --release --locked --target "$SPIKE_CARGO_TARGET" \
               --no-default-features --features "$CRYPTO_BACKEND"
           fi
 
