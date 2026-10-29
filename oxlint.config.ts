@@ -41,8 +41,33 @@ export default defineConfig({
     ".sf-plugin/**",
     "sebastian-gmbh-paratix-test/**",
     "packages/create-paratix/create-paratix-scaffold-test/**",
+    // packages/ssh-native: cargo output, platform package manifests and the
+    // napi-generated index.d.ts (diff-checked in CI instead).
+    "packages/ssh-native/target/**",
+    "packages/ssh-native/npm/**",
+    "packages/ssh-native/index.d.ts",
   ],
   overrides: [
+    {
+      // packages/ssh-native has no `"type": "module"`, so its hand-written
+      // loader and JS wrapper are CommonJS. Node wraps every CommonJS file in a
+      // module function, so top-level declarations never become implicit
+      // globals; oxlint parses these files as scripts and reports them anyway.
+      files: ["packages/ssh-native/*.js", "packages/ssh-native/lib/**/*.js"],
+      rules: {
+        "no-implicit-globals": "off",
+      },
+    },
+    {
+      // packages/ssh-native tests are plain node:test `.test.mjs` files; the
+      // shared config only relaxes these limits for `*.test.{ts,tsx}`.
+      files: ["packages/ssh-native/test/**/*.test.mjs"],
+      rules: {
+        "max-lines-per-function": "off",
+        "max-nested-callbacks": "off",
+        "max-statements": "off",
+      },
+    },
     {
       files: ["website/app/routes/**/*.tsx"],
       rules: {

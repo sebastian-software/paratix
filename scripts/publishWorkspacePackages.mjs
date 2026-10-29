@@ -50,6 +50,13 @@ const packages = [
   },
 ]
 
+// R-0000740 / #255: workspace packages that live under packages/ but are not
+// published by this script yet. They count as declared for the drift
+// assertion only; release, verify and recover-create-paratix never read,
+// pack or publish them. packages/ssh-native (@paratix/ssh-native) joins the
+// publish flow together with its six platform packages in #255 B3.
+const knownUnpublishedPackageDirectories = ["packages/ssh-native"]
+
 const PUBLISH_MODE_RECOVER_CREATE_PARATIX = "recover-create-paratix"
 const PUBLISH_MODE_RELEASE = "release"
 const PUBLISH_MODE_VERIFY = "verify"
@@ -90,8 +97,11 @@ function assertWorkspacePackageDirectoriesMatch(entries) {
     .filter((entry) => entry.isDirectory())
     .map((entry) => entry.name)
     .sort()
-  const declaredDirectories = packages
-    .map((packageInfo) => packageInfo.displayDirectory.replace(/^packages\//v, ""))
+  const declaredDirectories = [
+    ...packages.map((packageInfo) => packageInfo.displayDirectory),
+    ...knownUnpublishedPackageDirectories,
+  ]
+    .map((displayDirectory) => displayDirectory.replace(/^packages\//v, ""))
     .sort()
   const filesystemSet = new Set(filesystemDirectories)
   const declaredSet = new Set(declaredDirectories)

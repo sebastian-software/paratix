@@ -9,3 +9,15 @@ Before changing `ssh` or `readFile` semantics, run `pnpm --filter paratix test:i
 When writing Paratix code (playbooks or custom modules), read the [agent authoring guidance](packages/paratix/llm-guide.md#agent-authoring-guidance) in the complete API reference.
 
 Do not use cspell:ignore in the code. Write cspell findings into cspell.json
+
+## Rust toolchain for packages/ssh-native
+
+Building the repository requires a Rust toolchain: `pnpm build` always builds the native binding in `packages/ssh-native` (`@paratix/ssh-native`, incremental). The toolchain is pinned in `packages/ssh-native/rust-toolchain.toml`; install [rustup](https://rustup.rs) and run `rustup toolchain install` inside `packages/ssh-native` to get it.
+
+`pnpm rust:check` runs `cargo fmt --check`, `cargo clippy` with `-D warnings`, `cargo test` and `cargo deny check licenses bans sources` in `packages/ssh-native`. It needs cargo-deny 0.20.2 (`cargo install --locked cargo-deny@0.20.2`). `pnpm agent:check` calls it, controlled by `PARATIX_RUST_CHECK`:
+
+- `auto` (default): runs when `CI=true` or `origin/main` is not resolvable; otherwise only when `src/**`, `build.rs`, `Cargo.toml`, `Cargo.lock`, `rust-toolchain.toml` or `deny.toml` under `packages/ssh-native` changed since `git merge-base HEAD origin/main`, including uncommitted and untracked files. A skip is logged with its reason.
+- `always`: always runs. The CI job `check` uses this.
+- `skip`: never runs. `Integration Check` and the publish `validate` job use this and only build.
+
+An explicit value takes precedence over `CI=true`; any other value aborts `agent:check`.

@@ -16,7 +16,14 @@ jobs:
       contents: read
 
     runs-on: ubuntu-24.04
-    timeout-minutes: 30
+    # Raised from 30: `pnpm build` now compiles the packages/ssh-native binding
+    # (aws-lc-rs and russh in release mode) on a cold cache. Re-measure from
+    # the CI runs and tighten once warm-cache timings are known.
+    timeout-minutes: 40
+    env:
+      CARGO_TERM_COLOR: always
+      # Only the CI job `check` runs `pnpm rust:check`; this job builds only.
+      PARATIX_RUST_CHECK: skip
 
     steps:
       - name: Checkout
@@ -35,6 +42,29 @@ jobs:
         with:
           node-version: 24
           cache: pnpm
+
+      - name: Install Rust toolchain
+        id: rust
+        working-directory: packages/ssh-native
+        # rust-toolchain.toml pins the channel, components and profile.
+        run: |
+          rustup toolchain install --no-self-update
+          rustc --version
+          cargo --version
+          echo "host=$(rustc -vV | sed -n 's/^host: //p')" >> "$GITHUB_OUTPUT"
+          echo "release=$(rustc -vV | sed -n 's/^release: //p')" >> "$GITHUB_OUTPUT"
+
+      - name: Cache Rust build
+        # actions/cache@v6.1.0
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            packages/ssh-native/target/
+          key: ssh-native-build-${{ runner.os }}-${{ steps.rust.outputs.host }}-rust-${{ steps.rust.outputs.release }}-${{ hashFiles('packages/ssh-native/Cargo.lock') }}
+          restore-keys: |
+            ssh-native-build-${{ runner.os }}-${{ steps.rust.outputs.host }}-rust-${{ steps.rust.outputs.release }}-
 
       - name: Install dependencies
         run: pnpm install --frozen-lockfile

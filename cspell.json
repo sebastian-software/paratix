@@ -2,6 +2,7 @@
   "version": "0.2",
   "language": "en,de",
   "import": ["@cspell/dict-de-de/cspell-ext.json"],
+  "ignorePaths": ["packages/ssh-native/target/**", "packages/ssh-native/npm/**"],
   "words": [
     "IMODE",
     "ISREG",
@@ -322,6 +323,25 @@
     "zeroizes",
     "Zeroizing",
     "zigbuild",
-    "SIGPIPE"
+    "SIGPIPE",
+    "clippy",
+    "rustc",
+    "rustup",
+    "ABRT",
+    "acked",
+    "ALRM",
+    "Backpressured",
+    "Deque",
+    "fastner",
+    "fchmod",
+    "fsetstat",
+    "hostkey",
+    "nodelay",
+    "recv",
+    "SEGV",
+    "syscall",
+    "tokio",
+    "unacked",
+    "unref"
   ]
 }

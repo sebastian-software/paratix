@@ -14,9 +14,19 @@ concurrency:
 jobs:
   check:
     runs-on: ubuntu-24.04
-    timeout-minutes: 20
+    # Raised from 20 for packages/ssh-native: a cold run compiles aws-lc-rs and
+    # russh twice (release build for `pnpm build`, debug build for clippy and
+    # `cargo test`) and installs cargo-deny from source. Re-measure from the
+    # CI runs and tighten once warm-cache timings are known.
+    timeout-minutes: 45
     permissions:
       contents: read
+    env:
+      # Must match EXPECTED_CARGO_DENY_VERSION in scripts/rustCheck.mjs.
+      CARGO_DENY_VERSION: "0.20.2"
+      CARGO_TERM_COLOR: always
+      # This job is the only CI place that runs `pnpm rust:check`.
+      PARATIX_RUST_CHECK: always
     steps:
       # actions/checkout@v6
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd
@@ -29,5 +39,44 @@ jobs:
         with:
           node-version: "24"
           cache: pnpm
+      - name: Install Rust toolchain
+        id: rust
+        working-directory: packages/ssh-native
+        # rust-toolchain.toml pins the channel, components and profile.
+        run: |
+          rustup toolchain install --no-self-update
+          rustc --version
+          cargo --version
+          echo "host=$(rustc -vV | sed -n 's/^host: //p')" >> "$GITHUB_OUTPUT"
+          echo "release=$(rustc -vV | sed -n 's/^release: //p')" >> "$GITHUB_OUTPUT"
+      - name: Cache Rust build and tools
+        # actions/cache@v6.1.0
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            ~/.cargo-tools
+            packages/ssh-native/target/
+          key: ssh-native-check-${{ runner.os }}-${{ steps.rust.outputs.host }}-rust-${{ steps.rust.outputs.release }}-${{ hashFiles('packages/ssh-native/Cargo.lock') }}
+          restore-keys: |
+            ssh-native-check-${{ runner.os }}-${{ steps.rust.outputs.host }}-rust-${{ steps.rust.outputs.release }}-
+      - name: Install cargo-deny
+        run: |
+          tools="$HOME/.cargo-tools"
+          if [ "$("$tools/bin/cargo-deny" --version 2>/dev/null)" != "cargo-deny $CARGO_DENY_VERSION" ]; then
+            cargo install --locked --root "$tools" "cargo-deny@$CARGO_DENY_VERSION"
+          fi
+          "$tools/bin/cargo-deny" --version
+          echo "$tools/bin" >> "$GITHUB_PATH"
       - run: pnpm install --frozen-lockfile
       - run: pnpm agent:check
+      - name: Check that the generated index.d.ts is up to date
+        run: |
+          pnpm --filter @paratix/ssh-native build
+          git diff --exit-code -- packages/ssh-native/index.d.ts
+          status="$(git status --porcelain --untracked-files=all -- packages/ssh-native/index.d.ts)"
+          if [ -n "$status" ]; then
+            echo "::error file=packages/ssh-native/index.d.ts::index.d.ts differs from the committed file: $status"
+            exit 1
+          fi
