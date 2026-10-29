@@ -40,7 +40,7 @@ Entscheidungen des Nutzers vom 29.10.2026:
    - Erst unmittelbar vor dem ersten echten Release aus B richtet er je Paket einen Trusted Publisher ein und sperrt Tokens. npm lässt eine neue Trusted-Publisher-Konfiguration nach 2 Tagen verfallen, wenn bis dahin kein Publish darüber gelaufen ist.
    - Stand 29.10.2026: Scope und Platzhalter sind angelegt (erledigt).
 8. **RUSTSEC-2023-0071** (Marvin-Angriff, `rsa`-Crate, kein Fix verfügbar): Dafür gibt es eine begründete Ausnahme in `deny.toml`. Advisories prüft ein eigener, nicht blockierender, zeitgesteuerter Job. Lizenzen, Bans und Quellen blockieren weiter.
-9. **Tarballs:** Das Publish-Skript erzeugt alle Pakete per `pnpm pack` und setzt die `optionalDependencies` in einer Staging-Kopie. Veröffentlicht wird mit `npm publish <tgz>`.
+9. **Tarballs:** Das Publish-Skript schreibt zuerst die `optionalDependencies` in eine Staging-Kopie des Hauptpakets. Erst danach erzeugt es alle Pakete per `pnpm pack`. Vor dem Veröffentlichen prüft es das Manifest im Tarball von `@paratix/ssh-native`. Veröffentlicht wird mit `npm publish <tgz>`.
 10. **C in zwei Schritten mit eigenem Release:**
     - C1 zieht die Transport-Schnittstelle ein, mit einem temporären internen `ssh2`-Adapter.
     - C2 wechselt auf den nativen Adapter und entfernt `ssh2`.
@@ -257,9 +257,10 @@ Als Workflow passt Feature. Die öffentliche API verhält sich gleich, aber es k
      - `extra-files` aktualisiert nur die Plattform-Manifeste.
      - Die Crate bleibt fest auf `version = "0.0.0"` und `publish = false`. Die npm-Version ist die einzige Quelle, und `Cargo.lock` bleibt damit stabil.
    - Ablauf des Publish-Skripts:
-     1. Nach dem Git-Preflight packt es alle neun Pakete mit `pnpm pack`, also auf demselben Weg wie die Tests. Das löst `workspace:` auf.
-     2. In einer Staging-Kopie fügt es dem Hauptpaket `optionalDependencies` mit exakter Version hinzu.
-     3. Es veröffentlicht mit `npm publish <tgz>`. Reihenfolge: sechs Plattformpakete → `@paratix/ssh-native` → `paratix` → `create-paratix`.
+     1. Nach dem Git-Preflight legt es eine Staging-Kopie von `@paratix/ssh-native` an. Dort schreibt es `optionalDependencies` mit der exakten Version der sechs Plattformpakete ins Manifest. Das Manifest im Repo bleibt unverändert.
+     2. Erst danach packt es alle neun Pakete mit `pnpm pack`, also auf demselben Weg wie die Tests. `@paratix/ssh-native` packt es aus der Staging-Kopie, damit der Tarball die `optionalDependencies` enthält. `pnpm pack` löst `workspace:` auf.
+     3. Vor jedem `npm publish` liest es `package.json` aus dem Tarball von `@paratix/ssh-native`. Fehlt dort eines der sechs Plattformpakete in `optionalDependencies` oder weicht eine Version von der Release-Version ab, bricht es ab.
+     4. Es veröffentlicht mit `npm publish <tgz>`. Reihenfolge: sechs Plattformpakete → `@paratix/ssh-native` → `paratix` → `create-paratix`.
    - Robustheit:
      - Jeder Schritt ist idempotent. Eine schon veröffentlichte Version wird übersprungen.
      - Die Recovery deckt einen Abbruch an jeder Stelle ab.
@@ -303,7 +304,7 @@ Als Workflow passt Feature. Die öffentliche API verhält sich gleich, aber es k
 | `.github/workflows/integration-check.yml`                                                                                                                                  | B: Rust-Toolchain, Anbindung bauen                                                                                                                                                                                                                                                         |
 | `.github/workflows/rust-advisories.yml`                                                                                                                                    | neu (B): zeitgesteuert `cargo deny check advisories`, nicht blockierend, mit Meldung                                                                                                                                                                                                       |
 | `.github/workflows/publish.yml`                                                                                                                                            | B: Build-Matrix und Smoke-Test je Ziel mit dem Artefakt, das veröffentlicht wird. Binaries an `validate`, `verify` und `publish` weitergeben. `cancel-in-progress: false`                                                                                                                  |
-| `scripts/publishWorkspacePackages.mjs`, `scripts/publishWorkspacePackages.test.mjs`                                                                                        | B: neun Pakete mit Reihenfolge, Drift-Prüfung für Plattformverzeichnisse, `pnpm pack` plus Staging, `npm publish <tgz>`, Frische-Prüfung des `.node` gegen `src/*.rs`/`Cargo.*`, Idempotenz und Recovery                                                                                   |
+| `scripts/publishWorkspacePackages.mjs`, `scripts/publishWorkspacePackages.test.mjs`                                                                                        | B: neun Pakete mit Reihenfolge, Drift-Prüfung für Plattformverzeichnisse, `optionalDependencies` in der Staging-Kopie vor `pnpm pack`, Prüfung des Manifests im Tarball, `npm publish <tgz>`, Frische-Prüfung des `.node` gegen `src/*.rs`/`Cargo.*`, Idempotenz und Recovery              |
 | `package.json` (Wurzel)                                                                                                                                                    | B: `rust:check`, Bedingung in `agent:check`, `test:integration` um `ssh-native` erweitert                                                                                                                                                                                                  |
 | `packages/paratix/src/transport.ts`                                                                                                                                        | neu (C1): interne Transport-Schnittstelle                                                                                                                                                                                                                                                  |
 | `packages/paratix/src/transportSsh2.ts`                                                                                                                                    | neu (C1), in C2 gelöscht: temporärer Adapter auf `ssh2`                                                                                                                                                                                                                                    |
@@ -472,7 +473,7 @@ Nicht relevant: keine Oberfläche.
 
 - [ ] [A] ADR `docs/adr/0008-ssh-transport-russh-napi.md` liegt englisch mit Status „accepted“ vor. Es enthält die Ergebnisse jedes Nachweises aus A.1/A.2 selbst. Jeder harte Nachweis ist bestanden. Jeder weiche ist bestanden oder als Einschränkung begründet.
 - [ ] [B] Die Matrix baut alle sechs Ziele. Der Smoke-Test besteht je Ziel mit dem Artefakt, das veröffentlicht wird. `linux-x64-gnu` besteht zusätzlich in `ubuntu:22.04`. Laut `objdump -T` liegt keine `GLIBC_`-Version über 2.35.
-- [ ] [B] `publish.yml` im Modus `verify` erzeugt neun Tarballs. Jedes Manifest hat `repository`, und die Plattformpakete haben korrekte `os`/`cpu`/`libc`. `@paratix/ssh-native`, `paratix` und `create-paratix` enthalten exakte Versionen statt `workspace:`.
+- [ ] [B] `publish.yml` im Modus `verify` erzeugt neun Tarballs. Jedes Manifest hat `repository`, und die Plattformpakete haben korrekte `os`/`cpu`/`libc`. `@paratix/ssh-native`, `paratix` und `create-paratix` enthalten exakte Versionen statt `workspace:`. Das Manifest im Tarball von `@paratix/ssh-native` listet alle sechs Plattformpakete in `optionalDependencies` mit exakter Release-Version.
 - [ ] [B] Ein Node-Test der Anbindung meldet sich per Agent mit Schlüssel und Benutzerzertifikat an einem Docker-sshd an, der nur `TrustedUserCAKeys` akzeptiert.
 - [ ] [B] In CI sind `rust:check` (fmt, clippy, test, `deny` für Lizenzen, Bans und Quellen) und der Diff-Check von `index.d.ts` grün. Der Advisory-Job existiert und läuft zeitgesteuert.
 - [ ] [C1] Release mit `transport.ts` und `transportSsh2.ts`. Unit-Tests laufen gegen den Transport-Fake. `pnpm --filter paratix test:integration` ist mit der Paritätsmatrix aus C1.4 grün, gegen `ssh2`.
@@ -499,7 +500,7 @@ Nicht relevant: keine Oberfläche.
 - **Release:**
   - `publish.yml` im Modus `verify` auf dem Branch
   - Smoke-Tests je Ziel
-  - Inhalt aller neun Tarballs prüfen
+  - Inhalt aller neun Tarballs prüfen, insbesondere die `optionalDependencies` im Tarball von `@paratix/ssh-native`
 - **Manuell:**
   - Lauf von macOS arm64 und Linux x64 gegen einen echten Host per Agent
   - doppelter SIGINT während eines Reconnects
