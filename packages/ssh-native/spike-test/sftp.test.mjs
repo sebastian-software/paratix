@@ -121,6 +121,7 @@ proof(
       const sftp = server.state.sftp
       const acceptedByNative = progress.produced - progress.writableLength
       const snapshot = {
+        boundBytes: 1 * MiB,
         producedByJs: progress.produced,
         acceptedByNative,
         serverReceived: sftp.received,
@@ -131,8 +132,8 @@ proof(
         "the producer must be blocked while the server stalls"
       )
       assert.ok(
-        acceptedByNative <= 4 * MiB,
-        `in-flight data must stay bounded (${acceptedByNative} bytes)`
+        acceptedByNative <= 1 * MiB,
+        `in-flight data must stay bounded by 1 MiB (${acceptedByNative} bytes)`
       )
       sftp.stalled = false
       server.releaseHeld()

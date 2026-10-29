@@ -123,6 +123,37 @@ proof(
       "a plain `false` gives a generic HOST_KEY_REJECTED"
     )
     outcomes.returnFalse = { code: rejected4.code, message: rejected4.message }
+
+    // Fail-closed verdict: only exactly `true` or `undefined` accepts.
+    const verdicts = {}
+    for (const [name, value] of [
+      ["one", 1],
+      ["yesString", "yes"],
+      ["object", {}],
+      ["null", null],
+    ]) {
+      const error = await native
+        .connect(keyOptions(), async () => value)
+        .then(
+          (s) => {
+            s.destroy()
+            return null
+          },
+          (e) => e
+        )
+      assert.equal(error?.code, "HOST_KEY_REJECTED", `verdict ${name} must reject`)
+      verdicts[name] = error.code
+    }
+    for (const [name, verifier] of [
+      ["true", async () => true],
+      ["undefined", async () => undefined],
+      ["syncUndefined", () => {}],
+    ]) {
+      const session = await native.connect(keyOptions(), verifier)
+      await session.close()
+      verdicts[name] = "accepted"
+    }
+    outcomes.verdictRule = { rule: "accept only === true or === undefined", verdicts }
     return outcomes
   }
 )

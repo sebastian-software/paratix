@@ -205,15 +205,20 @@ class Session extends EventEmitter {
 }
 
 /**
- * Connects and authenticates. `verifyHost(info)` is awaited; if it throws or
- * rejects, `connect` rejects with that very error object.
+ * Connects and authenticates. `verifyHost(info)` is awaited. The host key is
+ * accepted only if it returns/resolves exactly `true` or `undefined`; any
+ * other value rejects with HOST_KEY_REJECTED. If it throws or rejects,
+ * `connect` rejects with that very error object.
  */
 async function connect(options, verifyHost) {
   const state = { remembered: null, disconnected: null, session: null }
   const verify = async (info) => {
     try {
       const verdict = await verifyHost(info)
-      return verdict !== false
+      // Fail closed: accept ONLY when the callback returns/resolves exactly
+      // `true` or `undefined` (no value) without throwing. Any other value,
+      // including truthy ones like 1 or "yes", rejects the host key.
+      return verdict === true || verdict === undefined
     } catch (error) {
       state.remembered = { error }
       return false

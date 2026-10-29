@@ -54,6 +54,26 @@ if (mode.startsWith("ssh2-")) {
       process.exit(0)
       break
     }
+    case "destroy-exit-streaming": {
+      // The remote command floods stdout; a listener is attached, so native
+      // threadsafe-function callbacks are in flight when destroy()+exit run.
+      const channel = await session.exec("yes spike-streaming-line")
+      let received = 0
+      const threshold = Number(env.SPIKE_CHILD_STREAM_BYTES ?? 1024 * 1024)
+      channel.stderr.resume()
+      await new Promise((resolve) => {
+        channel.stdout.on("data", (chunk) => {
+          received += chunk.length
+          if (received >= threshold) resolve()
+        })
+      })
+      // The data listener stays attached; native threadsafe-function calls keep
+      // queueing while destroy() and process.exit() run.
+      say(`READY ${received}`)
+      session.destroy()
+      process.exit(0)
+      break
+    }
     case "destroy-natural": {
       const channel = await session.exec("sleep 60")
       channel.stdout.resume()

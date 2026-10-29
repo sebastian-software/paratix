@@ -44,7 +44,20 @@ proof(
     // Negative control: the bare key without its certificate must be refused.
     const bareDir = mkdtempSync(join(tmpdir(), "paratix-spike-bare-"))
     copyFileSync(join(target.fixtureDir, "cert_user_ed25519"), join(bareDir, "cert_user_ed25519"))
-    const bareAgent = await startAgent(target.fixtureDir, [join(bareDir, "cert_user_ed25519")])
+    const bareKeyPath = join(bareDir, "cert_user_ed25519")
+    const bareAgent = await startAgent(target.fixtureDir, [bareKeyPath])
+    const bareListing = bareAgent.listing.trim().split("\n").filter(Boolean)
+    try {
+      // The control is only meaningful if the agent really holds the bare key
+      // (and only that): otherwise an empty agent would also fail.
+      assert.equal(bareAgent.added[bareKeyPath], "added", "bare key must be added to the agent")
+      assert.equal(bareListing.length, 1, "agent must hold exactly one identity")
+      assert.equal(bareListing[0].split(" ")[1], certKey, "agent identity must be the bare key")
+      assert.ok(!bareAgent.listing.includes("cert-v01"), "agent must not hold the certificate")
+    } catch (error) {
+      await bareAgent.stop()
+      throw error
+    }
     let bareError
     try {
       const s = await agentConnect(bareAgent.socket)
@@ -55,6 +68,12 @@ proof(
       await bareAgent.stop()
     }
     assert.equal(bareError?.code, "AUTH_FAILED", "bare certificate key must not authenticate")
+    // AUTH_FAILED from the server, not from the agent side (agent-unavailable,
+    // agent-protocol, agent-empty carry an `agent-*` detail).
+    assert.ok(
+      !String(bareError.detail ?? "").startsWith("agent-"),
+      `unexpected agent error: ${bareError.detail}`
+    )
 
     const agent = await startAgent(target.fixtureDir, ["cert_user_ed25519"])
     try {
@@ -72,7 +91,13 @@ proof(
             .trim()
             .split("\n")
             .map((l) => l.split(" ")[0]),
-          negativeControl: { bareKeyOnly: bareError.code },
+          negativeControl: {
+            bareKeyAdded: bareAgent.added[bareKeyPath],
+            bareAgentIdentities: bareListing.map((l) => l.split(" ")[0]),
+            code: bareError.code,
+            detail: bareError.detail ?? null,
+            message: bareError.message,
+          },
         }
       } finally {
         await session.close()

@@ -99,6 +99,10 @@ export interface Session extends EventEmitter {
 }
 
 export declare function scan(options: ScanOptions): Promise<HostKeyInfo>
+/**
+ * Host key verdict (fail closed): accepted only if `verifyHost` returns or
+ * resolves exactly `true` or `undefined`; any other value rejects.
+ */
 export declare function connect(
   options: ConnectOptions,
   verifyHost: (info: HostKeyInfo) => Promise<boolean | void> | boolean | void

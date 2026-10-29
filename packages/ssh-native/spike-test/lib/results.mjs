@@ -31,6 +31,7 @@ export function record({ id, level, status, detail }) {
  * Registers one proof as a node:test test and records its outcome.
  * `fn` returns a detail object; throwing SkipProof records a skip.
  * Hard and other proofs fail the suite on failure; soft proofs only record.
+ * A skipped hard proof is recorded as `skip` AND fails the suite.
  * @param {string} id
  * @param {"hard"|"other"|"soft"} level
  * @param {string} title
@@ -44,6 +45,8 @@ export function proof(id, level, title, fn) {
     } catch (error) {
       if (error instanceof SkipProof) {
         record({ id, level, status: "skip", detail: { reason: error.message } })
+        // A hard proof may never be skipped: a skip counts as a failure.
+        if (level === "hard") throw new Error(`hard proof skipped: ${error.message}`)
         t.skip(error.message)
         return
       }

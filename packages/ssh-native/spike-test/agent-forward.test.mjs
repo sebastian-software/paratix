@@ -4,7 +4,7 @@ import { execFileSync } from "node:child_process"
 import { join } from "node:path"
 import { after, before } from "node:test"
 
-import { native, pinnedVerifier, run, setupTarget, startAgent } from "./lib/env.mjs"
+import { native, pinnedVerifier, readFixture, run, setupTarget, startAgent } from "./lib/env.mjs"
 import { proof } from "./lib/results.mjs"
 import {
   latestClient,
@@ -66,18 +66,50 @@ proof(
   "hard",
   "without agentForward no agent reaches the remote side",
   async () => {
-    const session = await agentSession(false)
+    const probe = 'echo "sock=${SSH_AUTH_SOCK}"; ssh-add -l'
+    // 1) AGENT login with agentForward: false. The agent is in use for auth,
+    //    yet nothing may be forwarded.
+    const agentLogin = await agentSession(false)
+    let viaAgent
     try {
-      const result = await run(session, 'echo "sock=${SSH_AUTH_SOCK}"; ssh-add -l')
-      assert.match(result.stdout, /^sock=$/m, "SSH_AUTH_SOCK must be unset remotely")
+      assert.equal(
+        agentLogin.authInfo.method,
+        "agent",
+        "this control must authenticate via the agent"
+      )
+      const result = await run(agentLogin, probe)
+      assert.match(result.stdout, /^sock=$/m, "SSH_AUTH_SOCK must be empty remotely")
       assert.equal(result.code, 2, "ssh-add exits 2 when it cannot reach an agent")
-      return {
+      viaAgent = {
+        authInfo: agentLogin.authInfo,
         remoteOutput: result.stdout.trim(),
-        code: result.code,
-        channelStats: session.channelStats(),
+        sshAddExit: result.code,
+        channelStats: agentLogin.channelStats(),
+      }
+      assert.equal(viaAgent.channelStats.agentChannelsBridged, 0)
+    } finally {
+      await agentLogin.close()
+    }
+    // 2) Key-file login (agentForward defaults to false).
+    const keyLogin = await native.connect(
+      {
+        host: target.host,
+        port: target.port,
+        user: target.user,
+        privateKey: readFixture(target.fixtureDir, "key_ed25519_openssh"),
+      },
+      pinnedVerifier(target.fixtureDir)
+    )
+    try {
+      const result = await run(keyLogin, probe)
+      assert.match(result.stdout, /^sock=$/m)
+      assert.equal(result.code, 2)
+      return {
+        agentLoginWithoutForward: viaAgent,
+        keyFileLogin: { remoteOutput: result.stdout.trim(), sshAddExit: result.code },
       }
     } finally {
-      await session.close()
+      await keyLogin.close()
     }
   }
 )

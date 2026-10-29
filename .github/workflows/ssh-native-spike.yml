@@ -328,7 +328,9 @@ jobs:
         run: |
           smoke_dir="$RUNNER_TEMP/smoke"
           mkdir -p "$smoke_dir"
-          cp packages/ssh-native/index.js packages/ssh-native/spike-test/smoke.mjs "$smoke_dir/"
+          # smoke.mjs spawns smoke-child.mjs (lifecycle and panic probes) from its own directory.
+          cp packages/ssh-native/index.js packages/ssh-native/spike-test/smoke.mjs \
+            packages/ssh-native/spike-test/smoke-child.mjs "$smoke_dir/"
           cp "$RUNNER_TEMP/artifact/ssh-native.$TARGET.node" "$smoke_dir/"
           # Pure-JS ssh2 is enough for the in-process server; skip its optional native build.
           (cd "$smoke_dir" && npm install --no-save --no-package-lock --ignore-scripts --no-audit --no-fund ssh2@1.17.0)
@@ -381,6 +383,14 @@ jobs:
           backend=$(printf '%s' "$line" | jq -r '.cryptoBackend // ""' 2>/dev/null || true)
           if [ "$status" -eq 0 ] && [ "$backend" != "$CRYPTO_BACKEND" ]; then
             echo "::error::binding reports crypto backend '$backend', expected '$CRYPTO_BACKEND'"
+            status=1
+          fi
+          # The smoke must have loaded exactly the shipped artifact.
+          expected_sha=$(shasum -a 256 "$SMOKE_DIR/ssh-native.$TARGET.node" | cut -d' ' -f1)
+          loaded_sha=$(printf '%s' "$line" | jq -r '.binarySha256 // ""' 2>/dev/null || true)
+          echo "artifact sha256: $expected_sha, loaded by smoke: ${loaded_sha:-none}"
+          if [ "$status" -eq 0 ] && [ "$loaded_sha" != "$expected_sha" ]; then
+            echo "::error::smoke loaded sha256 '${loaded_sha:-none}', artifact is '$expected_sha'"
             status=1
           fi
           mkdir -p "$RUNNER_TEMP/smoke-result"
@@ -501,16 +511,35 @@ jobs:
         run: |
           node - "$RUNNER_TEMP/spike-results-docker.jsonl" "$RUNNER_TEMP/spike-results-local.jsonl" <<'NODE'
           const fs = require("node:fs")
+          // Every hard proof must appear with status "pass" in BOTH result files.
+          // A hard "skip" counts as a failure; an unlisted hard id is an error too.
+          const EXPECTED_HARD = [
+            "H1-agent-user-certificate",
+            "H2-async-verifier",
+            "H2-verifier-error-identity",
+            "H3-exec-streams-and-exit",
+            "H4-sftp-mode-0600-and-backpressure",
+            "H4-sftp-bounded-in-flight",
+            "H5-destroy-before-process-exit",
+            "H5-destroy-before-exit-while-streaming",
+            "H5-destroy-releases-event-loop",
+            "H5-close-then-natural-exit",
+            "H5-idle-connection-keeps-process-alive",
+            "H6-agent-forward-remote-ssh-add",
+            "H6-no-agent-forward-by-default",
+            "H6-server-opened-agent-channel-rejected",
+            "H6-server-opened-agent-channel-bridged",
+          ]
           const cell = (value) =>
             String(value ?? "").replace(/\|/g, "\\|").replace(/\s+/g, " ").slice(0, 240)
           let out = `## Proof results (backend ${process.env.CRYPTO_BACKEND})\n\n`
-          let hardFailures = 0
-          let missing = 0
+          const errors = []
           for (const file of process.argv.slice(2)) {
-            out += `### ${file.split("/").pop()}\n\n`
+            const name = file.split("/").pop()
+            out += `### ${name}\n\n`
             if (!fs.existsSync(file) || fs.statSync(file).size === 0) {
               out += "_missing or empty: the suite recorded no result_\n\n"
-              missing += 1
+              errors.push(`${name}: missing or empty`)
               continue
             }
             const rows = fs.readFileSync(file, "utf8").split("\n").filter(Boolean).map((l) => JSON.parse(l))
@@ -518,17 +547,31 @@ jobs:
             out += "| id | level | status | detail |\n| --- | --- | --- | --- |\n"
             for (const row of rows) {
               counts[row.status] = (counts[row.status] ?? 0) + 1
-              if (row.level === "hard" && row.status === "fail") hardFailures += 1
-              const status =
-                row.status === "fail" ? (row.level === "soft" ? "fail (soft)" : "**FAIL**") : row.status
+              const hardBad = row.level === "hard" && row.status !== "pass"
+              if (hardBad) errors.push(`${name}: hard proof ${row.id} is ${row.status}`)
+              if (row.level === "hard" && !EXPECTED_HARD.includes(row.id)) {
+                errors.push(`${name}: unexpected hard id ${row.id} (update EXPECTED_HARD)`)
+              }
+              const status = hardBad
+                ? `**${row.status.toUpperCase()}**`
+                : row.status === "fail" ? "fail (soft)" : row.status
               out += `| ${cell(row.id)} | ${cell(row.level)} | ${status} | ${cell(JSON.stringify(row.detail))} |\n`
+            }
+            for (const id of EXPECTED_HARD) {
+              const hits = rows.filter((r) => r.id === id)
+              if (hits.length === 0) errors.push(`${name}: hard proof ${id} missing`)
+              else if (!hits.every((r) => r.level === "hard" && r.status === "pass")) {
+                errors.push(`${name}: hard proof ${id} not pass in every record`)
+              }
             }
             out += `\n${Object.entries(counts).map(([k, v]) => `${k}: ${v}`).join(", ")}\n\n`
           }
+          out += errors.length === 0
+            ? `All ${EXPECTED_HARD.length} hard proofs passed in both result files.\n`
+            : `### Hard-proof violations\n\n${errors.map((e) => `- ${e}`).join("\n")}\n`
           fs.appendFileSync(process.env.GITHUB_STEP_SUMMARY, out)
-          if (hardFailures > 0) console.log(`::error::${hardFailures} hard proof(s) failed`)
-          if (missing > 0) console.log(`::error::${missing} result file(s) missing or empty`)
-          process.exitCode = hardFailures > 0 || missing > 0 ? 1 : 0
+          for (const error of errors) console.log(`::error::${error}`)
+          process.exitCode = errors.length > 0 ? 1 : 0
           NODE
 
       - name: Upload proof results
@@ -594,10 +637,10 @@ jobs:
             echo
             echo "### Smoke"
             echo
-            echo "| target | variant | runner | status | node | backend |"
-            echo "| --- | --- | --- | --- | --- | --- |"
+            echo "| target | variant | runner | status | node | backend | checks | binary sha256 |"
+            echo "| --- | --- | --- | --- | --- | --- | --- | --- |"
             for f in "$RUNNER_TEMP"/smoke/*.json; do
               [ -f "$f" ] || continue
-              jq -r '"| \(.target) | \(.variant) | \(.runner) | \(.status) | \(.output.node // "") | \(.output.cryptoBackend // "") |"' "$f"
+              jq -r '"| \(.target) | \(.variant) | \(.runner) | \(.status) | \(.output.node // "") | \(.output.cryptoBackend // "") | \((.output.checks // {}) | to_entries | map("\(.key)=\(.value.status)") | join(", ")) | `\(.output.binarySha256 // "")` |"' "$f"
             done
           } >> "$GITHUB_STEP_SUMMARY"

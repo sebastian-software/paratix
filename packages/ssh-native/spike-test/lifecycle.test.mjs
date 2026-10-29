@@ -43,11 +43,17 @@ async function startChild(mode, marker, extraEnv = {}) {
   const exit = new Promise((resolve) => {
     child.once("exit", (code, signal) => resolve({ code, signal, at: Date.now() }))
   })
+  let markerFields = []
   const markerAt = await new Promise((resolve, reject) => {
     child.stdout.on("data", (d) => {
       stdout += d
       const line = stdout.split("\n").find((l) => l.startsWith(`${marker} `))
-      if (line) resolve(Number(line.split(" ")[1]))
+      if (line) {
+        // `<MARKER> [fields...] <timestamp>`
+        const parts = line.trim().split(" ")
+        markerFields = parts.slice(1, -1)
+        resolve(Number(parts.at(-1)))
+      }
     })
     exit.then((e) =>
       reject(new Error(`child exited before ${marker}: ${JSON.stringify(e)} ${stderr}`))
@@ -57,6 +63,7 @@ async function startChild(mode, marker, extraEnv = {}) {
   return {
     child,
     markerAt,
+    markerFields,
     exit,
     get stderr() {
       return stderr
@@ -109,6 +116,39 @@ proof(
       runs,
       remoteSleepProcessesStillRunning: Number(remoteLeftovers.split("\n")[0]),
       note: "informational: exec runs without a PTY, so sshd does not signal the command when the connection drops",
+    }
+  }
+)
+
+proof(
+  "H5-destroy-before-exit-while-streaming",
+  "hard",
+  "destroy() + process.exit(0) while the exec floods stdout (callbacks in flight), 50 runs",
+  async () => {
+    const iterations = Number(process.env.SPIKE_STREAMING_ITERATIONS ?? 50)
+    const latencies = []
+    let bytesAtDestroy = 0
+    for (let i = 0; i < iterations; i += 1) {
+      const handle = await startChild("destroy-exit-streaming", "READY")
+      const exit = await exitWithin(handle, 5000)
+      assert.ok(exit, `run ${i}: child must exit`)
+      assert.equal(exit.code, 0, `run ${i}: exit code (stderr: ${handle.stderr})`)
+      assert.equal(exit.signal, null, `run ${i}: no signal`)
+      assert.ok(!ABORT_PATTERN.test(handle.stderr), `run ${i}: no abort output: ${handle.stderr}`)
+      assert.equal(handle.stderr, "", `run ${i}: empty stderr`)
+      latencies.push(exit.at - handle.markerAt)
+      bytesAtDestroy = Math.max(bytesAtDestroy, Number(handle.markerFields[0] ?? 0))
+    }
+    latencies.sort((a, b) => a - b)
+    return {
+      runs: iterations,
+      allExitCode0: true,
+      allSignalNull: true,
+      allStderrEmpty: true,
+      command: "yes spike-streaming-line (stdout listener attached)",
+      maxExitLatencyMs: latencies.at(-1),
+      medianExitLatencyMs: latencies[Math.floor(latencies.length / 2)],
+      maxBytesReceivedBeforeDestroy: bytesAtDestroy,
     }
   }
 )
