@@ -41,6 +41,8 @@ export default defineConfig({
     ".sf-plugin/**",
     "sebastian-gmbh-paratix-test/**",
     "packages/create-paratix/create-paratix-scaffold-test/**",
+    // THROWAWAY SPIKE (issue #254): removed together with packages/ssh-native.
+    "packages/ssh-native/**",
   ],
   overrides: [
     {

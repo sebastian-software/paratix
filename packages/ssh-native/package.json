@@ -1,0 +1,34 @@
+{
+  "name": "@paratix/ssh-native",
+  "version": "0.0.0",
+  "private": true,
+  "description": "THROWAWAY SPIKE (issue #254): napi-rs binding over russh, evidence for ADR 0008",
+  "license": "MIT",
+  "main": "index.js",
+  "types": "index.d.ts",
+  "engines": {
+    "node": ">=24.0.0"
+  },
+  "napi": {
+    "binaryName": "ssh-native",
+    "targets": [
+      "x86_64-unknown-linux-gnu",
+      "aarch64-unknown-linux-gnu",
+      "x86_64-unknown-linux-musl",
+      "aarch64-unknown-linux-musl",
+      "x86_64-apple-darwin",
+      "aarch64-apple-darwin"
+    ]
+  },
+  "scripts": {
+    "spike:build": "napi build --platform --release --no-js --dts target/spike-generated.d.ts",
+    "spike:build:ring": "napi build --platform --release --no-js --dts target/spike-generated.d.ts --no-default-features --features ring",
+    "spike:fixtures": "bash spike-fixture/generate.sh",
+    "spike:test": "node --test --test-concurrency=1 'spike-test/*.test.mjs'",
+    "spike:smoke": "node spike-test/smoke.mjs"
+  },
+  "devDependencies": {
+    "@napi-rs/cli": "3.10.9",
+    "ssh2": "1.17.0"
+  }
+}

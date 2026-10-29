@@ -5,3 +5,5 @@ pnpm-lock.yaml
 CHANGELOG.md
 renovate.json
 *.tmp.md
+# THROWAWAY SPIKE (issue #254): removed together with packages/ssh-native.
+packages/ssh-native/

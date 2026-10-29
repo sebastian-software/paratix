@@ -1,0 +1,38 @@
+# THROWAWAY SPIKE (issue #254). Profiles are selected by local port.
+Port 22
+Port 2223
+Port 2224
+Port 2225
+ListenAddress 0.0.0.0
+
+HostKey /etc/ssh/spike/host_ed25519
+HostKey /etc/ssh/spike/host_ecdsa
+HostKey /etc/ssh/spike/host_rsa
+HostCertificate /etc/ssh/spike/host_ed25519-cert.pub
+
+# H1: the certificate key is not in authorized_keys; only the CA vouches for it.
+TrustedUserCAKeys /etc/ssh/spike/user_ca.pub
+AuthorizedKeysFile .ssh/authorized_keys
+
+PubkeyAuthentication yes
+PasswordAuthentication yes
+KbdInteractiveAuthentication yes
+UsePAM yes
+PermitRootLogin no
+AllowUsers paratix
+AllowAgentForwarding yes
+AllowTcpForwarding no
+X11Forwarding no
+MaxAuthTries 20
+MaxSessions 10
+Subsystem sftp internal-sftp
+LogLevel VERBOSE
+
+Match LocalPort 2223
+  MaxSessions 1
+
+Match LocalPort 2224
+  AuthenticationMethods password
+
+Match LocalPort 2225
+  AuthenticationMethods keyboard-interactive
