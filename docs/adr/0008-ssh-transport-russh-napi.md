@@ -2,7 +2,7 @@
 
 ## Status
 
-Accepted. All 15 hard proofs of the spike passed in both proof runs, the prebuild matrix built all
+Accepted, amended 2026-10-29 (see "Amendment (2026-10-29, #255)"). All 15 hard proofs of the spike passed in both proof runs, the prebuild matrix built all
 six targets within the glibc and macOS limits, and the smoke test passed on every target. One soft
 cell (ed25519 PKCS#8 through the agent) could not be tested because OpenSSH's `ssh-add` refuses
 that format; it is documented as an OpenSSH limitation below. The spike also found gaps that work
@@ -447,6 +447,73 @@ bans and sources stay blocking.
   only warns; the alpine smoke test is the real check.
 - **Build toolchain:** the gnu artifacts need the zigbuild toolchain. A native build on
   `ubuntu-24.04` links GLIBC_2.38 and would break the glibc 2.35 floor.
+
+## Amendment (2026-10-29, #255)
+
+Stage B1 of sebastian-software/paratix#255 ships the package `@paratix/ssh-native`. The spike
+tables above stay unchanged as historical findings; this section records what B1 changed or
+settled.
+
+- **Verdict:** the host-key verifier accepts only `true`. Every other value (`false`, `undefined`,
+  `1`, `"yes"`, `{}`, `null`) rejects with `HOST_KEY_REJECTED`. This supersedes the "`true` or
+  `undefined`" rule in "Host Keys and Host Certificates" and H2, in line with the C1 planning in
+  sebastian-software/paratix#256. A value the verifier throws or rejects with still reaches the
+  caller of `connect()` as the identical object. `index.d.ts` types the verifier as
+  `(info: HostKeyInfo) => boolean | Promise<boolean>`.
+- **Unresponsive verifier:** `check_server_key` waits with `tokio::select!` on the verifier or a
+  cancel signal; the deadline comes from `readyTimeoutMs` and the `AbortSignal`. On expiry
+  `connect()` rejects with `TIMEOUT`, the russh session task ends, the handler and its ref'd
+  threadsafe function drop, and the process can exit. A late verdict is discarded without an
+  unhandled rejection. An `AbortSignal` gives `ABORTED`; an already-aborted signal gives `ABORTED`
+  without opening TCP.
+- **Exec backpressure and stderr rule:**
+  - stdout uses a bounded queue, `STDOUT_QUEUE_LIMIT` = 1 MiB. The Rust exec reader reads the next
+    channel message only after JS has taken stdout.
+  - The russh client config is set explicitly: `window_size` 2 MiB (2097152),
+    `maximum_packet_size` 32768, `channel_buffer_size` 100.
+  - stderr goes unbounded into a JS buffer and never blocks stdout or the exit while stdout flows.
+  - **Known limit:** paused stdout stalls the whole connection (all channels, SFTP and disconnect
+    detection). russh refills the SSH window on receipt, has no per-channel window, and its session
+    loop blocks when the channel queue is full. stderr flows only while stdout flows, and large
+    unread stderr uses memory. `destroy()` and `AbortSignal` still work during such a stall.
+  - **Rule for C2:** Paratix never pauses stdout while it waits for something else on the same
+    connection.
+  - **Measured** in the B1 unit test: the server sent 6,422,528 bytes against a bound of 6,488,064
+    (`STDOUT_QUEUE_LIMIT` + `highWaterMark` 64 KiB + 100 × 32768 + 2 MiB); JS buffered 1,081,344
+    bytes against a bound of 1,114,112.
+- **Ordering:** on connection loss the session disconnect is reported before the exit of an
+  affected channel. That exit reports `code: null` with `disconnected: true`, never exit 0. The
+  exit comes exactly once and after all stdout and stderr data, because it travels through the same
+  threadsafe-function queue as the data. Signals are raw names (`TERM`); the C2 adapter adds `SIG`.
+- **Panic coverage:** every synchronous `#[napi]` entry point uses `catch_unwind`; threadsafe-function
+  callbacks build their JS values inside `catch_unwind`; the exec reader and the handler
+  callbacks are guarded. The JS wrapper maps any error without a valid `CODE|detail|message` reason
+  to `INTERNAL` with the fixed message "internal error in the native SSH binding". The internal
+  probe `__internalPanicProbe(kind)` (`sync`, `convert`, `async`, `event`, `execReader`, `handler`)
+  in the shipped binary proves this. Limits: a panic during an unwind aborts the process, and
+  panics in tasks that russh-sftp spawns itself surface as `DISCONNECTED`. B1 drives SFTP through
+  `RawSftpSession`, so this is limited to russh-sftp's own internal tasks.
+- **SFTP status:** the finding "SFTP status on write is lost" is resolved. WRITE, READ and CLOSE run
+  through russh-sftp's `RawSftpSession` (pipelined, at most 16 requests of 32 KiB in flight), whose
+  status replies keep the numeric code. Failures surface as `SFTP_STATUS` with `sftpStatus` (unit
+  tests: WRITE 4, CLOSE 3, OPEN of a missing file 2).
+- **zeroize:** the private key, the password, exec stdin (including sudo stdin) and
+  keyboard-interactive answers sit in `Zeroizing` buffers in the binding; `cargo test` asserts this
+  through the types. The JS wrapper zero-fills the caller's buffers in every path, success
+  included. russh keeps its own non-zeroized copies: key decoding (`String`/`Vec`),
+  keyboard-interactive answers (`Vec<String>` in `Msg::AuthInfoResponse`) and exec/sudo stdin
+  (`Bytes` in `ChannelMsg::Data`).
+- **Rekey gap:** russh does not re-check the host key on rekey and offers no hook for it. This
+  stays a documented gap, tracked in sebastian-software/paratix#260 (re-check through a russh hook
+  or an upstream contribution).
+- **Tooling:**
+  - CI caches with `actions/cache`; `Swatinem/rust-cache` is not used and the action allowlist is
+    unchanged.
+  - `pnpm rust:check` runs fmt, clippy with `-D warnings`, `cargo test` and
+    `cargo deny check licenses bans sources`. `PARATIX_RUST_CHECK` (`always`, `skip`, `auto`)
+    controls it.
+  - It runs with `always` only in the `check` job of `ci.yml`. `integration-check.yml` and
+    `publish.yml` set `skip` and only build.
 
 ## Source
 
