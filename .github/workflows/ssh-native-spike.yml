@@ -106,14 +106,6 @@ jobs:
           rustc --version
           cargo --version
 
-      - name: Cache Rust build
-        # Swatinem/rust-cache@v2.9.3
-        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0
-        with:
-          workspaces: packages/ssh-native -> target
-          key: ${{ matrix.target }}-${{ env.CRYPTO_BACKEND }}
-          cache-on-failure: true
-
       - name: Install zig and cargo-zigbuild
         if: matrix.builder == 'zigbuild'
         run: |
