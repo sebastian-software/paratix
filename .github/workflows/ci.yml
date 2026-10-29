@@ -16,9 +16,9 @@ jobs:
     runs-on: ubuntu-24.04
     # Raised from 20 for packages/ssh-native: a cold run compiles aws-lc-rs and
     # russh twice (release build for `pnpm build`, debug build for clippy and
-    # `cargo test`) and installs cargo-deny from source. Re-measure from the
-    # CI runs and tighten once warm-cache timings are known.
-    timeout-minutes: 45
+    # `cargo test`) and installs cargo-deny from source. Measured on PR #262:
+    # 6.5 min cold (main before: about 3 min).
+    timeout-minutes: 25
     permissions:
       contents: read
     env:
