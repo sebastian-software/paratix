@@ -17,7 +17,3 @@ init-test.sh
 .claude/scheduled_tasks.lock
 .effective-flow/
 .DS_Store
-# THROWAWAY SPIKE (issue #254): removed together with packages/ssh-native.
-packages/ssh-native/target/
-packages/ssh-native/*.node
-packages/ssh-native/spike-results/
