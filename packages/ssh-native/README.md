@@ -38,7 +38,14 @@ Building needs the Rust toolchain pinned in `rust-toolchain.toml` (install
 ```sh
 pnpm --filter @paratix/ssh-native build   # napi build --platform --release (incremental)
 pnpm --filter @paratix/ssh-native test    # Node unit tests against an in-process ssh2 server
+pnpm --filter @paratix/ssh-native test:integration        # against an OpenSSH sshd in Docker
+pnpm --filter @paratix/ssh-native test:integration:local  # against a non-root local sshd
+pnpm --filter @paratix/ssh-native test:smoke              # smoke test of the loaded binary
 ```
+
+The integration suite (`test/integration`) runs the hard proofs H1–H6 of ADR 0008 against a real
+OpenSSH server. Keys, CA and certificates are generated per run. Without Docker the sshd tests
+are skipped locally; with `CI=true` they fail instead.
 
 The root `pnpm build` builds the binding as well. `pnpm build` also regenerates `index.d.ts` from
 `dts-header.txt` (the declarations of the JS wrapper) and the Rust `#[napi(object)]` structs; the
