@@ -15,21 +15,9 @@ import type {
 
 import { TransportError } from "./transport.js"
 
-// Legacy fixture bridges may omit EventEmitter methods; real ssh2 clients provide them.
-type Ssh2Client = Omit<Client, "eventNames" | "on" | "once" | "removeListener"> &
-  Partial<Pick<Client, "eventNames" | "on" | "once" | "removeListener">>
-function rawClient(value: unknown): Ssh2Client {
-  // eslint-disable-next-line @typescript-eslint/no-unsafe-type-assertion -- temporary boundary accepts existing ssh2 fixtures and real Client instances
-  return value as Ssh2Client
-}
-
-type Ssh2ConnectOptions = Omit<TransportConnectOptions, "verifyHostKey"> &
-  Partial<Pick<TransportConnectOptions, "verifyHostKey">>
-
 const CHANNEL_OPEN_FAILURE_PATTERN = /channel open failure/iv
 const DESTROY_FALLBACK_MS = 5000
 const DISCONNECTED_EXIT_CODE = 255
-const connections = new WeakMap<object, Ssh2Connection>()
 
 function ignoreTeardownError(): void {
   /* Late errors never replace the settled result. */
@@ -65,18 +53,13 @@ function wrap(error: unknown): TransportError {
 
 /**
  * R-0000794: install the sink before removing any existing listener.
- * @param value - A real client, legacy fixture, or transport connection.
+ * @param client - The raw ssh2 client to release.
  */
-export function cleanupSsh2Client(value: unknown): void {
-  if (value instanceof Ssh2Connection) {
-    value.cleanupFailed()
-    return
-  }
-  const client = rawClient(value)
+export function cleanupSsh2Client(client: Client): void {
   try {
-    client.removeListener?.("error", ignoreTeardownError)
-    client.on?.("error", ignoreTeardownError)
-    for (const event of client.eventNames?.() ?? []) {
+    client.removeListener("error", ignoreTeardownError)
+    client.on("error", ignoreTeardownError)
+    for (const event of client.eventNames()) {
       if (event !== "error") client.removeAllListeners(event)
     }
   } catch {
@@ -132,7 +115,7 @@ function normalizeSignal(signal: null | string | undefined): null | string {
 }
 
 /**
- * Temporary bridge for legacy channel test setup; removed with the C1 fake migration.
+ * Adapt one raw ssh2 channel with synchronous buffered output and exit replay.
  * @param stream - The underlying ssh2 channel.
  * @param isDisconnected - Whether the parent connection has already ended.
  * @returns Buffered transport streams and the synchronous exit subscription.
@@ -198,9 +181,7 @@ function fromSftp(sftp: SFTPWrapper): TransportSftpSession {
       return stream
     },
     end() {
-      // Lightweight legacy fixtures can omit the EventEmitter surface.
-      const once: unknown = Reflect.get(sftp, "once")
-      if (typeof once === "function") sftp.once("error", ignoreTeardownError)
+      sftp.once("error", ignoreTeardownError)
       sftp.end()
     },
   }
@@ -242,7 +223,7 @@ function buildHostVerifierBridge(
 }
 
 function buildConnectConfig(
-  options: Ssh2ConnectOptions,
+  options: TransportConnectOptions,
   hostVerifier: ConnectConfig["hostVerifier"]
 ): ConnectConfig {
   const config: ConnectConfig = {
@@ -266,7 +247,7 @@ class Ssh2Connection implements TransportConnection, Transport {
   private disconnected: TransportError | undefined
   private readonly listeners = new Set<(error: TransportError) => void>()
   private observing = false
-  public constructor(private readonly client: Ssh2Client) {}
+  public constructor(private readonly client: Client) {}
   public cleanupFailed(): void {
     cleanupSsh2Client(this.client)
   }
@@ -278,8 +259,8 @@ class Ssh2Connection implements TransportConnection, Transport {
       }, DESTROY_FALLBACK_MS)
       fallback.unref()
       try {
-        this.client.on?.("error", ignoreTeardownError)
-        this.client.once?.("close", () => {
+        this.client.on("error", ignoreTeardownError)
+        this.client.once("close", () => {
           clearTimeout(fallback)
           resolve()
         })
@@ -289,7 +270,7 @@ class Ssh2Connection implements TransportConnection, Transport {
       }
     })
   }
-  public async connect(options: Ssh2ConnectOptions): Promise<TransportConnection> {
+  public async connect(options: TransportConnectOptions): Promise<TransportConnection> {
     const { client } = this
     // The timeout, abort and ready handlers share this single settlement closure.
     // eslint-disable-next-line max-statements -- keep listener ownership and settlement visibly together
@@ -331,6 +312,7 @@ class Ssh2Connection implements TransportConnection, Transport {
         fail(new TransportError("TIMEOUT", new Error(`Connection timeout on port ${options.port}`)))
       }, options.readyTimeout)
       const { verifyHostKey } = options
+      // eslint-disable-next-line @typescript-eslint/no-unnecessary-condition -- untyped JavaScript callers must fail closed when the required verifier is absent
       if (verifyHostKey == null) {
         fail(
           new TransportError(
@@ -358,8 +340,8 @@ class Ssh2Connection implements TransportConnection, Transport {
         }
       )
       const config = buildConnectConfig(options, hostVerifier)
-      client.on?.("ready", handleReady)
-      client.on?.("error", handleError)
+      client.on("ready", handleReady)
+      client.on("error", handleError)
       options.signal?.addEventListener("abort", handleAbort, { once: true })
       try {
         client.connect(config)
@@ -370,7 +352,7 @@ class Ssh2Connection implements TransportConnection, Transport {
   }
   public destroy(): void {
     try {
-      this.client.on?.("error", ignoreTeardownError)
+      this.client.on("error", ignoreTeardownError)
       this.client.destroy()
     } catch {
       /* Synchronous hard-stop must never throw. */
@@ -387,7 +369,7 @@ class Ssh2Connection implements TransportConnection, Transport {
             reject(wrap(error))
             return
           }
-          // Attach before returning to ssh2, including synchronous legacy fakes.
+          // Attach before returning to ssh2, including a synchronous library response.
           const channel = fromSsh2Channel(stream, () => this.disconnected !== undefined)
           onChannel?.(channel)
           resolve(channel)
@@ -400,8 +382,8 @@ class Ssh2Connection implements TransportConnection, Transport {
   public observe(): void {
     if (this.observing) return
     this.observing = true
-    this.client.on?.("error", this.handleDisconnectError)
-    this.client.once?.("close", this.handleDisconnectClose)
+    this.client.on("error", this.handleDisconnectError)
+    this.client.once("close", this.handleDisconnectClose)
   }
   public onDisconnect(listener: (error: TransportError) => void): () => void {
     this.observe()
@@ -421,7 +403,7 @@ class Ssh2Connection implements TransportConnection, Transport {
             reject(wrap(error))
             return
           }
-          // eslint-disable-next-line @typescript-eslint/no-unnecessary-condition -- legacy callbacks and malformed library responses can omit the session
+          // eslint-disable-next-line @typescript-eslint/no-unnecessary-condition -- malformed library responses can omit the session
           if (sftp === undefined) {
             reject(wrap(new Error("Failed to open SFTP session: missing SFTP session")))
             return
@@ -451,28 +433,6 @@ class Ssh2Connection implements TransportConnection, Transport {
   }
 }
 
-/**
- * Temporary bridge for existing ssh2 test fixtures, removed in PR 3.
- * @param client - An existing ssh2 client or legacy fixture.
- * @returns A transport connection sharing the client's lifecycle.
- */
-export function fromSsh2Client(client: Client): TransportConnection {
-  let connection = connections.get(client)
-  if (connection === undefined) {
-    connection = new Ssh2Connection(client)
-    connections.set(client, connection)
-  }
-  connection.observe()
-  return connection
-}
 export function createSsh2Transport(): Transport & TransportConnection {
   return new Ssh2Connection(new Client())
-}
-export async function connectSsh2Client(
-  client: unknown,
-  options: Ssh2ConnectOptions
-): Promise<TransportConnection> {
-  if (client instanceof Ssh2Connection) return client.connect(options)
-  // Legacy fixtures supply the raw client until PR 3.
-  return new Ssh2Connection(rawClient(client)).connect(options)
 }

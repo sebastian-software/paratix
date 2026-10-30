@@ -1,4 +1,5 @@
 /* oxlint-disable vitest/no-conditional-in-test -- parameterized rows choose termination or failure mechanisms and always assert the same contract */
+import type * as Ssh2 from "ssh2"
 import type { Client, ConnectConfig } from "ssh2"
 
 import { generateKeyPairSync } from "node:crypto"
@@ -7,17 +8,42 @@ import { Writable } from "node:stream"
 import { Server } from "ssh2"
 import { afterEach, describe, expect, it, vi } from "vitest"
 
-import type { TransportConnectOptions, TransportExecChannel } from "../src/transport.js"
+import type {
+  Transport,
+  TransportConnection,
+  TransportConnectOptions,
+  TransportExecChannel,
+} from "../src/transport.js"
 
 import { HostKeyVerificationError } from "../src/knownHosts.js"
 import { sftpUploadContent } from "../src/sftp.js"
 import { TransportError } from "../src/transport.js"
-import {
-  cleanupSsh2Client,
-  connectSsh2Client,
-  createSsh2Transport,
-  fromSsh2Client,
-} from "../src/transportSsh2.js"
+import { cleanupSsh2Client, createSsh2Transport } from "../src/transportSsh2.js"
+import { FakeExecChannel, FakeTransportConnection } from "./helpers/fakeTransport.js"
+
+const { rawClients } = vi.hoisted(() => ({ rawClients: [] as Client[] }))
+vi.mock("ssh2", async () => {
+  const imported = await vi.importActual<{ default: typeof Ssh2 }>("ssh2")
+  const actual = imported.default
+  return {
+    ...actual,
+    Client: class extends actual.Client {
+      public constructor() {
+        const fixture = rawClients.shift()
+        // eslint-disable-next-line no-constructor-return -- select a controlled raw fixture without changing the prototype of live handshake clients
+        if (fixture !== undefined) return fixture
+        super()
+      }
+    },
+    Server: actual.Server,
+  }
+})
+async function connectSsh2Client(
+  client: ReturnType<typeof fakeClient>,
+  settings: TransportConnectOptions
+) {
+  return bridge(client).connect(settings)
+}
 
 const options: TransportConnectOptions = {
   host: "127.0.0.1",
@@ -56,8 +82,11 @@ function fakeChannel() {
   })
 }
 function bridge(client: ReturnType<typeof fakeClient>) {
-  return fromSsh2Client(client as unknown as Client)
+  // The fixture implements the raw methods exercised by the adapter; ssh2 stays inside this test boundary.
+  rawClients.push(client as unknown as Client)
+  return createSsh2Transport()
 }
+
 function deferred<T>() {
   let resolve!: (value: T) => void
   let reject!: (reason: unknown) => void
@@ -322,12 +351,15 @@ describe("ssh2 transport", () => {
       raw.emit("close")
       expect(order).toStrictEqual(["disconnect", "exit:255"])
     })
-    it("destroys synchronously without throwing, including a throwing client", () => {
+    it("destroys synchronously without throwing, including a throwing client", async () => {
       const client = fakeClient()
       client.destroy.mockImplementation(() => {
         throw new Error("already destroyed")
       })
       const connection = bridge(client)
+      const connected = connection.connect(options)
+      client.emit("ready")
+      await connected
       client.emit("error", new Error("earlier failure"))
       expect(() => {
         connection.destroy()
@@ -344,6 +376,18 @@ describe("ssh2 transport", () => {
       await close
       await vi.advanceTimersByTimeAsync(5000)
       expect(client.destroy).not.toHaveBeenCalled()
+    })
+    it("falls back to destroy when a successful end does not close the socket (R-0000209)", async () => {
+      vi.useFakeTimers()
+      const client = fakeClient()
+      const closed = bridge(client).close()
+      expect(client.end).toHaveBeenCalledOnce()
+      expect(client.destroy).not.toHaveBeenCalled()
+      await vi.advanceTimersByTimeAsync(4999)
+      expect(client.destroy).not.toHaveBeenCalled()
+      await vi.advanceTimersByTimeAsync(1)
+      await expect(closed).resolves.toBeUndefined()
+      expect(client.destroy).toHaveBeenCalledOnce()
     })
     it("resolves close after the fallback even when end and destroy throw", async () => {
       vi.useFakeTimers()
@@ -367,7 +411,7 @@ describe("ssh2 transport", () => {
         throw new Error("end failed")
       })
       expect(() => {
-        cleanupSsh2Client(client)
+        cleanupSsh2Client(client as unknown as Client)
       }).not.toThrow()
       expect(client.listenerCount("ready")).toBe(0)
       expect(client.listenerCount("error")).toBe(1)
@@ -555,6 +599,7 @@ describe("ssh2 transport", () => {
       expect((error as TransportError).cause).toBe(raw)
     })
     it("preserves synchronous SFTP stream creation and late error sinks", async () => {
+      // R-0000687: session end and remote streams retain their late-error sinks.
       const client = fakeClient()
       const raw = new EventEmitter()
       const write = new EventEmitter()
@@ -626,5 +671,361 @@ describe("ssh2 transport", () => {
       expect(sftp.createWriteStream).toHaveBeenCalledOnce()
       expect(sftp.end).toHaveBeenCalledOnce()
     })
+  })
+})
+
+describe("ssh2 connection listener ownership", () => {
+  afterEach(() => {
+    vi.useRealTimers()
+  })
+
+  it("removes connect-phase listeners after the client is ready", async () => {
+    const client = fakeClient()
+    const promise = legacyConnect({
+      client,
+      host: "example.test",
+      hostVerifier: () => true,
+      port: 22,
+      username: "root",
+    })
+
+    expect(client.listenerCount("ready")).toBe(1)
+    expect(client.listenerCount("error")).toBe(1)
+
+    client.emit("ready")
+
+    await expect(promise).resolves.toBeUndefined()
+    expect(client.listenerCount("ready")).toBe(0)
+    expect(
+      client.listeners("error").filter((listener) => !listener.name.startsWith("handleDisconnect"))
+    ).toHaveLength(0)
+
+    client.on("error", () => {
+      /* runtime errors are handled by the active SSH session */
+    })
+    client.emit("error", new Error("runtime failure"))
+
+    expect(client.end).not.toHaveBeenCalled()
+  })
+
+  it("cleans up the client when the connect-phase error fires before ready", async () => {
+    const client = fakeClient()
+    const error = new Error("Permission denied")
+    const promise = legacyConnect({
+      client,
+      host: "example.test",
+      hostVerifier: () => true,
+      port: 22,
+      username: "root",
+    })
+
+    client.emit("error", error)
+
+    await expect(promise).rejects.toThrow("Permission denied")
+    expect(client.end).toHaveBeenCalledOnce()
+    expect(client.listenerCount("ready")).toBe(0)
+    expect(client.listenerCount("error")).toBe(1)
+    expect(() => {
+      client.emit("error", new Error("late cleanup error"))
+    }).not.toThrow()
+  })
+
+  it("cleans up the client when the connect attempt times out", async () => {
+    vi.useFakeTimers()
+    const client = fakeClient()
+    const promise = legacyConnect({
+      client,
+      host: "example.test",
+      hostVerifier: () => true,
+      port: 2222,
+      username: "root",
+    })
+    const rejection = promise.then(
+      () => {
+        throw new Error("Expected promise to reject")
+      },
+      (error: unknown) => error
+    )
+
+    await vi.advanceTimersByTimeAsync(10_000)
+
+    await expect(rejection).resolves.toMatchObject({
+      message: "Connection timeout on port 2222",
+    })
+    expect(client.end).toHaveBeenCalledOnce()
+    expect(client.listenerCount("ready")).toBe(0)
+    expect(client.listenerCount("error")).toBe(1)
+    expect(() => {
+      client.emit("error", new Error("late cleanup error"))
+    }).not.toThrow()
+  })
+
+  it("uses a bounded ready timeout for ssh2 and the local connect timer", async () => {
+    vi.useFakeTimers()
+    const client = fakeClient()
+    const promise = legacyConnect({
+      client,
+      host: "example.test",
+      hostVerifier: () => true,
+      port: 2222,
+      readyTimeout: 1500,
+      username: "root",
+    })
+    const rejection = promise.then(
+      () => {
+        throw new Error("Expected promise to reject")
+      },
+      (error: unknown) => error
+    )
+
+    expect(client.connect).toHaveBeenCalledWith(
+      expect.objectContaining({
+        readyTimeout: 1500,
+      })
+    )
+
+    await vi.advanceTimersByTimeAsync(1499)
+    expect(client.end).not.toHaveBeenCalled()
+
+    await vi.advanceTimersByTimeAsync(1)
+
+    await expect(rejection).resolves.toMatchObject({
+      message: "Connection timeout on port 2222",
+    })
+    expect(client.end).toHaveBeenCalledOnce()
+    expect(client.listenerCount("ready")).toBe(0)
+    expect(client.listenerCount("error")).toBe(1)
+    expect(() => {
+      client.emit("error", new Error("late cleanup error"))
+    }).not.toThrow()
+  })
+
+  it("cleans up the client and timer when the connect attempt is aborted", async () => {
+    vi.useFakeTimers()
+    const client = fakeClient()
+    const abortController = new AbortController()
+    const abortError = new Error("Interrupted by SIGINT")
+    const promise = legacyConnect({
+      abortSignal: abortController.signal,
+      client,
+      host: "example.test",
+      hostVerifier: () => true,
+      port: 2222,
+      username: "root",
+    })
+
+    abortController.abort(abortError)
+
+    await expect(promise).rejects.toThrow("Interrupted by SIGINT")
+    expect(client.end).toHaveBeenCalledOnce()
+    expect(client.listenerCount("ready")).toBe(0)
+    expect(client.listenerCount("error")).toBe(1)
+    expect(() => {
+      client.emit("error", new Error("late cleanup error"))
+    }).not.toThrow()
+    expect(vi.getTimerCount()).toBe(0)
+  })
+
+  it("cleans up the client and timer when client.connect throws synchronously", async () => {
+    vi.useFakeTimers()
+    const client = fakeClient()
+    vi.mocked(client.connect).mockImplementationOnce(() => {
+      throw new Error("Cannot parse privateKey")
+    })
+
+    const promise = legacyConnect({
+      client,
+      host: "example.test",
+      hostVerifier: () => true,
+      port: 22,
+      username: "root",
+    })
+
+    await expect(promise).rejects.toThrow("Cannot parse privateKey")
+    expect(client.end).toHaveBeenCalledOnce()
+    expect(client.listenerCount("ready")).toBe(0)
+    expect(client.listenerCount("error")).toBe(1)
+    expect(() => {
+      client.emit("error", new Error("late cleanup error"))
+    }).not.toThrow()
+    expect(vi.getTimerCount()).toBe(0)
+  })
+
+  it("fails closed before connecting when no host-key verifier is configured", async () => {
+    const client = fakeClient()
+
+    await expect(
+      legacyConnect({
+        client,
+        host: "example.test",
+        port: 22,
+        username: "root",
+      })
+    ).rejects.toThrow(/without a host-key verifier/v)
+
+    expect(client.connect).not.toHaveBeenCalled()
+    expect(client.end).toHaveBeenCalledOnce()
+  })
+})
+
+async function legacyConnect(parameters: {
+  abortSignal?: AbortSignal
+  client: ReturnType<typeof fakeClient>
+  host: string
+  hostVerifier?: (key: Buffer) => boolean
+  port: number
+  readyTimeout?: number
+  username: string
+}): Promise<void> {
+  await connectSsh2Client(parameters.client, {
+    ...parameters,
+    readyTimeout: parameters.readyTimeout ?? 10_000,
+    signal: parameters.abortSignal,
+    verifyHostKey: parameters.hostVerifier!,
+  }).catch((error: unknown) => {
+    throw error instanceof TransportError ? error.cause : error
+  })
+}
+
+type ContractFixture = {
+  connection: Transport & TransportConnection
+  disconnect: (error: TransportError) => void
+  exit: () => void
+  failOutput: (error: Error) => void
+  ready: () => void
+  sendOutput: () => void
+}
+function contractFixture(kind: "fake" | "ssh2"): ContractFixture {
+  if (kind === "fake") {
+    const gate = deferred<undefined>()
+    const channel = new FakeExecChannel()
+    const connection = new FakeTransportConnection({
+      execute(_command, deliver) {
+        deliver(channel)
+      },
+      onConnect: async () => gate.promise,
+    })
+    return {
+      connection,
+      disconnect(error) {
+        connection.disconnect(error)
+      },
+      exit() {
+        channel.finish(7, "SIGTERM")
+      },
+      failOutput(error) {
+        channel.stdout.fail(error)
+      },
+      ready() {
+        gate.resolve(undefined)
+      },
+      sendOutput() {
+        channel.stdout.send("out")
+        channel.stderr.send("err")
+      },
+    }
+  }
+  const client = fakeClient()
+  const rawChannel = fakeChannel()
+  client.exec.mockImplementation((_command, callback) => {
+    callback(undefined, rawChannel)
+  })
+  const adapterConnection = bridge(client)
+  return {
+    connection: adapterConnection,
+    disconnect(error) {
+      client.emit("error", error.cause)
+      rawChannel.emit("close", 0)
+    },
+    exit() {
+      rawChannel.emit("close", 7, "SIGTERM")
+    },
+    failOutput(error) {
+      rawChannel.emit("error", error)
+    },
+    ready() {
+      client.emit("ready")
+    },
+    sendOutput() {
+      rawChannel.emit("data", Buffer.from("out"))
+      rawChannel.stderr.emit("data", Buffer.from("err"))
+    },
+  }
+}
+
+describe.each(["fake", "ssh2"] as const)("transport contract (%s)", (kind) => {
+  it("waits for controlled readiness before resolving connect", async () => {
+    const fixture = contractFixture(kind)
+    let resolved = false
+    const pending = fixture.connection.connect(options).then((connection) => {
+      resolved = true
+      return connection
+    })
+    await Promise.resolve()
+    expect(resolved).toBe(false)
+    fixture.ready()
+    await expect(pending).resolves.toBe(fixture.connection)
+    fixture.connection.destroy()
+  })
+
+  it("replays buffered output before exit and deduplicates exit", async () => {
+    const fixture = contractFixture(kind)
+    const pending = fixture.connection.exec("true")
+    fixture.sendOutput()
+    fixture.exit()
+    const channel = await pending
+    const order: string[] = []
+    channel.stdout.on("data", (data: Buffer) => {
+      order.push(`stdout:${data.toString()}`)
+    })
+    channel.stderr.on("data", (data: Buffer) => {
+      order.push(`stderr:${data.toString()}`)
+    })
+    channel.onExit((exit) => {
+      order.push(`exit:${String(exit.code)}:${String(exit.signal)}`)
+    })
+    fixture.exit()
+    expect(order).toStrictEqual(["stdout:out", "stderr:err", "exit:7:SIGTERM"])
+  })
+
+  it("replays stream errors to a late Promise-only consumer", async () => {
+    const fixture = contractFixture(kind)
+    const pending = fixture.connection.exec("true")
+    const raw = new Error("late stdout failure")
+    fixture.failOutput(raw)
+    const channel = await pending
+    const failure = vi.fn<(error: Error) => void>()
+    channel.stdout.on("error", failure)
+    expect(failure).toHaveBeenCalledExactlyOnceWith(raw)
+  })
+
+  it("notifies disconnect before exit, preserves cause and supports unsubscribe and replay", async () => {
+    const fixture = contractFixture(kind)
+    const removed = vi.fn<(error: TransportError) => void>()
+    const unsubscribe = fixture.connection.onDisconnect(removed)
+    unsubscribe()
+    const order: string[] = []
+    const failures: TransportError[] = []
+    fixture.connection.onDisconnect((error) => {
+      failures.push(error)
+      order.push("disconnect")
+    })
+    const channel = await fixture.connection.exec("sleep infinity")
+    channel.onExit((exit) => {
+      order.push(`exit:${String(exit.code)}`)
+    })
+    const raw = new Error("read ECONNRESET")
+    const failure = new TransportError("INTERNAL", raw)
+    fixture.disconnect(failure)
+    fixture.disconnect(failure)
+    const late = vi.fn<(error: TransportError) => void>()
+    fixture.connection.onDisconnect(late)
+    expect(order).toStrictEqual(["disconnect", "exit:255"])
+    expect(removed).not.toHaveBeenCalled()
+    expect(failures).toHaveLength(1)
+    expect(failures[0]).toBeInstanceOf(TransportError)
+    expect(failures[0].transportCode).toBe("INTERNAL")
+    expect(failures[0].cause).toBe(raw)
+    expect(late).toHaveBeenCalledExactlyOnceWith(failures[0])
   })
 })

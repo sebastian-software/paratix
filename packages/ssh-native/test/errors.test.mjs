@@ -1,5 +1,6 @@
 import assert from "node:assert/strict"
 import { createRequire } from "node:module"
+import { constants } from "node:os"
 import { describe, it } from "node:test"
 
 const require = createRequire(import.meta.url)
@@ -18,9 +19,11 @@ describe("error mapping", () => {
 
   it("adds errno and the syscall code for CONNECT_FAILED", () => {
     const error = toError(
-      nativeError("CONNECT_FAILED|111|the TCP connection could not be established")
+      nativeError(
+        `CONNECT_FAILED|${constants.errno.ECONNREFUSED}|the TCP connection could not be established`
+      )
     )
-    assert.equal(error.errno, 111)
+    assert.equal(error.errno, constants.errno.ECONNREFUSED)
     assert.equal(error.syscallCode, "ECONNREFUSED")
   })
 

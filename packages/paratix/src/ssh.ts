@@ -28,7 +28,6 @@ import {
 import { SFTP_TIMEOUT, sftpDownload, sftpUpload, sftpUploadContent } from "./sftp.js"
 import {
   CAPTURE_TRUNCATION_MARKER,
-  cleanupFailedSshClient,
   collectStreamOutput,
   DEFAULT_MAX_OUTPUT_BYTES,
   isCommandError,
@@ -38,12 +37,13 @@ import {
   prepareSecrets,
   type SecretSource,
   shellQuote,
-  tryConnectOnPort,
   validateMode,
 } from "./sshHelpers.js"
 import { promptTerminal } from "./terminal.js"
 import { TransportError, unwrapTransportError } from "./transport.js"
 import { createSsh2Transport } from "./transportSsh2.js"
+
+const CONNECTION_TIMEOUT = 10_000
 
 export { shellQuote, validateMktempPath, validateMode }
 
@@ -550,7 +550,7 @@ export class SshConnectionImpl implements SshConnection {
     // fresh-probe semantics that public disconnect() needs.
     // R-0000669: disconnectTransport also rotates connectionAbortController,
     // which now propagates into performConnectAttemptOnPort. A SIGINT-driven
-    // disconnect() while tryConnectOnPort is still running therefore aborts
+    // disconnect() while Transport.connect is still running therefore aborts
     // the in-flight connect via the abort-signal path instead of leaving an
     // orphaned client that disconnectTransport already nulled.
     this.disconnectTransport()
@@ -922,7 +922,7 @@ export class SshConnectionImpl implements SshConnection {
    * timing of every command on the connection. Under contention it returns a
    * promise that settles in FIFO order once a slot is handed over.
    *
-   * Callers must resolve their ssh2 client **after** this returns or its
+   * Callers must resolve their transport connection **after** this returns or its
    * promise settles, never before: `reconnect()` replaces the client and
    * `disconnect()` nulls it, so a reference captured before the wait can be
    * dead by the time the slot frees up. Waiting here is deliberately invisible
@@ -991,7 +991,7 @@ export class SshConnectionImpl implements SshConnection {
   }
 
   /**
-   * R-0000669: build the abort signal that {@link tryConnectOnPort} subscribes
+   * R-0000669: build the abort signal that {@link Transport} subscribes
    * to. Combines the prompt-level abort signal (which fires from the SIGINT
    * handler) with the connection-level abort signal (which fires from
    * {@link disconnect}/{@link disconnectTransport} via
@@ -1647,15 +1647,15 @@ ${this.buildDirSymlinkCheckScript(directory)}mktemp -p ${shellQuote(directory)} 
   /**
    * Detach the lifecycle listeners installed by registerConnectedClient.
    *
-   * R-0000254: `registerConnectedClient` stores `client.once("close", () =>
-   * rejectPending(...))` where `rejectPending` is a closure over
+   * R-0000254: `registerConnectedClient` subscribes to `onDisconnect`
+   * with `rejectPending`, which is a closure over
    * `this.pendingRejects` (no snapshot). Without removing these listeners on
    * disconnect, a delayed `close`/`error` event from the OLD client would run
    * the closure against the NEW connection's pendingRejects after a reconnect
    * and falsely reject freshly queued operations with
    * "SSH connection closed unexpectedly".
    *
-   * @param closing - The ssh2 client whose lifecycle listeners should be removed.
+   * @param closing - The transport connection whose lifecycle subscription should be removed.
    */
   private detachClientLifecycleListeners(closing: TransportConnection): void {
     const listeners = this.clientLifecycleListeners.get(closing)
@@ -2050,9 +2050,9 @@ trap - EXIT
     const { client, registered, tryConnectResolved } = parameters
     const error = unwrapTransportError(parameters.error)
     // Only release the client when nothing else has taken responsibility:
-    // tryConnectOnPort cleans up internally on rejection, and a registered
+    // The transport cleans up internally on connect rejection, and a registered
     // client is owned by `this` and must not be force-closed mid-iteration.
-    if (tryConnectResolved && !registered) cleanupFailedSshClient(client)
+    if (tryConnectResolved && !registered) void client.close()
     // R-0000256: rethrow HostKeyVerificationError before any abort handling
     // so the caller sees the verification failure verbatim. When the abort
     // fired simultaneously with a post-handshake commit failure, surface the
@@ -2156,7 +2156,7 @@ trap - EXIT
   }
 
   private async performConnectAttemptOnPort(parameters: {
-    client: TransportConnection
+    client: Transport & TransportConnection
     options: TryConnectOnPortsOptions
     port: number
     state: { registered: boolean; tryConnectResolved: boolean }
@@ -2174,25 +2174,32 @@ trap - EXIT
     const hostKeyAttempt = this.createHostKeyAttempt(verifier.hostVerifier)
     // R-0000669: combine the prompt-level abort signal (SIGINT-driven prompt
     // cancellation) with the connection-level abort signal so an in-flight
-    // tryConnectOnPort is aborted whenever disconnect() runs — including
+    // Transport.connect is aborted whenever disconnect() runs — including
     // programmatic disconnect paths that did not also abort promptAbortSignal.
     // Without this, disconnectTransport nulled the client while the connect
     // continued and emitted a `ready` event on a no-longer-tracked client.
     const connectAbortSignal = this.buildConnectAbortSignal()
     const transitionErrorSink = this.installConnectedClientTransitionErrorSink(client)
     try {
-      await tryConnectOnPort({
-        abortSignal: connectAbortSignal,
+      await client.connect({
         agent: options.agent,
         agentForward: this.config.agentForward,
-        client,
         host: this.runtime.host,
-        hostVerifier: hostKeyAttempt.hostVerifier,
         password: options.password,
         port,
         privateKey: options.privateKey,
-        readyTimeout: getRemainingReconnectTimeout(options.reconnectDeadline),
+        readyTimeout: Math.max(
+          1,
+          Math.min(
+            CONNECTION_TIMEOUT,
+            Math.floor(
+              getRemainingReconnectTimeout(options.reconnectDeadline) ?? CONNECTION_TIMEOUT
+            )
+          )
+        ),
+        signal: connectAbortSignal,
         username: this.config.user,
+        verifyHostKey: hostKeyAttempt.hostVerifier,
       })
       state.tryConnectResolved = true
       transitionErrorSink.assertNoError()
@@ -2371,7 +2378,7 @@ trap - EXIT
    * guaranteed release stay readable around the callback wiring.
    *
    * @param parameters - Prepared execution inputs.
-   * @param parameters.client - The ssh2 client resolved after the slot claim.
+   * @param parameters.client - The transport connection resolved after the slot claim.
    * @param parameters.command - The original (unwrapped) command, for messages.
    * @param parameters.options - The caller's exec options.
    * @param parameters.secrets - The prepared secret sink used for masking.
@@ -2406,9 +2413,9 @@ trap - EXIT
             if (delivered) return
             delivered = true
             // If the timer already fired (or the promise was otherwise settled) before
-            // ssh2 invoked this callback, we must not attach listeners that can never
+            // the transport delivered the channel, we must not attach listeners that can never
             // resolve the already-rejected promise. Close the stream immediately so
-            // ssh2 releases the channel and discards any buffered data.
+            // the transport releases the channel and discards any buffered data.
             if (isSettled()) {
               stream.close()
               return
@@ -2478,9 +2485,9 @@ trap - EXIT
           if (delivered) return
           delivered = true
           // If the timer already fired (or the promise was otherwise settled)
-          // before ssh2 invoked this callback, we must not attach listeners that
+          // before the transport delivered the channel, we must not attach listeners that
           // can never resolve the already-rejected promise. Close the stream
-          // immediately so ssh2 releases the channel and discards buffered data.
+          // immediately so the transport releases the channel and discards buffered data.
           if (isSettled()) {
             stream.close()
             return
@@ -2756,11 +2763,11 @@ trap - EXIT
   /**
    * Forward sudo password / `options.input` to a stream while tolerating
    * EPIPE errors that may arrive between the `isSettled()` check and the
-   * actual write call (R-0000054). The stream is owned by ssh2 and may
+   * actual write call (R-0000054). The stream is owned by the transport and may
    * have been closed by the timeout path; emitting an `error` event on a
    * closed channel without a listener would crash the process.
    *
-   * @param stream - The ssh2 channel that just became available.
+   * @param stream - The transport channel that just became available.
    * @param needsPassword - Whether the command needs a sudo password.
    * @param input - Optional stdin payload from the caller.
    */

@@ -1,9 +1,7 @@
-import type { Client, ClientChannel } from "ssh2"
-
-import { EventEmitter } from "node:events"
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 
 import {
+  collectStreamOutput,
   CommandError,
   createStreamMasker,
   DEFAULT_MAX_OUTPUT_BYTES,
@@ -11,114 +9,24 @@ import {
   maskSecrets,
   MAX_OUTPUT_LENGTH,
   shellQuote,
-  collectStreamOutput as transportCollectStreamOutput,
   type StreamOutputParameters as TransportStreamOutputParameters,
-  tryConnectOnPort as transportTryConnectOnPort,
   validateMode,
 } from "../src/sshHelpers.js"
-import { unwrapTransportError } from "../src/transport.js"
-import { fromSsh2Channel } from "../src/transportSsh2.js"
+import { FakeExecChannel } from "./helpers/fakeTransport.js"
 
-type StreamOutputParameters = {
-  stream: ClientChannel
-} & Omit<TransportStreamOutputParameters, "stream">
-
-function collectStreamOutput(parameters: StreamOutputParameters): void {
-  let channel: ReturnType<typeof fromSsh2Channel> | undefined
-  let originalSignal: null | string = null
-  const getChannel = () => {
-    if (channel !== undefined) return channel
-    const raw = parameters.stream
-    raw.prependListener("close", (_code: unknown, signal?: null | string) => {
-      originalSignal = signal ?? null
-    })
-    channel = fromSsh2Channel(raw)
-    return channel
-  }
-  transportCollectStreamOutput({
-    ...parameters,
-    stream: {
-      close() {
-        getChannel().close()
-      },
-      onExit(listener) {
-        return getChannel().onExit((exit) => {
-          listener({ ...exit, signal: originalSignal })
-        })
-      },
-      get stderr() {
-        return getChannel().stderr
-      },
-      get stdin() {
-        return getChannel().stdin
-      },
-      get stdout() {
-        return getChannel().stdout
-      },
-    },
-  })
-}
-async function tryConnectOnPort(
-  parameters: { client: Client } & Omit<Parameters<typeof transportTryConnectOnPort>[0], "client">
-): Promise<void> {
-  return transportTryConnectOnPort(
-    parameters as unknown as Parameters<typeof transportTryConnectOnPort>[0]
-  ).then(
-    () => {
-      /* Legacy helper ignores the connected result. */
-    },
-    (error: unknown) => {
-      throw unwrapTransportError(error)
-    }
-  )
-}
-
-// ---------------------------------------------------------------------------
-// Helpers
-// ---------------------------------------------------------------------------
-
-type MockChannel = { stderr: EventEmitter } & EventEmitter
-
-type MockClient = {
-  connect: Client["connect"]
-  end: Client["end"]
-} & Client &
-  EventEmitter
-
-function createMockChannel(): { stderr: EventEmitter; stream: MockChannel } {
-  const stream = new EventEmitter() as MockChannel
-  const stderr = new EventEmitter()
-  stream.stderr = stderr
-  return { stderr, stream }
-}
-
-function createMockClient(): MockClient {
-  const client = new EventEmitter() as MockClient
-  client.connect = () => client
-  client.end = () => client
-  const listenerCount = client.listenerCount.bind(client)
-  vi.spyOn(client, "listenerCount").mockImplementation((event) => {
-    const runtimeListeners = client
-      .listeners(event)
-      .filter((listener) => listener.name.startsWith("handleDisconnect")).length
-    return listenerCount(event) - runtimeListeners
-  })
-  vi.spyOn(client, "connect")
-  vi.spyOn(client, "end")
-  return client
-}
-
-function trustedHostVerifier(): boolean {
-  return true
+type StreamOutputParameters = TransportStreamOutputParameters
+function createMockChannel() {
+  const stream = new FakeExecChannel()
+  return { stderr: stream.stderr, stream }
 }
 
 type CollectResult = Promise<{ code: number; stderr: string; stdout: string }>
 type EmittedOutput = Buffer | Buffer[] | string
 
-function emitOutput(stream: EventEmitter, output: EmittedOutput): void {
+function emitOutput(stream: { send: (chunk: Buffer) => void }, output: EmittedOutput): void {
   const chunks = Array.isArray(output) ? output : [output]
   for (const chunk of chunks) {
-    stream.emit("data", typeof chunk === "string" ? Buffer.from(chunk) : chunk)
+    stream.send(typeof chunk === "string" ? Buffer.from(chunk) : chunk)
   }
 }
 
@@ -142,14 +50,14 @@ async function runCollect(
       options: { silent: true },
       reject,
       resolve,
-      stream: stream as unknown as StreamOutputParameters["stream"],
+      stream,
       timer,
       ...params,
     })
 
-    if (emitStdout !== undefined) emitOutput(stream, emitStdout)
+    if (emitStdout !== undefined) emitOutput(stream.stdout, emitStdout)
     if (emitStderr !== undefined) emitOutput(stderr, emitStderr)
-    stream.emit("close", emitClose.code, emitClose.signal)
+    stream.finish(emitClose.code, emitClose.signal)
 
     clearTimeout(timer)
   })
@@ -465,15 +373,15 @@ describe("collectStreamOutput", () => {
       reject,
       resolve,
       secrets: ["bad[REDACTED]secret"],
-      stream: stream as unknown as StreamOutputParameters["stream"],
+      stream,
       timer,
     })
 
     expect(rejectSpy).toHaveBeenCalledWith(
       expect.objectContaining({ message: expect.stringMatching(/redaction placeholder/v) })
     )
-    expect(stream.listenerCount("data")).toBe(0)
-    stream.emit("data", Buffer.from("output after rejection"))
+    expect(stream.stdout.listenerCount("data")).toBe(0)
+    stream.stdout.send(Buffer.from("output after rejection"))
     clearTimeout(timer)
   })
 
@@ -497,7 +405,7 @@ describe("collectStreamOutput", () => {
       reject,
       resolve,
       secrets: ["bad[REDACTED]secret"],
-      stream: stream as unknown as StreamOutputParameters["stream"],
+      stream,
       timer,
     })
 
@@ -663,11 +571,11 @@ describe("collectStreamOutput", () => {
           options: { silent: true },
           reject,
           resolve,
-          stream: stream as StreamOutputParameters["stream"],
+          stream,
           timer,
         })
         // Simulate ssh2 sending undefined for the code
-        stream.emit("close", undefined)
+        stream.finish(undefined)
         clearTimeout(timer)
       }
     )
@@ -741,10 +649,10 @@ describe("collectStreamOutput", () => {
           options: { silent: true },
           reject,
           resolve,
-          stream: stream as unknown as StreamOutputParameters["stream"],
+          stream,
           timer,
         })
-        stream.emit("error", streamError)
+        stream.stdout.fail(streamError)
       }
     )
 
@@ -765,7 +673,7 @@ describe("collectStreamOutput", () => {
           options: { silent: true },
           reject,
           resolve,
-          stream: stream as unknown as StreamOutputParameters["stream"],
+          stream,
           timer,
         })
         stderr.emit("error", stderrError)
@@ -818,13 +726,13 @@ describe("live-output masking via process.stdout/stderr.write", () => {
           resolve()
         },
         secrets: [secret],
-        stream: stream as unknown as StreamOutputParameters["stream"],
+        stream,
         timer,
       })
 
-      stream.emit("data", Buffer.from(`output contains ${secret} here`))
+      stream.stdout.send(Buffer.from(`output contains ${secret} here`))
       stderr.emit("data", Buffer.from("no secret here"))
-      stream.emit("close", 0)
+      stream.finish(0)
       clearTimeout(timer)
     })
 
@@ -848,14 +756,14 @@ describe("live-output masking via process.stdout/stderr.write", () => {
         resolve(value) {
           resolve(value)
         },
-        stream: stream as unknown as StreamOutputParameters["stream"],
+        stream,
         timer,
       })
 
       for (const chunk of chunks) {
-        stream.emit("data", Buffer.from(chunk))
+        stream.stdout.send(Buffer.from(chunk))
       }
-      stream.emit("close", 0)
+      stream.finish(0)
       clearTimeout(timer)
     })
 
@@ -884,12 +792,12 @@ describe("live-output masking via process.stdout/stderr.write", () => {
           resolve()
         },
         secrets: [secret],
-        stream: stream as unknown as StreamOutputParameters["stream"],
+        stream,
         timer,
       })
 
-      stream.emit("data", Buffer.from(`token ${secret}\u001B[31m done`))
-      stream.emit("close", 0)
+      stream.stdout.send(Buffer.from(`token ${secret}\u001B[31m done`))
+      stream.finish(0)
       clearTimeout(timer)
     })
 
@@ -917,14 +825,14 @@ describe("live-output masking via process.stdout/stderr.write", () => {
           resolve()
         },
         secrets: [secret],
-        stream: stream as unknown as StreamOutputParameters["stream"],
+        stream,
         timer,
       })
 
-      stream.emit("data", Buffer.from(escapedSecret.slice(0, 8)))
-      stream.emit("data", Buffer.from(escapedSecret.slice(8)))
+      stream.stdout.send(Buffer.from(escapedSecret.slice(0, 8)))
+      stream.stdout.send(Buffer.from(escapedSecret.slice(8)))
       stderr.emit("data", Buffer.from(""))
-      stream.emit("close", 0)
+      stream.finish(0)
       clearTimeout(timer)
     })
 
@@ -951,13 +859,13 @@ describe("live-output masking via process.stdout/stderr.write", () => {
           resolve()
         },
         secrets: [secret],
-        stream: stream as unknown as StreamOutputParameters["stream"],
+        stream,
         timer,
       })
 
-      stream.emit("data", Buffer.from("stdout without secret"))
+      stream.stdout.send(Buffer.from("stdout without secret"))
       stderr.emit("data", Buffer.from(`error: ${secret} is invalid`))
-      stream.emit("close", 0)
+      stream.finish(0)
       clearTimeout(timer)
     })
 
@@ -980,12 +888,12 @@ describe("live-output masking via process.stdout/stderr.write", () => {
         resolve() {
           resolve()
         },
-        stream: stream as unknown as StreamOutputParameters["stream"],
+        stream,
         timer,
       })
 
       stderr.emit("data", Buffer.from("error \u001B]0;bad\u0007line\rnext\u001B[2K"))
-      stream.emit("close", 0)
+      stream.finish(0)
       clearTimeout(timer)
     })
 
@@ -1014,13 +922,13 @@ describe("live-output masking via process.stdout/stderr.write", () => {
           resolve()
         },
         secrets: [password, token],
-        stream: stream as unknown as StreamOutputParameters["stream"],
+        stream,
         timer,
       })
 
-      stream.emit("data", Buffer.from(`using password ${password} done`))
+      stream.stdout.send(Buffer.from(`using password ${password} done`))
       stderr.emit("data", Buffer.from(`token ${token} rejected`))
-      stream.emit("close", 0)
+      stream.finish(0)
       clearTimeout(timer)
     })
 
@@ -1050,13 +958,13 @@ describe("live-output masking via process.stdout/stderr.write", () => {
           resolve()
         },
         secrets: [secret],
-        stream: stream as unknown as StreamOutputParameters["stream"],
+        stream,
         timer,
       })
 
-      stream.emit("data", Buffer.from(`contains ${secret}`))
+      stream.stdout.send(Buffer.from(`contains ${secret}`))
       stderr.emit("data", Buffer.from(`also ${secret}`))
-      stream.emit("close", 0)
+      stream.finish(0)
       clearTimeout(timer)
     })
 
@@ -1294,202 +1202,6 @@ describe("CommandError and truncation", () => {
 })
 
 // ---------------------------------------------------------------------------
-// tryConnectOnPort
-// ---------------------------------------------------------------------------
-
-describe("tryConnectOnPort", () => {
-  afterEach(() => {
-    vi.useRealTimers()
-  })
-
-  it("removes connect-phase listeners after the client is ready", async () => {
-    const client = createMockClient()
-    const promise = tryConnectOnPort({
-      client,
-      host: "example.test",
-      hostVerifier: trustedHostVerifier,
-      port: 22,
-      username: "root",
-    })
-
-    expect(client.listenerCount("ready")).toBe(1)
-    expect(client.listenerCount("error")).toBe(1)
-
-    client.emit("ready")
-
-    await expect(promise).resolves.toBeUndefined()
-    expect(client.listenerCount("ready")).toBe(0)
-    expect(client.listenerCount("error")).toBe(0)
-
-    client.on("error", () => {
-      /* runtime errors are handled by the active SSH session */
-    })
-    client.emit("error", new Error("runtime failure"))
-
-    expect(client.end).not.toHaveBeenCalled()
-  })
-
-  it("cleans up the client when the connect-phase error fires before ready", async () => {
-    const client = createMockClient()
-    const error = new Error("Permission denied")
-    const promise = tryConnectOnPort({
-      client,
-      host: "example.test",
-      hostVerifier: trustedHostVerifier,
-      port: 22,
-      username: "root",
-    })
-
-    client.emit("error", error)
-
-    await expect(promise).rejects.toThrow("Permission denied")
-    expect(client.end).toHaveBeenCalledOnce()
-    expect(client.listenerCount("ready")).toBe(0)
-    expect(client.listenerCount("error")).toBe(1)
-    expect(() => {
-      client.emit("error", new Error("late cleanup error"))
-    }).not.toThrow()
-  })
-
-  it("cleans up the client when the connect attempt times out", async () => {
-    vi.useFakeTimers()
-    const client = createMockClient()
-    const promise = tryConnectOnPort({
-      client,
-      host: "example.test",
-      hostVerifier: trustedHostVerifier,
-      port: 2222,
-      username: "root",
-    })
-    const rejection = promise.then(
-      () => {
-        throw new Error("Expected promise to reject")
-      },
-      (error: unknown) => error
-    )
-
-    await vi.advanceTimersByTimeAsync(10_000)
-
-    await expect(rejection).resolves.toMatchObject({
-      message: "Connection timeout on port 2222",
-    })
-    expect(client.end).toHaveBeenCalledOnce()
-    expect(client.listenerCount("ready")).toBe(0)
-    expect(client.listenerCount("error")).toBe(1)
-    expect(() => {
-      client.emit("error", new Error("late cleanup error"))
-    }).not.toThrow()
-  })
-
-  it("uses a bounded ready timeout for ssh2 and the local connect timer", async () => {
-    vi.useFakeTimers()
-    const client = createMockClient()
-    const promise = tryConnectOnPort({
-      client,
-      host: "example.test",
-      hostVerifier: trustedHostVerifier,
-      port: 2222,
-      readyTimeout: 1500,
-      username: "root",
-    })
-    const rejection = promise.then(
-      () => {
-        throw new Error("Expected promise to reject")
-      },
-      (error: unknown) => error
-    )
-
-    expect(client.connect).toHaveBeenCalledWith(
-      expect.objectContaining({
-        readyTimeout: 1500,
-      })
-    )
-
-    await vi.advanceTimersByTimeAsync(1499)
-    expect(client.end).not.toHaveBeenCalled()
-
-    await vi.advanceTimersByTimeAsync(1)
-
-    await expect(rejection).resolves.toMatchObject({
-      message: "Connection timeout on port 2222",
-    })
-    expect(client.end).toHaveBeenCalledOnce()
-    expect(client.listenerCount("ready")).toBe(0)
-    expect(client.listenerCount("error")).toBe(1)
-    expect(() => {
-      client.emit("error", new Error("late cleanup error"))
-    }).not.toThrow()
-  })
-
-  it("cleans up the client and timer when the connect attempt is aborted", async () => {
-    vi.useFakeTimers()
-    const client = createMockClient()
-    const abortController = new AbortController()
-    const abortError = new Error("Interrupted by SIGINT")
-    const promise = tryConnectOnPort({
-      abortSignal: abortController.signal,
-      client,
-      host: "example.test",
-      hostVerifier: trustedHostVerifier,
-      port: 2222,
-      username: "root",
-    })
-
-    abortController.abort(abortError)
-
-    await expect(promise).rejects.toThrow("Interrupted by SIGINT")
-    expect(client.end).toHaveBeenCalledOnce()
-    expect(client.listenerCount("ready")).toBe(0)
-    expect(client.listenerCount("error")).toBe(1)
-    expect(() => {
-      client.emit("error", new Error("late cleanup error"))
-    }).not.toThrow()
-    expect(vi.getTimerCount()).toBe(0)
-  })
-
-  it("cleans up the client and timer when client.connect throws synchronously", async () => {
-    vi.useFakeTimers()
-    const client = createMockClient()
-    vi.mocked(client.connect).mockImplementationOnce(() => {
-      throw new Error("Cannot parse privateKey")
-    })
-
-    const promise = tryConnectOnPort({
-      client,
-      host: "example.test",
-      hostVerifier: trustedHostVerifier,
-      port: 22,
-      username: "root",
-    })
-
-    await expect(promise).rejects.toThrow("Cannot parse privateKey")
-    expect(client.end).toHaveBeenCalledOnce()
-    expect(client.listenerCount("ready")).toBe(0)
-    expect(client.listenerCount("error")).toBe(1)
-    expect(() => {
-      client.emit("error", new Error("late cleanup error"))
-    }).not.toThrow()
-    expect(vi.getTimerCount()).toBe(0)
-  })
-
-  it("fails closed before connecting when no host-key verifier is configured", async () => {
-    const client = createMockClient()
-
-    await expect(
-      tryConnectOnPort({
-        client,
-        host: "example.test",
-        port: 22,
-        username: "root",
-      })
-    ).rejects.toThrow(/without a host-key verifier/v)
-
-    expect(client.connect).not.toHaveBeenCalled()
-    expect(client.end).toHaveBeenCalledOnce()
-  })
-})
-
-// ---------------------------------------------------------------------------
 // validateMode
 // ---------------------------------------------------------------------------
 
@@ -1655,12 +1367,12 @@ describe("collectStreamOutput with strictUtf8Stdout (Issue #219)", () => {
       options: strict,
       reject,
       resolve,
-      stream: stream as unknown as StreamOutputParameters["stream"],
+      stream,
       timer,
     })
-    stream.emit("data", Buffer.from([0xff]))
-    stream.emit("data", Buffer.from("more"))
-    stream.emit("close", 0)
+    stream.stdout.send(Buffer.from([0xff]))
+    stream.stdout.send(Buffer.from("more"))
+    stream.finish(0)
     clearTimeout(timer)
 
     expect(rejectSpy).toHaveBeenCalledOnce()
