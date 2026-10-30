@@ -6,7 +6,31 @@ import { rename, unlink } from "node:fs/promises"
 import { Writable } from "node:stream"
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 
-import { sftpDownload, sftpUpload, sftpUploadContent } from "../src/sftp.js"
+import {
+  sftpDownload as transportDownload,
+  sftpUpload as transportUpload,
+  sftpUploadContent as transportUploadContent,
+} from "../src/sftp.js"
+import { unwrapTransportError } from "../src/transport.js"
+import { fromSsh2Client } from "../src/transportSsh2.js"
+
+// Preserve the raw ssh2 fixture vocabulary until the shared fake migration.
+const sftpDownload = async (client: Client, ...args: Tail<Parameters<typeof transportDownload>>) =>
+  transportDownload(fromSsh2Client(client), ...args).catch((error: unknown) => {
+    throw unwrapTransportError(error)
+  })
+const sftpUpload = async (client: Client, ...args: Tail<Parameters<typeof transportUpload>>) =>
+  transportUpload(fromSsh2Client(client), ...args).catch((error: unknown) => {
+    throw unwrapTransportError(error)
+  })
+const sftpUploadContent = async (
+  client: Client,
+  ...args: Tail<Parameters<typeof transportUploadContent>>
+) =>
+  transportUploadContent(fromSsh2Client(client), ...args).catch((error: unknown) => {
+    throw unwrapTransportError(error)
+  })
+type Tail<T extends unknown[]> = T extends [unknown, ...infer Rest] ? Rest : never
 
 // vi.mock is hoisted to the top of the file by vitest before any imports are
 // evaluated, so the module under test receives the mocked version.

@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto"
-import { EventEmitter } from "node:events"
 import { posix } from "node:path"
+import { PassThrough } from "node:stream"
 import { describe, expect, it, onTestFinished, vi } from "vitest"
 
 import type { ExecOptions, ExecResult, ModuleResult, SshConnection } from "../../src/types.js"
@@ -6406,7 +6406,25 @@ function rawStdoutConnection(stdout: Buffer): { commands: string[]; conn: SshCon
     async exec(command: string, options?: ExecOptions): Promise<ExecResult> {
       commands.push(command)
       return new Promise<ExecResult>((resolve, reject) => {
-        const stream = Object.assign(new EventEmitter(), { stderr: new EventEmitter() })
+        const stream = Object.assign(new PassThrough(), { stderr: new PassThrough() })
+        const channel: StreamOutputParameters["stream"] = {
+          close() {
+            stream.destroy()
+            stream.stderr.destroy()
+          },
+          onExit(listener) {
+            const onClose = (code?: number): void => {
+              listener({ code: code ?? null, signal: null })
+            }
+            stream.once("close", onClose)
+            return () => {
+              stream.off("close", onClose)
+            }
+          },
+          stderr: stream.stderr,
+          stdin: stream,
+          stdout: stream,
+        }
         const timer = setTimeout(() => {
           /* the fake channel closes synchronously; this never fires */
         }, 60_000)
@@ -6415,7 +6433,7 @@ function rawStdoutConnection(stdout: Buffer): { commands: string[]; conn: SshCon
           options: options ?? {},
           reject,
           resolve,
-          stream: stream as unknown as StreamOutputParameters["stream"],
+          stream: channel,
           timer,
         })
         stream.emit("data", stdout)

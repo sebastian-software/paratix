@@ -7,7 +7,29 @@ import { stat } from "node:fs/promises"
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 
 import { sftpUpload, sftpUploadContent } from "../src/sftp.js"
-import { SshConnectionImpl } from "../src/ssh.js"
+import { SshConnectionImpl as OriginalSshConnectionImpl } from "../src/ssh.js"
+import { fromSsh2Client } from "../src/transportSsh2.js"
+
+const { rawClients } = vi.hoisted(() => ({ rawClients: new WeakMap<object, Client>() }))
+function bridgeClient(client: Client) {
+  const connection = fromSsh2Client(client)
+  rawClients.set(connection, client)
+  return connection
+}
+
+class SshConnectionImpl extends OriginalSshConnectionImpl {
+  public constructor(...args: ConstructorParameters<typeof OriginalSshConnectionImpl>) {
+    super(...args)
+    let connection: unknown = null
+    Object.defineProperty(this, "client", {
+      configurable: true,
+      get: () => connection,
+      set(client: Client | null) {
+        connection = client === null ? null : bridgeClient(client)
+      },
+    })
+  }
+}
 
 // R-0000522: SHA-256 over an empty byte sequence — what `sha256sum` prints
 // when the remote file was finalized as 0 bytes (e.g. after a disk-full
@@ -45,11 +67,26 @@ vi.mock("node:fs/promises", () => ({
   stat: vi.fn().mockResolvedValue({ size: 11 }),
 }))
 
-vi.mock("../src/sftp.js", () => ({
-  SFTP_TIMEOUT: 120_000,
-  sftpUpload: vi.fn(),
-  sftpUploadContent: vi.fn(),
-}))
+vi.mock("../src/sftp.js", () => {
+  // oxlint-disable-next-line unicorn/consistent-function-scoping -- keep the helper inside the hoisted module mock factory
+  const legacyMock = (mock = vi.fn()) =>
+    new Proxy(mock, {
+      apply(target, thisArg, args: unknown[]) {
+        const first = args[0]
+        const translated = [...args]
+        if (typeof first === "object" && first !== null)
+          translated[0] = rawClients.get(first) ?? first
+        const result: unknown = Reflect.apply(target, thisArg, translated)
+        return result
+      },
+    })
+  return {
+    SFTP_TIMEOUT: 120_000,
+    sftpDownload: legacyMock(vi.fn().mockResolvedValue(null)),
+    sftpUpload: legacyMock(),
+    sftpUploadContent: legacyMock(),
+  }
+})
 
 // ---------------------------------------------------------------------------
 // Helpers

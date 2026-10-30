@@ -10,20 +10,77 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 
 import type * as KnownHosts from "../src/knownHosts.js"
 import type * as SshHelpers from "../src/sshHelpers.js"
+import type { TransportConnection } from "../src/transport.js"
+import type * as TransportSsh2 from "../src/transportSsh2.js"
 
 import { HostKeyVerificationError } from "../src/knownHosts.js"
 import { rsync } from "../src/modules/rsync.js"
 import { sftpDownload } from "../src/sftp.js"
-import { SshConnectionImpl, SudoInputUnsupportedError, validateMktempPath } from "../src/ssh.js"
+import {
+  SshConnectionImpl as OriginalSshConnectionImpl,
+  SudoInputUnsupportedError,
+  validateMktempPath,
+} from "../src/ssh.js"
 import {
   CAPTURE_TRUNCATION_MARKER,
   cleanupFailedSshClient,
   collectStreamOutput,
   DEFAULT_MAX_OUTPUT_BYTES,
   shellQuote,
-  tryConnectOnPort,
+  tryConnectOnPort as transportTryConnectOnPort,
 } from "../src/sshHelpers.js"
 import { promptTerminal } from "../src/terminal.js"
+import { fromSsh2Client } from "../src/transportSsh2.js"
+
+// Preserve the legacy mock's void result and raw-client event surface in setup.
+const tryConnectOnPort = transportTryConnectOnPort as unknown as (
+  parameters: Omit<SshHelpers.ConnectParameters, "client" | "hostVerifier"> & {
+    client: Client
+    hostVerifier?: (key: Buffer) => boolean
+  }
+) => Promise<void>
+
+// Keep the existing ssh2-shaped fixtures during the PR 2 setup-only migration.
+const { rawClients } = vi.hoisted(() => ({ rawClients: new WeakMap<object, Client>() }))
+function bridgeClient(client: Client) {
+  const connection = fromSsh2Client(client)
+  rawClients.set(connection, client)
+  return connection
+}
+
+class SshConnectionImpl extends OriginalSshConnectionImpl {
+  public constructor(...args: ConstructorParameters<typeof OriginalSshConnectionImpl>) {
+    super(...args)
+    const instance = this as unknown as Record<string, unknown>
+    let connection: unknown = null
+    Object.defineProperty(this, "client", {
+      configurable: true,
+      get: () => connection,
+      set(value: Client | null | TransportConnection) {
+        connection = value === null || "onDisconnect" in value ? value : bridgeClient(value)
+      },
+    })
+    const register = instance.registerConnectedClient as (
+      client: TransportConnection,
+      port: number
+    ) => void
+    instance.registerConnectedClient = (client: Client | TransportConnection, port: number) => {
+      register.call(this, "onDisconnect" in client ? client : bridgeClient(client), port)
+    }
+  }
+}
+
+vi.mock("../src/transportSsh2.js", async () => {
+  const actual = await vi.importActual<typeof TransportSsh2>("../src/transportSsh2.js")
+  const { Client } = await import("ssh2")
+  return {
+    ...actual,
+    createSsh2Transport() {
+      const client = new Client()
+      return Object.assign(actual.fromSsh2Client(client), { emit: client.emit.bind(client) })
+    },
+  }
+})
 
 type PrivateSshConnection = {
   execWithoutSudo: (command: string) => Promise<void>
@@ -98,17 +155,30 @@ vi.mock("../src/knownHosts.js", async () => {
   }
 })
 
-vi.mock("../src/sftp.js", () => ({
-  SFTP_TIMEOUT: 120_000,
-  sftpDownload: vi.fn().mockResolvedValue(null),
-  sftpUpload: vi.fn(),
-  sftpUploadContent: vi.fn(),
-}))
+vi.mock("../src/sftp.js", () => {
+  // oxlint-disable-next-line unicorn/consistent-function-scoping -- keep the helper inside the hoisted module mock factory
+  const legacyMock = (mock = vi.fn()) =>
+    new Proxy(mock, {
+      apply(target, thisArg, args: unknown[]) {
+        const first = args[0]
+        const translated = [...args]
+        if (typeof first === "object" && first !== null)
+          translated[0] = rawClients.get(first) ?? first
+        const result: unknown = Reflect.apply(target, thisArg, translated)
+        return result
+      },
+    })
+  return {
+    SFTP_TIMEOUT: 120_000,
+    sftpDownload: legacyMock(vi.fn().mockResolvedValue(null)),
+    sftpUpload: legacyMock(),
+    sftpUploadContent: legacyMock(),
+  }
+})
 
 vi.mock("../src/sshHelpers.js", async () => {
   const actual = await vi.importActual<typeof SshHelpers>("../src/sshHelpers.js")
   return {
-    attachSshClientTeardownErrorSink: actual.attachSshClientTeardownErrorSink,
     // R-0000668: re-export the capture truncation marker so ssh.readFile and
     // ssh.sha256 can detect output truncation against the real constant.
     CAPTURE_TRUNCATION_MARKER: actual.CAPTURE_TRUNCATION_MARKER,
@@ -5107,5 +5177,71 @@ describe("validateMktempPath", () => {
 
   it("accepts the root directory as a special case", () => {
     expect(() => validateMktempPath("/", "/paratix-write.ABCDEF", "paratix-write")).not.toThrow()
+  })
+})
+
+describe("transport public error compatibility", () => {
+  afterEach(() => {
+    vi.clearAllMocks()
+  })
+
+  it("rejects a pending public exec with the identical raw disconnect error", async () => {
+    const client = Object.assign(new EventEmitter(), {
+      end: vi.fn(),
+      exec: vi.fn(),
+      sftp: vi.fn(),
+    }) as unknown as Client & EventEmitter
+    const ssh = makeConnectedSshWithCloseListener(client)
+    const raw = Object.assign(new Error("read ECONNRESET"), { code: "ECONNRESET" })
+    const pending = ssh.exec("sleep infinity", { silent: true })
+    const failure = pending.catch((error: unknown) => error)
+    await vi.waitFor(() => {
+      expect(client.exec).toHaveBeenCalledOnce()
+    })
+    client.emit("error", raw)
+    client.emit("close")
+    expect(await failure).toBe(raw)
+  })
+
+  it("keeps the identical raw error as the channel refusal cause", async () => {
+    const raw = Object.assign(new Error("(SSH) Channel open failure: open failed"), { code: 1 })
+    const exec = vi.fn((_command: string, callback: ExecCallback) => {
+      callback(raw, makeStream())
+    })
+    const ssh = makeConnectedSsh(makeClientWithExecSpy(exec))
+    const error = await expectRejectedError(ssh.exec("true", { silent: true }))
+    expect(error.cause).toBe(raw)
+    expect(error.message).toContain("the SSH server refused a new session channel")
+  })
+
+  it("preserves the public exec error message and errno code", async () => {
+    const raw = Object.assign(new Error("read ECONNRESET"), { code: "ECONNRESET" })
+    const exec = vi.fn((_command: string, callback: ExecCallback) => {
+      callback(raw, makeStream())
+    })
+    const ssh = makeConnectedSsh(makeClientWithExecSpy(exec))
+    const error = await expectRejectedError(ssh.exec("true", { silent: true }))
+    expect(error).toBe(raw)
+    expect(error.message).toBe("read ECONNRESET")
+    expect(Reflect.get(error, "code")).toBe("ECONNRESET")
+  })
+
+  it("collects data and exit once when a transport only returns a Promise", async () => {
+    const stream = makeStream()
+    const exec = vi.fn((_command: string, callback: ExecCallback) => {
+      callback(undefined, stream)
+      stream.emit("data", Buffer.from("out"))
+      stream.stderr.emit("data", Buffer.from("err"))
+      stream.emit("close", 0)
+    })
+    const client = makeClientWithExecSpy(exec)
+    const connection = fromSsh2Client(client)
+    const openChannel = connection.exec.bind(connection)
+    connection.exec = async (command) => openChannel(command)
+    const ssh = makeConnectedSsh(client)
+    const result = await ssh.exec("true", { input: "payload", silent: true })
+    expect(result).toStrictEqual({ code: 0, stderr: "err", stdout: "out" })
+    expect(stream.end).toHaveBeenCalledExactlyOnceWith("payload")
+    expect(exec).toHaveBeenCalledOnce()
   })
 })

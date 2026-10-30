@@ -1,11 +1,11 @@
 /* eslint-disable max-lines, max-statements -- ssh2 stream handlers are intentionally co-located */
-import type { Client, ClientChannel, ConnectConfig } from "ssh2"
-
 import { StringDecoder } from "node:string_decoder"
 
+import type { TransportConnection, TransportExecChannel } from "./transport.js"
 import type { ExecOptions, ExecResult } from "./types.js"
 
 import { createTerminalSanitizer } from "./terminalSanitizer.js"
+import { cleanupSsh2Client, connectSsh2Client } from "./transportSsh2.js"
 
 /**
  * Validate that a file mode string is a valid octal permission (e.g. "644", "0755").
@@ -41,10 +41,6 @@ export const DEFAULT_MAX_OUTPUT_BYTES = Number("1048576")
  * `ssh.sha256`) can detect truncation and refuse to act on corrupted data.
  */
 export const CAPTURE_TRUNCATION_MARKER = "\n[output truncated]"
-
-function ignoreTeardownError(): void {
-  /* teardown sink: late ssh2 errors after cleanup must not crash Node */
-}
 
 /**
  * Maximum number of characters included in a {@link CommandError} message
@@ -251,7 +247,7 @@ export type StreamOutputParameters = {
   reject: (reason: Error) => void
   resolve: (value: ExecResult) => void
   secrets?: PreparedSecrets | SecretSource[]
-  stream: ClientChannel
+  stream: TransportExecChannel
   timer: ReturnType<typeof setTimeout>
 }
 
@@ -561,7 +557,7 @@ export function collectStreamOutput(parameters: StreamOutputParameters): void {
     if (text.length > 0) stderrMasker.push(text)
   }
 
-  stream.on("data", (data: Buffer) => {
+  stream.stdout.on("data", (data: Buffer) => {
     stdoutMasker.push(stdoutDecoder.write(data))
   })
   stream.stderr.on("data", (data: Buffer) => {
@@ -581,9 +577,9 @@ export function collectStreamOutput(parameters: StreamOutputParameters): void {
     drain()
     reject(error)
   }
-  stream.on("error", failStream)
+  stream.stdout.on("error", failStream)
   stream.stderr.on("error", failStream)
-  stream.on("close", (code: null | number | undefined, signal?: null | string) => {
+  stream.onExit(({ code, signal }) => {
     drain()
     const capturedStdout = stdout.toString()
     const capturedStderr = stderr.toString()
@@ -634,11 +630,11 @@ export type ConnectParameters = {
   /** Forward the local SSH agent to the remote host during this session. */
   agentForward?: boolean
   /** The ssh2 `Client` instance to connect with. */
-  client: Client
+  client: TransportConnection
   /** Hostname or IP address of the remote host. */
   host: string
   /** Optional host key verifier callback for known_hosts checking. */
-  hostVerifier?: (key: Buffer) => boolean
+  hostVerifier?: (key: Buffer) => boolean | Promise<boolean>
   /** Password for keyboard-interactive or password authentication. */
   password?: string
   /** Port to connect on. */
@@ -652,169 +648,31 @@ export type ConnectParameters = {
 }
 
 /**
- * Build the ssh2 `ConnectConfig` from the connection parameters.
- *
- * @param parameters - Connection parameters.
- * @returns The populated config object.
+ * Temporary legacy cleanup entry point, retained until PR 3.
+ * @param client - The transport connection or legacy fixture to release.
  */
-function buildConnectConfig(parameters: ConnectParameters): ConnectConfig {
-  const { agent, agentForward, host, hostVerifier, password, port, privateKey, username } =
-    parameters
-  const readyTimeout = resolveReadyTimeout(parameters)
-  const connectConfig: ConnectConfig = {
-    host,
-    port,
-    readyTimeout,
-    username,
-  }
-  if (privateKey != null) {
-    connectConfig.privateKey = privateKey
-  }
-  if (agent != null) {
-    connectConfig.agent = agent
-  }
-  if (agentForward === true) {
-    connectConfig.agentForward = true
-  }
-  if (typeof password === "string") {
-    connectConfig.password = password
-    connectConfig.tryKeyboard = true
-  }
-  if (hostVerifier != null) {
-    connectConfig.hostVerifier = hostVerifier
-  }
-  return connectConfig
+export function cleanupFailedSshClient(client: unknown): void {
+  cleanupSsh2Client(client)
 }
 
 /**
- * Defensively release a ssh2 `Client` instance after a failed connect
- * attempt. R-0000039: ssh2 may keep listeners, internal sockets, and buffers
- * alive even when `connect()` rejected. Calling `removeAllListeners()` and
- * `end()` ensures the FD and event-listener footprint does not grow across
- * retry iterations or reconnect storms.
- *
- * @param client - The ssh2 client whose resources should be released.
+ * Temporary legacy connect entry point, retained until PR 3.
+ * @param parameters - Connection settings and the connection attempt owner.
+ * @returns The connected transport.
  */
-export function cleanupFailedSshClient(client: Client): void {
-  // R-0000794: install the best-effort teardown error sink BEFORE detaching
-  // any other listener so a late `error` event from `client.end()` cannot
-  // escape as an unhandled exception in the window between detaching and
-  // attaching. The sink is idempotent — `attachSshClientTeardownErrorSink`
-  // removes any prior `ignoreTeardownError` before re-adding itself.
-  attachSshClientTeardownErrorSink(client)
-  // Detach every non-error listener so caller-installed `ready`/`close`/…
-  // handlers do not fire on the teardown. We deliberately keep the `error`
-  // channel's listeners intact: the connect path's `handleError` (if still
-  // present) would reject its outer Promise but is itself idempotent
-  // (R-0000790), and the freshly attached teardown sink keeps any orphan
-  // `error` emit from crashing the process.
-  try {
-    for (const eventName of client.eventNames()) {
-      if (eventName === "error") continue
-      client.removeAllListeners(eventName)
-    }
-  } catch {
-    /* listener teardown must not throw under any circumstance */
-  }
-  try {
-    client.end()
-  } catch {
-    /* end() may throw when the underlying socket has already been destroyed */
-  }
-}
-
-export function attachSshClientTeardownErrorSink(client: Client): void {
-  try {
-    client.removeListener("error", ignoreTeardownError)
-    client.on("error", ignoreTeardownError)
-  } catch {
-    /* installing the best-effort teardown sink must not mask cleanup */
-  }
-}
-
-function getConnectAbortReason(signal: AbortSignal): Error {
-  return signal.reason instanceof Error ? signal.reason : new Error("SSH connect aborted")
-}
-
-/**
- * Attempt a single SSH connection on a specific port.
- *
- * R-0000039: any error path closes the client so a failed attempt does not
- * leak sockets or listeners up to the caller.
- *
- * @param parameters - Connection parameters.
- */
-export async function tryConnectOnPort(parameters: ConnectParameters): Promise<void> {
-  const { abortSignal, client, port } = parameters
-  if (parameters.hostVerifier == null) {
-    cleanupFailedSshClient(client)
-    throw new Error(
-      "Refusing to start ssh2 without a host-key verifier. " +
-        "Use buildHostVerifier and pass the resulting hostVerifier, or explicitly configure a safe host-key policy."
-    )
-  }
-  const connectConfig = buildConnectConfig(parameters)
-  const readyTimeout = resolveReadyTimeout(parameters)
-  return new Promise((resolve, reject) => {
-    if (abortSignal?.aborted === true) {
-      cleanupFailedSshClient(client)
-      reject(getConnectAbortReason(abortSignal))
-      return
-    }
-
-    const cleanupConnectListeners = (): void => {
-      client.off("ready", handleReady)
-      client.off("error", handleError)
-      abortSignal?.removeEventListener("abort", handleAbort)
-    }
-
-    const handleTimeout = (): void => {
-      cleanupConnectListeners()
-      cleanupFailedSshClient(client)
-      reject(new Error(`Connection timeout on port ${port}`))
-    }
-
-    const handleAbort = (): void => {
-      clearTimeout(timeout)
-      cleanupConnectListeners()
-      cleanupFailedSshClient(client)
-      reject(
-        abortSignal == null ? new Error("SSH connect aborted") : getConnectAbortReason(abortSignal)
-      )
-    }
-
-    const handleReady = (): void => {
-      clearTimeout(timeout)
-      cleanupConnectListeners()
-      resolve()
-    }
-
-    // R-0000790: a synchronous throw out of `client.connect()` invokes
-    // `handleError` from the catch block, which detaches listeners and rejects.
-    // ssh2 may still queue a late `error` event before the next tick observes
-    // the detach, re-entering `handleError` for the same client. The `settled`
-    // flag keeps the rejection / cleanup chain idempotent so the duplicate
-    // event is a silent no-op instead of a double `cleanupFailedSshClient` /
-    // double `reject` call.
-    let settled = false
-    const handleError = (error: Error): void => {
-      if (settled) return
-      settled = true
-      clearTimeout(timeout)
-      cleanupConnectListeners()
-      cleanupFailedSshClient(client)
-      reject(error)
-    }
-
-    const timeout = setTimeout(handleTimeout, readyTimeout)
-
-    client.on("ready", handleReady)
-    client.on("error", handleError)
-    abortSignal?.addEventListener("abort", handleAbort, { once: true })
-    try {
-      client.connect(connectConfig)
-    } catch (error) {
-      handleError(error instanceof Error ? error : new Error(String(error)))
-    }
+export async function tryConnectOnPort(
+  parameters: ConnectParameters
+): Promise<TransportConnection> {
+  return connectSsh2Client(parameters.client, {
+    agent: parameters.agent,
+    agentForward: parameters.agentForward,
+    host: parameters.host,
+    password: parameters.password,
+    port: parameters.port,
+    privateKey: parameters.privateKey,
+    readyTimeout: resolveReadyTimeout(parameters),
+    signal: parameters.abortSignal,
+    username: parameters.username,
+    verifyHostKey: parameters.hostVerifier,
   })
 }
