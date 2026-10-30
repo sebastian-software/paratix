@@ -1,0 +1,41 @@
+# sshd of the @paratix/ssh-native integration suite (Docker target).
+# Profiles are selected by the local port:
+#   2222  main: publickey, password and keyboard-interactive (PAM), agent
+#         forwarding, internal-sftp
+#   2223  user CA only (H1): TrustedUserCAKeys, no authorized_keys
+#   2224  password only
+#   2225  keyboard-interactive only
+Port 2222
+Port 2223
+Port 2224
+Port 2225
+ListenAddress 0.0.0.0
+
+HostKey /etc/ssh/ssh-native-it/host_ed25519
+AuthorizedKeysFile .ssh/authorized_keys
+
+PubkeyAuthentication yes
+PasswordAuthentication yes
+KbdInteractiveAuthentication yes
+UsePAM yes
+PermitRootLogin no
+AllowUsers paratix
+AllowAgentForwarding yes
+AllowTcpForwarding no
+X11Forwarding no
+MaxAuthTries 20
+MaxSessions 10
+Subsystem sftp internal-sftp
+LogLevel VERBOSE
+
+# H1: the certified key is in no authorized_keys file; only the CA vouches for it.
+Match LocalPort 2223
+  TrustedUserCAKeys /etc/ssh/ssh-native-it/user_ca.pub
+  AuthorizedKeysFile none
+  AuthenticationMethods publickey
+
+Match LocalPort 2224
+  AuthenticationMethods password
+
+Match LocalPort 2225
+  AuthenticationMethods keyboard-interactive

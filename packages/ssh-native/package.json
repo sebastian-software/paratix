@@ -30,7 +30,10 @@
   },
   "scripts": {
     "build": "napi build --platform --release --no-js --dts index.d.ts",
-    "test": "node --test --test-concurrency=1 \"test/*.test.mjs\""
+    "test": "node --test --test-concurrency=1 \"test/*.test.mjs\"",
+    "test:integration": "node test/integration/run.mjs docker",
+    "test:integration:local": "node test/integration/run.mjs local",
+    "test:smoke": "node test/smoke/smoke.mjs"
   },
   "devDependencies": {
     "@napi-rs/cli": "3.10.9",
