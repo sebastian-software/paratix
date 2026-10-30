@@ -61,6 +61,19 @@ Als Workflow passt Feature. Die öffentliche API verhält sich gleich, aber es k
 
 **Planungsbasis:** `main`, HEAD `b890ef58`, 29.10.2026, sauberer Arbeitsbaum. Die Zeilenangaben beziehen sich auf diesen Stand.
 
+### Präzisierungen für C1 aus #256
+
+C1 wird in drei aufeinanderfolgenden PRs umgesetzt: Paritätsmatrix, interne Schnittstelle mit temporärem ssh2-Adapter, anschließend gemeinsame Transport-Fakes und Release. Die Gesamtumstellung bleibt bis zum Abschluss der Arbeitspakete offen.
+
+- `CHANNEL_OPEN_FAILED` ersetzt die Regex in `ssh.ts` bereits in C1. Der Adapter behält die ssh2-spezifische Erkennung; öffentliche Fehler reichen den unveränderten Rohfehler über `cause` weiter.
+- Ein Host-Key-Prüfer akzeptiert ausschließlich das Verdikt `true`, auch bei einem Promise. Andere Werte lehnen ab. Das präzisiert ADR 0008 für beide Adapter.
+- Ein Prüfer ohne Antwort endet bereits in C1 mit `TIMEOUT`; C2 übernimmt diese Regel anstelle von `HOST_KEY_REJECTED`.
+- C1 erhält sein eigenes Patch-Release. Die Squash-Nachricht des dritten PRs endet mit `Release-As: <Version>`; die nächste Patch-Version wird zum Merge-Zeitpunkt bestimmt. Die gemeinsame Versionierung umfasst `paratix` und `create-paratix`.
+- `runner.ts` und `cli.ts` benötigen für C1 keine Änderungen. Die Runner-Tests und `knownHosts.test.ts` werden nicht auf den Transport-Fake migriert.
+- Für C2 bleibt `agentForward` mit einer Key-Datei eine bewusste Entscheidung: ssh2 lehnt diese Kombination heute ohne Agent-Pfad ab. C1 hält diese bestehende Lücke mit `INTERNAL` fest.
+- C2 muss die rohen Meldungsprüfungen in `isRebootDisconnect` (`modules/system.ts`) und `isRestartDisconnect` (`modules/sshd.ts`) berücksichtigen. C1 erhält `ECONNRESET` und `Connection reset` über den unveränderten Rohfehler; Meldungen des nativen Adapters können abweichen.
+- Die interne Schnittstelle erlaubt zusätzlich eine optionale synchrone Übergabe von Exec-Kanal und SFTP-Sitzung. Sie erhält die bisherigen Tick- und Setup-Invarianten. Aufrufer verarbeiten auch das Promise-Ergebnis und entdoppeln die Übergabe; ein künftiger Adapter darf die optionale Übergabe ignorieren. Gepufferte Daten und Exit bleiben dann vollständig verfügbar.
+
 ### Verifizierter Ist-Zustand
 
 **Wo `ssh2` steckt**

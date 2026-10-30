@@ -1,6 +1,5 @@
 /* eslint-disable max-lines -- SFTP transfer helpers keep stream lifecycle wiring local */
 import type { Writable } from "node:stream"
-import type { Client, SFTPWrapper } from "ssh2"
 
 import { randomUUID } from "node:crypto"
 import { createReadStream, createWriteStream } from "node:fs"
@@ -9,8 +8,10 @@ import { dirname, join } from "node:path"
 import { Readable } from "node:stream"
 
 import type { PreparedSecrets } from "./sshHelpers.js"
+import type { TransportConnection, TransportSftpSession } from "./transport.js"
 
 import { maskPreparedSecrets } from "./sshHelpers.js"
+import { unwrapTransportError } from "./transport.js"
 
 /** Default timeout for SFTP transfers in milliseconds (2 minutes). */
 export const SFTP_TIMEOUT = 120_000
@@ -41,7 +42,8 @@ type TransferStreams = {
 }
 
 function normalizeTransferError(error: unknown, message: string): Error {
-  return error instanceof Error ? error : new Error(`${message}: ${String(error)}`)
+  const cause = unwrapTransportError(error)
+  return cause instanceof Error ? cause : new Error(`${message}: ${String(cause)}`)
 }
 
 function noopAbortCleanup(): void {
@@ -62,26 +64,6 @@ function noopAbortCleanup(): void {
  */
 function noopStreamError(): void {
   /* swallow late stream errors after the transfer has settled */
-}
-
-/**
- * R-0000687: register a one-shot `error` listener on the SFTP wrapper before
- * we call `sftp.end()`. Without this sink, ssh2 may emit `error` on the
- * wrapper after the surrounding Promise has already settled (e.g. when the
- * underlying channel reports a teardown error post-close). Node would treat
- * that emit as an unhandled `error` and crash the process. The once-listener
- * absorbs that straggler emit without keeping the SFTPWrapper alive. The
- * runtime guard accommodates lightweight test doubles that do not implement
- * the full EventEmitter surface.
- *
- * @param sftp - The SFTP wrapper to silence on late errors.
- */
-function silenceLateSftpErrors(sftp: SFTPWrapper): void {
-  const maybeOnce = (sftp as { once?: unknown }).once
-  if (typeof maybeOnce !== "function") return
-  sftp.once("error", () => {
-    /* swallow late SFTP wrapper errors after the transfer has settled */
-  })
 }
 
 /**
@@ -118,9 +100,9 @@ function subscribeToConnectionAbort(
 }
 
 function openSftp(options: {
-  client: Client
+  client: TransportConnection
   connectionAbortSignal?: AbortSignal
-  onOpen: (sftp: SFTPWrapper) => void
+  onOpen: (sftp: TransportSftpSession) => void
   reject: (reason: Error) => void
   timeout: number
   timeoutMessage: string
@@ -134,7 +116,7 @@ function openSftp(options: {
     if (settled) return
     settled = true
     abortHandle.cleanup()
-    client.end()
+    void client.close()
     reject(new Error(timeoutMessage))
   }, timeout)
   const subscription = subscribeToConnectionAbort(connectionAbortSignal, () => {
@@ -145,41 +127,36 @@ function openSftp(options: {
   })
   abortHandle.cleanup = subscription.cleanup
   if (subscription.aborted) return
-  try {
-    client.sftp((error: Error | undefined, sftp: SFTPWrapper | undefined) => {
-      if (settled) {
-        if (sftp !== undefined) {
-          silenceLateSftpErrors(sftp)
-          sftp.end()
-        }
-        return
-      }
-      clearTimeout(timer)
-      abortHandle.cleanup()
-      settled = true
-      if (error) {
-        reject(error)
-        return
-      }
-      if (sftp === undefined) {
-        reject(new Error("Failed to open SFTP session: missing SFTP session"))
-        return
-      }
-      onOpen(sftp)
-    })
-  } catch (openError) {
+  let delivered = false
+  const acceptSession = (sftp: TransportSftpSession): void => {
+    if (delivered) return
+    delivered = true
+    if (settled) {
+      sftp.end()
+      return
+    }
     clearTimeout(timer)
     abortHandle.cleanup()
     settled = true
-    reject(normalizeTransferError(openError, "Failed to open SFTP session"))
+    onOpen(sftp)
   }
+  client
+    .sftp(acceptSession)
+    .then(acceptSession)
+    .catch((openError: unknown) => {
+      if (settled) return
+      clearTimeout(timer)
+      abortHandle.cleanup()
+      settled = true
+      reject(normalizeTransferError(openError, "Failed to open SFTP session"))
+    })
 }
 
 function createTransferSettlement(options: {
   clearTimer: () => void
   reject: (reason: Error) => void
   resolve: () => void
-  sftp: SFTPWrapper
+  sftp: TransportSftpSession
 }): TransferSettlement {
   let settled = false
 
@@ -188,7 +165,6 @@ function createTransferSettlement(options: {
       options.clearTimer()
       if (settled) return
       settled = true
-      silenceLateSftpErrors(options.sftp)
       options.sftp.end()
       options.reject(reason)
     },
@@ -196,7 +172,6 @@ function createTransferSettlement(options: {
       options.clearTimer()
       if (settled) return
       settled = true
-      silenceLateSftpErrors(options.sftp)
       options.sftp.end()
       options.resolve()
     },
@@ -204,7 +179,7 @@ function createTransferSettlement(options: {
 }
 
 function openDownloadStreams(
-  sftp: SFTPWrapper,
+  sftp: TransportSftpSession,
   remotePath: string,
   temporaryPath: string
 ): TransferStreams {
@@ -223,7 +198,7 @@ function openDownloadStreams(
 }
 
 function openUploadStreams(
-  sftp: SFTPWrapper,
+  sftp: TransportSftpSession,
   localPath: string,
   remotePath: string
 ): TransferStreams {
@@ -242,7 +217,7 @@ function openUploadStreams(
 }
 
 function openContentUploadStreams(
-  sftp: SFTPWrapper,
+  sftp: TransportSftpSession,
   content: string,
   remotePath: string
 ): TransferStreams {
@@ -418,7 +393,7 @@ function wireStreams(options: {
   readStream: Readable
   reject: (reason: Error) => void
   resolve: () => void
-  sftp: SFTPWrapper
+  sftp: TransportSftpSession
   timeout: number
   timeoutMessage: string
   writeStream: Writable
@@ -545,7 +520,7 @@ function wireStreams(options: {
  */
 // eslint-disable-next-line max-params -- timeout / abort / secrets parameters extend the existing signature; cleanup/finalize logic is intentionally kept together
 export async function sftpDownload(
-  client: Client,
+  client: TransportConnection,
   remotePath: string,
   localPath: string,
   timeout = SFTP_TIMEOUT,
@@ -580,7 +555,6 @@ export async function sftpDownload(
           streams = openDownloadStreams(sftp, remotePath, temporaryPath)
           shouldCleanupTemporaryFile = true
         } catch (streamError) {
-          silenceLateSftpErrors(sftp)
           sftp.end()
           rejectWithCleanup(normalizeTransferError(streamError, "Failed to create SFTP download"))
           return
@@ -642,7 +616,7 @@ export async function sftpDownload(
  */
 // eslint-disable-next-line max-params -- timeout / abort / secrets parameters extend the existing signature
 export async function sftpUpload(
-  client: Client,
+  client: TransportConnection,
   localPath: string,
   remotePath: string,
   timeout = SFTP_TIMEOUT,
@@ -659,7 +633,6 @@ export async function sftpUpload(
         try {
           streams = openUploadStreams(sftp, localPath, remotePath)
         } catch (streamError) {
-          silenceLateSftpErrors(sftp)
           sftp.end()
           reject(normalizeTransferError(streamError, "Failed to create SFTP upload"))
           return
@@ -704,7 +677,7 @@ export async function sftpUpload(
  */
 // eslint-disable-next-line max-params -- timeout / abort / secrets parameters mirror sftpUpload
 export async function sftpUploadContent(
-  client: Client,
+  client: TransportConnection,
   content: string,
   remotePath: string,
   timeout = SFTP_TIMEOUT,
@@ -721,7 +694,6 @@ export async function sftpUploadContent(
         try {
           streams = openContentUploadStreams(sftp, content, remotePath)
         } catch (streamError) {
-          silenceLateSftpErrors(sftp)
           sftp.end()
           reject(normalizeTransferError(streamError, "Failed to create SFTP content upload"))
           return

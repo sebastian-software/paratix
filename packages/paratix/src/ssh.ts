@@ -7,8 +7,8 @@ import { readFile, stat } from "node:fs/promises"
 import { homedir } from "node:os"
 import { join, posix } from "node:path"
 import { pipeline } from "node:stream/promises"
-import { Client, type ClientChannel } from "ssh2"
 
+import type { Transport, TransportConnection, TransportExecChannel } from "./transport.js"
 import type { ExecOptions, ExecResult, SshConfig, SshConnection } from "./types.js"
 
 import {
@@ -27,7 +27,6 @@ import {
 } from "./secretSink.js"
 import { SFTP_TIMEOUT, sftpDownload, sftpUpload, sftpUploadContent } from "./sftp.js"
 import {
-  attachSshClientTeardownErrorSink,
   CAPTURE_TRUNCATION_MARKER,
   cleanupFailedSshClient,
   collectStreamOutput,
@@ -43,6 +42,8 @@ import {
   validateMode,
 } from "./sshHelpers.js"
 import { promptTerminal } from "./terminal.js"
+import { TransportError, unwrapTransportError } from "./transport.js"
+import { createSsh2Transport } from "./transportSsh2.js"
 
 export { shellQuote, validateMktempPath, validateMode }
 
@@ -65,11 +66,13 @@ function describeChannelOpenFailure(
   error: Error,
   command: string,
   secrets: PreparedSecrets
-): Error {
-  if (!CHANNEL_OPEN_FAILURE_PATTERN.test(error.message)) return error
+): unknown {
+  if (!(error instanceof TransportError) || error.transportCode !== "CHANNEL_OPEN_FAILED") {
+    return unwrapTransportError(error)
+  }
   return new Error(
     `${error.message} — the SSH server refused a new session channel. paratix opens at most ${String(MAX_CONCURRENT_SESSION_CHANNELS)} concurrent channels per connection; a server whose MaxSessions is below that (OpenSSH default: 10) refuses them. Command: ${maskPreparedSecrets(command, secrets)}`,
-    { cause: error }
+    { cause: unwrapTransportError(error) }
   )
 }
 
@@ -231,7 +234,6 @@ function resolveReconnectBudget(
 const EMPTY_FILE_SHA256 = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
 // R-0000209: how long to wait for `client.end()` to complete before
 // forcibly destroying the underlying socket.
-const DISCONNECT_DESTROY_FALLBACK_MS = 5000
 // Issue #178: every `exec` opens its own ssh2 session channel, and OpenSSH
 // caps them per connection via `MaxSessions` (default 10). Module-level
 // fan-outs used to issue 8 at once, one channel below that ceiling, which
@@ -243,7 +245,6 @@ const DISCONNECT_DESTROY_FALLBACK_MS = 5000
 const MAX_CONCURRENT_SESSION_CHANNELS = 4
 // ssh2 reports a refused channel as `(SSH) Channel open failure: open failed`,
 // which reads like a transport fault rather than a reached ceiling.
-const CHANNEL_OPEN_FAILURE_PATTERN = /channel open failure/iv
 const JITTER_BASE = 0.75
 const JITTER_RANGE = 0.5
 const RECONNECT_BASE_DELAY = 1000
@@ -265,10 +266,7 @@ type HostKeyAttempt = {
   hostVerifier: (key: Buffer) => boolean
 }
 
-type ClientLifecycleListeners = {
-  close: () => void
-  error: (error: Error) => void
-}
+type ClientLifecycleListeners = () => void
 
 type SshRuntimeState = {
   host: string
@@ -348,7 +346,7 @@ export function isSudoInputUnsupportedError(value: unknown): value is SudoInputU
   )
 }
 
-function closeClientChannel(channel: ClientChannel | null): void {
+function closeTransportExecChannel(channel: null | TransportExecChannel): void {
   if (channel == null) return
   channel.close()
 }
@@ -413,8 +411,11 @@ export class SshConnectionImpl implements SshConnection {
    * mitigation, not a guarantee.
    */
   private cachedSudoPassword: Buffer | null = null
-  private client: Client | null = null
-  private readonly clientLifecycleListeners = new WeakMap<Client, ClientLifecycleListeners>()
+  private client: null | TransportConnection = null
+  private readonly clientLifecycleListeners = new WeakMap<
+    TransportConnection,
+    ClientLifecycleListeners
+  >()
   private readonly config: SshConfig
   private connectedPort = 0
   /**
@@ -456,7 +457,7 @@ export class SshConnectionImpl implements SshConnection {
    * stdin channel with caller-provided input and the call must fail-closed.
    */
   private passwordlessSudo = false
-  private readonly pendingRejects = new Set<(reason: Error) => void>()
+  private readonly pendingRejects = new Set<(reason: unknown) => void>()
   private pinnedHostKey: Buffer | null = null
   private promptAbortSignal: AbortSignal | undefined
   private readonly runtime: SshRuntimeState
@@ -476,6 +477,7 @@ export class SshConnectionImpl implements SshConnection {
   private sudoProbeFailedReason: Error | null = null
   private sudoProbePromise: null | Promise<void> = null
   private sudoReady = false
+  private readonly transportFactory: () => Transport & TransportConnection = createSsh2Transport
   private verifiedHostKey: Buffer | null = null
 
   public constructor(host: string, config: SshConfig) {
@@ -1392,7 +1394,7 @@ sha256sum -- ${shellQuote(remotePath)} 2>/dev/null || printf 'paratix-hash-faile
   }
 
   private async commitAcceptedHostKeyAndRegisterClient(parameters: {
-    client: Client
+    client: TransportConnection
     port: number
     transitionErrorSink: { assertNoError: () => void }
     verifier: HostVerifierResult
@@ -1619,14 +1621,14 @@ ${this.buildDirSymlinkCheckScript(directory)}mktemp -p ${shellQuote(directory)} 
 
   private createSettledCallbacks<T>(
     resolve: (value: T) => void,
-    reject: (reason: Error) => void
+    reject: (reason: unknown) => void
   ): {
     isSettled: () => boolean
-    wrappedReject: (reason: Error) => void
+    wrappedReject: (reason: unknown) => void
     wrappedResolve: (value: T) => void
   } {
     let settled = false
-    const wrappedReject = (reason: Error): void => {
+    const wrappedReject = (reason: unknown): void => {
       if (settled) return
       settled = true
       this.pendingRejects.delete(wrappedReject)
@@ -1655,16 +1657,11 @@ ${this.buildDirSymlinkCheckScript(directory)}mktemp -p ${shellQuote(directory)} 
    *
    * @param closing - The ssh2 client whose lifecycle listeners should be removed.
    */
-  private detachClientLifecycleListeners(closing: Client): void {
+  private detachClientLifecycleListeners(closing: TransportConnection): void {
     const listeners = this.clientLifecycleListeners.get(closing)
     if (listeners == null) return
-    try {
-      closing.removeListener("close", listeners.close)
-      closing.removeListener("error", listeners.error)
-      this.clientLifecycleListeners.delete(closing)
-    } catch {
-      // removeListener must never propagate from the disconnect path.
-    }
+    listeners()
+    this.clientLifecycleListeners.delete(closing)
   }
 
   private disconnectTransport(): void {
@@ -1682,19 +1679,22 @@ ${this.buildDirSymlinkCheckScript(directory)}mktemp -p ${shellQuote(directory)} 
     this.pendingRejects.clear()
   }
 
-  private endStreamInput(stream: ClientChannel, input?: Exclude<ExecOptions["input"], null>): void {
+  private endStreamInput(
+    stream: TransportExecChannel,
+    input?: Exclude<ExecOptions["input"], null>
+  ): void {
     try {
       if (input === undefined) {
-        stream.end()
+        stream.stdin.end()
       } else {
-        stream.end(input)
+        stream.stdin.end(input)
       }
     } catch {
       // Defense in depth: same as writeSudoPassword above.
     }
   }
 
-  private ensureClient(): Client {
+  private ensureClient(): TransportConnection {
     if (!this.client) throw new Error("SSH not connected")
     return this.client
   }
@@ -1920,7 +1920,7 @@ ${this.buildDirSymlinkCheckScript(directory)}mktemp -p ${shellQuote(directory)} 
    */
   private async execRaw(command: string): Promise<{ exitCode: number; stdout: string }> {
     // Issue #178: the raw path opens a session channel exactly like the sudo
-    // path, so it shares the same cap. Client resolution happens after the
+    // path, so it shares the same cap. TransportConnection resolution happens after the
     // claim for the reconnect reason documented on acquireSessionChannel.
     const channelWait = this.acquireSessionChannel()
     if (channelWait !== null) await channelWait
@@ -2042,12 +2042,13 @@ trap - EXIT
   }
 
   private handleTryConnectError(parameters: {
-    client: Client
+    client: TransportConnection
     error: unknown
     registered: boolean
     tryConnectResolved: boolean
   }): void {
-    const { client, error, registered, tryConnectResolved } = parameters
+    const { client, registered, tryConnectResolved } = parameters
+    const error = unwrapTransportError(parameters.error)
     // Only release the client when nothing else has taken responsibility:
     // tryConnectOnPort cleans up internally on rejection, and a registered
     // client is owned by `this` and must not be force-closed mid-iteration.
@@ -2094,22 +2095,21 @@ trap - EXIT
     }
   }
 
-  private installConnectedClientTransitionErrorSink(client: Client): {
+  private installConnectedClientTransitionErrorSink(client: TransportConnection): {
     assertNoError: () => void
     dispose: () => void
   } {
-    const transitionState: { error?: Error } = {}
-    const handleTransitionError = (error: Error): void => {
-      transitionState.error ??= error
-    }
-    client.on("error", handleTransitionError)
+    const transitionState: { error?: unknown } = {}
+    const unsubscribe = client.onDisconnect((error) => {
+      transitionState.error ??= unwrapTransportError(error)
+    })
     return {
       assertNoError() {
+        // The transport contract preserves even non-Error raw rejection values.
+        // eslint-disable-next-line @typescript-eslint/only-throw-error -- preserve the raw transport failure
         if (transitionState.error != null) throw transitionState.error
       },
-      dispose() {
-        client.removeListener("error", handleTransitionError)
-      },
+      dispose: unsubscribe,
     }
   }
 
@@ -2156,7 +2156,7 @@ trap - EXIT
   }
 
   private async performConnectAttemptOnPort(parameters: {
-    client: Client
+    client: TransportConnection
     options: TryConnectOnPortsOptions
     port: number
     state: { registered: boolean; tryConnectResolved: boolean }
@@ -2245,29 +2245,17 @@ trap - EXIT
     }
   }
 
-  private registerConnectedClient(client: Client, port: number): void {
-    const rejectPending = (error: Error): void => {
+  private registerConnectedClient(client: TransportConnection, port: number): void {
+    const rejectPending = (error: unknown): void => {
       for (const rejectFunction of this.pendingRejects) {
         rejectFunction(error)
       }
       this.pendingRejects.clear()
     }
-    const closeListener = (): void => {
-      rejectPending(new Error("SSH connection closed unexpectedly"))
-    }
-    const errorListener = (error: Error): void => {
-      rejectPending(error)
-    }
-    // R-0000143: ssh2 emits both `close` and `error` for a single
-    // disconnect event (e.g. error escalation followed by close). Use
-    // `once` for the close handler so the cleanup logic and stderr
-    // logging fire exactly once per lifecycle, avoiding duplicated lines
-    // for the operator. `rejectPending` itself is idempotent (it clears
-    // the set after calling), but the handler is also responsible for
-    // diagnostics that should not be repeated.
-    client.once("close", closeListener)
-    client.on("error", errorListener)
-    this.clientLifecycleListeners.set(client, { close: closeListener, error: errorListener })
+    const unsubscribe = client.onDisconnect((error) => {
+      rejectPending(unwrapTransportError(error))
+    })
+    this.clientLifecycleListeners.set(client, unsubscribe)
     this.client = client
     this.connectedPort = port
   }
@@ -2391,7 +2379,7 @@ trap - EXIT
    * @returns The captured execution result.
    */
   private async runPreparedExec(parameters: {
-    client: Client
+    client: TransportConnection
     command: string
     options: ExecOptions
     secrets: PreparedSecrets
@@ -2403,7 +2391,7 @@ trap - EXIT
         const { isSettled, wrappedReject, wrappedResolve } =
           this.createSettledCallbacks<ExecResult>(resolve, reject)
         const timeout = options.timeout ?? COMMAND_TIMEOUT
-        let activeStream: ClientChannel | null = null
+        let activeStream: null | TransportExecChannel = null
         const timer = setTimeout(() => {
           activeStream?.close()
           wrappedReject(
@@ -2413,12 +2401,10 @@ trap - EXIT
           )
         }, timeout)
         try {
-          client.exec(sudo.command, (error: Error | undefined, stream: ClientChannel) => {
-            if (error) {
-              clearTimeout(timer)
-              wrappedReject(describeChannelOpenFailure(error, command, secrets))
-              return
-            }
+          let delivered = false
+          const acceptChannel = (stream: TransportExecChannel): void => {
+            if (delivered) return
+            delivered = true
             // If the timer already fired (or the promise was otherwise settled) before
             // ssh2 invoked this callback, we must not attach listeners that can never
             // resolve the already-rejected promise. Close the stream immediately so
@@ -2438,10 +2424,17 @@ trap - EXIT
               timer,
             })
             this.writeStreamInput(stream, sudo.needsPassword, options.input)
-          })
+          }
+          client
+            .exec(sudo.command, acceptChannel)
+            .then(acceptChannel)
+            .catch((error: unknown) => {
+              clearTimeout(timer)
+              wrappedReject(describeChannelOpenFailure(toError(error), command, secrets))
+            })
         } catch (error) {
           clearTimeout(timer)
-          closeClientChannel(activeStream)
+          closeTransportExecChannel(activeStream)
           wrappedReject(toError(error))
         }
       })
@@ -2470,7 +2463,7 @@ trap - EXIT
         resolve,
         reject
       )
-      let activeStream: ClientChannel | null = null
+      let activeStream: null | TransportExecChannel = null
       const timer = setTimeout(() => {
         activeStream?.close()
         wrappedReject(
@@ -2480,12 +2473,10 @@ trap - EXIT
         )
       }, COMMAND_TIMEOUT)
       try {
-        client.exec(command, (error: Error | undefined, stream: ClientChannel) => {
-          if (error) {
-            clearTimeout(timer)
-            wrappedReject(describeChannelOpenFailure(error, command, secrets))
-            return
-          }
+        let delivered = false
+        const acceptChannel = (stream: TransportExecChannel): void => {
+          if (delivered) return
+          delivered = true
           // If the timer already fired (or the promise was otherwise settled)
           // before ssh2 invoked this callback, we must not attach listeners that
           // can never resolve the already-rejected promise. Close the stream
@@ -2504,10 +2495,17 @@ trap - EXIT
             stream,
             timer,
           })
-        })
+        }
+        client
+          .exec(command, acceptChannel)
+          .then(acceptChannel)
+          .catch((error: unknown) => {
+            clearTimeout(timer)
+            wrappedReject(describeChannelOpenFailure(toError(error), command, secrets))
+          })
       } catch (error) {
         clearTimeout(timer)
-        closeClientChannel(activeStream)
+        closeTransportExecChannel(activeStream)
         wrappedReject(toError(error))
       }
     })
@@ -2600,36 +2598,10 @@ trap - EXIT
     return { command: `sudo -n bash -c ${quoted}`, mode: "noninteractive", needsPassword: false }
   }
 
-  private tearDownClient(closing: Client): void {
-    // R-0000582: attach the teardown error sink BEFORE detaching the lifecycle
-    // listeners so the client never goes without an `error` listener even for
-    // a single tick. Otherwise an `error` event emitted between the detach
-    // and the new sink registration would crash the process via Node's
-    // "unhandled error" path.
-    attachSshClientTeardownErrorSink(closing)
+  private tearDownClient(closing: TransportConnection): void {
+    // R-0000582 / R-0000254: unsubscribe before the adapter starts teardown.
     this.detachClientLifecycleListeners(closing)
-    try {
-      closing.end()
-    } catch {
-      // end() may throw when the underlying socket has already been destroyed
-    }
-    const fallback = setTimeout(() => {
-      try {
-        closing.destroy()
-      } catch {
-        // destroy() must never propagate from a best-effort fallback
-      }
-    }, DISCONNECT_DESTROY_FALLBACK_MS)
-    // Do not keep the event loop alive solely for the destroy fallback —
-    // when the program is otherwise idle, it can exit and the GC will
-    // reclaim the socket.
-    fallback.unref()
-    // R-0000524: when `end()` completes a clean shutdown before the fallback
-    // fires, cancel the pending `destroy()` so it does not run on an already
-    // closed socket.
-    closing.once("close", () => {
-      clearTimeout(fallback)
-    })
+    void closing.close()
   }
 
   /**
@@ -2667,9 +2639,9 @@ trap - EXIT
     const ports: number[] = [...this.runtime.ports]
     for (const port of ports) {
       if (hasReconnectDeadlineExpired(options.reconnectDeadline)) return false
-      // R-0000039 / R-0000198: keep the Client reference outside the try-block so
+      // R-0000039 / R-0000198: keep the TransportConnection reference outside the try-block so
       // the catch path can close it explicitly when ownership did not transfer.
-      const client = new Client()
+      const client = this.transportFactory()
       const state = { registered: false, tryConnectResolved: false }
       try {
         // eslint-disable-next-line no-await-in-loop -- buildHostVerifier serializes the known_hosts read; sequential per-port is intentional.
@@ -2793,26 +2765,12 @@ trap - EXIT
    * @param input - Optional stdin payload from the caller.
    */
   private writeStreamInput(
-    stream: ClientChannel,
+    stream: TransportExecChannel,
     needsPassword: boolean,
     input: ExecOptions["input"]
   ): void {
-    // R-0000054: attach an EPIPE-safe error handler before any subsequent
-    // write to the stream. The settle path (timeout / remote close)
-    // already owns the rejection reason; later stream errors are dropped.
-    stream.once("error", () => {
-      // Defensive no-op.
-    })
-    // R-0000140: ssh2 emits stderr `error` events (e.g. EPIPE during the
-    // sudo password write) on the stderr channel separately from the main
-    // stream. `collectStreamOutput` only attaches its own stderr listener
-    // *after* `writeStreamInput` returns, so a synchronous stderr EPIPE
-    // emitted while the password is being written would have no listener
-    // and the channel could hang silently until the 120s watchdog fires.
-    // Install a defensive stderr listener so the event is always consumed.
-    stream.stderr.once("error", () => {
-      // Defensive no-op — collectStreamOutput owns the actual rejection path.
-    })
+    // R-0000054 / R-0000140: the adapter installs stdin and stderr sinks
+    // before exposing the channel; stream collection owns the rejection.
     const writesPassword = needsPassword && this.cachedSudoPassword != null
     if (writesPassword) {
       try {
@@ -2836,8 +2794,8 @@ trap - EXIT
    *
    * @param stream - The SSH channel to write the password to.
    */
-  private writeSudoPassword(stream: ClientChannel): void {
-    stream.write(this.cachedSudoPassword)
-    stream.write("\n")
+  private writeSudoPassword(stream: TransportExecChannel): void {
+    stream.stdin.write(this.cachedSudoPassword)
+    stream.stdin.write("\n")
   }
 }

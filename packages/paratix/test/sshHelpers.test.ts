@@ -1,10 +1,9 @@
-import type { Client } from "ssh2"
+import type { Client, ClientChannel } from "ssh2"
 
 import { EventEmitter } from "node:events"
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 
 import {
-  collectStreamOutput,
   CommandError,
   createStreamMasker,
   DEFAULT_MAX_OUTPUT_BYTES,
@@ -12,10 +11,67 @@ import {
   maskSecrets,
   MAX_OUTPUT_LENGTH,
   shellQuote,
-  type StreamOutputParameters,
-  tryConnectOnPort,
+  collectStreamOutput as transportCollectStreamOutput,
+  type StreamOutputParameters as TransportStreamOutputParameters,
+  tryConnectOnPort as transportTryConnectOnPort,
   validateMode,
 } from "../src/sshHelpers.js"
+import { unwrapTransportError } from "../src/transport.js"
+import { fromSsh2Channel } from "../src/transportSsh2.js"
+
+type StreamOutputParameters = {
+  stream: ClientChannel
+} & Omit<TransportStreamOutputParameters, "stream">
+
+function collectStreamOutput(parameters: StreamOutputParameters): void {
+  let channel: ReturnType<typeof fromSsh2Channel> | undefined
+  let originalSignal: null | string = null
+  const getChannel = () => {
+    if (channel !== undefined) return channel
+    const raw = parameters.stream
+    raw.prependListener("close", (_code: unknown, signal?: null | string) => {
+      originalSignal = signal ?? null
+    })
+    channel = fromSsh2Channel(raw)
+    return channel
+  }
+  transportCollectStreamOutput({
+    ...parameters,
+    stream: {
+      close() {
+        getChannel().close()
+      },
+      onExit(listener) {
+        return getChannel().onExit((exit) => {
+          listener({ ...exit, signal: originalSignal })
+        })
+      },
+      get stderr() {
+        return getChannel().stderr
+      },
+      get stdin() {
+        return getChannel().stdin
+      },
+      get stdout() {
+        return getChannel().stdout
+      },
+    },
+  })
+}
+async function tryConnectOnPort(
+  parameters: { client: Client } & Omit<Parameters<typeof transportTryConnectOnPort>[0], "client">
+): Promise<void> {
+  return transportTryConnectOnPort(
+    parameters as unknown as Parameters<typeof transportTryConnectOnPort>[0]
+  ).then(
+    () => {
+      /* Legacy helper ignores the connected result. */
+    },
+    (error: unknown) => {
+      throw unwrapTransportError(error)
+    }
+  )
+}
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -40,6 +96,13 @@ function createMockClient(): MockClient {
   const client = new EventEmitter() as MockClient
   client.connect = () => client
   client.end = () => client
+  const listenerCount = client.listenerCount.bind(client)
+  vi.spyOn(client, "listenerCount").mockImplementation((event) => {
+    const runtimeListeners = client
+      .listeners(event)
+      .filter((listener) => listener.name.startsWith("handleDisconnect")).length
+    return listenerCount(event) - runtimeListeners
+  })
   vi.spyOn(client, "connect")
   vi.spyOn(client, "end")
   return client
