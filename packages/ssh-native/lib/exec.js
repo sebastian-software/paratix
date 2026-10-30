@@ -92,11 +92,34 @@ function settle(start, callback) {
 }
 
 /**
+ * Returns a Buffer view of a plain Uint8Array (same memory), so the chunk
+ * `_write` receives is the very object that was tracked.
+ *
+ * @param chunk what the caller passed to `write()` or `end()`
+ * @returns a Buffer for a Uint8Array, otherwise the chunk unchanged
+ */
+function asBuffer(chunk) {
+  if (chunk instanceof Uint8Array && !Buffer.isBuffer(chunk)) {
+    return Buffer.from(chunk.buffer, chunk.byteOffset, chunk.byteLength)
+  }
+  return chunk
+}
+
+/**
  * stdin that zero-fills every Buffer written to it in every path: once the
  * binding copied it, immediately when the stream no longer accepts data,
  * and on destroy for chunks still queued.
  */
 class StdinWritable extends Writable {
+  /**
+   * Number of written chunks not yet taken or wiped (diagnostics, internal).
+   *
+   * @returns the size of the pending set
+   */
+  get trackedChunks() {
+    return this.#pending.size
+  }
+
   /** @type {Set<Uint8Array>} */
   #pending = new Set()
 
@@ -120,8 +143,9 @@ class StdinWritable extends Writable {
    * @returns this stream
    */
   end(chunk, ...args) {
-    this.#track(chunk)
-    return super.end(chunk, ...args)
+    const data = asBuffer(chunk)
+    this.#track(data)
+    return super.end(data, ...args)
   }
 
   /**
@@ -140,8 +164,9 @@ class StdinWritable extends Writable {
    * @returns whether more data may be written now
    */
   write(chunk, ...args) {
-    this.#track(chunk)
-    return super.write(chunk, ...args)
+    const data = asBuffer(chunk)
+    this.#track(data)
+    return super.write(data, ...args)
   }
 
   /** @param chunk a chunk handed to `write()` or `end()` */
@@ -233,9 +258,10 @@ class ExecChannelImpl {
   }
 
   /**
-   * Sends CHANNEL_CLOSE; the exit follows once the server confirms.
+   * Sends CHANNEL_CLOSE through the native reader; the exit follows with
+   * `disconnected: false` and the exit status, if one arrived.
    *
-   * @returns resolves once the request was sent
+   * @returns resolves once the close was requested
    */
   async close() {
     if (this.#finished || !this.#attached) return

@@ -174,6 +174,15 @@ function readAll(stream, done) {
 }
 
 const COMMANDS = {
+  backlog(stream, argument) {
+    // stderr data, then the channel stays open without an exit.
+    pump(stream.stderr, Number(argument), () => stream.write("backlog sent\n"))
+  },
+  cat(stream) {
+    // Echoes stdin as it arrives (with backpressure), exits 0 at EOF.
+    stream.pipe(stream, { end: false })
+    stream.on("end", () => finish(stream, 0))
+  },
   drop(stream, _argument, client) {
     // Output, then the connection vanishes without CHANNEL_CLOSE.
     stream.write("before-drop\n", () => setTimeout(() => client._sock.destroy(), 50))
@@ -354,10 +363,11 @@ function accepts(context, keys) {
  * @property {number} connections TCP connections accepted
  * @property {number} authAttempts authentication requests seen
  * @property {number} stdoutSent channel data bytes handed to the connection
+ * @property {number} stderrSent extended (stderr) data bytes handed to the connection
  */
 
 /**
- * Counts the stdout bytes the server hands to the connection.
+ * Counts the stdout and stderr bytes the server hands to the connection.
  *
  * @param client the ssh2 client connection
  * @param stats counters (mutated)
@@ -374,6 +384,17 @@ function countStdout(client, stats) {
   protocol.channelData = (id, data) => {
     counters.stdoutSent += data.length
     return channelData(id, data)
+  }
+  const channelExtData = protocol.channelExtData.bind(protocol)
+  /**
+   * @param id channel id
+   * @param data extended (stderr) data
+   * @param type extended data type
+   * @returns what ssh2 returns
+   */
+  protocol.channelExtData = (id, data, type) => {
+    counters.stderrSent += data.length
+    return channelExtData(id, data, type)
   }
 }
 
@@ -401,7 +422,7 @@ export async function startServer(options = {}) {
   const hostPrivateKey = hostKey()
   const behaviour = { refuseSftp: false }
   /** @type {ServerStats} */
-  const stats = { authAttempts: 0, connections: 0, stdoutSent: 0 }
+  const stats = { authAttempts: 0, connections: 0, stderrSent: 0, stdoutSent: 0 }
   const clients = []
   const onSession = (client, accept) => {
     const session = accept()

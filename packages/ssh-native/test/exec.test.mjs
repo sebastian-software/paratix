@@ -1,9 +1,37 @@
 import assert from "node:assert/strict"
+import { spawn } from "node:child_process"
 import { once } from "node:events"
 import { after, before, describe, it } from "node:test"
+import { fileURLToPath } from "node:url"
 
 import { collect, connectWithKey, delay, within } from "./helpers/binding.mjs"
 import { clientKey, payload, sha256, startServer } from "./helpers/server.mjs"
+
+const ECHO_STDIN = "echo-stdin"
+const BACKLOG_CHILD = fileURLToPath(new URL("children/close-backlog-child.mjs", import.meta.url))
+
+/**
+ * Runs the close-backlog child and returns its JSON report.
+ *
+ * @param environment variables for the child
+ * @returns the report, stderr and exit code of the child
+ */
+async function runBacklogChild(environment) {
+  const child = spawn(process.execPath, [BACKLOG_CHILD], {
+    env: { ...process.env, ...environment },
+    stdio: ["ignore", "pipe", "pipe"],
+  })
+  let stdout = ""
+  let stderr = ""
+  child.stdout.on("data", (data) => {
+    stdout += data
+  })
+  child.stderr.on("data", (data) => {
+    stderr += data
+  })
+  const [code] = await once(child, "exit")
+  return { code, report: stdout ? JSON.parse(stdout) : null, stderr }
+}
 
 describe("exec", () => {
   const key = clientKey()
@@ -25,7 +53,7 @@ describe("exec", () => {
 
   it("streams stdin through and reports the exit code", () =>
     withSession(async (session) => {
-      const channel = await session.exec("echo-stdin", { stdin: Buffer.from("initial ") })
+      const channel = await session.exec(ECHO_STDIN, { stdin: Buffer.from("initial ") })
       channel.stdin.write(Buffer.from("chunk "))
       channel.stdin.end("tail")
       const stdout = await collect(channel.stdout)
@@ -199,5 +227,70 @@ describe("exec", () => {
     unsubscribe()
     await delay(20)
     assert.equal(notified, false)
+  })
+
+  it("streams a 16 MiB initial stdin through cat", () =>
+    withSession(async (session) => {
+      const size = 16 * 1024 * 1024
+      const initial = payload(size)
+      const expected = sha256(initial)
+      const channel = await within(
+        session.exec("cat", { stdin: initial }),
+        10_000,
+        "exec() with a large initial stdin"
+      )
+      channel.stdin.end()
+      const stdout = await within(collect(channel.stdout), 20_000, "the echoed stdin")
+      assert.equal(stdout.length, size)
+      assert.equal(sha256(stdout), expected)
+      const exit = await channel.exit
+      assert.deepEqual(exit, { code: 0, disconnected: false, signal: null })
+    }))
+
+  it("keeps later stdin writes behind the initial stdin", () =>
+    withSession(async (session) => {
+      const channel = await session.exec(ECHO_STDIN, { stdin: Buffer.from("first ") })
+      channel.stdin.write(Buffer.from("second "))
+      channel.stdin.end(Buffer.from("third"))
+      const stdout = await collect(channel.stdout)
+      assert.equal(stdout.toString(), "first second third")
+    }))
+
+  it("tracks Uint8Array stdin chunks as Buffer views and forgets them once written", () =>
+    withSession(async (session) => {
+      const channel = await session.exec(ECHO_STDIN)
+      const chunks = Array.from(
+        { length: 200 },
+        (_value, index) => new Uint8Array([65 + (index % 26)])
+      )
+      for (const chunk of chunks) channel.stdin.write(chunk)
+      channel.stdin.end()
+      const stdout = await collect(channel.stdout)
+      assert.equal(stdout.length, chunks.length)
+      assert.ok(
+        chunks.every((chunk) => chunk[0] === 0),
+        "every chunk was zero-filled"
+      )
+      const stdin = /** @type {{ trackedChunks?: number }} */ (
+        /** @type {unknown} */ (channel.stdin)
+      )
+      assert.equal(stdin.trackedChunks, 0)
+    }))
+
+  it("close() delivers a queued stderr backlog before the disconnected exit", async () => {
+    const size = 48 * 1024 * 1024
+    const stderrBefore = server.stats.stderrSent
+    const { code, report, stderr } = await runBacklogChild({
+      BACKLOG_SIZE: String(size),
+      BUSY_MS: "1500",
+      CLIENT_KEY: key.privateKey,
+      SERVER_PORT: String(server.port),
+    })
+    assert.equal(stderr, "")
+    assert.equal(code, 0)
+    assert.equal(server.stats.stderrSent - stderrBefore, size, "the server sent the whole backlog")
+    assert.deepEqual(report.exit, { code: null, disconnected: true, signal: null })
+    assert.equal(report.received, size, "no queued stderr was dropped")
+    assert.equal(report.receivedAtExit, size, "the exit came after all stderr")
   })
 })

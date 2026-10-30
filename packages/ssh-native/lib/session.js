@@ -150,7 +150,9 @@ class Session {
   }
 
   /**
-   * Graceful close.
+   * Graceful close. The native readers deliver each open channel's
+   * remaining data and then its disconnected exit, in order, through the
+   * channel's own event queue; ending channels here would race that queue.
    *
    * @returns resolves once the connection is gone
    */
@@ -158,7 +160,7 @@ class Session {
     try {
       await callNative(() => native.sessionClose(this.#native))
     } finally {
-      this.#endChannels()
+      this.reportDisconnect({ reason: "local" })
     }
   }
 
@@ -301,6 +303,7 @@ class Session {
    * with a disconnected exit (the disconnect comes first).
    */
   #endChannels() {
+    // Only for destroy(): the event loop may stop right after it.
     this.reportDisconnect({ reason: "local" })
     const event = /** @type {DisconnectInfo} */ (this.#disconnect)
     for (const channel of this.#channels) channel.finishDisconnected(event)

@@ -482,7 +482,10 @@ settled.
     (also an early exit from `for await` or a failed pipeline) still work during such a stall; a
     destroyed `stdout` releases its outstanding credit and acknowledges later data on arrival.
     `session.close()` puts the disconnect and the wait for the end under one 5 s deadline, then
-    shuts the socket down; channels still open end with `disconnected: true`. A connection that
+    shuts the socket down; channels still open end with `disconnected: true`, reported by their
+    native reader after the data already queued for them, so `close()` does not drop output the reader already received. The
+    initial exec `stdin` is written in the background after the reader started; later stdin writes
+    and EOF wait for it, and a failed initial write fails them. A connection that
     drops while stdout is paused (russh's loop not blocked) also ends the channel as disconnected.
   - **Rule for C2:** Paratix never pauses stdout while it waits for something else on the same
     connection.

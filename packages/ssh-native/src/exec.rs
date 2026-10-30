@@ -450,6 +450,7 @@ pub async fn run_reader<S: MessageSource>(
 /// Native side of one exec channel, handed to JS as an external.
 pub struct ExecCore {
     flow: Arc<Flow>,
+    stdin: StdinOrder,
     write: Arc<ChannelWriteHalf<Msg>>,
 }
 
@@ -499,23 +500,47 @@ async fn request_exec(
         "exec-refused",
         "the server refused the exec request",
     );
-    let prefix = await_request_reply(read, refused).await?;
-    if let Some(stdin) = &request.stdin {
-        write
-            .data_bytes(Bytes::copy_from_slice(stdin))
+    await_request_reply(read, refused).await
+}
+
+/// Orders all stdin traffic of one channel: the initial stdin is written
+/// first, while it holds the lock; later writes and EOF wait for it. The slot
+/// keeps the error of a failed initial write, which later writes report.
+type StdinOrder = Arc<tokio::sync::Mutex<Option<BindingError>>>;
+
+/// Writes the initial stdin in the background, holding the stdin lock.
+///
+/// This runs only after the reader started and while the channel goes back
+/// to JS: written before that, a large initial stdin echoed by the command
+/// (`cat`) would fill russh's channel queue, the session loop could no
+/// longer process window adjusts, and `exec()` would never resolve.
+async fn write_initial_stdin(
+    order: &StdinOrder,
+    write: Arc<ChannelWriteHalf<Msg>>,
+    stdin: SecretBytes,
+) {
+    let mut slot = order.clone().lock_owned().await;
+    tokio::spawn(async move {
+        if write
+            .data_bytes(Bytes::copy_from_slice(&stdin))
             .await
-            .map_err(|_| channel_closed())?;
-    }
-    Ok(prefix)
+            .is_err()
+        {
+            *slot = Some(channel_closed());
+        }
+        // `stdin` (zeroizing) and the lock are released here.
+        drop(stdin);
+    });
 }
 
 pub async fn start_exec(
     handle: &Handle<ClientHandler>,
     shared: Arc<Shared>,
-    request: ExecRequest,
+    mut request: ExecRequest,
     abort: Flag,
     sink: Arc<ExecEventFn>,
 ) -> BindingResult<ExecChannel> {
+    let initial_stdin = request.stdin.take();
     let channel = tokio::select! {
         biased;
         () = abort.fired() => return Err(BindingError::aborted()),
@@ -553,7 +578,11 @@ pub async fn start_exec(
         link,
         Some(write.clone()),
     ));
-    Ok(External::new(ExecCore { flow, write }))
+    let stdin: StdinOrder = Arc::new(tokio::sync::Mutex::new(None));
+    if let Some(initial) = initial_stdin {
+        write_initial_stdin(&stdin, write.clone(), initial).await;
+    }
+    Ok(External::new(ExecCore { flow, stdin, write }))
 }
 
 /// Acknowledges stdout bytes the JS `Readable` has taken.
@@ -574,7 +603,13 @@ pub fn exec_write<'env>(
     let data = copy_secret(&chunk);
     drop(chunk);
     let write = channel.write.clone();
+    let order = channel.stdin.clone();
     env.spawn_future(guarded(async move {
+        // After the initial stdin; fails if that write failed.
+        let failed = order.lock().await;
+        if let Some(err) = failed.as_ref() {
+            return Err(err.clone());
+        }
         write
             .data_bytes(Bytes::copy_from_slice(&data))
             .await
@@ -586,7 +621,12 @@ pub fn exec_write<'env>(
 #[napi(js_name = "execEnd", skip_typescript, catch_unwind)]
 pub fn exec_end<'env>(env: &'env Env, channel: &ExecChannel) -> napi::Result<PromiseRaw<'env, ()>> {
     let write = channel.write.clone();
+    let order = channel.stdin.clone();
     env.spawn_future(guarded(async move {
+        let failed = order.lock().await;
+        if let Some(err) = failed.as_ref() {
+            return Err(err.clone());
+        }
         write.eof().await.map_err(|_| channel_closed())
     }))
 }
