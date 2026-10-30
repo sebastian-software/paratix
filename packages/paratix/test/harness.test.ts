@@ -1,6 +1,7 @@
+import type * as ChildProcessModule from "node:child_process"
 import type * as FsPromises from "node:fs/promises"
 
-import { execFile } from "node:child_process"
+import { ChildProcess, execFile, spawn } from "node:child_process"
 import { writeFileSync } from "node:fs"
 import { access, rm } from "node:fs/promises"
 import { resolve } from "node:path"
@@ -8,6 +9,7 @@ import { afterEach, describe, expect, it, vi } from "vitest"
 
 import {
   createDockerResourceMetadata,
+  createIntegrationAgent,
   createIntegrationEnvironment,
   ensureIntegrationRuntimeIsAvailable,
   restoreHomeEnvironmentVariable,
@@ -19,8 +21,10 @@ type CommandRunner = (
   options?: { cwd?: string; timeoutMs?: number }
 ) => Promise<string>
 
-vi.mock("node:child_process", () => ({
+vi.mock("node:child_process", async (importOriginal) => ({
+  ...(await importOriginal<typeof ChildProcessModule>()),
   execFile: vi.fn(),
+  spawn: vi.fn(),
 }))
 
 vi.mock("node:fs/promises", async () => {
@@ -216,6 +220,53 @@ describe("createIntegrationEnvironment", () => {
     expect(message).not.toContain("stdout-start")
     expect(message).not.toContain("stderr-start")
     expect(message.length).toBeLessThan(longStdout.length + longStderr.length)
+  })
+})
+
+describe("createIntegrationAgent", () => {
+  afterEach(() => {
+    vi.clearAllMocks()
+  })
+
+  it("removes the agent directory when spawning fails", async () => {
+    const failure = new Error("test agent spawn failed")
+    vi.mocked(spawn).mockImplementationOnce(() => {
+      throw failure
+    })
+
+    await expect(createIntegrationAgent("/unused/test-key")).rejects.toBe(failure)
+
+    const directory = String(mockRm.mock.calls.at(-1)?.[0])
+    expect(directory).toContain("paratix-integration-agent-")
+    await expect(access(directory)).rejects.toThrow("ENOENT")
+  })
+
+  it("reaps the child and removes its socket when loading the test key fails", async () => {
+    const originalSocket = process.env.SSH_AUTH_SOCK
+    const child = new ChildProcess()
+    const kill = vi.spyOn(child, "kill").mockImplementation(() => {
+      child.emit("close", null, "SIGTERM")
+      return true
+    })
+    let socket: string | undefined
+    vi.mocked(spawn).mockImplementationOnce((_command, args) => {
+      socket = args[2]
+      writeFileSync(socket, "test socket")
+      return child
+    })
+    mockExecFile.mockImplementationOnce((...args: unknown[]) => {
+      const callback = args.at(-1) as (error: Error, stdout: string, stderr: string) => void
+      callback(new Error("test key rejected"), "", "test key rejected")
+      return undefined as never
+    })
+
+    await expect(createIntegrationAgent("/unused/test-key")).rejects.toThrow("test key rejected")
+
+    expect(spawn).toHaveBeenCalledWith("ssh-agent", ["-D", "-a", socket], { stdio: "ignore" })
+    expect(kill).toHaveBeenCalledWith("SIGTERM")
+    expect(child.listenerCount("close")).toBe(0)
+    await expect(access(socket!)).rejects.toThrow("ENOENT")
+    expect(process.env.SSH_AUTH_SOCK).toBe(originalSocket)
   })
 })
 

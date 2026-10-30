@@ -1,5 +1,8 @@
 Port 22
 Port 2222
+Port 2223
+Port 2224
+Port 2225
 ListenAddress 0.0.0.0
 HostKey /etc/ssh/ssh_host_ed25519_key
 HostKey /etc/ssh/ssh_host_rsa_key
@@ -20,3 +23,11 @@ PidFile /run/sshd.pid
 MaxSessions 10
 Subsystem sftp internal-sftp
 LogLevel VERBOSE
+
+Match LocalPort 2223
+    PasswordAuthentication yes
+    PubkeyAuthentication no
+Match LocalPort 2224
+    MaxSessions 1
+Match LocalPort 2225
+    AllowAgentForwarding yes

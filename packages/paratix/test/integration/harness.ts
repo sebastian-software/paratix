@@ -1,7 +1,7 @@
 /* eslint-disable max-lines -- integration harness keeps Docker lifecycle helpers together */
-import { execFile } from "node:child_process"
-import { randomUUID } from "node:crypto"
-import { chmod, mkdir, mkdtemp, readFile, rm } from "node:fs/promises"
+import { execFile, spawn } from "node:child_process"
+import { randomBytes, randomUUID } from "node:crypto"
+import { access, chmod, mkdir, mkdtemp, readFile, rm } from "node:fs/promises"
 import net from "node:net"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
@@ -11,6 +11,9 @@ const DOCKER_RESOURCE_LABEL_PREFIX = "com.sebastian-software.paratix.integration
 const DOCKER_RESOURCE_MANAGED_LABEL = `${DOCKER_RESOURCE_LABEL_PREFIX}.managed=true`
 const DOCKER_RESOURCE_ID_LABEL = `${DOCKER_RESOURCE_LABEL_PREFIX}.id`
 const HOST = "127.0.0.1"
+const PRIMARY_SSH_PORT = 22
+const SECONDARY_SSH_PORT = 2222
+const PASSWORD_RANDOM_BYTES = 24
 const TEN = "0123456789".length
 const EIGHT = "12345678".length
 const KILOBYTE = 1024
@@ -28,20 +31,37 @@ const SOCKET_TIMEOUT = 1000
 const SSH_POLL_INTERVAL = 250
 const SSH_READY_TIMEOUT = 30_000
 
-export type IntegrationEnvironment = {
+const PROFILE_PORTS = {
+  ecdsaPort: 2228,
+  ed25519Port: 2226,
+  forwardingPort: 2225,
+  keyboardInteractivePort: 2229,
+  maxSessionsPort: 2224,
+  passwordPort: 2223,
+  rsaPort: 2227,
+} as const
+
+type PublishedPorts = {
+  primaryPort: number
+  secondaryPort: number
+} & Record<keyof typeof PROFILE_PORTS, number>
+
+export type IntegrationEnvironment = PublishedPorts & {
   cleanup: () => Promise<void>
   clientPrivateKeyPath: string
   containerName: string
   dockerImageTag: string
   host: string
   hostPublicKey: string
-  primaryPort: number
-  secondaryPort: number
+  hostPublicKeys: Record<"ecdsa" | "ed25519" | "rsa", string>
+  password: string
   workspaceHome: string
 }
 
 type CommandOptions = {
   cwd?: string
+  env?: NodeJS.ProcessEnv
+  input?: string
   timeoutMs?: number
 }
 
@@ -119,12 +139,13 @@ async function execFileText(
   options: CommandOptions
 ): Promise<CommandResult> {
   return new Promise<CommandResult>((resolve, reject) => {
-    execFile(
+    const child = execFile(
       command,
       commandArguments,
       {
         cwd: options.cwd,
         encoding: "utf8",
+        env: options.env,
         killSignal: "SIGTERM",
         maxBuffer: COMMAND_MAX_BUFFER,
         timeout: options.timeoutMs ?? DEFAULT_COMMAND_TIMEOUT_MS,
@@ -146,6 +167,12 @@ async function execFileText(
         resolve({ stderr, stdout })
       }
     )
+    if (options.input != null) {
+      child.stdin?.on("error", () => {
+        // The callback owns command failures, including an early closed stdin.
+      })
+      child.stdin?.end(options.input)
+    }
   })
 }
 
@@ -337,29 +364,6 @@ async function generateClientKeyPair(clientPrivateKeyPath: string): Promise<stri
   return publicKey.trim()
 }
 
-function createEnvironmentResult(parameters: {
-  cleanup: () => Promise<void>
-  clientPrivateKeyPath: string
-  containerName: string
-  dockerImageTag: string
-  hostPublicKey: string
-  primaryPort: number
-  secondaryPort: number
-  workspaceHome: string
-}): IntegrationEnvironment {
-  return {
-    cleanup: parameters.cleanup,
-    clientPrivateKeyPath: parameters.clientPrivateKeyPath,
-    containerName: parameters.containerName,
-    dockerImageTag: parameters.dockerImageTag,
-    host: HOST,
-    hostPublicKey: parameters.hostPublicKey,
-    primaryPort: parameters.primaryPort,
-    secondaryPort: parameters.secondaryPort,
-    workspaceHome: parameters.workspaceHome,
-  }
-}
-
 function createCleanup(
   containerName: string,
   dockerImageTag: string,
@@ -465,32 +469,152 @@ async function startIntegrationContainer(
       `${HOST}::22`,
       "--publish",
       `${HOST}::2222`,
+      ...Object.values(PROFILE_PORTS).flatMap((port) => ["--publish", `${HOST}::${port}`]),
       dockerImageTag,
     ],
     { timeoutMs: DEFAULT_COMMAND_TIMEOUT_MS }
   )
 }
 
-async function readPublishedPorts(
-  containerName: string
-): Promise<{ primaryPort: number; secondaryPort: number }> {
-  const primaryPort = parseDockerPort(
-    await runCommand("docker", ["port", containerName, "22/tcp"], {
-      timeoutMs: SHORT_COMMAND_TIMEOUT_MS,
-    })
-  )
-  const secondaryPort = parseDockerPort(
-    await runCommand("docker", ["port", containerName, "2222/tcp"], {
-      timeoutMs: SHORT_COMMAND_TIMEOUT_MS,
-    })
-  )
-  return { primaryPort, secondaryPort }
+async function readPublishedPorts(containerName: string): Promise<PublishedPorts> {
+  const readPort = async (port: number): Promise<number> =>
+    parseDockerPort(await runCommand("docker", ["port", containerName, `${port}/tcp`]))
+  return {
+    ecdsaPort: await readPort(PROFILE_PORTS.ecdsaPort),
+    ed25519Port: await readPort(PROFILE_PORTS.ed25519Port),
+    forwardingPort: await readPort(PROFILE_PORTS.forwardingPort),
+    keyboardInteractivePort: await readPort(PROFILE_PORTS.keyboardInteractivePort),
+    maxSessionsPort: await readPort(PROFILE_PORTS.maxSessionsPort),
+    passwordPort: await readPort(PROFILE_PORTS.passwordPort),
+    primaryPort: await readPort(PRIMARY_SSH_PORT),
+    rsaPort: await readPort(PROFILE_PORTS.rsaPort),
+    secondaryPort: await readPort(SECONDARY_SSH_PORT),
+  }
 }
 
-async function readHostPublicKey(containerName: string): Promise<string> {
-  return runCommand("docker", ["exec", containerName, "cat", "/etc/ssh/ssh_host_ed25519_key.pub"], {
-    timeoutMs: SHORT_COMMAND_TIMEOUT_MS,
+export async function runInIntegrationContainer(
+  environment: Pick<IntegrationEnvironment, "containerName">,
+  commandArguments: string[]
+): Promise<string> {
+  return runCommand("docker", ["exec", environment.containerName, ...commandArguments])
+}
+
+async function readHostPublicKeys(
+  containerName: string
+): Promise<IntegrationEnvironment["hostPublicKeys"]> {
+  const readKey = async (type: string): Promise<string> =>
+    runInIntegrationContainer({ containerName }, ["cat", `/etc/ssh/ssh_host_${type}_key.pub`])
+  return {
+    ecdsa: await readKey("ecdsa"),
+    ed25519: await readKey("ed25519"),
+    rsa: await readKey("rsa"),
+  }
+}
+
+export async function disconnectIntegrationSessions(
+  environment: IntegrationEnvironment
+): Promise<void> {
+  await runInIntegrationContainer(environment, ["pkill", "-f", "^sshd(-session)?: paratix"])
+}
+
+export async function waitForIntegrationMarker(
+  environment: IntegrationEnvironment,
+  marker: string
+): Promise<void> {
+  await runInIntegrationContainer(environment, [
+    "timeout",
+    "10",
+    "sh",
+    "-c",
+    'until test -f "$1"; do sleep 0.05; done',
+    "sh",
+    marker,
+  ])
+}
+
+export type IntegrationAgent = {
+  cleanup: () => Promise<void>
+  fingerprint: string
+  socket: string
+}
+
+function startForegroundAgent(socket: string): {
+  assertRunning: () => void
+  stop: () => Promise<void>
+} {
+  const child = spawn("ssh-agent", ["-D", "-a", socket], { stdio: "ignore" })
+  let failure: Error | undefined
+  child.once("error", (error) => {
+    failure = error
   })
+  const closed = new Promise<void>((resolve) => {
+    child.once("close", () => {
+      resolve()
+    })
+  })
+  return {
+    assertRunning() {
+      if (failure != null) throw failure
+      if (child.exitCode !== null || child.signalCode !== null) {
+        throw new Error("Test SSH agent exited before becoming ready")
+      }
+    },
+    async stop() {
+      if (child.exitCode === null && child.signalCode === null) child.kill("SIGTERM")
+      const forceKill = setTimeout(() => {
+        child.kill("SIGKILL")
+      }, SOCKET_TIMEOUT)
+      try {
+        await closed
+      } finally {
+        clearTimeout(forceKill)
+      }
+    },
+  }
+}
+
+export async function createIntegrationAgent(privateKeyPath: string): Promise<IntegrationAgent> {
+  const directory = await mkdtemp(join(tmpdir(), "paratix-integration-agent-"))
+  const socket = join(directory, "agent.sock")
+  let agentProcess: ReturnType<typeof startForegroundAgent> | undefined
+  const cleanup = async (): Promise<void> => {
+    try {
+      await agentProcess?.stop()
+    } finally {
+      await rm(directory, { force: true, recursive: true })
+    }
+  }
+  try {
+    agentProcess = startForegroundAgent(socket)
+    await waitForAgentSocket(socket, agentProcess.assertRunning)
+    const env = { ...process.env, SSH_AUTH_SOCK: socket }
+    await runCommand("ssh-add", [privateKeyPath], { env })
+    const fingerprint = /SHA256:\S+/v.exec(
+      await runCommand("ssh-keygen", ["-lf", `${privateKeyPath}.pub`])
+    )?.[0]
+    if (fingerprint == null) throw new Error("Test key fingerprint is missing")
+    return { cleanup, fingerprint, socket }
+  } catch (error) {
+    await cleanup()
+    throw error
+  }
+}
+
+async function waitForAgentSocket(socket: string, assertRunning: () => void): Promise<void> {
+  const deadline = Date.now() + SHORT_COMMAND_TIMEOUT_MS
+  while (Date.now() < deadline) {
+    assertRunning()
+    try {
+      // eslint-disable-next-line no-await-in-loop -- readiness belongs to this foreground child.
+      await access(socket)
+      return
+    } catch {
+      // The foreground agent creates its socket after spawning.
+    }
+    // eslint-disable-next-line no-await-in-loop -- wait for this child process, not another agent.
+    await sleep(SSH_POLL_INTERVAL)
+  }
+  throw new Error("Timed out waiting for the test SSH agent socket")
 }
 
 export async function createIntegrationEnvironment(
@@ -508,20 +632,27 @@ export async function createIntegrationEnvironment(
 
   try {
     await startIntegrationContainer(containerName, dockerImageTag, dockerLabels)
-    const { primaryPort, secondaryPort } = await readPublishedPorts(containerName)
-    await waitForTcpPort(HOST, primaryPort, SSH_READY_TIMEOUT)
-    await waitForTcpPort(HOST, secondaryPort, SSH_READY_TIMEOUT)
-    const hostPublicKey = await readHostPublicKey(containerName)
-    return createEnvironmentResult({
+    const ports = await readPublishedPorts(containerName)
+    await Promise.all(
+      Object.values(ports).map(async (port) => waitForTcpPort(HOST, port, SSH_READY_TIMEOUT))
+    )
+    const password = randomBytes(PASSWORD_RANDOM_BYTES).toString("hex")
+    await runCommand("docker", ["exec", "-i", containerName, "chpasswd"], {
+      input: `paratix:${password}\n`,
+    })
+    const hostPublicKeys = await readHostPublicKeys(containerName)
+    return {
       cleanup,
       clientPrivateKeyPath,
       containerName,
       dockerImageTag,
-      hostPublicKey,
-      primaryPort,
-      secondaryPort,
+      host: HOST,
+      hostPublicKey: hostPublicKeys.ed25519,
+      hostPublicKeys,
+      password,
+      ...ports,
       workspaceHome,
-    })
+    }
   } catch (error) {
     await cleanup()
     throw error
