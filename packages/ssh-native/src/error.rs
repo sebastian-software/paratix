@@ -91,6 +91,16 @@ impl BindingError {
     pub fn timeout(message: &str) -> Self {
         Self::new(Code::Timeout, message)
     }
+
+    /// `UNSUPPORTED_KEY` for a key type the binding cannot use; `detail` carries
+    /// the key type name.
+    pub fn unsupported_key_type(detail: impl Into<String>) -> Self {
+        Self::with_detail(
+            Code::UnsupportedKey,
+            detail,
+            "the private key type is not supported",
+        )
+    }
 }
 
 impl fmt::Display for BindingError {
@@ -140,11 +150,7 @@ pub fn from_key_error(err: &russh::keys::Error) -> BindingError {
         ),
         K::UnsupportedKeyType {
             key_type_string, ..
-        } => BindingError::with_detail(
-            Code::UnsupportedKey,
-            key_type_string.clone(),
-            "the private key type is not supported",
-        ),
+        } => BindingError::unsupported_key_type(key_type_string.clone()),
         K::UnknownAlgorithm(oid) => BindingError::with_detail(
             Code::UnsupportedKey,
             oid.to_string(),
