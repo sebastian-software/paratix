@@ -1,0 +1,14 @@
+{
+  "extends": "../../tsconfig.json",
+  "compilerOptions": {
+    "allowJs": true,
+    "checkJs": true,
+    "declaration": false,
+    "declarationMap": false,
+    "noEmit": true,
+    "noImplicitAny": false,
+    "useUnknownInCatchVariables": false,
+    "types": ["node"]
+  },
+  "include": ["index.d.ts", "index.js", "loader.js", "lib/**/*.js", "test/**/*.mjs"]
+}

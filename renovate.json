@@ -34,6 +34,31 @@
         ],
         "executionMode": "branch"
       }
+    },
+    {
+      "description": "#255: update the russh SSH stack of packages/ssh-native together; russh-sftp tracks russh releases.",
+      "matchManagers": [
+        "cargo"
+      ],
+      "matchFileNames": [
+        "packages/ssh-native/**"
+      ],
+      "matchPackageNames": [
+        "russh",
+        "russh-sftp"
+      ],
+      "groupName": "russh"
+    },
+    {
+      "description": "#255 (until the C1 release of @paratix/ssh-native): require Dependency Dashboard approval for every Cargo and npm update under packages/ssh-native so no fix(deps) commit triggers a release before C1. Remove this rule after the C1 release so security updates trigger releases again.",
+      "matchManagers": [
+        "cargo",
+        "npm"
+      ],
+      "matchFileNames": [
+        "packages/ssh-native/**"
+      ],
+      "dependencyDashboardApproval": true
     }
   ]
 }

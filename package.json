@@ -7,6 +7,7 @@
     "test": "pnpm -r test && pnpm test:scripts",
     "test:scripts": "node --test scripts/*.test.mjs",
     "check:vitest": "node scripts/checkVitestCompatibility.mjs",
+    "rust:check": "node scripts/rustCheck.mjs",
     "test:integration": "pnpm --filter paratix test:integration && pnpm --filter create-paratix test:integration",
     "typecheck": "pnpm typecheck:root && pnpm typecheck:packages",
     "typecheck:root": "tsc -p tsconfig.root.json --noEmit",
@@ -17,7 +18,7 @@
     "e18e:analyze": "pnpx @e18e/cli analyze",
     "format": "prettier --write .",
     "format:check": "prettier --check .",
-    "agent:check": "pnpm check:vitest && pnpm lint && pnpm format:check && pnpm typecheck && pnpm build && pnpm test",
+    "agent:check": "pnpm check:vitest && pnpm lint && pnpm format:check && pnpm rust:check && pnpm typecheck && pnpm build && pnpm test",
     "agent:check:integration": "pnpm agent:check && pnpm test:integration"
   },
   "repository": {

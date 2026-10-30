@@ -33,7 +33,7 @@ Entscheidungen des Nutzers vom 29.10.2026:
    - `paratix` lädt die Anbindung beim ersten Verbindungsaufbau. Die CLI prüft vor dem Secret-Prewarm, ob sie sich laden lässt.
    - `create-paratix` lädt sie nur im Host-Key-Scan.
    - Bibliothek, `--help`, `--version`, Playbook-Unit-Tests und Scaffolding laufen damit auf jeder Plattform.
-6. **Toolchain:** `pnpm build` baut die Anbindung immer, inkrementell. Die Rust-Toolchain ist damit für alle Pflicht, die das Repo bauen. `cargo fmt`, `clippy` und `test` laufen lokal nur bei Rust-Änderungen, in CI immer.
+6. **Toolchain:** `pnpm build` baut die Anbindung immer, inkrementell. Die Rust-Toolchain ist damit für alle Pflicht, die das Repo bauen. `cargo fmt`, `clippy` und `test` laufen lokal nur bei Rust-Änderungen, in CI immer im Job `check` von `ci.yml`.
 7. **Erstveröffentlichung mit Platzhaltern:**
    - Der Nutzer legt die npm-Scope `@paratix` an.
    - Er veröffentlicht einmalig `0.0.0`-Platzhalter für die sieben neuen Pakete, mit seiner interaktiven npm-Sitzung und 2FA, ohne Token.
@@ -190,6 +190,8 @@ Als Workflow passt Feature. Die öffentliche API verhält sich gleich, aber es k
 
 4. **Host-Key-Prüfung: Die Vertrauensentscheidung bleibt in TypeScript.**
    - `buildHostVerifier` bleibt wie es ist. `transportNative.ts` legt den synchronen Verifier hinter den asynchronen Callback der threadsafe function. Der Callback muss innerhalb von `readyTimeout` antworten.
+   - **Verdikt:** Nur `true` gilt als Zustimmung, jeder andere Wert lehnt mit `HOST_KEY_REJECTED` ab. `index.d.ts` typisiert den Prüfer als `(info: HostKeyInfo) => boolean | Promise<boolean>`.
+   - **Prüfer ohne Antwort:** Antwortet der Prüfer nicht bis `readyTimeout`, endet `connect()` mit `TIMEOUT`. Die russh-Sitzung endet, und ein spätes Verdikt wird verworfen.
    - Erhalten bleiben: Mutex, TOFU-Commit nach `ready`, Pins, „HOST KEY CHANGED“ und R-0000204.
    - **Wirft der Verifier, merkt sich `transportNative.ts` genau dieses Fehlerobjekt** für den Verbindungsversuch. Bei `HOST_KEY_REJECTED` wirft es dieses Objekt erneut. Nur wenn nichts gemerkt ist, kommt ein allgemeiner `HostKeyVerificationError`. So bleiben die Texte erhalten, und der Reconnect bricht weiter ab (fail closed).
    - Host-Zertifikate:
@@ -282,10 +284,13 @@ Als Workflow passt Feature. Die öffentliche API verhält sich gleich, aber es k
 
 11. **Toolchain und Prüfungen.**
     - `rust-toolchain.toml` pinnt die Version. `pnpm build` ruft `napi build` inkrementell auf.
-    - Ein Root-Skript `rust:check` (`cargo fmt --check`, `clippy -D warnings`, `cargo test`, `cargo deny check licenses bans sources`) läuft in `agent:check` nur, wenn sich Rust-Dateien geändert haben:
-      - Vergleich gegen `git merge-base HEAD origin/main`, plus Arbeitsbaum und untracked Dateien.
-      - Fehlt die Referenz oder ist `CI=true` gesetzt, läuft es immer.
-    - In CI läuft `rust:check` nur im Job `check` von `ci.yml`, mit `rust-cache` und angepasstem Timeout. Die anderen Jobs bauen nur.
+    - An der Wurzel gibt es keinen Rust-Workspace. Die Crate in `packages/ssh-native` hat ein eigenes `[workspace]`.
+    - Ein Root-Skript `rust:check` (`cargo fmt --check`, `clippy -D warnings`, `cargo test`, `cargo deny check licenses bans sources`) läuft in `agent:check`, gesteuert über `PARATIX_RUST_CHECK`:
+      - `always` läuft immer, `skip` nie, `auto` ist der Standard.
+      - Ein gesetzter Wert hat Vorrang vor `CI=true`. Ein unbekannter Wert bricht ab.
+      - `auto` läuft immer, wenn `CI=true` gesetzt oder `origin/main` nicht auflösbar ist. Sonst läuft es nur bei Änderungen an `packages/ssh-native/src/**`, `build.rs`, `Cargo.toml`, `Cargo.lock`, `rust-toolchain.toml` oder `deny.toml` gegenüber `git merge-base HEAD origin/main`, einschließlich Arbeitsbaum und untracked Dateien.
+    - In CI läuft `rust:check` nur im Job `check` von `ci.yml`, mit `PARATIX_RUST_CHECK=always`, `actions/cache` und angepasstem Timeout. `integration-check.yml` und `publish.yml` setzen `PARATIX_RUST_CHECK=skip` und bauen nur.
+    - Es kommen keine Actions von Dritten hinzu: `Swatinem/rust-cache` wird nicht verwendet, die Allowlist bleibt unverändert.
     - `packages/ssh-native` bekommt `tsconfig.json`/`tsconfig.typecheck.json` für `typecheck:packages`.
     - ESLint, oxlint, Prettier und cspell ignorieren `target/` und `npm/*`.
 
@@ -295,13 +300,13 @@ Als Workflow passt Feature. Die öffentliche API verhält sich gleich, aber es k
 | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
 | `docs/adr/0008-ssh-transport-russh-napi.md`                                                                                                                                | neu (A), englisch. Inhalt: Entscheidung, Alternativen, Spike-Ergebnisse, Plattformen (glibc 2.35, macOS-Mindestversion), Krypto-Backend, Fehlercodes, Aufteilung der Host-Zertifikate zwischen Rust und TS, `zeroize`-Grenzen, Advisory-Ausnahme, Update-Regel, Abbruchkriterien           |
 | `packages/ssh-native/` (`Cargo.toml`, `src/*.rs`, `package.json`, `index.js`, `index.d.ts`, `npm/<triple>/package.json`, `test/`, `tsconfig*.json`)                        | neu (B). napi-rs-Anbindung mit russh und russh-sftp sowie zeroize. Loader von Hand, `index.d.ts` erzeugt.                                                                                                                                                                                  |
-| `Cargo.toml` (Workspace), `rust-toolchain.toml`, `Cargo.lock`, `deny.toml`, `.gitignore`                                                                                   | neu bzw. geändert (B). Rust-Workspace, Toolchain-Pin, Prüfregeln, `target/`                                                                                                                                                                                                                |
+| `packages/ssh-native/` (`rust-toolchain.toml`, `Cargo.lock`, `deny.toml`), `.gitignore`                                                                                    | neu bzw. geändert (B). Crate mit eigenem `[workspace]`, kein Rust-Workspace an der Wurzel. Toolchain-Pin, Prüfregeln, `target/`                                                                                                                                                            |
 | `pnpm-workspace.yaml`                                                                                                                                                      | B/C2: Paket aufnehmen, `ssh2: false`, `cpu-features: false`                                                                                                                                                                                                                                |
 | `release-please-config.json`, `.release-please-manifest.json`                                                                                                              | B: linked-versions, `extra-files` für Plattform-Manifeste                                                                                                                                                                                                                                  |
 | `renovate.json`                                                                                                                                                            | B: Gruppe für `russh` und `russh-sftp`                                                                                                                                                                                                                                                     |
 | `eslint.config.ts`, `oxlint.config.ts`, `.prettierignore`, `cspell.json`                                                                                                   | B: Ignore-Regeln für `target/` und `npm/*`, neue Begriffe                                                                                                                                                                                                                                  |
-| `.github/workflows/ci.yml`                                                                                                                                                 | B: Rust-Toolchain, `rust-cache`, `rust:check`, Diff-Check für `index.d.ts`, Timeout                                                                                                                                                                                                        |
-| `.github/workflows/integration-check.yml`                                                                                                                                  | B: Rust-Toolchain, Anbindung bauen                                                                                                                                                                                                                                                         |
+| `.github/workflows/ci.yml`                                                                                                                                                 | B: Rust-Toolchain, `actions/cache`, `rust:check` mit `PARATIX_RUST_CHECK=always`, Diff-Check für `index.d.ts`, Timeout                                                                                                                                                                     |
+| `.github/workflows/integration-check.yml`                                                                                                                                  | B: Rust-Toolchain, Anbindung bauen, `PARATIX_RUST_CHECK=skip`                                                                                                                                                                                                                              |
 | `.github/workflows/rust-advisories.yml`                                                                                                                                    | neu (B): zeitgesteuert `cargo deny check advisories`, nicht blockierend, mit Meldung                                                                                                                                                                                                       |
 | `.github/workflows/publish.yml`                                                                                                                                            | B: Build-Matrix und Smoke-Test je Ziel mit dem Artefakt, das veröffentlicht wird. Binaries an `validate`, `verify` und `publish` weitergeben. `cancel-in-progress: false`                                                                                                                  |
 | `scripts/publishWorkspacePackages.mjs`, `scripts/publishWorkspacePackages.test.mjs`                                                                                        | B: neun Pakete mit Reihenfolge, Drift-Prüfung für Plattformverzeichnisse, `optionalDependencies` in der Staging-Kopie vor `pnpm pack`, Prüfung des Manifests im Tarball, `npm publish <tgz>`, Frische-Prüfung des `.node` gegen `src/*.rs`/`Cargo.*`, Idempotenz und Recovery              |
@@ -368,7 +373,7 @@ Als Workflow passt Feature. Die öffentliche API verhält sich gleich, aber es k
 
 **Arbeitspaket B – Paket `@paratix/ssh-native` (neues Issue, blockiert C2)**
 
-1. Rust-Workspace, `packages/ssh-native`, `deny.toml`, Toolchain-Pin und Tooling-Integration wie in den Entscheidungen 7, 10 und 11.
+1. `packages/ssh-native` mit eigenem `[workspace]`, `deny.toml`, Toolchain-Pin und Tooling-Integration wie in den Entscheidungen 7, 10 und 11.
 2. Die API aus Entscheidung 2 umsetzen. Signaturskizze, nur als Beispiel: `connect(options: ConnectOptions & { signal?: AbortSignal }, verifyHost: (info: HostKeyInfo) => Promise<void>): Promise<NativeSession>` und `scan(options: ScanOptions): Promise<HostKeyInfo>`. `NativeSession` bietet `exec`, `sftp`, `onDisconnect`, `close` und `destroy`.
 3. Fehlercodes, Panics, Secrets und Event-Loop wie in den Entscheidungen 5 und 6.
 4. Tests:
@@ -452,7 +457,7 @@ Nicht relevant: keine Oberfläche.
   - Ein Lauf bricht vor der ersten Secret-Abfrage mit der Meldung aus Entscheidung 7 ab.
   - `create-paratix` scaffoldet ohne Scan und gibt einen Hinweis aus.
 - **Optionale Abhängigkeiten ausgelassen** oder Lockfile von einer anderen Plattform: dieselbe Meldung, mit Hinweis auf die Ursache.
-- **Verifier wirft:** Derselbe `HostKeyVerificationError` erreicht den Aufrufer, und der Reconnect bricht ab. Antwortet der Callback nicht innerhalb von `readyTimeout`, kommt `HOST_KEY_REJECTED`.
+- **Verifier wirft:** Derselbe `HostKeyVerificationError` erreicht den Aufrufer, und der Reconnect bricht ab. Antwortet der Callback nicht innerhalb von `readyTimeout`, endet `connect()` mit `TIMEOUT`.
 - **Host mit `HostCertificate` vor E:** Ohne angebotene Zertifikat-Algorithmen präsentiert er seinen reinen Schlüssel. Pins und `known_hosts` greifen. Eine passende `@cert-authority`-Zeile führt weiter zur Ablehnung (R-0000204).
 - **Server öffnet einen Kanal:** wird abgelehnt. Nur `auth-agent` bei `agentForward: true` ist erlaubt.
 - **Abbruch während Exec:** `DISCONNECTED` führt in die Reconnect-Logik wie heute. Späte native Ereignisse werden verworfen.
@@ -490,7 +495,7 @@ Nicht relevant: keine Oberfläche.
 
 ## Validierungsplan
 
-- **Rust:** `pnpm rust:check` lokal bei Änderungen, in CI immer. Der Advisory-Job wird einmal manuell ausgelöst.
+- **Rust:** `pnpm rust:check` lokal bei Änderungen, in CI immer im Job `check` von `ci.yml`. Der Advisory-Job wird einmal manuell ausgelöst.
 - **Unit-Tests:** `pnpm agent:check`
   - `R-000xxxx` laufen gegen den Transport-Fake.
   - Die Adapter-Tests laufen gegen `ssh2` (C1) bzw. gegen ein gefälschtes natives Modul (C2).

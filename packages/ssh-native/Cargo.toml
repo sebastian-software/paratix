@@ -1,0 +1,40 @@
+[package]
+name = "paratix-ssh-native"
+version = "0.0.0"
+edition = "2021"
+publish = false
+license = "MIT"
+description = "napi-rs binding over russh and russh-sftp for Paratix (@paratix/ssh-native)"
+
+# Own workspace: the crate is not part of any workspace above it.
+[workspace]
+
+[lib]
+crate-type = ["cdylib"]
+
+[features]
+default = ["aws-lc-rs"]
+aws-lc-rs = ["russh/aws-lc-rs"]
+ring = ["russh/ring"]
+
+[dependencies]
+bytes = "1"
+futures = { version = "0.3", default-features = false, features = ["std"] }
+napi = { version = "3.15.0", default-features = false, features = ["napi8", "async", "tokio_rt"] }
+napi-derive = "3.6.13"
+russh = { version = "0.65.0", default-features = false, features = ["rsa"] }
+russh-sftp = "3.0.1"
+tokio = { version = "1", features = ["rt-multi-thread", "net", "time", "sync", "io-util", "macros"] }
+zeroize = "1"
+
+# Test builds only (resolver 2 keeps dev-dependency features out of the
+# shipped binary): `cargo test` links a plain executable, so napi resolves
+# its symbols at runtime instead of expecting Node to provide them.
+[dev-dependencies]
+napi = { version = "3.15.0", default-features = false, features = ["napi8", "async", "tokio_rt", "dyn-symbols"] }
+
+[build-dependencies]
+napi-build = "2"
+
+[profile.release]
+panic = "unwind"

@@ -5,3 +5,8 @@ pnpm-lock.yaml
 CHANGELOG.md
 renovate.json
 *.tmp.md
+# packages/ssh-native: cargo output, platform package manifests and the
+# napi-generated index.d.ts (diff-checked in CI instead).
+packages/ssh-native/target/
+packages/ssh-native/npm/
+packages/ssh-native/index.d.ts

@@ -1,0 +1,31 @@
+{
+  "name": "@paratix/ssh-native-linux-arm64-gnu",
+  "version": "0.0.0",
+  "description": "Prebuilt linux-arm64-gnu binary of @paratix/ssh-native (internal native SSH binding of Paratix)",
+  "license": "MIT",
+  "main": "ssh-native.linux-arm64-gnu.node",
+  "files": [
+    "ssh-native.linux-arm64-gnu.node"
+  ],
+  "os": [
+    "linux"
+  ],
+  "cpu": [
+    "arm64"
+  ],
+  "libc": [
+    "glibc"
+  ],
+  "engines": {
+    "node": ">=24.0.0"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/sebastian-software/paratix.git",
+    "directory": "packages/ssh-native"
+  },
+  "bugs": {
+    "url": "https://github.com/sebastian-software/paratix/issues"
+  },
+  "author": "Sebastian Fastner <s.fastner@sebastian-software.de>"
+}

@@ -1,0 +1,34 @@
+# cargo-deny 0.20 configuration of the native binding. Run from this
+# directory: `cargo deny --locked check licenses bans sources` (pnpm rust:check);
+# advisories are checked by a scheduled advisory workflow that arrives with
+# stage B3 of #255 (it does not exist yet).
+
+[graph]
+all-features = false
+
+[advisories]
+ignore = [
+  # Marvin attack: timing side channel in RSA decryption of the `rsa` crate.
+  # The binding never decrypts with RSA; russh uses `rsa` only to sign and to
+  # verify signatures, and no fixed release exists. Revisit with every russh
+  # update.
+  { id = "RUSTSEC-2023-0071", reason = "rsa is used for signatures only; no RSA decryption, no fixed release" },
+]
+
+[licenses]
+allow = ["MIT", "Apache-2.0", "BSD-3-Clause", "ISC", "Unicode-3.0"]
+confidence-threshold = 0.9
+
+[licenses.private]
+ignore = true
+
+[bans]
+multiple-versions = "allow"
+wildcards = "deny"
+allow-wildcard-paths = false
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
+allow-git = []

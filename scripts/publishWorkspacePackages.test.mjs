@@ -66,6 +66,9 @@ const FRESH_DIST_MTIME = 2000
 const STALE_SOURCE_MTIME = 1000
 const DEFAULT_PARATIX_FILES = ["dist", "llm-guide.md"]
 const DEFAULT_CREATE_PARATIX_FILES = ["dist"]
+const SSH_NATIVE_DIRECTORY_NAME = "ssh-native"
+const DEFAULT_PACKAGE_DIRECTORIES = [CREATE_PARATIX_NAME, PARATIX_NAME, SSH_NATIVE_DIRECTORY_NAME]
+const DRIFT_MESSAGE_FRAGMENT = "Workspace package drift detected"
 
 const toMockPath = (path) => {
   if (path === REPOSITORY_ROOT) return ""
@@ -77,6 +80,10 @@ function createFs(options) {
     createParatixFiles = DEFAULT_CREATE_PARATIX_FILES,
     createParatixVersion = DEFAULT_STABLE_VERSION,
     mtimes: mtimeOverrides = {},
+    // R-0000740 / #255: the `packages/` listing seen by the drift assertion.
+    // Defaults to the real workspace layout, including the known but not yet
+    // published packages/ssh-native.
+    packageDirectories = DEFAULT_PACKAGE_DIRECTORIES,
     paratixFiles = DEFAULT_PARATIX_FILES,
     paratixVersion = DEFAULT_STABLE_VERSION,
     // R-0000685: callers can force `maxMtimeMillisecondsUnder` to fail with
@@ -126,7 +133,7 @@ function createFs(options) {
     // the `packages/` directory at startup, so the mock has to surface
     // the workspace package directories alongside the per-package dist/
     // and src/ trees.
-    packages: ["create-paratix", "paratix"],
+    packages: packageDirectories,
     "packages/create-paratix": [
       "dist",
       PACKAGE_JSON_FILE,
@@ -148,6 +155,11 @@ function createFs(options) {
     ],
     "packages/paratix/dist": ["index.js"],
     "packages/paratix/src": ["index.ts"],
+    ...Object.fromEntries(
+      packageDirectories
+        .filter((name) => name !== CREATE_PARATIX_NAME && name !== PARATIX_NAME)
+        .map((name) => [`packages/${name}`, [PACKAGE_JSON_FILE]])
+    ),
   }
   const symlinkSet = new Set(symlinkPaths)
   const calls = []
@@ -1039,6 +1051,99 @@ describe("publishWorkspacePackages release validations", () => {
     assert.equal(caught.message.includes(symlinkedDistributionPath), true, caught.message)
     assert.equal(caught.message.includes("Materialize"), true, caught.message)
     assert.equal(hasNpmPublishCall(commandRunner.calls), false)
+  })
+})
+
+// R-0000740 / #255: packages/ssh-native is a declared workspace package that
+// this script does not publish until #255 B3. Its presence must not trip the
+// drift assertion, it must never be read, packed or published, and any other
+// undeclared or missing directory under packages/ must still abort before
+// registry side effects.
+const ABSOLUTE_SSH_NATIVE_DIRECTORY = join(ABSOLUTE_PACKAGES_DIRECTORY, SSH_NATIVE_DIRECTORY_NAME)
+
+// Match on the absolute package path and the npm name only: the repository
+// root itself may contain "ssh-native" (e.g. a worktree directory name).
+function isSshNativeArgument(argument) {
+  return (
+    typeof argument === "string" &&
+    (argument === ABSOLUTE_SSH_NATIVE_DIRECTORY ||
+      argument.startsWith(`${ABSOLUTE_SSH_NATIVE_DIRECTORY}/`) ||
+      argument.includes("@paratix/ssh-native"))
+  )
+}
+
+function touchesSshNative(calls) {
+  return calls.some((call) => call.some((argument) => isSshNativeArgument(argument)))
+}
+
+describe("publishWorkspacePackages workspace drift assertion", () => {
+  const sshNativeModes = [
+    { initiallyPublished: undefined, mode: "release" },
+    { initiallyPublished: undefined, mode: VERIFY_MODE },
+    { initiallyPublished: new Set([PARATIX_SPECIFIER]), mode: RECOVER_CREATE_PARATIX_MODE },
+  ]
+  for (const { initiallyPublished, mode } of sshNativeModes) {
+    it(`#255: accepts packages/ssh-native without touching it in ${mode} mode`, async () => {
+      const commandRunner = createCommandRunner(initiallyPublished)
+      const fs = createFs()
+
+      await publishWorkspacePackages({
+        availabilityDelayMilliseconds: 0,
+        availabilityRetries: 2,
+        commandRunner,
+        fs,
+        mode,
+      })
+
+      assert.equal(hasPackagesRootDirectoryRead(fs.calls), true)
+      assert.equal(touchesSshNative(fs.calls), false)
+      assert.equal(touchesSshNative(commandRunner.calls), false)
+    })
+  }
+
+  it("#255: keeps the release publish order limited to paratix and create-paratix", async () => {
+    const commandRunner = createCommandRunner()
+
+    await publishWorkspacePackages({
+      availabilityDelayMilliseconds: 0,
+      availabilityRetries: 2,
+      commandRunner,
+      fs: createFs(),
+    })
+
+    assert.deepEqual(publishDirectories(commandRunner.calls), [
+      ABSOLUTE_PARATIX_DIRECTORY,
+      ABSOLUTE_CREATE_PARATIX_DIRECTORY,
+    ])
+  })
+
+  it("#255: still aborts on an additional undeclared package directory", async () => {
+    const commandRunner = createCommandRunner()
+
+    await assertRejectsWithMessage(
+      publishWorkspacePackages({
+        commandRunner,
+        fs: createFs({ packageDirectories: [...DEFAULT_PACKAGE_DIRECTORIES, "unknown-package"] }),
+      }),
+      `${DRIFT_MESSAGE_FRAGMENT} (not declared in publishWorkspacePackages.mjs: unknown-package)`
+    )
+
+    assert.equal(commandRunner.calls.length, 0)
+  })
+
+  it("#255: aborts when the declared packages/ssh-native directory is missing", async () => {
+    const commandRunner = createCommandRunner()
+
+    await assertRejectsWithMessage(
+      publishWorkspacePackages({
+        commandRunner,
+        fs: createFs({ packageDirectories: [CREATE_PARATIX_NAME, PARATIX_NAME] }),
+        mode: VERIFY_MODE,
+      }),
+      `${DRIFT_MESSAGE_FRAGMENT} (missing from filesystem: ssh-native)`
+    )
+
+    assert.equal(commandRunner.calls.length, 0)
   })
 })
 

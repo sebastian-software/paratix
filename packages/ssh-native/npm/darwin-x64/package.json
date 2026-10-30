@@ -1,0 +1,28 @@
+{
+  "name": "@paratix/ssh-native-darwin-x64",
+  "version": "0.0.0",
+  "description": "Prebuilt darwin-x64 binary of @paratix/ssh-native (internal native SSH binding of Paratix)",
+  "license": "MIT",
+  "main": "ssh-native.darwin-x64.node",
+  "files": [
+    "ssh-native.darwin-x64.node"
+  ],
+  "os": [
+    "darwin"
+  ],
+  "cpu": [
+    "x64"
+  ],
+  "engines": {
+    "node": ">=24.0.0"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/sebastian-software/paratix.git",
+    "directory": "packages/ssh-native"
+  },
+  "bugs": {
+    "url": "https://github.com/sebastian-software/paratix/issues"
+  },
+  "author": "Sebastian Fastner <s.fastner@sebastian-software.de>"
+}
