@@ -16,10 +16,7 @@ jobs:
       contents: read
 
     runs-on: ubuntu-24.04
-    # Raised from 30: `pnpm build` now compiles the packages/ssh-native binding
-    # (aws-lc-rs and russh in release mode) on a cold cache. Re-measure from
-    # the CI runs and tighten once warm-cache timings are known.
-    timeout-minutes: 40
+    timeout-minutes: 30
     env:
       CARGO_TERM_COLOR: always
       # Only the CI job `check` runs `pnpm rust:check`; this job builds only.
