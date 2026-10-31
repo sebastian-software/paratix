@@ -28,6 +28,11 @@ const sharedDefine = {
   PACKAGE_VERSION: JSON.stringify(version),
 }
 
+// #257: the native SSH binding is loaded at runtime through a dynamic import
+// and ships as its own package with platform binaries. tsup bundles
+// devDependencies by default, so keep it external in both passes.
+const sharedExternal = ["@paratix/ssh-native"]
+
 // R-0000729: split the previous single-build config into two passes so the
 // `#!/usr/bin/env node` shebang only lands on the CLI bundle. The original
 // single-build configuration applied the banner globally and enabled
@@ -59,6 +64,7 @@ export default defineConfig([
     define: sharedDefine,
     dts: false,
     entry: { cli: "src/cli.ts" },
+    external: sharedExternal,
     format: ["esm"],
     // #75: ship no source maps in the published tarball. They are useless at
     // runtime for a CLI tool and previously accounted for ~70% of the package.
@@ -78,6 +84,7 @@ export default defineConfig([
       index: "src/index.ts",
       "modules/index": "src/modules/index.ts",
     },
+    external: sharedExternal,
     format: ["esm"],
     // #75: ship no source maps in the published tarball. They are useless at
     // runtime for a CLI tool and previously accounted for ~70% of the package.
