@@ -11,12 +11,6 @@ on:
     # Mondays 05:17 UTC (off the full hour to avoid the scheduler peak).
     - cron: "17 5 * * 1"
   workflow_dispatch:
-  # Temporary: workflow_dispatch needs the file on the default branch, so the
-  # pre-merge proof run is triggered by a push to the #255 B3 branch. Removed
-  # again before merge.
-  push:
-    branches:
-      - firmo/build/ssh-native-b3
 
 concurrency:
   group: ssh-native-advisories
