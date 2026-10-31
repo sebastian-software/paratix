@@ -9,18 +9,27 @@ import { userInfo } from "node:os"
 import { join } from "node:path"
 
 import { freePorts, waitForBanners } from "./net.mjs"
+import { runTool } from "./tools.mjs"
 
 export const LOCAL_SSHD = process.env.SSH_NATIVE_IT_SSHD ?? "/usr/sbin/sshd"
 const READY_TIMEOUT_MS = 15_000
 const STOP_TIMEOUT_MS = 5000
 
+// OpenSSH 9.8+ penalizes a source address after failed authentications and
+// pre-auth disconnects (PerSourcePenalties, on by default). The suite fails
+// on purpose and probes banners against one shared sshd, so 127.0.0.1 would
+// be refused for the rest of the run; older sshd rejects the option.
+const PENALTIES_OFF = "PerSourcePenalties no"
+
 /**
  * @param fixtures the generated fixtures
  * @param paths run directory, ports
+ * @param [extraOptions] global options inserted before the `Match` block
  * @returns the sshd_config text
  */
-function localConfig(fixtures, paths) {
+function localConfig(fixtures, paths, extraOptions = []) {
   const { mainPort, runDir, userCaPort } = paths
+  const extra = extraOptions.map((option) => `${option}\n`).join("")
   return `# Generated per run by test/integration/lib/local-target.mjs.
 Port ${mainPort}
 Port ${userCaPort}
@@ -40,13 +49,32 @@ MaxAuthTries 20
 MaxSessions 10
 Subsystem sftp internal-sftp
 LogLevel ERROR
-
+${extra}
 # H1: only the user CA vouches for keys on this port.
 Match LocalPort ${userCaPort}
   TrustedUserCAKeys ${fixtures.userCaPublic}
   AuthorizedKeysFile none
   AuthenticationMethods publickey
 `
+}
+
+/**
+ * Writes the config with penalties disabled when the sshd accepts that
+ * (`sshd -t`), otherwise without the option.
+ *
+ * @param configPath where the config is written
+ * @param fixtures the generated fixtures
+ * @param paths run directory, ports
+ */
+async function writeLocalConfig(configPath, fixtures, paths) {
+  await writeFile(configPath, localConfig(fixtures, paths, [PENALTIES_OFF]), { mode: 0o600 })
+  try {
+    await runTool(LOCAL_SSHD, ["-t", "-f", configPath])
+  } catch {
+    // Pre-9.8 sshd: "Bad configuration option". Any other config error
+    // surfaces again when the real start fails.
+    await writeFile(configPath, localConfig(fixtures, paths), { mode: 0o600 })
+  }
 }
 
 /**
@@ -79,7 +107,7 @@ export async function startLocalTarget(fixtures, options) {
   const [mainPort, userCaPort] = await freePorts(2)
   const ports = { mainPort, userCaPort }
   const configPath = join(runDir, "sshd_config")
-  await writeFile(configPath, localConfig(fixtures, { ...ports, runDir }), { mode: 0o600 })
+  await writeLocalConfig(configPath, fixtures, { ...ports, runDir })
   const logPath = join(runDir, "sshd.log")
   const log = createWriteStream(logPath)
   const child = spawn(LOCAL_SSHD, ["-D", "-e", "-f", configPath], {
