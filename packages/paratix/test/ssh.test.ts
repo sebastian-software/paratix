@@ -1,8 +1,5 @@
-import type { Client, SFTPWrapper } from "ssh2"
-
 import { execFile } from "node:child_process"
 import { createHash } from "node:crypto"
-import { EventEmitter } from "node:events"
 import { stat } from "node:fs/promises"
 import { homedir } from "node:os"
 import { join } from "node:path"
@@ -10,74 +7,45 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 
 import type * as KnownHosts from "../src/knownHosts.js"
 import type * as SshHelpers from "../src/sshHelpers.js"
-import type { TransportConnection } from "../src/transport.js"
-import type * as TransportSsh2 from "../src/transportSsh2.js"
 
 import { HostKeyVerificationError } from "../src/knownHosts.js"
 import { rsync } from "../src/modules/rsync.js"
 import { sftpDownload } from "../src/sftp.js"
-import {
-  SshConnectionImpl as OriginalSshConnectionImpl,
-  SudoInputUnsupportedError,
-  validateMktempPath,
-} from "../src/ssh.js"
+import { SshConnectionImpl, SudoInputUnsupportedError, validateMktempPath } from "../src/ssh.js"
 import {
   CAPTURE_TRUNCATION_MARKER,
-  cleanupFailedSshClient,
   collectStreamOutput,
   DEFAULT_MAX_OUTPUT_BYTES,
   shellQuote,
-  tryConnectOnPort as transportTryConnectOnPort,
 } from "../src/sshHelpers.js"
 import { promptTerminal } from "../src/terminal.js"
-import { fromSsh2Client } from "../src/transportSsh2.js"
+import {
+  type TransportConnection,
+  type TransportConnectOptions,
+  TransportError,
+} from "../src/transport.js"
+import {
+  type ChannelDelivery,
+  type ExecScenario,
+  FakeExecChannel,
+  FakeTransportConnection,
+} from "./helpers/fakeTransport.js"
 
-// Preserve the legacy mock's void result and raw-client event surface in setup.
-const tryConnectOnPort = transportTryConnectOnPort as unknown as (
-  parameters: Omit<SshHelpers.ConnectParameters, "client" | "hostVerifier"> & {
-    client: Client
-    hostVerifier?: (key: Buffer) => boolean
-  }
-) => Promise<void>
-
-// Keep the existing ssh2-shaped fixtures during the PR 2 setup-only migration.
-const { rawClients } = vi.hoisted(() => ({ rawClients: new WeakMap<object, Client>() }))
-function bridgeClient(client: Client) {
-  const connection = fromSsh2Client(client)
-  rawClients.set(connection, client)
-  return connection
-}
-
-class SshConnectionImpl extends OriginalSshConnectionImpl {
-  public constructor(...args: ConstructorParameters<typeof OriginalSshConnectionImpl>) {
-    super(...args)
-    const instance = this as unknown as Record<string, unknown>
-    let connection: unknown = null
-    Object.defineProperty(this, "client", {
-      configurable: true,
-      get: () => connection,
-      set(value: Client | null | TransportConnection) {
-        connection = value === null || "onDisconnect" in value ? value : bridgeClient(value)
-      },
-    })
-    const register = instance.registerConnectedClient as (
-      client: TransportConnection,
-      port: number
-    ) => void
-    instance.registerConnectedClient = (client: Client | TransportConnection, port: number) => {
-      register.call(this, "onDisconnect" in client ? client : bridgeClient(client), port)
-    }
-  }
-}
-
+const { attempts, closeTransport, connectTransport } = vi.hoisted(() => ({
+  attempts: [] as FakeTransportConnection[],
+  closeTransport: vi.fn(),
+  connectTransport: vi.fn<(options: TransportConnectOptions) => Promise<void>>(),
+}))
 vi.mock("../src/transportSsh2.js", async () => {
-  const actual = await vi.importActual<typeof TransportSsh2>("../src/transportSsh2.js")
-  const { Client } = await import("ssh2")
+  const { FakeTransportConnection: ConnectionFake } = await import("./helpers/fakeTransport.js")
   return {
-    ...actual,
     createSsh2Transport() {
-      const client = new Client()
-      return Object.assign(actual.fromSsh2Client(client), { emit: client.emit.bind(client) })
+      const connection = new ConnectionFake({
+        onClose: closeTransport,
+        onConnect: connectTransport,
+      })
+      attempts.push(connection)
+      return connection
     },
   }
 })
@@ -155,26 +123,12 @@ vi.mock("../src/knownHosts.js", async () => {
   }
 })
 
-vi.mock("../src/sftp.js", () => {
-  // oxlint-disable-next-line unicorn/consistent-function-scoping -- keep the helper inside the hoisted module mock factory
-  const legacyMock = (mock = vi.fn()) =>
-    new Proxy(mock, {
-      apply(target, thisArg, args: unknown[]) {
-        const first = args[0]
-        const translated = [...args]
-        if (typeof first === "object" && first !== null)
-          translated[0] = rawClients.get(first) ?? first
-        const result: unknown = Reflect.apply(target, thisArg, translated)
-        return result
-      },
-    })
-  return {
-    SFTP_TIMEOUT: 120_000,
-    sftpDownload: legacyMock(vi.fn().mockResolvedValue(null)),
-    sftpUpload: legacyMock(),
-    sftpUploadContent: legacyMock(),
-  }
-})
+vi.mock("../src/sftp.js", () => ({
+  SFTP_TIMEOUT: 120_000,
+  sftpDownload: vi.fn().mockResolvedValue(null),
+  sftpUpload: vi.fn(),
+  sftpUploadContent: vi.fn(),
+}))
 
 vi.mock("../src/sshHelpers.js", async () => {
   const actual = await vi.importActual<typeof SshHelpers>("../src/sshHelpers.js")
@@ -182,7 +136,6 @@ vi.mock("../src/sshHelpers.js", async () => {
     // R-0000668: re-export the capture truncation marker so ssh.readFile and
     // ssh.sha256 can detect output truncation against the real constant.
     CAPTURE_TRUNCATION_MARKER: actual.CAPTURE_TRUNCATION_MARKER,
-    cleanupFailedSshClient: vi.fn(actual.cleanupFailedSshClient),
     collectStreamOutput: vi.fn(actual.collectStreamOutput),
     // R-0000146: secretSink.maskScopedError performs `isCommandError` (the
     // #193 cross-bundle replacement for `instanceof CommandError`) when
@@ -196,7 +149,6 @@ vi.mock("../src/sshHelpers.js", async () => {
     normalizeSshCloseCode: actual.normalizeSshCloseCode,
     prepareSecrets: actual.prepareSecrets,
     shellQuote: actual.shellQuote,
-    tryConnectOnPort: vi.fn(),
     validateMode: actual.validateMode,
   }
 })
@@ -209,59 +161,28 @@ vi.mock("../src/terminal.js", () => ({
 // Helpers
 // ---------------------------------------------------------------------------
 
-type StreamWithStderr = {
-  close: () => void
-  end: (chunk?: Buffer | string) => StreamWithStderr
-  stderr: EventEmitter
-  write: (chunk: Buffer | string) => boolean
-} & EventEmitter
+function makeStream(): FakeExecChannel {
+  return new FakeExecChannel()
+}
 
-type ExecCallback = (error: Error | undefined, stream: StreamWithStderr) => void
-
-function makeStream(): StreamWithStderr {
-  const stream = new EventEmitter() as StreamWithStderr
-  stream.stderr = new EventEmitter()
-  stream.write = () => true
-  stream.close = () => {
-    /* noop */
-  }
-  stream.end = () => stream
-  vi.spyOn(stream, "write").mockImplementation(() => true)
-  vi.spyOn(stream, "close").mockImplementation(() => {
-    /* noop */
+function makeConnectionWithClose(endSpy: () => unknown): FakeTransportConnection {
+  return new FakeTransportConnection({
+    execute(_command, deliver) {
+      const channel = makeStream()
+      deliver(channel)
+      channel.finish(0)
+    },
+    onClose: endSpy,
   })
-  vi.spyOn(stream, "end").mockImplementation(() => stream)
-  return stream
 }
-
-function makeClientWithEnd(endSpy: ReturnType<typeof vi.fn>): Client {
-  return {
-    end: endSpy,
-    exec: vi.fn().mockImplementation((_command: string, callback: ExecCallback) => {
-      const stream = makeStream()
-      callback(undefined, stream)
-      stream.emit("close", 0)
-    }),
-    once: vi.fn(),
-    sftp: vi.fn().mockImplementation((callback: Parameters<Client["sftp"]>[0]) => {
-      callback(undefined, {} as SFTPWrapper)
-    }),
-  } as unknown as Client
-}
-
-function makeClientWithExecSpy(execSpy: ReturnType<typeof vi.fn>): Client {
-  return {
-    end: vi.fn(),
-    exec: execSpy,
-    once: vi.fn(),
-    sftp: vi.fn().mockImplementation((callback: Parameters<Client["sftp"]>[0]) => {
-      callback(undefined, {} as SFTPWrapper)
-    }),
-  } as unknown as Client
+function makeConnectionWithExecScenario(
+  execSpy: ReturnType<typeof vi.fn<ExecScenario>>
+): FakeTransportConnection {
+  return new FakeTransportConnection({ execute: execSpy })
 }
 
 function makeConnectedSsh(
-  client: Client,
+  client: FakeTransportConnection,
   options: { sudoPassword?: null | string; user?: string } = {}
 ): SshConnectionImpl {
   const user = options.user ?? "root"
@@ -275,28 +196,10 @@ function makeConnectedSsh(
     user,
   }
   const ssh = new SshConnectionImpl("1.2.3.4", config)
-  ;(ssh as unknown as Record<string, unknown>).client = client
-  return ssh
-}
-
-/**
- * Creates an SSH instance with a mock client that also has the connected-client
- * lifecycle listeners registered — exactly as tryConnectOnPorts() would do it.
- * This allows tests to simulate unexpected connection drop/error events.
- *
- * @param client - Mock SSH2 Client that also extends EventEmitter so 'close' can be emitted.
- * @param options - Optional connection options.
- * @param options.sudoPassword - Optional sudo password for the connection.
- * @param options.user - Optional SSH user (defaults to "root").
- * @returns A connected SshConnectionImpl with the 'close' listener attached.
- */
-function makeConnectedSshWithCloseListener(
-  client: Client & EventEmitter,
-  options: { sudoPassword?: null | string; user?: string } = {}
-): SshConnectionImpl {
-  const ssh = makeConnectedSsh(client, options)
   ;(
-    ssh as unknown as { registerConnectedClient: (client: Client, port: number) => void }
+    ssh as unknown as {
+      registerConnectedClient: (connection: TransportConnection, port: number) => void
+    }
   ).registerConnectedClient(client, 22)
   return ssh
 }
@@ -391,13 +294,13 @@ function stagedResponseData(command: string, options: StagedExecOptions): string
 function makeStagedExec(
   executedCommands: string[],
   options: StagedExecOptions
-): ReturnType<typeof vi.fn> {
-  return vi.fn().mockImplementation((command: string, callback: ExecCallback) => {
+): ReturnType<typeof vi.fn<ExecScenario>> {
+  return vi.fn().mockImplementation((command: string, callback: ChannelDelivery) => {
     executedCommands.push(command)
     const stream = makeStream()
-    callback(undefined, stream)
-    stream.emit("data", Buffer.from(stagedResponseData(command, options)))
-    stream.emit("close", 0)
+    callback(stream)
+    stream.stdout.send(Buffer.from(stagedResponseData(command, options)))
+    stream.finish(0)
   })
 }
 
@@ -428,22 +331,22 @@ function makeFinalizeSymlinkExec(
   executedCommands: string[],
   tempPath: string,
   resolvedMarker: string
-): ReturnType<typeof vi.fn> {
-  return vi.fn().mockImplementation((command: string, callback: ExecCallback) => {
+): ReturnType<typeof vi.fn<ExecScenario>> {
+  return vi.fn().mockImplementation((command: string, callback: ChannelDelivery) => {
     executedCommands.push(command)
     const stream = makeStream()
-    callback(undefined, stream)
+    callback(stream)
     if (command.includes("mktemp -p /tmp")) {
-      stream.emit("data", Buffer.from(tempPath))
-      stream.emit("close", 0)
+      stream.stdout.send(Buffer.from(tempPath))
+      stream.finish(0)
     } else if (command.includes("stat -c '%s'")) {
-      stream.emit("data", Buffer.from("11"))
-      stream.emit("close", 0)
+      stream.stdout.send(Buffer.from("11"))
+      stream.finish(0)
     } else if (command.includes("sha256sum")) {
-      stream.stderr.emit("data", Buffer.from(`paratix-symlink-component ${resolvedMarker}`))
-      stream.emit("close", 20)
+      stream.stderr.send(Buffer.from(`paratix-symlink-component ${resolvedMarker}`))
+      stream.finish(20)
     } else {
-      stream.emit("close", 0)
+      stream.finish(0)
     }
   })
 }
@@ -454,21 +357,21 @@ function makeFinalizeSymlinkExec(
 function makeFinalizeFailExec(
   executedCommands: string[],
   tempPath: string
-): ReturnType<typeof vi.fn> {
-  return vi.fn().mockImplementation((command: string, callback: ExecCallback) => {
+): ReturnType<typeof vi.fn<ExecScenario>> {
+  return vi.fn().mockImplementation((command: string, callback: ChannelDelivery) => {
     executedCommands.push(command)
     const stream = makeStream()
-    callback(undefined, stream)
+    callback(stream)
     if (command.includes("mktemp")) {
-      stream.emit("data", Buffer.from(tempPath))
-      stream.emit("close", 0)
+      stream.stdout.send(Buffer.from(tempPath))
+      stream.finish(0)
     } else if (command.includes("stat -c '%s'")) {
-      stream.emit("data", Buffer.from("11"))
-      stream.emit("close", 0)
+      stream.stdout.send(Buffer.from("11"))
+      stream.finish(0)
     } else if (command.includes("sha256sum")) {
-      stream.emit("close", 1)
+      stream.finish(1)
     } else {
-      stream.emit("close", 0)
+      stream.finish(0)
     }
   })
 }
@@ -476,12 +379,12 @@ function makeFinalizeFailExec(
 // #82: exec spy for the root path where the combined prep script's folded
 // dirname-symlink guard rejects a symlinked destination component before any
 // staged temp is created.
-function makePrepSymlinkExec(resolvedMarker: string): ReturnType<typeof vi.fn> {
-  return vi.fn().mockImplementationOnce((_command: string, callback: ExecCallback) => {
+function makePrepSymlinkExec(resolvedMarker: string): ReturnType<typeof vi.fn<ExecScenario>> {
+  return vi.fn().mockImplementationOnce((_command: string, callback: ChannelDelivery) => {
     const stream = makeStream()
-    callback(undefined, stream)
-    stream.stderr.emit("data", Buffer.from(`paratix-symlink-component ${resolvedMarker}`))
-    stream.emit("close", 20)
+    callback(stream)
+    stream.stderr.send(Buffer.from(`paratix-symlink-component ${resolvedMarker}`))
+    stream.finish(20)
   })
 }
 
@@ -517,13 +420,13 @@ function makeSshInstanceWithAgent(
 function makeExecHandler(
   executedCommands: string[],
   output: string
-): (_command: string, callback: ExecCallback) => void {
-  return (cmd: string, callback: ExecCallback) => {
+): (_command: string, callback: ChannelDelivery) => void {
+  return (cmd: string, callback: ChannelDelivery) => {
     executedCommands.push(cmd)
     const stream = makeStream()
-    callback(undefined, stream)
-    stream.emit("data", Buffer.from(output))
-    stream.emit("close", 0)
+    callback(stream)
+    stream.stdout.send(Buffer.from(output))
+    stream.finish(0)
   }
 }
 
@@ -574,7 +477,7 @@ describe("SshConnectionImpl", () => {
   describe("disconnect", () => {
     it("calls client.end() when connected", () => {
       const endSpy = vi.fn()
-      const client = makeClientWithEnd(endSpy)
+      const client = makeConnectionWithClose(endSpy)
       const ssh = makeConnectedSsh(client)
 
       ssh.disconnect()
@@ -584,46 +487,18 @@ describe("SshConnectionImpl", () => {
 
     it("is idempotent — calling twice does not throw", () => {
       const endSpy = vi.fn()
-      const client = makeClientWithEnd(endSpy)
+      const client = makeConnectionWithClose(endSpy)
       const ssh = makeConnectedSsh(client)
 
       ssh.disconnect()
       ssh.disconnect()
 
       expect(endSpy).toHaveBeenCalledOnce()
-    })
-
-    it("calls client.destroy() as a fallback when end() does not close the socket (R-0000209)", () => {
-      vi.useFakeTimers()
-      const endSpy = vi.fn()
-      const destroySpy = vi.fn()
-      const client = {
-        destroy: destroySpy,
-        end: endSpy,
-        exec: vi.fn(),
-        // once("close", ...) is called by tearDownClient to cancel the fallback
-        // when end() completes cleanly. In this test we never emit the close event
-        // so the handler is registered but never invoked — the timeout fires.
-        once: vi.fn(),
-        sftp: vi.fn(),
-      } as unknown as Client
-      const ssh = makeConnectedSsh(client)
-
-      ssh.disconnect()
-
-      expect(endSpy).toHaveBeenCalledOnce()
-      // destroy is scheduled, not synchronous
-      expect(destroySpy).not.toHaveBeenCalled()
-
-      vi.advanceTimersByTime(5000)
-
-      expect(destroySpy).toHaveBeenCalledOnce()
-      vi.useRealTimers()
     })
 
     it("resets connectedPort, authMethod and agentSocket so getConnectionInfo() reflects no live connection (R-0000236)", () => {
       const endSpy = vi.fn()
-      const client = makeClientWithEnd(endSpy)
+      const client = makeConnectionWithClose(endSpy)
       const ssh = makeConnectedSsh(client)
       // Simulate a connection that authenticated via the SSH agent on a
       // non-default port — exactly what registerConnectedClient() and the
@@ -654,21 +529,19 @@ describe("SshConnectionImpl", () => {
       // Promises are silently dropped and never settled, which causes callers to
       // hang indefinitely.
       //
-      // The correct behavior (already implemented in the 'close' event handler
-      // in tryConnectOnPorts) is to iterate over pendingRejects, call each
-      // function with an Error, and then clear the set.
-      const execSpy = vi.fn().mockImplementation((_command: string, callback: ExecCallback) => {
+      // Explicit disconnect must reject pending operations just as the transport
+      // disconnect subscription does: call each pending reject function with
+      // an Error before clearing the set.
+      const execSpy = vi.fn().mockImplementation((_command: string, callback: ChannelDelivery) => {
         const stream = makeStream()
-        callback(undefined, stream)
+        callback(stream)
         // Stream intentionally never emits 'close' — the exec() Promise stays pending
       })
 
-      const client = {
-        end: vi.fn(),
-        exec: execSpy,
-        once: vi.fn(),
-        sftp: vi.fn(),
-      } as unknown as Client
+      const client = new FakeTransportConnection({
+        execute: execSpy,
+        onClose: vi.fn(),
+      })
 
       const ssh = makeConnectedSsh(client)
 
@@ -694,31 +567,31 @@ describe("SshConnectionImpl", () => {
       // disconnectTransport, a delayed close event from the OLD client would
       // run rejectPending against the NEW connection's pendingRejects set and
       // reject its in-flight exec() with "SSH connection closed unexpectedly".
-      const oldClientEmitter = new EventEmitter()
-      const oldClient = Object.assign(oldClientEmitter, {
-        end: vi.fn(),
-        exec: vi.fn(),
-        sftp: vi.fn(),
-      }) as unknown as Client & EventEmitter
+      const oldClient = new FakeTransportConnection({
+        execute: vi.fn(),
+        onClose: vi.fn(),
+      })
 
-      const ssh = makeConnectedSshWithCloseListener(oldClient, {})
+      const ssh = makeConnectedSsh(oldClient, {})
 
       // Simulate disconnect followed by a fresh connection on a NEW client.
       ssh.disconnect()
 
-      const newExecSpy = vi.fn().mockImplementation((_command: string, callback: ExecCallback) => {
-        const stream = makeStream()
-        callback(undefined, stream)
-        // Stream intentionally never emits 'close' — the exec() Promise stays pending
+      const newExecSpy = vi
+        .fn()
+        .mockImplementation((_command: string, callback: ChannelDelivery) => {
+          const stream = makeStream()
+          callback(stream)
+          // Stream intentionally never emits 'close' — the exec() Promise stays pending
+        })
+      const newClient = new FakeTransportConnection({
+        execute: newExecSpy,
+        onClose: vi.fn(),
       })
-      const newClientEmitter = new EventEmitter()
-      const newClient = Object.assign(newClientEmitter, {
-        end: vi.fn(),
-        exec: newExecSpy,
-        sftp: vi.fn(),
-      }) as unknown as Client & EventEmitter
       ;(
-        ssh as unknown as { registerConnectedClient: (client: Client, port: number) => void }
+        ssh as unknown as {
+          registerConnectedClient: (client: FakeTransportConnection, port: number) => void
+        }
       ).registerConnectedClient(newClient, 22)
 
       const execPromise = ssh.exec("sleep infinity")
@@ -734,7 +607,7 @@ describe("SshConnectionImpl", () => {
       // this would reject the new connection's pending exec() with
       // "SSH connection closed unexpectedly". With the fix, the listener has
       // been removed so the emit is a no-op.
-      oldClientEmitter.emit("close")
+      oldClient.disconnect()
 
       // Allow microtasks to settle.
       await Promise.resolve()
@@ -744,29 +617,29 @@ describe("SshConnectionImpl", () => {
     })
 
     it("does not reject pending operations of a fresh client when an old client emits a delayed 'error' event after disconnect", async () => {
-      const oldClientEmitter = new EventEmitter()
-      const oldClient = Object.assign(oldClientEmitter, {
-        end: vi.fn(),
-        exec: vi.fn(),
-        sftp: vi.fn(),
-      }) as unknown as Client & EventEmitter
+      const oldClient = new FakeTransportConnection({
+        execute: vi.fn(),
+        onClose: vi.fn(),
+      })
 
-      const ssh = makeConnectedSshWithCloseListener(oldClient, {})
+      const ssh = makeConnectedSsh(oldClient, {})
 
       ssh.disconnect()
 
-      const newExecSpy = vi.fn().mockImplementation((_command: string, callback: ExecCallback) => {
-        const stream = makeStream()
-        callback(undefined, stream)
+      const newExecSpy = vi
+        .fn()
+        .mockImplementation((_command: string, callback: ChannelDelivery) => {
+          const stream = makeStream()
+          callback(stream)
+        })
+      const newClient = new FakeTransportConnection({
+        execute: newExecSpy,
+        onClose: vi.fn(),
       })
-      const newClientEmitter = new EventEmitter()
-      const newClient = Object.assign(newClientEmitter, {
-        end: vi.fn(),
-        exec: newExecSpy,
-        sftp: vi.fn(),
-      }) as unknown as Client & EventEmitter
       ;(
-        ssh as unknown as { registerConnectedClient: (client: Client, port: number) => void }
+        ssh as unknown as {
+          registerConnectedClient: (client: FakeTransportConnection, port: number) => void
+        }
       ).registerConnectedClient(newClient, 22)
 
       const execPromise = ssh.exec("sleep infinity")
@@ -777,7 +650,7 @@ describe("SshConnectionImpl", () => {
       await Promise.resolve()
 
       expect(() => {
-        oldClientEmitter.emit("error", new Error("late teardown error"))
+        oldClient.disconnect(new TransportError("DISCONNECTED", new Error("late teardown error")))
       }).not.toThrow()
       await Promise.resolve()
       await Promise.resolve()
@@ -820,7 +693,7 @@ describe("SshConnectionImpl", () => {
       const ssh = makeSshInstance({ ports: [22, 2222] })
 
       // First port mutates the runtime port array. Subsequent ports just record.
-      vi.mocked(tryConnectOnPort)
+      vi.mocked(connectTransport)
         .mockImplementationOnce(async ({ port }) => {
           await Promise.resolve()
           visitedPorts.push(port)
@@ -866,7 +739,7 @@ describe("SshConnectionImpl", () => {
     it("succeeds after N failed connect attempts", async () => {
       vi.useFakeTimers()
 
-      vi.mocked(tryConnectOnPort)
+      vi.mocked(connectTransport)
         .mockRejectedValueOnce(new Error("Connection refused (attempt 1)"))
         .mockRejectedValueOnce(new Error("Connection refused (attempt 2)"))
         .mockResolvedValueOnce()
@@ -882,13 +755,13 @@ describe("SshConnectionImpl", () => {
 
       await reconnectPromise
 
-      expect(tryConnectOnPort).toHaveBeenCalledTimes(3)
+      expect(connectTransport).toHaveBeenCalledTimes(3)
     })
 
     it("throws after deadline when all connect attempts fail", async () => {
       vi.useFakeTimers()
 
-      vi.mocked(tryConnectOnPort).mockRejectedValue(new Error("Connection refused"))
+      vi.mocked(connectTransport).mockRejectedValue(new Error("Connection refused"))
 
       const ssh = makeSshInstance({ reconnectTimeout: 5000 })
 
@@ -913,7 +786,7 @@ describe("SshConnectionImpl", () => {
     it("resets connectedPort to 0 after a fully failed reconnect (R-0000236)", async () => {
       vi.useFakeTimers()
 
-      vi.mocked(tryConnectOnPort).mockRejectedValue(new Error("Connection refused"))
+      vi.mocked(connectTransport).mockRejectedValue(new Error("Connection refused"))
 
       const ssh = makeSshInstance({ maxReconnectAttempts: 2, reconnectTimeout: 300_000 })
       // Pretend a previous connection on port 22 was live so that
@@ -945,7 +818,7 @@ describe("SshConnectionImpl", () => {
     it("throws after maxReconnectAttempts when all attempts fail before timeout", async () => {
       vi.useFakeTimers()
 
-      vi.mocked(tryConnectOnPort).mockRejectedValue(new Error("Connection refused"))
+      vi.mocked(connectTransport).mockRejectedValue(new Error("Connection refused"))
 
       // Use a high timeout so it never triggers — only the attempt limit should fire
       const ssh = makeSshInstance({ maxReconnectAttempts: 3, reconnectTimeout: 300_000 })
@@ -966,7 +839,7 @@ describe("SshConnectionImpl", () => {
       await expect(reconnectPromise).rejects.toThrow(
         /Failed to reconnect to 1\.2\.3\.4 after 3 attempts/v
       )
-      expect(tryConnectOnPort).toHaveBeenCalledTimes(3)
+      expect(connectTransport).toHaveBeenCalledTimes(3)
     })
 
     // Issue #73: without an explicit maxReconnectAttempts the attempt count is
@@ -976,7 +849,7 @@ describe("SshConnectionImpl", () => {
     it("keeps retrying within the whole window without a fixed attempt cap", async () => {
       vi.useFakeTimers()
 
-      vi.mocked(tryConnectOnPort).mockRejectedValue(new Error("Connection refused"))
+      vi.mocked(connectTransport).mockRejectedValue(new Error("Connection refused"))
 
       const ssh = makeSshInstance({ reconnectTimeout: 300_000 })
 
@@ -998,7 +871,7 @@ describe("SshConnectionImpl", () => {
         /Failed to reconnect to 1\.2\.3\.4 after \d+ attempts \(timeout: 300000ms\)/v
       )
       // The old fixed cap of 10 must no longer bound a 300 s window.
-      expect(vi.mocked(tryConnectOnPort).mock.calls.length).toBeGreaterThan(10)
+      expect(vi.mocked(connectTransport).mock.calls.length).toBeGreaterThan(10)
     })
 
     // Issue #73: the reboot path passes a longer `defaultTimeout`. It must take
@@ -1007,7 +880,7 @@ describe("SshConnectionImpl", () => {
     it("applies options.defaultTimeout as the reconnect window when reconnectTimeout is unset", async () => {
       vi.useFakeTimers()
 
-      vi.mocked(tryConnectOnPort).mockRejectedValue(new Error("Connection refused"))
+      vi.mocked(connectTransport).mockRejectedValue(new Error("Connection refused"))
 
       const ssh = makeSshInstance({})
 
@@ -1029,7 +902,7 @@ describe("SshConnectionImpl", () => {
     it("lets an explicit reconnectTimeout override options.defaultTimeout", async () => {
       vi.useFakeTimers()
 
-      vi.mocked(tryConnectOnPort).mockRejectedValue(new Error("Connection refused"))
+      vi.mocked(connectTransport).mockRejectedValue(new Error("Connection refused"))
 
       // An explicit (short) window must win over the longer reboot default.
       const ssh = makeSshInstance({ reconnectTimeout: 5000 })
@@ -1053,10 +926,10 @@ describe("SshConnectionImpl", () => {
       const initialKey = Buffer.from("initial-host-key")
       const differentKey = Buffer.from("different-key!!")
 
-      // Mock tryConnectOnPort to invoke hostVerifier with the provided key
-      vi.mocked(tryConnectOnPort).mockImplementation(async (parameters) => {
+      // Mock connectTransport to invoke hostVerifier with the provided key
+      vi.mocked(connectTransport).mockImplementation(async (parameters) => {
         await Promise.resolve()
-        parameters.hostVerifier?.(differentKey)
+        await parameters.verifyHostKey(differentKey)
       })
 
       const ssh = makeSshInstance({ reconnectTimeout: 300_000 })
@@ -1076,9 +949,9 @@ describe("SshConnectionImpl", () => {
       const initialKey = Buffer.from("initial-host-key")
       const differentKey = Buffer.from("different-key!!")
 
-      vi.mocked(tryConnectOnPort).mockImplementation(async (parameters) => {
+      vi.mocked(connectTransport).mockImplementation(async (parameters) => {
         await Promise.resolve()
-        parameters.hostVerifier?.(differentKey)
+        await parameters.verifyHostKey(differentKey)
       })
 
       const ssh = makeSshInstance({ reconnectTimeout: 300_000 })
@@ -1096,9 +969,9 @@ describe("SshConnectionImpl", () => {
     it("reconnects successfully when host key matches pinned key", async () => {
       const hostKey = Buffer.from("stable-host-key")
 
-      vi.mocked(tryConnectOnPort).mockImplementation(async (parameters) => {
+      vi.mocked(connectTransport).mockImplementation(async (parameters) => {
         await Promise.resolve()
-        parameters.hostVerifier?.(hostKey)
+        await parameters.verifyHostKey(hostKey)
       })
 
       const ssh = makeSshInstance({ reconnectTimeout: 300_000 })
@@ -1108,7 +981,7 @@ describe("SshConnectionImpl", () => {
 
       await ssh.reconnect()
 
-      expect(tryConnectOnPort).toHaveBeenCalledTimes(1)
+      expect(connectTransport).toHaveBeenCalledTimes(1)
     })
 
     it("aborts immediately without retry when connect throws SSH connection closed — R-003 regression", async () => {
@@ -1132,7 +1005,7 @@ describe("SshConnectionImpl", () => {
       // options, the signal installed by an earlier `connect({ abortSignal })`
       // call was overwritten with `undefined` and the graceful-shutdown path
       // could no longer abort interactive prompts after a reconnect.
-      vi.mocked(tryConnectOnPort).mockResolvedValue()
+      vi.mocked(connectTransport).mockResolvedValue()
 
       const abortController = new AbortController()
       const ssh = makeSshInstance({ reconnectTimeout: 300_000 })
@@ -1149,7 +1022,7 @@ describe("SshConnectionImpl", () => {
       // The fix uses `options?.abortSignal !== undefined` to gate the
       // assignment, so calling connect() without an abortSignal property must
       // leave the previously cached signal in place.
-      vi.mocked(tryConnectOnPort).mockResolvedValue()
+      vi.mocked(connectTransport).mockResolvedValue()
 
       const abortController = new AbortController()
       const ssh = makeSshInstance({ reconnectTimeout: 300_000 })
@@ -1181,7 +1054,7 @@ describe("SshConnectionImpl", () => {
 
       let connectCalls = 0
       // First attempt: queue the abort, drive the next sleep delay to ~0 ms.
-      vi.mocked(tryConnectOnPort)
+      vi.mocked(connectTransport)
         .mockImplementationOnce(async () => {
           await Promise.resolve()
           connectCalls += 1
@@ -1212,13 +1085,13 @@ describe("SshConnectionImpl", () => {
     it("aborts an in-flight reconnect attempt without retrying", async () => {
       const abortController = new AbortController()
       const abortError = new Error("Interrupted by SIGINT")
-      vi.mocked(tryConnectOnPort).mockResolvedValueOnce()
+      vi.mocked(connectTransport).mockResolvedValueOnce()
 
       const ssh = makeSshInstance({ maxReconnectAttempts: 3, reconnectTimeout: 300_000 })
       await ssh.connect({ abortSignal: abortController.signal })
 
-      vi.mocked(tryConnectOnPort).mockImplementationOnce(
-        async ({ abortSignal }) =>
+      vi.mocked(connectTransport).mockImplementationOnce(
+        async ({ signal: abortSignal }) =>
           new Promise<void>((_resolve, reject) => {
             abortSignal?.addEventListener(
               "abort",
@@ -1235,21 +1108,21 @@ describe("SshConnectionImpl", () => {
         /* handled below */
       })
       await vi.waitFor(() => {
-        expect(tryConnectOnPort).toHaveBeenCalledTimes(2)
+        expect(connectTransport).toHaveBeenCalledTimes(2)
       })
 
       abortController.abort(abortError)
 
       await expect(reconnectPromise).rejects.toThrow("Interrupted by SIGINT")
-      expect(tryConnectOnPort).toHaveBeenCalledTimes(2)
+      expect(connectTransport).toHaveBeenCalledTimes(2)
     })
 
     it("pins host key on initial connection", async () => {
       const hostKey = Buffer.from("new-host-key")
 
-      vi.mocked(tryConnectOnPort).mockImplementation(async (parameters) => {
+      vi.mocked(connectTransport).mockImplementation(async (parameters) => {
         await Promise.resolve()
-        parameters.hostVerifier?.(hostKey)
+        await parameters.verifyHostKey(hostKey)
       })
 
       const ssh = makeSshInstance()
@@ -1259,23 +1132,19 @@ describe("SshConnectionImpl", () => {
       expect((ssh as any).pinnedHostKey).toStrictEqual(hostKey)
     })
 
-    it("releases ssh2 Client after every failed port connect attempt (R-0000039 regression)", async () => {
-      // R-0000039: tryConnectOnPort owns the lifecycle of the Client during
-      // the connect handshake — its internal handlers (handleAbort,
-      // handleError, handleTimeout) must release listeners and TCP sockets
-      // so failed reconnects do not leak. Simulate a connect error that
-      // forwards through tryConnectOnPort's internal cleanup and assert the
-      // cleanup helper was invoked once per attempt.
+    it("creates one transport attempt per port after connection failures (R-0000039 regression)", async () => {
+      // R-0000039 / R-0000198: a rejected connect attempt owns its cleanup.
+      // The policy must create one transport per port and must not close an
+      // already-released failed connection. Raw listener and socket cleanup
+      // is covered by the adapter tests in transportSsh2.test.ts.
       vi.useFakeTimers()
-      vi.mocked(tryConnectOnPort).mockImplementation(async (parameters) => {
-        // Mirror the production handleError contract: clean the client up
-        // before rejecting, since R-0000198 made tryConnectOnPorts trust
-        // the inner connect to handle cleanup on rejection.
-        cleanupFailedSshClient(parameters.client)
+      vi.mocked(connectTransport).mockImplementation(async () => {
+        // The fake destroys its connection on rejection, matching the adapter's
+        // cleanup ownership; the policy only proceeds to the next port.
         await Promise.resolve()
         throw new Error("Connection refused")
       })
-      vi.mocked(cleanupFailedSshClient).mockClear()
+      vi.mocked(closeTransport).mockClear()
 
       const ssh = makeSshInstance({
         maxReconnectAttempts: 2,
@@ -1296,9 +1165,16 @@ describe("SshConnectionImpl", () => {
       await expect(reconnectPromise).rejects.toThrow(
         /Failed to reconnect to 1\.2\.3\.4 after 2 attempts/v
       )
-      // 2 attempts * 3 ports each = 6 cleanup calls (one per failed Client),
-      // performed by the inner connect helper per R-0000198.
-      expect(cleanupFailedSshClient).toHaveBeenCalledTimes(2 * 3)
+      // 2 attempts * 3 ports each = 6 independent transport attempts.
+      // Each rejected fake destroys itself once; the policy never closes it.
+      expect(connectTransport).toHaveBeenCalledTimes(6)
+      expect(attempts.slice(-6).map((attempt) => attempt.connect.mock.calls.length)).toStrictEqual([
+        1, 1, 1, 1, 1, 1,
+      ])
+      expect(closeTransport).not.toHaveBeenCalled()
+      expect(attempts.slice(-6).map((attempt) => attempt.destroy.mock.calls.length)).toStrictEqual([
+        1, 1, 1, 1, 1, 1,
+      ])
     })
 
     it("backoff sleep does not exceed remaining time before deadline — R-004 regression", async () => {
@@ -1309,7 +1185,7 @@ describe("SshConnectionImpl", () => {
       // reject very close to the reconnectTimeout, not at reconnectTimeout + 30 000.
       vi.useFakeTimers()
 
-      vi.mocked(tryConnectOnPort).mockRejectedValue(new Error("Connection refused"))
+      vi.mocked(connectTransport).mockRejectedValue(new Error("Connection refused"))
 
       const reconnectTimeout = 3000
       const ssh = makeSshInstance({ reconnectTimeout })
@@ -1339,7 +1215,7 @@ describe("SshConnectionImpl", () => {
     it("passes the remaining reconnect deadline to each port attempt", async () => {
       vi.useFakeTimers()
 
-      vi.mocked(tryConnectOnPort)
+      vi.mocked(connectTransport)
         .mockImplementationOnce(async () => {
           await vi.advanceTimersByTimeAsync(1500)
           throw new Error("Connection timeout on port 22")
@@ -1358,16 +1234,16 @@ describe("SshConnectionImpl", () => {
       })
 
       await vi.waitFor(() => {
-        expect(tryConnectOnPort).toHaveBeenCalledTimes(2)
+        expect(connectTransport).toHaveBeenCalledTimes(2)
       })
       await vi.advanceTimersByTimeAsync(1000)
 
       await expect(reconnectPromise).rejects.toThrow(
         /Failed to reconnect to 1\.2\.3\.4 after 1 attempts \(timeout: 2500ms\)/v
       )
-      const firstAttempt = vi.mocked(tryConnectOnPort).mock.calls[0][0]
-      const secondAttempt = vi.mocked(tryConnectOnPort).mock.calls[1][0]
-      const firstReadyTimeout = firstAttempt.readyTimeout!
+      const firstAttempt = vi.mocked(connectTransport).mock.calls[0][0]
+      const secondAttempt = vi.mocked(connectTransport).mock.calls[1][0]
+      const firstReadyTimeout = firstAttempt.readyTimeout
       expect(firstReadyTimeout).toBeGreaterThan(0)
       expect(firstReadyTimeout).toBeLessThanOrEqual(2500)
       expect(secondAttempt.readyTimeout).toBe(firstReadyTimeout - 1500)
@@ -1397,14 +1273,14 @@ describe("SshConnectionImpl", () => {
     })
 
     it("connects via SSH agent when privateKey is omitted and SSH_AUTH_SOCK is set", async () => {
-      vi.mocked(tryConnectOnPort).mockResolvedValueOnce()
+      vi.mocked(connectTransport).mockResolvedValueOnce()
       process.env.SSH_AUTH_SOCK = AGENT_SOCKET
 
       const ssh = makeSshInstanceWithAgent()
       await ssh.connect()
 
-      expect(tryConnectOnPort).toHaveBeenCalledOnce()
-      const [callArgs] = vi.mocked(tryConnectOnPort).mock.calls[0]
+      expect(connectTransport).toHaveBeenCalledOnce()
+      const [callArgs] = vi.mocked(connectTransport).mock.calls[0]
       expect(callArgs.agent).toBe(AGENT_SOCKET)
       expect(callArgs.privateKey).toBeUndefined()
     })
@@ -1416,11 +1292,11 @@ describe("SshConnectionImpl", () => {
       await expect(ssh.connect()).rejects.toThrow(
         "No privateKey configured and SSH_AUTH_SOCK is not set"
       )
-      expect(tryConnectOnPort).not.toHaveBeenCalled()
+      expect(connectTransport).not.toHaveBeenCalled()
     })
 
     it("falls back directly to interactive password auth when privateKey is omitted, SSH_AUTH_SOCK is not set and passwordFallback is enabled", async () => {
-      vi.mocked(tryConnectOnPort).mockResolvedValueOnce()
+      vi.mocked(connectTransport).mockResolvedValueOnce()
       vi.mocked(promptTerminal).mockResolvedValueOnce("secret-password")
 
       const ssh = makeSshInstanceWithAgent({ passwordFallback: true })
@@ -1428,8 +1304,8 @@ describe("SshConnectionImpl", () => {
       await ssh.connect()
 
       expect(promptTerminal).toHaveBeenCalledOnce()
-      expect(tryConnectOnPort).toHaveBeenCalledOnce()
-      const [callArgs] = vi.mocked(tryConnectOnPort).mock.calls[0]
+      expect(connectTransport).toHaveBeenCalledOnce()
+      const [callArgs] = vi.mocked(connectTransport).mock.calls[0]
       expect(callArgs.agent).toBeUndefined()
       expect(callArgs.password).toBe("secret-password")
       expect(callArgs.privateKey).toBeUndefined()
@@ -1450,7 +1326,7 @@ describe("SshConnectionImpl", () => {
       vi.mocked(promptTerminal).mockResolvedValueOnce(password)
 
       let registeredDuringConnect: string[] = []
-      vi.mocked(tryConnectOnPort).mockImplementationOnce(async () => {
+      vi.mocked(connectTransport).mockImplementationOnce(async () => {
         // Snapshot the sink while the connect attempt is in flight.
         await Promise.resolve()
         registeredDuringConnect = getRegisteredSecrets()
@@ -1473,7 +1349,7 @@ describe("SshConnectionImpl", () => {
       const { getRegisteredSecrets } = await import("../src/secretSink.js")
       const password = "leak-prone-password-2"
       vi.mocked(promptTerminal).mockResolvedValueOnce(password)
-      vi.mocked(tryConnectOnPort).mockRejectedValueOnce(new Error("Connection refused"))
+      vi.mocked(connectTransport).mockRejectedValueOnce(new Error("Connection refused"))
 
       const ssh = makeSshInstanceWithAgent({ passwordFallback: true })
 
@@ -1487,7 +1363,7 @@ describe("SshConnectionImpl", () => {
       // however no agent connect was attempted. With the fix, the error names
       // both root causes (no agent + failed password auth).
       vi.mocked(promptTerminal).mockResolvedValueOnce("wrong-password")
-      vi.mocked(tryConnectOnPort).mockRejectedValue(new Error("All-Auth Failed"))
+      vi.mocked(connectTransport).mockRejectedValue(new Error("All-Auth Failed"))
 
       const ssh = makeSshInstanceWithAgent({ passwordFallback: true })
 
@@ -1504,12 +1380,12 @@ describe("SshConnectionImpl", () => {
       await expect(ssh.connect()).rejects.toThrow(
         "No privateKey configured and SSH_AUTH_SOCK is not set"
       )
-      expect(tryConnectOnPort).not.toHaveBeenCalled()
+      expect(connectTransport).not.toHaveBeenCalled()
     })
 
     it("falls back directly to interactive password auth when SSH_AUTH_SOCK is empty and passwordFallback is enabled", async () => {
       process.env.SSH_AUTH_SOCK = ""
-      vi.mocked(tryConnectOnPort).mockResolvedValueOnce()
+      vi.mocked(connectTransport).mockResolvedValueOnce()
       vi.mocked(promptTerminal).mockResolvedValueOnce("secret-password")
 
       const ssh = makeSshInstanceWithAgent({ passwordFallback: true })
@@ -1517,7 +1393,7 @@ describe("SshConnectionImpl", () => {
       await ssh.connect()
 
       expect(promptTerminal).toHaveBeenCalledOnce()
-      const [callArgs] = vi.mocked(tryConnectOnPort).mock.calls[0]
+      const [callArgs] = vi.mocked(connectTransport).mock.calls[0]
       expect(callArgs.agent).toBeUndefined()
       expect(callArgs.password).toBe("secret-password")
     })
@@ -1531,13 +1407,13 @@ describe("SshConnectionImpl", () => {
       await expect(ssh.connect()).rejects.toThrow(
         "SSH_AUTH_SOCK points to non-existent path: /no/such/socket"
       )
-      expect(tryConnectOnPort).not.toHaveBeenCalled()
+      expect(connectTransport).not.toHaveBeenCalled()
     })
 
     it("falls back to interactive password auth when SSH_AUTH_SOCK points to a non-existent path and passwordFallback is enabled", async () => {
       vi.mocked(stat).mockRejectedValueOnce(new Error("ENOENT"))
       vi.mocked(promptTerminal).mockResolvedValueOnce("secret-password")
-      vi.mocked(tryConnectOnPort).mockResolvedValueOnce()
+      vi.mocked(connectTransport).mockResolvedValueOnce()
       process.env.SSH_AUTH_SOCK = "/no/such/socket"
 
       const ssh = makeSshInstanceWithAgent({ passwordFallback: true })
@@ -1545,8 +1421,8 @@ describe("SshConnectionImpl", () => {
       await ssh.connect()
 
       expect(promptTerminal).toHaveBeenCalledOnce()
-      expect(tryConnectOnPort).toHaveBeenCalledOnce()
-      const [callArgs] = vi.mocked(tryConnectOnPort).mock.calls[0]
+      expect(connectTransport).toHaveBeenCalledOnce()
+      const [callArgs] = vi.mocked(connectTransport).mock.calls[0]
       expect(callArgs.agent).toBeUndefined()
       expect(callArgs.password).toBe("secret-password")
       expect(callArgs.privateKey).toBeUndefined()
@@ -1555,7 +1431,7 @@ describe("SshConnectionImpl", () => {
     })
 
     it("throws when SSH_AUTH_SOCK is set but all port connections fail", async () => {
-      vi.mocked(tryConnectOnPort).mockRejectedValue(new Error("Connection refused"))
+      vi.mocked(connectTransport).mockRejectedValue(new Error("Connection refused"))
       process.env.SSH_AUTH_SOCK = AGENT_SOCKET
 
       const ssh = makeSshInstanceWithAgent({ ports: [22, 2222] })
@@ -1564,33 +1440,33 @@ describe("SshConnectionImpl", () => {
         /Could not connect to 1\.2\.3\.4 via SSH agent on ports 22, 2222/v
       )
       // Must have tried each configured port
-      expect(tryConnectOnPort).toHaveBeenCalledTimes(2)
+      expect(connectTransport).toHaveBeenCalledTimes(2)
     })
 
-    it("passes agentForward: true to tryConnectOnPort when configured", async () => {
-      vi.mocked(tryConnectOnPort).mockResolvedValueOnce()
+    it("passes agentForward: true to connectTransport when configured", async () => {
+      vi.mocked(connectTransport).mockResolvedValueOnce()
       process.env.SSH_AUTH_SOCK = AGENT_SOCKET
 
       const ssh = makeSshInstanceWithAgent({ agentForward: true })
       await ssh.connect()
 
-      const [callArgsForward] = vi.mocked(tryConnectOnPort).mock.calls[0]
+      const [callArgsForward] = vi.mocked(connectTransport).mock.calls[0]
       expect(callArgsForward.agentForward).toBe(true)
     })
 
-    it("passes agentForward: undefined to tryConnectOnPort on key-auth path (backwards compatibility)", async () => {
-      vi.mocked(tryConnectOnPort).mockResolvedValueOnce()
+    it("passes agentForward: undefined to connectTransport on key-auth path (backwards compatibility)", async () => {
+      vi.mocked(connectTransport).mockResolvedValueOnce()
 
       const ssh = makeSshInstance()
       await ssh.connect()
 
-      const [callArgsKeyAuth] = vi.mocked(tryConnectOnPort).mock.calls[0]
+      const [callArgsKeyAuth] = vi.mocked(connectTransport).mock.calls[0]
       expect(callArgsKeyAuth.agentForward).toBeUndefined()
     })
 
     it("connects on second attempt when agent-only fails and passwordFallback is true", async () => {
       // Arrange: first call (agent-only) rejects, second call (agent + password) resolves
-      vi.mocked(tryConnectOnPort)
+      vi.mocked(connectTransport)
         .mockRejectedValueOnce(new Error("Agent auth failed"))
         .mockResolvedValueOnce()
       vi.mocked(promptTerminal).mockResolvedValueOnce("secret-password")
@@ -1601,11 +1477,11 @@ describe("SshConnectionImpl", () => {
       // Act
       await ssh.connect()
 
-      // Assert: tryConnectOnPort called twice — once without password, once with
-      expect(tryConnectOnPort).toHaveBeenCalledTimes(2)
-      const [, secondCallArgs] = vi.mocked(tryConnectOnPort).mock.calls as [
-        Parameters<typeof tryConnectOnPort>,
-        Parameters<typeof tryConnectOnPort>,
+      // Assert: connectTransport called twice — once without password, once with
+      expect(connectTransport).toHaveBeenCalledTimes(2)
+      const [, secondCallArgs] = vi.mocked(connectTransport).mock.calls as [
+        Parameters<typeof connectTransport>,
+        Parameters<typeof connectTransport>,
       ]
       expect(secondCallArgs[0].password).toBe("secret-password")
       expect(secondCallArgs[0].agent).toBe(AGENT_SOCKET)
@@ -1613,7 +1489,7 @@ describe("SshConnectionImpl", () => {
     })
 
     it("does not expose agentSocket after agent failure and password fallback", async () => {
-      vi.mocked(tryConnectOnPort)
+      vi.mocked(connectTransport)
         .mockRejectedValueOnce(new Error("Agent auth failed"))
         .mockResolvedValueOnce()
       vi.mocked(promptTerminal).mockResolvedValueOnce("secret-password")
@@ -1633,7 +1509,7 @@ describe("SshConnectionImpl", () => {
     })
 
     it("returns a failed result with a clear error in rsync after agent failure and password fallback", async () => {
-      vi.mocked(tryConnectOnPort)
+      vi.mocked(connectTransport)
         .mockRejectedValueOnce(new Error("Agent auth failed"))
         .mockResolvedValueOnce()
       vi.mocked(promptTerminal).mockResolvedValueOnce("secret-password")
@@ -1664,7 +1540,7 @@ describe("SshConnectionImpl", () => {
 
     it("throws when agent-only fails and passwordFallback second attempt also fails", async () => {
       // Arrange: both attempts fail
-      vi.mocked(tryConnectOnPort).mockRejectedValue(new Error("Connection refused"))
+      vi.mocked(connectTransport).mockRejectedValue(new Error("Connection refused"))
       vi.mocked(promptTerminal).mockResolvedValueOnce("wrong-password")
       process.env.SSH_AUTH_SOCK = AGENT_SOCKET
 
@@ -1677,12 +1553,12 @@ describe("SshConnectionImpl", () => {
       // Prompt must have been shown once (fallback was attempted)
       expect(promptTerminal).toHaveBeenCalledOnce()
       // Both agent-only and agent+password attempts must have been made
-      expect(tryConnectOnPort).toHaveBeenCalledTimes(2)
+      expect(connectTransport).toHaveBeenCalledTimes(2)
     })
 
     it("throws immediately without prompting when agent-only fails and passwordFallback is disabled", async () => {
       // Arrange: agent-only attempt fails, passwordFallback not set
-      vi.mocked(tryConnectOnPort).mockRejectedValueOnce(new Error("Permission denied"))
+      vi.mocked(connectTransport).mockRejectedValueOnce(new Error("Permission denied"))
       process.env.SSH_AUTH_SOCK = AGENT_SOCKET
 
       const ssh = makeSshInstanceWithAgent({ passwordFallback: false })
@@ -1694,7 +1570,7 @@ describe("SshConnectionImpl", () => {
       // No prompt must have been shown
       expect(promptTerminal).not.toHaveBeenCalled()
       // Only one attempt (no fallback)
-      expect(tryConnectOnPort).toHaveBeenCalledTimes(1)
+      expect(connectTransport).toHaveBeenCalledTimes(1)
     })
   })
 
@@ -1708,7 +1584,7 @@ describe("SshConnectionImpl", () => {
       const { readFile } = await import("node:fs/promises")
       const fakeKeyBuffer = Buffer.from("fake-pem-key-content")
       vi.mocked(readFile).mockResolvedValueOnce(fakeKeyBuffer)
-      vi.mocked(tryConnectOnPort).mockResolvedValueOnce()
+      vi.mocked(connectTransport).mockResolvedValueOnce()
 
       const ssh = makeSshInstance()
 
@@ -1728,11 +1604,12 @@ describe("SshConnectionImpl", () => {
     // would corrupt ssh2's internal state. The buffer is only zeroed on the
     // error path — see the corresponding error-path test below.
     it("does NOT zero the private key Buffer after a successful connection (finally-block)", async () => {
+      // R-0000521: the transport retains this key buffer for the live connection.
       // Arrange
       const { readFile } = await import("node:fs/promises")
       const fakeKeyBuffer = Buffer.from("sensitive-private-key")
       vi.mocked(readFile).mockResolvedValueOnce(fakeKeyBuffer)
-      vi.mocked(tryConnectOnPort).mockResolvedValueOnce()
+      vi.mocked(connectTransport).mockResolvedValueOnce()
 
       const ssh = makeSshInstance()
 
@@ -1750,7 +1627,7 @@ describe("SshConnectionImpl", () => {
       const fakeKeyBuffer = Buffer.from("sensitive-private-key")
       vi.mocked(readFile).mockResolvedValueOnce(fakeKeyBuffer)
       // All ports fail — tryConnectOnPorts returns false, connect() throws
-      vi.mocked(tryConnectOnPort).mockRejectedValue(new Error("Connection refused"))
+      vi.mocked(connectTransport).mockRejectedValue(new Error("Connection refused"))
 
       const ssh = makeSshInstance({ ports: [22] })
 
@@ -1761,21 +1638,21 @@ describe("SshConnectionImpl", () => {
       expect(fakeKeyBuffer.every((byte) => byte === 0)).toBe(true)
     })
 
-    it("passes the Buffer directly to tryConnectOnPort as privateKey", async () => {
+    it("passes the Buffer directly to connectTransport as privateKey", async () => {
       // Arrange
       const { readFile } = await import("node:fs/promises")
       const fakeKeyBuffer = Buffer.from("my-rsa-key")
       vi.mocked(readFile).mockResolvedValueOnce(fakeKeyBuffer)
-      vi.mocked(tryConnectOnPort).mockResolvedValueOnce()
+      vi.mocked(connectTransport).mockResolvedValueOnce()
 
       const ssh = makeSshInstance()
 
       // Act
       await ssh.connect()
 
-      // Assert: the Buffer was forwarded unchanged to tryConnectOnPort
-      expect(tryConnectOnPort).toHaveBeenCalledOnce()
-      const [callArgs] = vi.mocked(tryConnectOnPort).mock.calls[0]
+      // Assert: the Buffer was forwarded unchanged to connectTransport
+      expect(connectTransport).toHaveBeenCalledOnce()
+      const [callArgs] = vi.mocked(connectTransport).mock.calls[0]
       expect(callArgs.privateKey).toBe(fakeKeyBuffer)
       expect(Buffer.isBuffer(callArgs.privateKey)).toBe(true)
     })
@@ -1783,8 +1660,8 @@ describe("SshConnectionImpl", () => {
     it("aborts an in-flight initial connect and does not try the next port", async () => {
       const abortController = new AbortController()
       const abortError = new Error("Interrupted by SIGINT")
-      vi.mocked(tryConnectOnPort).mockImplementationOnce(
-        async ({ abortSignal }) =>
+      vi.mocked(connectTransport).mockImplementationOnce(
+        async ({ signal: abortSignal }) =>
           new Promise<void>((_resolve, reject) => {
             abortSignal?.addEventListener(
               "abort",
@@ -1802,29 +1679,29 @@ describe("SshConnectionImpl", () => {
         /* handled below */
       })
       await vi.waitFor(() => {
-        expect(tryConnectOnPort).toHaveBeenCalledOnce()
+        expect(connectTransport).toHaveBeenCalledOnce()
       })
 
       // R-0000669: performConnectAttemptOnPort now combines the prompt-level
       // abort signal with the connection-level abort signal, so the value
-      // passed to tryConnectOnPort is a composite. Verify the composite signal
+      // passed to connectTransport is a composite. Verify the composite signal
       // honors the caller-provided abort source instead of asserting identity.
-      const [callArgs] = vi.mocked(tryConnectOnPort).mock.calls[0]
-      expect(callArgs.abortSignal).toBeInstanceOf(AbortSignal)
-      expect(callArgs.abortSignal?.aborted).toBe(false)
+      const [callArgs] = vi.mocked(connectTransport).mock.calls[0]
+      expect(callArgs.signal).toBeInstanceOf(AbortSignal)
+      expect(callArgs.signal?.aborted).toBe(false)
 
       abortController.abort(abortError)
 
       await expect(connectPromise).rejects.toThrow("Interrupted by SIGINT")
-      expect(tryConnectOnPort).toHaveBeenCalledOnce()
+      expect(connectTransport).toHaveBeenCalledOnce()
     })
 
     it("aborts an in-flight initial connect when disconnect() is called (R-0000669)", async () => {
       // R-0000669: every attempt subscribes to the connection-level abort
       // signal. Reject from any call that observes the abort so the test
       // covers the multi-port loop as well as the first attempt.
-      vi.mocked(tryConnectOnPort).mockImplementation(
-        async ({ abortSignal }) =>
+      vi.mocked(connectTransport).mockImplementation(
+        async ({ signal: abortSignal }) =>
           new Promise<void>((_resolve, reject) => {
             abortSignal?.addEventListener(
               "abort",
@@ -1842,13 +1719,13 @@ describe("SshConnectionImpl", () => {
         /* handled below */
       })
       await vi.waitFor(() => {
-        expect(tryConnectOnPort).toHaveBeenCalledOnce()
+        expect(connectTransport).toHaveBeenCalledOnce()
       })
 
       // Programmatic disconnect without first aborting any prompt-level
       // signal must still cancel the in-flight connect via the
       // connection-level abort controller. The composite signal observed by
-      // tryConnectOnPort must fire so the connect attempt rejects instead of
+      // connectTransport must fire so the connect attempt rejects instead of
       // running with the now-orphaned client reference.
       ssh.disconnect()
 
@@ -1857,13 +1734,13 @@ describe("SshConnectionImpl", () => {
       // observable behavior is that the in-flight attempt was settled (and
       // the mock recorded only one attempt).
       await expect(connectPromise).rejects.toThrow(/Failed to connect|SSH connect aborted/v)
-      expect(tryConnectOnPort).toHaveBeenCalledOnce()
+      expect(connectTransport).toHaveBeenCalledOnce()
     })
 
     it("expands ~/ privateKey paths for connect() and getConnectionInfo()", async () => {
       const { readFile } = await import("node:fs/promises")
       const expandedPrivateKeyPath = join(homedir(), ".ssh", "id_ed25519")
-      vi.mocked(tryConnectOnPort).mockResolvedValueOnce()
+      vi.mocked(connectTransport).mockResolvedValueOnce()
 
       const ssh = new SshConnectionImpl("1.2.3.4", {
         ports: [22],
@@ -1890,7 +1767,7 @@ describe("SshConnectionImpl", () => {
   describe("exec", () => {
     it("rejects redaction-placeholder secrets before starting a remote command", async () => {
       const execSpy = vi.fn()
-      const client = makeClientWithExecSpy(execSpy)
+      const client = makeConnectionWithExecScenario(execSpy)
       const ssh = makeConnectedSsh(client, { user: "deploy" })
       ;(ssh as unknown as Record<string, unknown>).cachedSudoPassword = null
       ;(ssh as unknown as Record<string, unknown>).sudoReady = true
@@ -1905,12 +1782,12 @@ describe("SshConnectionImpl", () => {
     it("rejects with timeout error when stream never closes", async () => {
       vi.useFakeTimers()
 
-      const execSpy = vi.fn().mockImplementation((_command: string, callback: ExecCallback) => {
+      const execSpy = vi.fn().mockImplementation((_command: string, callback: ChannelDelivery) => {
         const stream = makeStream()
-        callback(undefined, stream)
+        callback(stream)
         // Stream never emits 'close' — simulates a hanging command
       })
-      const client = makeClientWithExecSpy(execSpy)
+      const client = makeConnectionWithExecScenario(execSpy)
       const ssh = makeConnectedSsh(client, { user: "deploy" })
       ;(ssh as unknown as Record<string, unknown>).cachedSudoPassword = null
       ;(ssh as unknown as Record<string, unknown>).sudoReady = true
@@ -1936,12 +1813,12 @@ describe("SshConnectionImpl", () => {
       // immediately and skips listener registration.
       vi.useFakeTimers()
 
-      let pendingCallback: ExecCallback | undefined
-      const execSpy = vi.fn().mockImplementation((_command: string, callback: ExecCallback) => {
+      let pendingCallback: ChannelDelivery | undefined
+      const execSpy = vi.fn().mockImplementation((_command: string, callback: ChannelDelivery) => {
         // Capture the callback so the test can invoke it manually after the timeout fires
         pendingCallback = callback
       })
-      const client = makeClientWithExecSpy(execSpy)
+      const client = makeConnectionWithExecScenario(execSpy)
       const ssh = makeConnectedSsh(client, { user: "deploy" })
       ;(ssh as unknown as Record<string, unknown>).cachedSudoPassword = null
       ;(ssh as unknown as Record<string, unknown>).sudoReady = true
@@ -1964,7 +1841,7 @@ describe("SshConnectionImpl", () => {
       // immediately and no listeners must be attached via collectStreamOutput.
       expect(pendingCallback).toBeDefined()
       const lateStream = makeStream()
-      pendingCallback!(undefined, lateStream)
+      pendingCallback!(lateStream)
 
       expect(lateStream.close).toHaveBeenCalledOnce()
       expect(collectMock).not.toHaveBeenCalled()
@@ -1975,12 +1852,12 @@ describe("SshConnectionImpl", () => {
       // directly without calling maskSecrets, leaking secrets into error messages.
       vi.useFakeTimers()
 
-      const execSpy = vi.fn().mockImplementation((_command: string, callback: ExecCallback) => {
+      const execSpy = vi.fn().mockImplementation((_command: string, callback: ChannelDelivery) => {
         const stream = makeStream()
-        callback(undefined, stream)
+        callback(stream)
         // Stream never emits 'close' — simulates a hanging command
       })
-      const client = makeClientWithExecSpy(execSpy)
+      const client = makeConnectionWithExecScenario(execSpy)
       const ssh = makeConnectedSsh(client, { user: "deploy" })
 
       const secret = "super-secret-token"
@@ -2003,15 +1880,16 @@ describe("SshConnectionImpl", () => {
     // Unhandled error event. The promise carries the timeout reason, and
     // a subsequent EPIPE on the closed stream is dropped silently.
     it("does not surface an unhandled error event when stream errors after timeout", async () => {
+      // R-0000054: a late stream failure must preserve the already settled timeout.
       vi.useFakeTimers()
 
-      let capturedStream: StreamWithStderr | undefined
-      const execSpy = vi.fn().mockImplementation((_command: string, callback: ExecCallback) => {
+      let capturedStream: FakeExecChannel | undefined
+      const execSpy = vi.fn().mockImplementation((_command: string, callback: ChannelDelivery) => {
         const stream = makeStream()
         capturedStream = stream
-        callback(undefined, stream)
+        callback(stream)
       })
-      const client = makeClientWithExecSpy(execSpy)
+      const client = makeConnectionWithExecScenario(execSpy)
       const ssh = makeConnectedSsh(client, { user: "deploy" })
       // R-0000127: simulate a confirmed passwordless-sudo probe so
       // `sudoCommand()` may safely combine cached sudoPassword + caller
@@ -2042,7 +1920,7 @@ describe("SshConnectionImpl", () => {
       // the dedicated `stream.once("error", ...)` listener swallows the
       // event so it never propagates as Unhandled.
       expect(capturedStream).toBeDefined()
-      capturedStream?.emit("error", new Error("write EPIPE"))
+      capturedStream?.stdout.fail(new Error("write EPIPE"))
 
       await expect(execPromise).rejects.toThrow(/Command timed out after 5000ms/v)
 
@@ -2060,13 +1938,13 @@ describe("SshConnectionImpl", () => {
       // written) to stderr too. Without the listener, that synchronous
       // stderr `error` would crash the process via uncaughtException and
       // the channel could otherwise hang silently until the 120s watchdog.
-      let capturedStream: StreamWithStderr | undefined
-      const execSpy = vi.fn().mockImplementation((_command: string, callback: ExecCallback) => {
+      let capturedStream: FakeExecChannel | undefined
+      const execSpy = vi.fn().mockImplementation((_command: string, callback: ChannelDelivery) => {
         const stream = makeStream()
         capturedStream = stream
-        callback(undefined, stream)
+        callback(stream)
       })
-      const client = makeClientWithExecSpy(execSpy)
+      const client = makeConnectionWithExecScenario(execSpy)
       const ssh = makeConnectedSsh(client, { sudoPassword: "my-sudo-pass", user: "deploy" })
 
       const unhandledErrors: unknown[] = []
@@ -2086,10 +1964,10 @@ describe("SshConnectionImpl", () => {
       // Emit synchronous stderr 'error' as ssh2 would for an EPIPE during
       // the sudo password write. With the fix, the defensive once-error
       // listener on stream.stderr consumes the event silently.
-      capturedStream?.stderr.emit("error", new Error("stderr EPIPE"))
+      capturedStream?.stderr.fail(new Error("stderr EPIPE"))
 
       // Settle the exec so the test does not hang on the watchdog.
-      capturedStream?.emit("close", 0)
+      capturedStream?.finish(0)
       await execPromise.catch(() => {
         /* handled */
       })
@@ -2102,11 +1980,11 @@ describe("SshConnectionImpl", () => {
     it("masks shell-quoted secrets in timeout error messages", async () => {
       vi.useFakeTimers()
 
-      const execSpy = vi.fn().mockImplementation((_command: string, callback: ExecCallback) => {
+      const execSpy = vi.fn().mockImplementation((_command: string, callback: ChannelDelivery) => {
         const stream = makeStream()
-        callback(undefined, stream)
+        callback(stream)
       })
-      const client = makeClientWithExecSpy(execSpy)
+      const client = makeConnectionWithExecScenario(execSpy)
       const ssh = makeConnectedSsh(client, { user: "deploy" })
 
       const secret = "don't-print-this"
@@ -2130,12 +2008,12 @@ describe("SshConnectionImpl", () => {
     })
 
     it("prefixes sudo command with SUDO_PROMPT='' to suppress username disclosure in stderr", async () => {
-      const execSpy = vi.fn().mockImplementation((_command: string, callback: ExecCallback) => {
+      const execSpy = vi.fn().mockImplementation((_command: string, callback: ChannelDelivery) => {
         const stream = makeStream()
-        callback(undefined, stream)
-        stream.emit("close", 0)
+        callback(stream)
+        stream.finish(0)
       })
-      const client = makeClientWithExecSpy(execSpy)
+      const client = makeConnectionWithExecScenario(execSpy)
       const ssh = makeConnectedSsh(client, { sudoPassword: "my-sudo-pass", user: "deploy" })
 
       await ssh.exec("whoami")
@@ -2146,15 +2024,15 @@ describe("SshConnectionImpl", () => {
     })
 
     it("writes sudo password to stdin for non-root user with cachedSudoPassword", async () => {
-      const execSpy = vi.fn().mockImplementation((_command: string, callback: ExecCallback) => {
+      const execSpy = vi.fn().mockImplementation((_command: string, callback: ChannelDelivery) => {
         const stream = makeStream()
-        callback(undefined, stream)
+        callback(stream)
         // Verify write was called before close
-        expect(stream.write).toHaveBeenCalledWith(Buffer.from("my-sudo-pass"))
-        expect(stream.write).toHaveBeenCalledWith("\n")
-        stream.emit("close", 0)
+        expect(stream.stdin.write).toHaveBeenCalledWith(Buffer.from("my-sudo-pass"))
+        expect(stream.stdin.write).toHaveBeenCalledWith("\n")
+        stream.finish(0)
       })
-      const client = makeClientWithExecSpy(execSpy)
+      const client = makeConnectionWithExecScenario(execSpy)
       const ssh = makeConnectedSsh(client, { sudoPassword: "my-sudo-pass", user: "deploy" })
 
       await ssh.exec("whoami")
@@ -2163,42 +2041,42 @@ describe("SshConnectionImpl", () => {
     })
 
     it("closes sudo stdin after writing the password when no command input is provided", async () => {
-      let capturedStream: null | StreamWithStderr = null
-      const execSpy = vi.fn().mockImplementation((_command: string, callback: ExecCallback) => {
+      let capturedStream: FakeExecChannel | null = null
+      const execSpy = vi.fn().mockImplementation((_command: string, callback: ChannelDelivery) => {
         const stream = makeStream()
         capturedStream = stream
-        callback(undefined, stream)
-        stream.emit("close", 0)
+        callback(stream)
+        stream.finish(0)
       })
-      const client = makeClientWithExecSpy(execSpy)
+      const client = makeConnectionWithExecScenario(execSpy)
       const ssh = makeConnectedSsh(client, { sudoPassword: "my-sudo-pass", user: "deploy" })
 
       await ssh.exec("whoami")
 
       expect(capturedStream).not.toBeNull()
-      const execStream = capturedStream as unknown as StreamWithStderr
-      expect(execStream.write).toHaveBeenCalledWith(Buffer.from("my-sudo-pass"))
-      expect(execStream.write).toHaveBeenCalledWith("\n")
-      expect(execStream.end).toHaveBeenCalledOnce()
-      expect(execStream.end).toHaveBeenCalledWith()
+      const execStream = capturedStream as unknown as FakeExecChannel
+      expect(execStream.stdin.write).toHaveBeenCalledWith(Buffer.from("my-sudo-pass"))
+      expect(execStream.stdin.write).toHaveBeenCalledWith("\n")
+      expect(execStream.stdin.end).toHaveBeenCalledOnce()
+      expect(execStream.stdin.end).toHaveBeenCalledWith()
     })
 
     it("uses passwordless sudo and writes only command input when stdin is provided", async () => {
       let capturedStream: null | ReturnType<typeof makeStream> = null
       const endCalls: unknown[][] = []
-      const execSpy = vi.fn().mockImplementation((_command: string, callback: ExecCallback) => {
+      const execSpy = vi.fn().mockImplementation((_command: string, callback: ChannelDelivery) => {
         const stream = makeStream()
-        Object.assign(stream, {
+        Object.assign(stream.stdin, {
           end(...args: unknown[]) {
             endCalls.push(args)
             return stream
           },
         })
         capturedStream = stream
-        callback(undefined, stream)
-        stream.emit("close", 0)
+        callback(stream)
+        stream.finish(0)
       })
-      const client = makeClientWithExecSpy(execSpy)
+      const client = makeConnectionWithExecScenario(execSpy)
       const ssh = makeConnectedSsh(client, { sudoPassword: "my-sudo-pass", user: "deploy" })
       // The probe path in `hasPasswordlessSudo` would set this on a real host;
       // simulate it explicitly so `sudoCommand()` may safely use `sudo -n`.
@@ -2209,8 +2087,8 @@ describe("SshConnectionImpl", () => {
       const [executedCommand] = execSpy.mock.calls[0] as [string, ...unknown[]]
       const execStream = capturedStream as unknown as ReturnType<typeof makeStream>
       expect(executedCommand).toMatch(/^sudo -n bash -c /v)
-      expect(execStream.write).not.toHaveBeenCalledWith(Buffer.from("my-sudo-pass"))
-      expect(execStream.write).not.toHaveBeenCalledWith("\n")
+      expect(execStream.stdin.write).not.toHaveBeenCalledWith(Buffer.from("my-sudo-pass"))
+      expect(execStream.stdin.write).not.toHaveBeenCalledWith("\n")
       expect(endCalls).toContainEqual(["payload\n"])
     })
 
@@ -2221,7 +2099,7 @@ describe("SshConnectionImpl", () => {
       // message instead of emitting `sudo -n bash -c` that would break at
       // runtime on hosts that actually require a password.
       const execSpy = vi.fn()
-      const client = makeClientWithExecSpy(execSpy)
+      const client = makeConnectionWithExecScenario(execSpy)
       const ssh = makeConnectedSsh(client, { sudoPassword: "my-sudo-pass", user: "deploy" })
 
       const error = await expectRejectedError(ssh.exec("tee /etc/config", { input: "payload\n" }))
@@ -2237,12 +2115,12 @@ describe("SshConnectionImpl", () => {
       const passwordBuffer = Buffer.from("my-sudo-pass")
       const toStringSpy = vi.spyOn(passwordBuffer, "toString")
 
-      const execSpy = vi.fn().mockImplementation((_command: string, callback: ExecCallback) => {
+      const execSpy = vi.fn().mockImplementation((_command: string, callback: ChannelDelivery) => {
         const stream = makeStream()
-        callback(undefined, stream)
-        stream.emit("close", 0)
+        callback(stream)
+        stream.finish(0)
       })
-      const client = makeClientWithExecSpy(execSpy)
+      const client = makeConnectionWithExecScenario(execSpy)
       const ssh = makeConnectedSsh(client, { user: "deploy" })
       ;(ssh as unknown as Record<string, unknown>).cachedSudoPassword = passwordBuffer
 
@@ -2257,11 +2135,11 @@ describe("SshConnectionImpl", () => {
       const passwordBuffer = Buffer.from("my-sudo-pass")
       const toStringSpy = vi.spyOn(passwordBuffer, "toString")
 
-      const execSpy = vi.fn().mockImplementation((_command: string, callback: ExecCallback) => {
+      const execSpy = vi.fn().mockImplementation((_command: string, callback: ChannelDelivery) => {
         const stream = makeStream()
-        callback(undefined, stream)
+        callback(stream)
       })
-      const client = makeClientWithExecSpy(execSpy)
+      const client = makeConnectionWithExecScenario(execSpy)
       const ssh = makeConnectedSsh(client, { user: "deploy" })
       ;(ssh as unknown as Record<string, unknown>).cachedSudoPassword = passwordBuffer
 
@@ -2281,34 +2159,36 @@ describe("SshConnectionImpl", () => {
     })
 
     it("registers stream listeners (collectStreamOutput) before writing sudo password to stdin (regression: race condition)", async () => {
-      // Root cause: stream.write(sudoPassword) was called before collectStreamOutput,
+      // Root cause: stream.stdin.write(sudoPassword) was called before collectStreamOutput,
       // so listeners were registered after the password was already written.
       // Fix: collectStreamOutput must be called first to register listeners,
-      // then stream.write sends the password.
-      let capturedStream: null | StreamWithStderr = null
+      // then stream.stdin.write sends the password.
+      let capturedStream: FakeExecChannel | null = null
 
-      const execSpy = vi.fn().mockImplementation((_command: string, callback: ExecCallback) => {
+      const execSpy = vi.fn().mockImplementation((_command: string, callback: ChannelDelivery) => {
         const stream = makeStream()
         capturedStream = stream
-        callback(undefined, stream)
-        stream.emit("close", 0)
+        callback(stream)
+        stream.finish(0)
       })
 
-      const client = makeClientWithExecSpy(execSpy)
+      const client = makeConnectionWithExecScenario(execSpy)
       const ssh = makeConnectedSsh(client, { sudoPassword: "my-sudo-pass", user: "deploy" })
 
       await ssh.exec("whoami")
 
       expect(capturedStream).not.toBeNull()
-      const capturedExecStream = capturedStream as unknown as StreamWithStderr
+      const capturedExecStream = capturedStream as unknown as FakeExecChannel
       expect(vi.mocked(collectStreamOutput)).toHaveBeenCalledOnce()
-      expect(vi.mocked(capturedExecStream.write)).toHaveBeenCalledWith(Buffer.from("my-sudo-pass"))
-      expect(vi.mocked(capturedExecStream.write)).toHaveBeenCalledWith("\n")
+      expect(vi.mocked(capturedExecStream.stdin.write)).toHaveBeenCalledWith(
+        Buffer.from("my-sudo-pass")
+      )
+      expect(vi.mocked(capturedExecStream.stdin.write)).toHaveBeenCalledWith("\n")
 
-      // collectStreamOutput must be invoked before stream.write so that all
+      // collectStreamOutput must be invoked before stream.stdin.write so that all
       // stream event listeners are registered before the sudo password is sent
       const collectOrder = vi.mocked(collectStreamOutput).mock.invocationCallOrder[0]
-      const writeOrder = vi.mocked(capturedExecStream.write).mock.invocationCallOrder[0]
+      const writeOrder = vi.mocked(capturedExecStream.stdin.write).mock.invocationCallOrder[0]
       expect(collectOrder).toBeDefined()
       expect(writeOrder).toBeDefined()
       expect(collectOrder).toBeLessThan(writeOrder)
@@ -2316,35 +2196,35 @@ describe("SshConnectionImpl", () => {
 
     it("does not write sudo password to stdin when user is root (needsPassword: false)", async () => {
       // Arrange: root user with a sudoPassword set — sudoCommand() returns needsPassword: false
-      let capturedStream: null | StreamWithStderr = null
-      const execSpy = vi.fn().mockImplementation((_command: string, callback: ExecCallback) => {
+      let capturedStream: FakeExecChannel | null = null
+      const execSpy = vi.fn().mockImplementation((_command: string, callback: ChannelDelivery) => {
         const stream = makeStream()
         capturedStream = stream
-        callback(undefined, stream)
-        stream.emit("close", 0)
+        callback(stream)
+        stream.finish(0)
       })
-      const client = makeClientWithExecSpy(execSpy)
+      const client = makeConnectionWithExecScenario(execSpy)
       // sudoPassword is set but user is root → needsPassword must be false
       const ssh = makeConnectedSsh(client, { sudoPassword: "my-sudo-pass", user: "root" })
 
       // Act
       await ssh.exec("whoami")
 
-      // Assert: stream.write must never have been called with the password
+      // Assert: stream.stdin.write must never have been called with the password
       expect(capturedStream).not.toBeNull()
-      expect(capturedStream!.write).not.toHaveBeenCalled()
+      expect(capturedStream!.stdin.write).not.toHaveBeenCalled()
     })
 
     it("does not write sudo password to stdin when cachedSudoPassword is null (non-root, no password)", async () => {
       // Arrange: non-root user without a sudoPassword — cachedSudoPassword is null
-      let capturedStream: null | StreamWithStderr = null
-      const execSpy = vi.fn().mockImplementation((_command: string, callback: ExecCallback) => {
+      let capturedStream: FakeExecChannel | null = null
+      const execSpy = vi.fn().mockImplementation((_command: string, callback: ChannelDelivery) => {
         const stream = makeStream()
         capturedStream = stream
-        callback(undefined, stream)
-        stream.emit("close", 0)
+        callback(stream)
+        stream.finish(0)
       })
-      const client = makeClientWithExecSpy(execSpy)
+      const client = makeConnectionWithExecScenario(execSpy)
       // No sudoPassword → cachedSudoPassword is null → needsPassword is false
       const ssh = makeConnectedSsh(client, { user: "deploy" })
       ;(ssh as unknown as Record<string, unknown>).cachedSudoPassword = null
@@ -2353,28 +2233,26 @@ describe("SshConnectionImpl", () => {
       // Act
       await ssh.exec("whoami")
 
-      // Assert: stream.write must never have been called
+      // Assert: stream.stdin.write must never have been called
       expect(capturedStream).not.toBeNull()
-      expect(capturedStream!.write).not.toHaveBeenCalled()
+      expect(capturedStream!.stdin.write).not.toHaveBeenCalled()
     })
 
     it("rejects pending exec() immediately when client emits 'close'", async () => {
-      let capturedStream: null | StreamWithStderr = null
-      const execSpy = vi.fn().mockImplementation((_command: string, callback: ExecCallback) => {
+      let capturedStream: FakeExecChannel | null = null
+      const execSpy = vi.fn().mockImplementation((_command: string, callback: ChannelDelivery) => {
         const stream = makeStream()
         capturedStream = stream
-        callback(undefined, stream)
+        callback(stream)
         // Stream intentionally never emits 'close' — the exec() Promise stays pending
       })
 
-      const clientEmitter = new EventEmitter()
-      const client = Object.assign(clientEmitter, {
-        end: vi.fn(),
-        exec: execSpy,
-        sftp: vi.fn(),
-      }) as unknown as Client & EventEmitter
+      const client = new FakeTransportConnection({
+        execute: execSpy,
+        onClose: vi.fn(),
+      })
 
-      const ssh = makeConnectedSshWithCloseListener(client, {})
+      const ssh = makeConnectedSsh(client, {})
 
       const execPromise = ssh.exec("sleep infinity")
       await Promise.resolve()
@@ -2383,44 +2261,42 @@ describe("SshConnectionImpl", () => {
       expect(capturedStream).not.toBeNull()
 
       // Simulate an unexpected connection drop
-      clientEmitter.emit("close")
+      client.disconnect()
 
       await expect(execPromise).rejects.toThrow("SSH connection closed unexpectedly")
     })
 
     it("rejects pending exec() immediately when connected client emits 'error'", async () => {
-      let capturedStream: null | StreamWithStderr = null
-      const execSpy = vi.fn().mockImplementation((_command: string, callback: ExecCallback) => {
+      let capturedStream: FakeExecChannel | null = null
+      const execSpy = vi.fn().mockImplementation((_command: string, callback: ChannelDelivery) => {
         const stream = makeStream()
         capturedStream = stream
-        callback(undefined, stream)
+        callback(stream)
         // Stream intentionally never emits 'close' — the exec() Promise stays pending
       })
 
-      const clientEmitter = new EventEmitter()
-      const client = Object.assign(clientEmitter, {
-        end: vi.fn(),
-        exec: execSpy,
-        sftp: vi.fn(),
-      }) as unknown as Client & EventEmitter
+      const client = new FakeTransportConnection({
+        execute: execSpy,
+        onClose: vi.fn(),
+      })
 
-      const ssh = makeConnectedSshWithCloseListener(client, {})
+      const ssh = makeConnectedSsh(client, {})
 
       const execPromise = ssh.exec("sleep infinity")
       await Promise.resolve()
 
       expect(capturedStream).not.toBeNull()
 
-      clientEmitter.emit("error", new Error("socket failure"))
+      client.disconnect(new TransportError("DISCONNECTED", new Error("socket failure")))
 
       await expect(execPromise).rejects.toThrow("socket failure")
     })
 
     it("rejects when client.exec callback receives an error", async () => {
-      const execSpy = vi.fn().mockImplementation((_command: string, callback: ExecCallback) => {
-        callback(new Error("SSH channel open failed"), undefined as unknown as StreamWithStderr)
+      const execSpy = vi.fn().mockImplementation((_command: string, callback: ChannelDelivery) => {
+        callback.fail(new Error("SSH channel open failed"))
       })
-      const client = makeClientWithExecSpy(execSpy)
+      const client = makeConnectionWithExecScenario(execSpy)
       const ssh = makeConnectedSsh(client)
 
       await expect(ssh.exec("whoami")).rejects.toThrow("SSH channel open failed")
@@ -2432,7 +2308,7 @@ describe("SshConnectionImpl", () => {
       const execSpy = vi.fn().mockImplementation(() => {
         throw new Error("ssh2 exec failed before callback")
       })
-      const client = makeClientWithExecSpy(execSpy)
+      const client = makeConnectionWithExecScenario(execSpy)
       const ssh = makeConnectedSsh(client)
       const pendingRejects = (ssh as unknown as Record<string, unknown>).pendingRejects as Set<
         (reason: Error) => void
@@ -2452,24 +2328,22 @@ describe("SshConnectionImpl", () => {
       // handler twice and produce duplicate operator-visible logs. The fix
       // installs the close handler with `client.once(...)` so it executes at
       // most once.
-      const execSpy = vi.fn().mockImplementation((_command: string, callback: ExecCallback) => {
+      const execSpy = vi.fn().mockImplementation((_command: string, callback: ChannelDelivery) => {
         const stream = makeStream()
-        callback(undefined, stream)
+        callback(stream)
         // Stream never emits close — promise stays pending until rejection.
       })
 
-      const clientEmitter = new EventEmitter()
-      const client = Object.assign(clientEmitter, {
-        end: vi.fn(),
-        exec: execSpy,
-        sftp: vi.fn(),
-      }) as unknown as Client & EventEmitter
+      const client = new FakeTransportConnection({
+        execute: execSpy,
+        onClose: vi.fn(),
+      })
 
-      const ssh = makeConnectedSshWithCloseListener(client, {})
+      const ssh = makeConnectedSsh(client, {})
 
       // Exactly one close listener should be registered, and it must be a
       // once-style listener (no second invocation after an error+close).
-      expect(clientEmitter.listenerCount("close")).toBe(1)
+      expect(client.disconnectListenerCount()).toBe(1)
 
       const execPromise = ssh.exec("sleep infinity")
       execPromise.catch(() => {
@@ -2478,18 +2352,18 @@ describe("SshConnectionImpl", () => {
       await Promise.resolve()
 
       // First disconnect — error path runs the cleanup, then close arrives.
-      clientEmitter.emit("error", new Error("socket failure"))
-      clientEmitter.emit("close")
+      client.disconnect(new TransportError("DISCONNECTED", new Error("socket failure")))
+      client.disconnect()
 
       await expect(execPromise).rejects.toThrow("socket failure")
 
       // After the disconnect, the once-listener must have detached itself.
-      expect(clientEmitter.listenerCount("close")).toBe(0)
+      expect(client.disconnectListenerCount()).toBe(0)
 
       // A late spurious close emission must not run the cleanup handler again.
-      clientEmitter.emit("close")
+      client.disconnect()
       // Listener count stays at zero.
-      expect(clientEmitter.listenerCount("close")).toBe(0)
+      expect(client.disconnectListenerCount()).toBe(0)
     })
 
     // -------------------------------------------------------------------------
@@ -2498,7 +2372,7 @@ describe("SshConnectionImpl", () => {
 
     describe("env option", () => {
       it("throws synchronously for an env key containing a semicolon (injection attempt)", async () => {
-        const client = makeClientWithEnd(vi.fn())
+        const client = makeConnectionWithClose(vi.fn())
         const ssh = makeConnectedSsh(client)
 
         await expect(ssh.exec("whoami", { env: { "FOO;rm -rf /": "val" } })).rejects.toThrow(
@@ -2507,7 +2381,7 @@ describe("SshConnectionImpl", () => {
       })
 
       it("throws for an env key that starts with a digit", async () => {
-        const client = makeClientWithEnd(vi.fn())
+        const client = makeConnectionWithClose(vi.fn())
         const ssh = makeConnectedSsh(client)
 
         await expect(ssh.exec("whoami", { env: { "1INVALID": "val" } })).rejects.toThrow(
@@ -2516,7 +2390,7 @@ describe("SshConnectionImpl", () => {
       })
 
       it("throws for an env key containing a space", async () => {
-        const client = makeClientWithEnd(vi.fn())
+        const client = makeConnectionWithClose(vi.fn())
         const ssh = makeConnectedSsh(client)
 
         await expect(ssh.exec("whoami", { env: { "MY VAR": "val" } })).rejects.toThrow(
@@ -2525,7 +2399,7 @@ describe("SshConnectionImpl", () => {
       })
 
       it("throws for an env key containing a dollar sign", async () => {
-        const client = makeClientWithEnd(vi.fn())
+        const client = makeConnectionWithClose(vi.fn())
         const ssh = makeConnectedSsh(client)
 
         await expect(ssh.exec("whoami", { env: { $SECRET: "val" } })).rejects.toThrow(
@@ -2534,12 +2408,14 @@ describe("SshConnectionImpl", () => {
       })
 
       it("accepts a simple uppercase key (MY_VAR)", async () => {
-        const execSpy = vi.fn().mockImplementation((_command: string, callback: ExecCallback) => {
-          const stream = makeStream()
-          callback(undefined, stream)
-          stream.emit("close", 0)
-        })
-        const client = makeClientWithExecSpy(execSpy)
+        const execSpy = vi
+          .fn()
+          .mockImplementation((_command: string, callback: ChannelDelivery) => {
+            const stream = makeStream()
+            callback(stream)
+            stream.finish(0)
+          })
+        const client = makeConnectionWithExecScenario(execSpy)
         const ssh = makeConnectedSsh(client)
 
         await expect(ssh.exec("whoami", { env: { MY_VAR: "hello" } })).resolves.toBeDefined()
@@ -2549,12 +2425,14 @@ describe("SshConnectionImpl", () => {
       })
 
       it("accepts an underscore-prefixed key (_foo)", async () => {
-        const execSpy = vi.fn().mockImplementation((_command: string, callback: ExecCallback) => {
-          const stream = makeStream()
-          callback(undefined, stream)
-          stream.emit("close", 0)
-        })
-        const client = makeClientWithExecSpy(execSpy)
+        const execSpy = vi
+          .fn()
+          .mockImplementation((_command: string, callback: ChannelDelivery) => {
+            const stream = makeStream()
+            callback(stream)
+            stream.finish(0)
+          })
+        const client = makeConnectionWithExecScenario(execSpy)
         const ssh = makeConnectedSsh(client)
 
         await expect(ssh.exec("whoami", { env: { _foo: "bar" } })).resolves.toBeDefined()
@@ -2564,12 +2442,14 @@ describe("SshConnectionImpl", () => {
       })
 
       it("accepts the conventional PATH key", async () => {
-        const execSpy = vi.fn().mockImplementation((_command: string, callback: ExecCallback) => {
-          const stream = makeStream()
-          callback(undefined, stream)
-          stream.emit("close", 0)
-        })
-        const client = makeClientWithExecSpy(execSpy)
+        const execSpy = vi
+          .fn()
+          .mockImplementation((_command: string, callback: ChannelDelivery) => {
+            const stream = makeStream()
+            callback(stream)
+            stream.finish(0)
+          })
+        const client = makeConnectionWithExecScenario(execSpy)
         const ssh = makeConnectedSsh(client)
 
         await expect(
@@ -2581,12 +2461,14 @@ describe("SshConnectionImpl", () => {
       })
 
       it("shell-quotes the env value to prevent injection", async () => {
-        const execSpy = vi.fn().mockImplementation((_command: string, callback: ExecCallback) => {
-          const stream = makeStream()
-          callback(undefined, stream)
-          stream.emit("close", 0)
-        })
-        const client = makeClientWithExecSpy(execSpy)
+        const execSpy = vi
+          .fn()
+          .mockImplementation((_command: string, callback: ChannelDelivery) => {
+            const stream = makeStream()
+            callback(stream)
+            stream.finish(0)
+          })
+        const client = makeConnectionWithExecScenario(execSpy)
         const ssh = makeConnectedSsh(client)
 
         await ssh.exec("whoami", { env: { GREETING: "hello world; rm -rf /" } })
@@ -2603,12 +2485,14 @@ describe("SshConnectionImpl", () => {
         // which is wrong because sudo strips env vars by default.
         // The correct form is:
         //   SUDO_PROMPT='' sudo -S bash -c 'MY_VAR='\''val'\'' whoami'
-        const execSpy = vi.fn().mockImplementation((_command: string, callback: ExecCallback) => {
-          const stream = makeStream()
-          callback(undefined, stream)
-          stream.emit("close", 0)
-        })
-        const client = makeClientWithExecSpy(execSpy)
+        const execSpy = vi
+          .fn()
+          .mockImplementation((_command: string, callback: ChannelDelivery) => {
+            const stream = makeStream()
+            callback(stream)
+            stream.finish(0)
+          })
+        const client = makeConnectionWithExecScenario(execSpy)
         const ssh = makeConnectedSsh(client, { sudoPassword: "secret", user: "deploy" })
 
         await ssh.exec("whoami", { env: { MY_VAR: "val" } })
@@ -2627,12 +2511,14 @@ describe("SshConnectionImpl", () => {
         // Same regression test for the passwordless-sudo branch (no cachedSudoPassword).
         // The correct form is:
         //   sudo -n bash -c 'MY_VAR='\''val'\'' whoami'
-        const execSpy = vi.fn().mockImplementation((_command: string, callback: ExecCallback) => {
-          const stream = makeStream()
-          callback(undefined, stream)
-          stream.emit("close", 0)
-        })
-        const client = makeClientWithExecSpy(execSpy)
+        const execSpy = vi
+          .fn()
+          .mockImplementation((_command: string, callback: ChannelDelivery) => {
+            const stream = makeStream()
+            callback(stream)
+            stream.finish(0)
+          })
+        const client = makeConnectionWithExecScenario(execSpy)
         // No sudoPassword — triggers the noninteractive sudo branch
         const ssh = makeConnectedSsh(client, { sudoPassword: null, user: "deploy" })
 
@@ -2656,12 +2542,12 @@ describe("SshConnectionImpl", () => {
 
   describe("sha256", () => {
     it("returns null when the file does not exist", async () => {
-      const execSpy = vi.fn().mockImplementation((_command: string, callback: ExecCallback) => {
+      const execSpy = vi.fn().mockImplementation((_command: string, callback: ChannelDelivery) => {
         const stream = makeStream()
-        callback(undefined, stream)
-        stream.emit("close", 1) // file does not exist
+        callback(stream)
+        stream.finish(1) // file does not exist
       })
-      const client = makeClientWithExecSpy(execSpy)
+      const client = makeConnectionWithExecScenario(execSpy)
       const ssh = makeConnectedSsh(client)
 
       const result = await ssh.sha256("/nonexistent")
@@ -2673,19 +2559,19 @@ describe("SshConnectionImpl", () => {
       const execSpy = vi
         .fn()
         // First call: test() — file exists, exit 0
-        .mockImplementationOnce((_command: string, callback: ExecCallback) => {
+        .mockImplementationOnce((_command: string, callback: ChannelDelivery) => {
           const stream = makeStream()
-          callback(undefined, stream)
-          stream.emit("close", 0)
+          callback(stream)
+          stream.finish(0)
         })
         // Second call: sha256sum output
-        .mockImplementationOnce((_command: string, callback: ExecCallback) => {
+        .mockImplementationOnce((_command: string, callback: ChannelDelivery) => {
           const stream = makeStream()
-          callback(undefined, stream)
-          stream.emit("data", Buffer.from("abc123def456  /etc/hosts\n"))
-          stream.emit("close", 0)
+          callback(stream)
+          stream.stdout.send(Buffer.from("abc123def456  /etc/hosts\n"))
+          stream.finish(0)
         })
-      const client = makeClientWithExecSpy(execSpy)
+      const client = makeConnectionWithExecScenario(execSpy)
       const ssh = makeConnectedSsh(client)
 
       const result = await ssh.sha256("/etc/hosts")
@@ -2700,13 +2586,13 @@ describe("SshConnectionImpl", () => {
 
   describe("lines", () => {
     it("returns an empty array for empty output", async () => {
-      const execSpy = vi.fn().mockImplementation((_command: string, callback: ExecCallback) => {
+      const execSpy = vi.fn().mockImplementation((_command: string, callback: ChannelDelivery) => {
         const stream = makeStream()
-        callback(undefined, stream)
-        stream.emit("data", Buffer.from("   \n"))
-        stream.emit("close", 0)
+        callback(stream)
+        stream.stdout.send(Buffer.from("   \n"))
+        stream.finish(0)
       })
-      const client = makeClientWithExecSpy(execSpy)
+      const client = makeConnectionWithExecScenario(execSpy)
       const ssh = makeConnectedSsh(client)
 
       const result = await ssh.lines("echo ''")
@@ -2721,13 +2607,13 @@ describe("SshConnectionImpl", () => {
 
   describe("readFile", () => {
     it("uses sudo prefix for non-root user", async () => {
-      const execSpy = vi.fn().mockImplementation((_command: string, callback: ExecCallback) => {
+      const execSpy = vi.fn().mockImplementation((_command: string, callback: ChannelDelivery) => {
         const stream = makeStream()
-        callback(undefined, stream)
-        stream.emit("data", Buffer.from("file content"))
-        stream.emit("close", 0)
+        callback(stream)
+        stream.stdout.send(Buffer.from("file content"))
+        stream.finish(0)
       })
-      const client = makeClientWithExecSpy(execSpy)
+      const client = makeConnectionWithExecScenario(execSpy)
       const ssh = makeConnectedSsh(client, { user: "deploy" })
 
       await ssh.readFile("/etc/shadow")
@@ -2739,13 +2625,13 @@ describe("SshConnectionImpl", () => {
     })
 
     it("does not use sudo prefix for root user", async () => {
-      const execSpy = vi.fn().mockImplementation((_command: string, callback: ExecCallback) => {
+      const execSpy = vi.fn().mockImplementation((_command: string, callback: ChannelDelivery) => {
         const stream = makeStream()
-        callback(undefined, stream)
-        stream.emit("data", Buffer.from("file content"))
-        stream.emit("close", 0)
+        callback(stream)
+        stream.stdout.send(Buffer.from("file content"))
+        stream.finish(0)
       })
-      const client = makeClientWithExecSpy(execSpy)
+      const client = makeConnectionWithExecScenario(execSpy)
       const ssh = makeConnectedSsh(client, { user: "root" })
 
       await ssh.readFile("/etc/hosts")
@@ -2757,13 +2643,13 @@ describe("SshConnectionImpl", () => {
 
     it("preserves leading spaces, trailing whitespace, and final newline", async () => {
       const fileContent = "  leading\nvalue=1  \n"
-      const execSpy = vi.fn().mockImplementation((_command: string, callback: ExecCallback) => {
+      const execSpy = vi.fn().mockImplementation((_command: string, callback: ChannelDelivery) => {
         const stream = makeStream()
-        callback(undefined, stream)
-        stream.emit("data", Buffer.from(fileContent))
-        stream.emit("close", 0)
+        callback(stream)
+        stream.stdout.send(Buffer.from(fileContent))
+        stream.finish(0)
       })
-      const client = makeClientWithExecSpy(execSpy)
+      const client = makeConnectionWithExecScenario(execSpy)
       const ssh = makeConnectedSsh(client, { user: "root" })
 
       const result = await ssh.readFile("/etc/app.conf")
@@ -2791,7 +2677,7 @@ describe("SshConnectionImpl", () => {
         tempPath,
       })
 
-      const client = makeClientWithExecSpy(execSpy)
+      const client = makeConnectionWithExecScenario(execSpy)
       const ssh = makeConnectedSsh(client, { user: "deploy" })
       ;(ssh as unknown as Record<string, unknown>).cachedSudoPassword = null
       ;(ssh as unknown as Record<string, unknown>).sudoReady = true
@@ -2854,7 +2740,7 @@ describe("SshConnectionImpl", () => {
         "/var/tmp/attacker/my-app"
       )
 
-      const client = makeClientWithExecSpy(execSpy)
+      const client = makeConnectionWithExecScenario(execSpy)
       const ssh = makeConnectedSsh(client, { user: "deploy" })
       ;(ssh as unknown as Record<string, unknown>).cachedSudoPassword = null
       ;(ssh as unknown as Record<string, unknown>).sudoReady = true
@@ -2885,7 +2771,7 @@ describe("SshConnectionImpl", () => {
         tempPath,
       })
 
-      const client = makeClientWithExecSpy(execSpy)
+      const client = makeConnectionWithExecScenario(execSpy)
       const ssh = makeConnectedSsh(client)
 
       await ssh.uploadFile("/local/file.txt", remotePath)
@@ -2913,7 +2799,7 @@ describe("SshConnectionImpl", () => {
         tempPath,
       })
 
-      const client = makeClientWithExecSpy(execSpy)
+      const client = makeConnectionWithExecScenario(execSpy)
       const ssh = makeConnectedSsh(client)
 
       await ssh.uploadFile("/local/file.txt", remotePath, { mode: "0644" })
@@ -2941,7 +2827,7 @@ describe("SshConnectionImpl", () => {
         tempPath,
       })
 
-      const client = makeClientWithExecSpy(execSpy)
+      const client = makeConnectionWithExecScenario(execSpy)
       const ssh = makeConnectedSsh(client)
 
       await ssh.uploadFile("/local/file.txt", remotePath)
@@ -2959,7 +2845,7 @@ describe("SshConnectionImpl", () => {
       // Finalize fails (e.g. mv rejected) with a generic non-zero exit.
       const execSpy = makeFinalizeFailExec(executedCommands, tempPath)
 
-      const client = makeClientWithExecSpy(execSpy)
+      const client = makeConnectionWithExecScenario(execSpy)
       const ssh = makeConnectedSsh(client)
 
       await expect(ssh.uploadFile("/local/file.txt", remotePath)).rejects.toThrow("Command failed")
@@ -2986,7 +2872,7 @@ describe("SshConnectionImpl", () => {
         tempPath,
       })
 
-      const client = makeClientWithExecSpy(execSpy)
+      const client = makeConnectionWithExecScenario(execSpy)
       const ssh = makeConnectedSsh(client)
 
       await expect(ssh.uploadFile("/local/file.txt", remotePath)).rejects.toThrow(
@@ -3015,7 +2901,7 @@ describe("SshConnectionImpl", () => {
         tempPath,
       })
 
-      const client = makeClientWithExecSpy(execSpy)
+      const client = makeConnectionWithExecScenario(execSpy)
       const ssh = makeConnectedSsh(client)
 
       await ssh.uploadFile("/local/file.txt", remotePath)
@@ -3044,7 +2930,7 @@ describe("SshConnectionImpl", () => {
         tempPath,
       })
 
-      const client = makeClientWithExecSpy(execSpy)
+      const client = makeConnectionWithExecScenario(execSpy)
       const ssh = makeConnectedSsh(client, { user: "deploy" })
       const internals = ssh as unknown as Record<string, unknown>
       internals.cachedSudoPassword = null
@@ -3085,7 +2971,7 @@ describe("SshConnectionImpl", () => {
         tempPath,
       })
 
-      const client = makeClientWithExecSpy(execSpy)
+      const client = makeConnectionWithExecScenario(execSpy)
       const ssh = makeConnectedSsh(client, { user: "deploy" })
       ;(ssh as unknown as Record<string, unknown>).cachedSudoPassword = null
       ;(ssh as unknown as Record<string, unknown>).sudoReady = true
@@ -3128,7 +3014,7 @@ describe("SshConnectionImpl", () => {
         "/var/tmp/attacker/system"
       )
 
-      const client = makeClientWithExecSpy(execSpy)
+      const client = makeConnectionWithExecScenario(execSpy)
       const ssh = makeConnectedSsh(client, { user: "deploy" })
       ;(ssh as unknown as Record<string, unknown>).cachedSudoPassword = null
       ;(ssh as unknown as Record<string, unknown>).sudoReady = true
@@ -3158,7 +3044,7 @@ describe("SshConnectionImpl", () => {
         tempPath,
       })
 
-      const client = makeClientWithExecSpy(execSpy)
+      const client = makeConnectionWithExecScenario(execSpy)
       const ssh = makeConnectedSsh(client)
 
       await ssh.writeFile(remotePath, "hello world", { mode: "0600" })
@@ -3186,7 +3072,7 @@ describe("SshConnectionImpl", () => {
         tempPath,
       })
 
-      const client = makeClientWithExecSpy(execSpy)
+      const client = makeConnectionWithExecScenario(execSpy)
       const ssh = makeConnectedSsh(client)
 
       await ssh.writeFile(remotePath, "hello world", { mode: "0600" })
@@ -3212,7 +3098,7 @@ describe("SshConnectionImpl", () => {
         tempPath,
       })
 
-      const client = makeClientWithExecSpy(execSpy)
+      const client = makeConnectionWithExecScenario(execSpy)
       const ssh = makeConnectedSsh(client)
 
       await ssh.writeFile(remotePath, "hello world", { mode: "0755" })
@@ -3247,7 +3133,7 @@ describe("SshConnectionImpl", () => {
         verifyHash: HELLO_WORLD_SHA256_HEX,
       })
 
-      const client = makeClientWithExecSpy(execSpy)
+      const client = makeConnectionWithExecScenario(execSpy)
       const ssh = makeConnectedSsh(client, { user: "deploy" })
       ;(ssh as unknown as Record<string, unknown>).cachedSudoPassword = null
       ;(ssh as unknown as Record<string, unknown>).sudoReady = true
@@ -3284,7 +3170,7 @@ describe("SshConnectionImpl", () => {
       // marker + exit 20 before any staged temp is created.
       const execSpy = makePrepSymlinkExec("/var/tmp/attacker/sudoers.d")
 
-      const client = makeClientWithExecSpy(execSpy)
+      const client = makeConnectionWithExecScenario(execSpy)
       const ssh = makeConnectedSsh(client)
 
       await expect(ssh.writeFile(remotePath, "x", { mode: "0440" })).rejects.toThrow(
@@ -3317,7 +3203,7 @@ describe("SshConnectionImpl", () => {
     function makeStagingExecSpy(
       executedCommands: string[],
       stagedPath: string
-    ): ReturnType<typeof vi.fn> {
+    ): ReturnType<typeof vi.fn<ExecScenario>> {
       return vi
         .fn()
         .mockImplementationOnce(makeExecHandler(executedCommands, DOWNLOAD_STAGING_DIRECTORY))
@@ -3327,7 +3213,7 @@ describe("SshConnectionImpl", () => {
 
     it("downloads directly via SFTP for root user", async () => {
       const execSpy = vi.fn()
-      const client = makeClientWithExecSpy(execSpy)
+      const client = makeConnectionWithExecScenario(execSpy)
       const ssh = makeConnectedSsh(client, { user: "root" })
 
       await ssh.downloadFile("/var/log/syslog", "/tmp/local-syslog")
@@ -3352,14 +3238,14 @@ describe("SshConnectionImpl", () => {
 
       const execSpy = makeStagingExecSpy(executedCommands, stagedPath)
         // Fourth call: bounded cleanup
-        .mockImplementationOnce((cmd: string, callback: ExecCallback) => {
+        .mockImplementationOnce((cmd: string, callback: ChannelDelivery) => {
           executedCommands.push(cmd)
           const stream = makeStream()
-          callback(undefined, stream)
-          stream.emit("close", 0)
+          callback(stream)
+          stream.finish(0)
         })
 
-      const client = makeClientWithExecSpy(execSpy)
+      const client = makeConnectionWithExecScenario(execSpy)
       const ssh = makeConnectedSsh(client, { user: "deploy" })
 
       await ssh.downloadFile("/var/log/secure", "/tmp/local-secure")
@@ -3388,7 +3274,7 @@ describe("SshConnectionImpl", () => {
         // Fourth call: bounded cleanup
         .mockImplementationOnce(makeExecHandler(executedCommands, ""))
 
-      const client = makeClientWithExecSpy(execSpy)
+      const client = makeConnectionWithExecScenario(execSpy)
       const ssh = makeConnectedSsh(client, { user: "deploy" })
 
       await ssh.downloadFile("/var/log/secure", "/tmp/local-secure")
@@ -3420,15 +3306,15 @@ describe("SshConnectionImpl", () => {
         .fn()
         .mockImplementationOnce(makeExecHandler(executedCommands, DOWNLOAD_STAGING_DIRECTORY))
         // Second call: the staged-file mktemp fails
-        .mockImplementationOnce((cmd: string, callback: ExecCallback) => {
+        .mockImplementationOnce((cmd: string, callback: ChannelDelivery) => {
           executedCommands.push(cmd)
           const stream = makeStream()
-          callback(undefined, stream)
-          stream.emit("close", 1)
+          callback(stream)
+          stream.finish(1)
         })
         .mockImplementationOnce(makeExecHandler(executedCommands, ""))
 
-      const client = makeClientWithExecSpy(execSpy)
+      const client = makeConnectionWithExecScenario(execSpy)
       const ssh = makeConnectedSsh(client, { user: "deploy" })
 
       await expect(ssh.downloadFile("/var/log/secure", "/tmp/local-secure")).rejects.toThrow(
@@ -3451,7 +3337,7 @@ describe("SshConnectionImpl", () => {
 
       vi.mocked(sftpDownload).mockRejectedValueOnce(new Error("SFTP transfer failed"))
 
-      const client = makeClientWithExecSpy(execSpy)
+      const client = makeConnectionWithExecScenario(execSpy)
       const ssh = makeConnectedSsh(client, { user: "nonroot" })
 
       // Act
@@ -3471,16 +3357,13 @@ describe("SshConnectionImpl", () => {
       const executedCommands: string[] = []
 
       const execSpy = makeStagingExecSpy(executedCommands, stagedPath).mockImplementationOnce(
-        (_cmd: string, callback: ExecCallback) => {
+        (_cmd: string, callback: ChannelDelivery) => {
           executedCommands.push(_cmd)
-          callback(
-            new Error(`permission denied: rmdir ${DOWNLOAD_STAGING_DIRECTORY}`),
-            makeStream()
-          )
+          callback.fail(new Error(`permission denied: rmdir ${DOWNLOAD_STAGING_DIRECTORY}`))
         }
       )
 
-      const client = makeClientWithExecSpy(execSpy)
+      const client = makeConnectionWithExecScenario(execSpy)
       const ssh = makeConnectedSsh(client, { user: "deploy" })
 
       const stderrSpy = vi.spyOn(process.stderr, "write").mockImplementation(() => true)
@@ -3517,13 +3400,13 @@ describe("SshConnectionImpl", () => {
       registerSecret(opToken)
       try {
         const execSpy = makeStagingExecSpy(executedCommands, stagedPath).mockImplementationOnce(
-          (_cmd: string, callback: ExecCallback) => {
+          (_cmd: string, callback: ChannelDelivery) => {
             executedCommands.push(_cmd)
-            callback(new Error(`cleanup failed: ${opToken} surfaced in error`), makeStream())
+            callback.fail(new Error(`cleanup failed: ${opToken} surfaced in error`))
           }
         )
 
-        const client = makeClientWithExecSpy(execSpy)
+        const client = makeConnectionWithExecScenario(execSpy)
         const ssh = makeConnectedSsh(client, { user: "deploy" })
         const stderrSpy = vi.spyOn(process.stderr, "write").mockImplementation(() => true)
 
@@ -3558,15 +3441,15 @@ describe("SshConnectionImpl", () => {
       const executedCommands: string[] = []
 
       const execSpy = makeStagingExecSpy(executedCommands, stagedPath).mockImplementationOnce(
-        (_cmd: string, callback: ExecCallback) => {
+        (_cmd: string, callback: ChannelDelivery) => {
           executedCommands.push(_cmd)
-          callback(new Error("cleanup failed unexpectedly"), makeStream())
+          callback.fail(new Error("cleanup failed unexpectedly"))
         }
       )
 
       vi.mocked(sftpDownload).mockRejectedValueOnce(new Error("Original SFTP failure"))
 
-      const client = makeClientWithExecSpy(execSpy)
+      const client = makeConnectionWithExecScenario(execSpy)
       const ssh = makeConnectedSsh(client, { user: "deploy" })
       const stderrSpy = vi.spyOn(process.stderr, "write").mockImplementation(() => true)
 
@@ -3648,24 +3531,24 @@ describe("SshConnectionImpl", () => {
     it("lazily probes sudo on the first privileged exec instead of requiring bootstrap probing", async () => {
       const execSpy = vi
         .fn()
-        .mockImplementationOnce((_command: string, callback: ExecCallback) => {
+        .mockImplementationOnce((_command: string, callback: ChannelDelivery) => {
           const stream = makeStream()
-          callback(undefined, stream)
-          stream.emit("close", 0)
+          callback(stream)
+          stream.finish(0)
         })
-        .mockImplementationOnce((_command: string, callback: ExecCallback) => {
+        .mockImplementationOnce((_command: string, callback: ChannelDelivery) => {
           const stream = makeStream()
-          callback(undefined, stream)
-          stream.emit("close", 0)
+          callback(stream)
+          stream.finish(0)
         })
-        .mockImplementationOnce((_command: string, callback: ExecCallback) => {
+        .mockImplementationOnce((_command: string, callback: ChannelDelivery) => {
           const stream = makeStream()
-          callback(undefined, stream)
-          stream.emit("data", Buffer.from("ok\n"))
-          stream.emit("close", 0)
+          callback(stream)
+          stream.stdout.send(Buffer.from("ok\n"))
+          stream.finish(0)
         })
 
-      const client = makeClientWithExecSpy(execSpy)
+      const client = makeConnectionWithExecScenario(execSpy)
       const ssh = makeConnectedSsh(client, { sudoPassword: null, user: "deploy" })
 
       await expect(ssh.exec("echo ok", { silent: true })).resolves.toMatchObject({
@@ -3691,53 +3574,53 @@ describe("SshConnectionImpl", () => {
       const execSpy = vi
         .fn()
         // Initial probe: sudo exists.
-        .mockImplementationOnce((_command: string, callback: ExecCallback) => {
+        .mockImplementationOnce((_command: string, callback: ChannelDelivery) => {
           const stream = makeStream()
-          callback(undefined, stream)
-          stream.emit("close", 0)
+          callback(stream)
+          stream.finish(0)
         })
         // Initial probe: `sudo -n true` succeeds only because a remote sudo
         // timestamp is still fresh.
-        .mockImplementationOnce((_command: string, callback: ExecCallback) => {
+        .mockImplementationOnce((_command: string, callback: ChannelDelivery) => {
           const stream = makeStream()
-          callback(undefined, stream)
-          stream.emit("close", 0)
+          callback(stream)
+          stream.finish(0)
         })
         // Later privileged command: the timestamp has expired, so `sudo -n`
         // fails fast instead of hanging on a prompt.
-        .mockImplementationOnce((_command: string, callback: ExecCallback) => {
+        .mockImplementationOnce((_command: string, callback: ChannelDelivery) => {
           const stream = makeStream()
-          callback(undefined, stream)
-          stream.stderr.emit("data", Buffer.from("sudo: a password is required\n"))
-          stream.emit("close", 1)
+          callback(stream)
+          stream.stderr.send(Buffer.from("sudo: a password is required\n"))
+          stream.finish(1)
         })
         // Re-probe after invalidation: sudo still exists.
-        .mockImplementationOnce((_command: string, callback: ExecCallback) => {
+        .mockImplementationOnce((_command: string, callback: ChannelDelivery) => {
           const stream = makeStream()
-          callback(undefined, stream)
-          stream.emit("close", 0)
+          callback(stream)
+          stream.finish(0)
         })
         // Re-probe after invalidation: no passwordless sudo.
-        .mockImplementationOnce((_command: string, callback: ExecCallback) => {
+        .mockImplementationOnce((_command: string, callback: ChannelDelivery) => {
           const stream = makeStream()
-          callback(undefined, stream)
-          stream.emit("close", 1)
+          callback(stream)
+          stream.finish(1)
         })
         // Interactive validation with the prompted password succeeds.
-        .mockImplementationOnce((_command: string, callback: ExecCallback) => {
+        .mockImplementationOnce((_command: string, callback: ChannelDelivery) => {
           const stream = makeStream()
-          callback(undefined, stream)
-          stream.emit("close", 0)
+          callback(stream)
+          stream.finish(0)
         })
         // The retried caller command now uses the password-backed sudo path.
-        .mockImplementationOnce((_command: string, callback: ExecCallback) => {
+        .mockImplementationOnce((_command: string, callback: ChannelDelivery) => {
           const stream = makeStream()
-          callback(undefined, stream)
-          stream.emit("data", Buffer.from("recovered\n"))
-          stream.emit("close", 0)
+          callback(stream)
+          stream.stdout.send(Buffer.from("recovered\n"))
+          stream.finish(0)
         })
 
-      const client = makeClientWithExecSpy(execSpy)
+      const client = makeConnectionWithExecScenario(execSpy)
       const ssh = makeConnectedSsh(client, { sudoPassword: null, user: "deploy" })
 
       await expect(ssh.exec("touch /root/file", { silent: true })).rejects.toThrow(
@@ -3772,24 +3655,24 @@ describe("SshConnectionImpl", () => {
     it("keeps sudo readiness when a noninteractive sudo command fails for a normal command error", async () => {
       const execSpy = vi
         .fn()
-        .mockImplementationOnce((_command: string, callback: ExecCallback) => {
+        .mockImplementationOnce((_command: string, callback: ChannelDelivery) => {
           const stream = makeStream()
-          callback(undefined, stream)
-          stream.emit("close", 0)
+          callback(stream)
+          stream.finish(0)
         })
-        .mockImplementationOnce((_command: string, callback: ExecCallback) => {
+        .mockImplementationOnce((_command: string, callback: ChannelDelivery) => {
           const stream = makeStream()
-          callback(undefined, stream)
-          stream.emit("close", 0)
+          callback(stream)
+          stream.finish(0)
         })
-        .mockImplementationOnce((_command: string, callback: ExecCallback) => {
+        .mockImplementationOnce((_command: string, callback: ChannelDelivery) => {
           const stream = makeStream()
-          callback(undefined, stream)
-          stream.stderr.emit("data", Buffer.from("application failed\n"))
-          stream.emit("close", 2)
+          callback(stream)
+          stream.stderr.send(Buffer.from("application failed\n"))
+          stream.finish(2)
         })
 
-      const client = makeClientWithExecSpy(execSpy)
+      const client = makeConnectionWithExecScenario(execSpy)
       const ssh = makeConnectedSsh(client, { sudoPassword: null, user: "deploy" })
 
       await expect(ssh.exec("false", { silent: true })).rejects.toThrow("application failed")
@@ -3811,29 +3694,29 @@ describe("SshConnectionImpl", () => {
       const execSpy = vi
         .fn()
         // First call: execRaw "command -v sudo" — sudo is installed
-        .mockImplementationOnce((_command: string, callback: ExecCallback) => {
+        .mockImplementationOnce((_command: string, callback: ChannelDelivery) => {
           const stream = makeStream()
-          callback(undefined, stream)
-          stream.emit("close", 0)
+          callback(stream)
+          stream.finish(0)
         })
         // Second call: passwordless probe — must be `sudo -n true` so it
         // exits non-zero without blocking on a sudo prompt.
-        .mockImplementationOnce((_command: string, callback: ExecCallback) => {
+        .mockImplementationOnce((_command: string, callback: ChannelDelivery) => {
           const stream = makeStream()
-          callback(undefined, stream)
-          stream.emit("close", 1)
+          callback(stream)
+          stream.finish(1)
         })
 
-      const client = makeClientWithExecSpy(execSpy)
+      const client = makeConnectionWithExecScenario(execSpy)
       const ssh = makeConnectedSsh(client, { sudoPassword: null, user: "deploy" })
       vi.mocked(promptTerminal).mockResolvedValueOnce("entered-sudo-password")
 
       // Third call: cacheAndValidateSudoPassword runs `sudo -S bash -c true`
       // with the cached password — succeed so the probe completes.
-      execSpy.mockImplementationOnce((_command: string, callback: ExecCallback) => {
+      execSpy.mockImplementationOnce((_command: string, callback: ChannelDelivery) => {
         const stream = makeStream()
-        callback(undefined, stream)
-        stream.emit("close", 0)
+        callback(stream)
+        stream.finish(0)
       })
 
       await expect(ssh.probeSudo()).resolves.toBeUndefined()
@@ -3864,18 +3747,18 @@ describe("SshConnectionImpl", () => {
 
       const execSpy = vi
         .fn()
-        .mockImplementationOnce((_command: string, callback: ExecCallback) => {
+        .mockImplementationOnce((_command: string, callback: ChannelDelivery) => {
           const stream = makeStream()
-          callback(undefined, stream)
-          stream.emit("close", 0)
+          callback(stream)
+          stream.finish(0)
         })
-        .mockImplementationOnce((_command: string, callback: ExecCallback) => {
+        .mockImplementationOnce((_command: string, callback: ChannelDelivery) => {
           const stream = makeStream()
-          callback(undefined, stream)
-          stream.emit("close", 1)
+          callback(stream)
+          stream.finish(1)
         })
 
-      const client = makeClientWithExecSpy(execSpy)
+      const client = makeConnectionWithExecScenario(execSpy)
       const ssh = makeConnectedSsh(client, { sudoPassword: null, user: "deploy" })
       const abortController = new AbortController()
       const probePromise = ssh.probeSudo({ abortSignal: abortController.signal })
@@ -3887,13 +3770,13 @@ describe("SshConnectionImpl", () => {
     })
 
     it("treats undefined ssh2 close code as exit code 0 in execWithoutSudo (regression)", async () => {
-      const execSpy = vi.fn().mockImplementation((_command: string, callback: ExecCallback) => {
+      const execSpy = vi.fn().mockImplementation((_command: string, callback: ChannelDelivery) => {
         const stream = makeStream()
-        callback(undefined, stream)
-        stream.emit("close", undefined)
+        callback(stream)
+        stream.finish(undefined)
       })
 
-      const client = makeClientWithExecSpy(execSpy)
+      const client = makeConnectionWithExecScenario(execSpy)
       const ssh = makeConnectedSsh(client, { sudoPassword: null, user: "deploy" })
 
       await expect(
@@ -3902,13 +3785,13 @@ describe("SshConnectionImpl", () => {
     })
 
     it("rejects signal-closed execRaw streams instead of treating them as success", async () => {
-      const execSpy = vi.fn().mockImplementation((_command: string, callback: ExecCallback) => {
+      const execSpy = vi.fn().mockImplementation((_command: string, callback: ChannelDelivery) => {
         const stream = makeStream()
-        callback(undefined, stream)
-        stream.emit("close", null, "SIGKILL")
+        callback(stream)
+        stream.finish(null, "SIGKILL")
       })
 
-      const client = makeClientWithExecSpy(execSpy)
+      const client = makeConnectionWithExecScenario(execSpy)
       const ssh = makeConnectedSsh(client, { sudoPassword: null, user: "deploy" })
 
       await expect(
@@ -3922,14 +3805,14 @@ describe("SshConnectionImpl", () => {
       // suffixed with the shared capture-truncation marker (instead of the old
       // manual reject-on-overflow path), so the raw path and the sudo path emit
       // one identical truncation output.
-      const execSpy = vi.fn().mockImplementation((_command: string, callback: ExecCallback) => {
+      const execSpy = vi.fn().mockImplementation((_command: string, callback: ChannelDelivery) => {
         const stream = makeStream()
-        callback(undefined, stream)
-        stream.emit("data", Buffer.alloc(DEFAULT_MAX_OUTPUT_BYTES + 1, "a"))
-        stream.emit("close", 0)
+        callback(stream)
+        stream.stdout.send(Buffer.alloc(DEFAULT_MAX_OUTPUT_BYTES + 1, "a"))
+        stream.finish(0)
       })
 
-      const client = makeClientWithExecSpy(execSpy)
+      const client = makeConnectionWithExecScenario(execSpy)
       const ssh = makeConnectedSsh(client, { sudoPassword: null, user: "deploy" })
 
       const output = await (ssh as unknown as PrivateSshConnection).outputWithoutSudo(
@@ -3941,14 +3824,14 @@ describe("SshConnectionImpl", () => {
     })
 
     it("treats undefined ssh2 close code as exit code 0 in outputWithoutSudo (regression)", async () => {
-      const execSpy = vi.fn().mockImplementation((_command: string, callback: ExecCallback) => {
+      const execSpy = vi.fn().mockImplementation((_command: string, callback: ChannelDelivery) => {
         const stream = makeStream()
-        callback(undefined, stream)
-        stream.emit("data", Buffer.from(" hello \n"))
-        stream.emit("close", undefined)
+        callback(stream)
+        stream.stdout.send(Buffer.from(" hello \n"))
+        stream.finish(undefined)
       })
 
-      const client = makeClientWithExecSpy(execSpy)
+      const client = makeConnectionWithExecScenario(execSpy)
       const ssh = makeConnectedSsh(client, { sudoPassword: null, user: "deploy" })
 
       await expect(
@@ -3959,18 +3842,18 @@ describe("SshConnectionImpl", () => {
     it("treats undefined ssh2 close code as exit code 0 in probeSudo (regression)", async () => {
       const execSpy = vi
         .fn()
-        .mockImplementationOnce((_command: string, callback: ExecCallback) => {
+        .mockImplementationOnce((_command: string, callback: ChannelDelivery) => {
           const stream = makeStream()
-          callback(undefined, stream)
-          stream.emit("close", undefined)
+          callback(stream)
+          stream.finish(undefined)
         })
-        .mockImplementationOnce((_command: string, callback: ExecCallback) => {
+        .mockImplementationOnce((_command: string, callback: ChannelDelivery) => {
           const stream = makeStream()
-          callback(undefined, stream)
-          stream.emit("close", undefined)
+          callback(stream)
+          stream.finish(undefined)
         })
 
-      const client = makeClientWithExecSpy(execSpy)
+      const client = makeConnectionWithExecScenario(execSpy)
       const ssh = makeConnectedSsh(client, { sudoPassword: null, user: "deploy" })
 
       await expect(ssh.probeSudo()).resolves.toBeUndefined()
@@ -3988,31 +3871,31 @@ describe("SshConnectionImpl", () => {
       const execSpy = vi
         .fn()
         // Probe: command -v sudo
-        .mockImplementationOnce((_command: string, callback: ExecCallback) => {
+        .mockImplementationOnce((_command: string, callback: ChannelDelivery) => {
           const stream = makeStream()
-          callback(undefined, stream)
-          stream.emit("close", 0)
+          callback(stream)
+          stream.finish(0)
         })
         // Probe: sudo -n true (passwordless probe fails)
-        .mockImplementationOnce((_command: string, callback: ExecCallback) => {
+        .mockImplementationOnce((_command: string, callback: ChannelDelivery) => {
           const stream = makeStream()
-          callback(undefined, stream)
-          stream.emit("close", 1)
+          callback(stream)
+          stream.finish(1)
         })
         // Validation: SUDO_PROMPT='' sudo -S bash -c 'true'
-        .mockImplementationOnce((_command: string, callback: ExecCallback) => {
+        .mockImplementationOnce((_command: string, callback: ChannelDelivery) => {
           const stream = makeStream()
-          callback(undefined, stream)
-          stream.emit("close", 0)
+          callback(stream)
+          stream.finish(0)
         })
         // Subsequent exec with input: must use sudo -n bash -c
-        .mockImplementationOnce((_command: string, callback: ExecCallback) => {
+        .mockImplementationOnce((_command: string, callback: ChannelDelivery) => {
           const stream = makeStream()
-          callback(undefined, stream)
-          stream.emit("close", 0)
+          callback(stream)
+          stream.finish(0)
         })
 
-      const client = makeClientWithExecSpy(execSpy)
+      const client = makeConnectionWithExecScenario(execSpy)
       const ssh = makeConnectedSsh(client, { sudoPassword: null, user: "deploy" })
 
       await ssh.probeSudo()
@@ -4044,26 +3927,26 @@ describe("SshConnectionImpl", () => {
       const execSpy = vi
         .fn()
         // First call: command -v sudo — installed
-        .mockImplementationOnce((_command: string, callback: ExecCallback) => {
+        .mockImplementationOnce((_command: string, callback: ChannelDelivery) => {
           const stream = makeStream()
-          callback(undefined, stream)
-          stream.emit("close", 0)
+          callback(stream)
+          stream.finish(0)
         })
         // Second call: sudo -n true — passwordless probe fails
-        .mockImplementationOnce((_command: string, callback: ExecCallback) => {
+        .mockImplementationOnce((_command: string, callback: ChannelDelivery) => {
           const stream = makeStream()
-          callback(undefined, stream)
-          stream.emit("close", 1)
+          callback(stream)
+          stream.finish(1)
         })
         // Third call: sudo -S validation — succeed and snapshot the sink
-        .mockImplementationOnce((_command: string, callback: ExecCallback) => {
+        .mockImplementationOnce((_command: string, callback: ChannelDelivery) => {
           registeredDuringProbe = getRegisteredSecrets()
           const stream = makeStream()
-          callback(undefined, stream)
-          stream.emit("close", 0)
+          callback(stream)
+          stream.finish(0)
         })
 
-      const client = makeClientWithExecSpy(execSpy)
+      const client = makeConnectionWithExecScenario(execSpy)
       const ssh = makeConnectedSsh(client, { sudoPassword: null, user: "deploy" })
 
       await ssh.probeSudo()
@@ -4087,26 +3970,26 @@ describe("SshConnectionImpl", () => {
       const execSpy = vi
         .fn()
         // First call: execRaw "command -v sudo" — sudo is installed
-        .mockImplementationOnce((_command: string, callback: ExecCallback) => {
+        .mockImplementationOnce((_command: string, callback: ChannelDelivery) => {
           const stream = makeStream()
-          callback(undefined, stream)
-          stream.emit("close", 0)
+          callback(stream)
+          stream.finish(0)
         })
         // Second call: passwordless sudo probe — fails (sudo requires a password)
-        .mockImplementationOnce((_command: string, callback: ExecCallback) => {
+        .mockImplementationOnce((_command: string, callback: ChannelDelivery) => {
           const stream = makeStream()
-          callback(undefined, stream)
-          stream.emit("close", 1)
+          callback(stream)
+          stream.finish(1)
         })
         // Third call: sudo with password — fails with the password in stderr
-        .mockImplementationOnce((_command: string, callback: ExecCallback) => {
+        .mockImplementationOnce((_command: string, callback: ChannelDelivery) => {
           const stream = makeStream()
-          callback(undefined, stream)
-          stream.stderr.emit("data", Buffer.from(`Authentication failed: ${password} invalid`))
-          stream.emit("close", 1)
+          callback(stream)
+          stream.stderr.send(Buffer.from(`Authentication failed: ${password} invalid`))
+          stream.finish(1)
         })
 
-      const client = makeClientWithExecSpy(execSpy)
+      const client = makeConnectionWithExecScenario(execSpy)
       const ssh = makeConnectedSsh(client, { sudoPassword: null, user: "deploy" })
 
       // Act
@@ -4129,19 +4012,19 @@ describe("SshConnectionImpl", () => {
       const execSpy = vi
         .fn()
         // First call: execRaw "command -v sudo" — sudo is installed
-        .mockImplementationOnce((_command: string, callback: ExecCallback) => {
+        .mockImplementationOnce((_command: string, callback: ChannelDelivery) => {
           const stream = makeStream()
-          callback(undefined, stream)
-          stream.emit("close", 0)
+          callback(stream)
+          stream.finish(0)
         })
         // Second call: passwordless sudo probe fails so probeSudo prompts for a password
-        .mockImplementationOnce((_command: string, callback: ExecCallback) => {
+        .mockImplementationOnce((_command: string, callback: ChannelDelivery) => {
           const stream = makeStream()
-          callback(undefined, stream)
-          stream.emit("close", 1)
+          callback(stream)
+          stream.finish(1)
         })
 
-      const client = makeClientWithExecSpy(execSpy)
+      const client = makeConnectionWithExecScenario(execSpy)
       const ssh = makeConnectedSsh(client, { sudoPassword: null, user: "deploy" })
 
       // Act & Assert
@@ -4155,19 +4038,19 @@ describe("SshConnectionImpl", () => {
       const execSpy = vi
         .fn()
         // First call: execRaw "command -v sudo" — sudo is installed
-        .mockImplementationOnce((_command: string, callback: ExecCallback) => {
+        .mockImplementationOnce((_command: string, callback: ChannelDelivery) => {
           const stream = makeStream()
-          callback(undefined, stream)
-          stream.emit("close", 0)
+          callback(stream)
+          stream.finish(0)
         })
         // Second call: passwordless sudo probe fails so probeSudo prompts for a password
-        .mockImplementationOnce((_command: string, callback: ExecCallback) => {
+        .mockImplementationOnce((_command: string, callback: ChannelDelivery) => {
           const stream = makeStream()
-          callback(undefined, stream)
-          stream.emit("close", 1)
+          callback(stream)
+          stream.finish(1)
         })
 
-      const client = makeClientWithExecSpy(execSpy)
+      const client = makeConnectionWithExecScenario(execSpy)
       const ssh = makeConnectedSsh(client, { sudoPassword: null, user: "deploy" })
 
       // Act & Assert
@@ -4179,13 +4062,13 @@ describe("SshConnectionImpl", () => {
       const execSpy = vi
         .fn()
         // Only call: execRaw "command -v sudo" — sudo is NOT installed
-        .mockImplementationOnce((_command: string, callback: ExecCallback) => {
+        .mockImplementationOnce((_command: string, callback: ChannelDelivery) => {
           const stream = makeStream()
-          callback(undefined, stream)
-          stream.emit("close", 1)
+          callback(stream)
+          stream.finish(1)
         })
 
-      const client = makeClientWithExecSpy(execSpy)
+      const client = makeConnectionWithExecScenario(execSpy)
       const ssh = makeConnectedSsh(client, { sudoPassword: null, user: "deploy" })
 
       // Act & Assert
@@ -4199,13 +4082,13 @@ describe("SshConnectionImpl", () => {
       vi.useFakeTimers()
 
       // The stream is created but close is never emitted — simulating a hanging command
-      const execSpy = vi.fn().mockImplementation((_command: string, callback: ExecCallback) => {
+      const execSpy = vi.fn().mockImplementation((_command: string, callback: ChannelDelivery) => {
         const stream = makeStream()
-        callback(undefined, stream)
-        // Intentionally omit stream.emit("close", ...) to simulate a hang
+        callback(stream)
+        // Intentionally omit stream.finish( ...) to simulate a hang
       })
 
-      const client = makeClientWithExecSpy(execSpy)
+      const client = makeConnectionWithExecScenario(execSpy)
       const ssh = makeConnectedSsh(client, { sudoPassword: null, user: "deploy" })
 
       // Act
@@ -4230,13 +4113,13 @@ describe("SshConnectionImpl", () => {
       // The fix closes the late stream immediately and skips listener registration.
       vi.useFakeTimers()
 
-      let pendingCallback: ExecCallback | undefined
-      const execSpy = vi.fn().mockImplementation((_command: string, callback: ExecCallback) => {
+      let pendingCallback: ChannelDelivery | undefined
+      const execSpy = vi.fn().mockImplementation((_command: string, callback: ChannelDelivery) => {
         // Capture the callback so the test can invoke it manually after the timeout fires
         pendingCallback = callback
       })
 
-      const client = makeClientWithExecSpy(execSpy)
+      const client = makeConnectionWithExecScenario(execSpy)
       const ssh = makeConnectedSsh(client, { sudoPassword: null, user: "deploy" })
 
       // probeSudo -> ensureSudoInstalled -> execRaw is the only execRaw call site,
@@ -4255,9 +4138,9 @@ describe("SshConnectionImpl", () => {
       // stream would accumulate buffered data forever.
       expect(pendingCallback).toBeDefined()
       const lateStream = makeStream()
-      const dataListenerSpy = vi.spyOn(lateStream, "on")
+      const dataListenerSpy = vi.spyOn(lateStream.stdout, "on")
       const stderrListenerSpy = vi.spyOn(lateStream.stderr, "on")
-      pendingCallback!(undefined, lateStream)
+      pendingCallback!(lateStream)
 
       expect(lateStream.close).toHaveBeenCalledOnce()
       expect(dataListenerSpy).not.toHaveBeenCalled()
@@ -4270,7 +4153,7 @@ describe("SshConnectionImpl", () => {
       const execSpy = vi.fn().mockImplementation(() => {
         throw new Error("ssh2 exec failed before callback")
       })
-      const client = makeClientWithExecSpy(execSpy)
+      const client = makeConnectionWithExecScenario(execSpy)
       const ssh = makeConnectedSsh(client, { sudoPassword: null, user: "deploy" })
       const pendingRejects = (ssh as unknown as Record<string, unknown>).pendingRejects as Set<
         (reason: Error) => void
@@ -4294,13 +4177,13 @@ describe("SshConnectionImpl", () => {
 
       // Arrange: exec callback receives the stream but the stream never emits 'close'
       // — the execRaw Promise stays pending until something externally rejects it.
-      const execSpy = vi.fn().mockImplementation((_command: string, callback: ExecCallback) => {
+      const execSpy = vi.fn().mockImplementation((_command: string, callback: ChannelDelivery) => {
         const stream = makeStream()
-        callback(undefined, stream)
-        // Intentionally omit stream.emit("close", ...) to keep execRaw pending
+        callback(stream)
+        // Intentionally omit stream.finish( ...) to keep execRaw pending
       })
 
-      const client = makeClientWithExecSpy(execSpy)
+      const client = makeConnectionWithExecScenario(execSpy)
       const ssh = makeConnectedSsh(client, { sudoPassword: null, user: "deploy" })
 
       // Act: start probeSudo (which internally calls ensureSudoInstalled → execRaw)
@@ -4338,13 +4221,13 @@ describe("SshConnectionImpl", () => {
       // unhandled `error` event. The fix attaches error listeners on both the
       // stream and its stderr channel that clear the timer and reject.
       const epipeError = new Error("write EPIPE")
-      const execSpy = vi.fn().mockImplementation((_command: string, callback: ExecCallback) => {
+      const execSpy = vi.fn().mockImplementation((_command: string, callback: ChannelDelivery) => {
         const stream = makeStream()
-        callback(undefined, stream)
-        stream.emit("error", epipeError)
+        callback(stream)
+        stream.stdout.fail(epipeError)
       })
 
-      const client = makeClientWithExecSpy(execSpy)
+      const client = makeConnectionWithExecScenario(execSpy)
       const ssh = makeConnectedSsh(client, { sudoPassword: null, user: "deploy" })
 
       await expect(ssh.probeSudo()).rejects.toThrow("write EPIPE")
@@ -4356,13 +4239,13 @@ describe("SshConnectionImpl", () => {
       // fix mirrors collectStreamOutput by attaching an error listener that
       // rejects via the wrapped reject path.
       const stderrError = new Error("stderr channel error")
-      const execSpy = vi.fn().mockImplementation((_command: string, callback: ExecCallback) => {
+      const execSpy = vi.fn().mockImplementation((_command: string, callback: ChannelDelivery) => {
         const stream = makeStream()
-        callback(undefined, stream)
-        stream.stderr.emit("error", stderrError)
+        callback(stream)
+        stream.stderr.fail(stderrError)
       })
 
-      const client = makeClientWithExecSpy(execSpy)
+      const client = makeConnectionWithExecScenario(execSpy)
       const ssh = makeConnectedSsh(client, { sudoPassword: null, user: "deploy" })
 
       await expect(ssh.probeSudo()).rejects.toThrow("stderr channel error")
@@ -4377,13 +4260,13 @@ describe("SshConnectionImpl", () => {
       const execSpy = vi
         .fn()
         // First exec call: command -v sudo — sudo NOT installed (exit 1)
-        .mockImplementationOnce((_command: string, callback: ExecCallback) => {
+        .mockImplementationOnce((_command: string, callback: ChannelDelivery) => {
           const stream = makeStream()
-          callback(undefined, stream)
-          stream.emit("close", 1)
+          callback(stream)
+          stream.finish(1)
         })
 
-      const client = makeClientWithExecSpy(execSpy)
+      const client = makeConnectionWithExecScenario(execSpy)
       const ssh = makeConnectedSsh(client, { sudoPassword: null, user: "deploy" })
 
       // First exec: probe runs and fails with "sudo is not installed".
@@ -4405,7 +4288,7 @@ describe("SshConnectionImpl", () => {
       // ensureSudoReady would still throw the cached probe failure from the
       // previous host. The fix mirrors the public disconnect() semantics in
       // the internal teardown path.
-      const ssh = makeConnectedSsh(makeClientWithEnd(vi.fn()), {
+      const ssh = makeConnectedSsh(makeConnectionWithClose(vi.fn()), {
         sudoPassword: null,
         user: "deploy",
       })
@@ -4427,10 +4310,10 @@ describe("SshConnectionImpl", () => {
     })
 
     it("propagates exec callback errors from test()", async () => {
-      const execSpy = vi.fn().mockImplementation((_command: string, callback: ExecCallback) => {
-        callback(new Error("channel open failed"), makeStream())
+      const execSpy = vi.fn().mockImplementation((_command: string, callback: ChannelDelivery) => {
+        callback.fail(new Error("channel open failed"))
       })
-      const client = makeClientWithExecSpy(execSpy)
+      const client = makeConnectionWithExecScenario(execSpy)
       const ssh = makeConnectedSsh(client)
 
       await expect(ssh.test("test -f /etc/passwd")).rejects.toThrow("channel open failed")
@@ -4445,12 +4328,12 @@ describe("SshConnectionImpl", () => {
       const { clearRegisteredSecrets, getRegisteredSecrets } = await import("../src/secretSink.js")
       clearRegisteredSecrets()
 
-      const execSpy = vi.fn().mockImplementation((_command: string, callback: ExecCallback) => {
+      const execSpy = vi.fn().mockImplementation((_command: string, callback: ChannelDelivery) => {
         const stream = makeStream()
-        callback(undefined, stream)
-        stream.emit("close", 0)
+        callback(stream)
+        stream.finish(0)
       })
-      const client = makeClientWithExecSpy(execSpy)
+      const client = makeConnectionWithExecScenario(execSpy)
       const ssh = makeConnectedSsh(client, { sudoPassword: null, user: "deploy" })
       const internals = ssh as unknown as {
         cacheAndValidateSudoPassword: (password: string) => Promise<void>
@@ -4480,7 +4363,7 @@ describe("SshConnectionImpl", () => {
     beforeEach(async () => {
       const knownHosts = await import("../src/knownHosts.js")
       vi.mocked(knownHosts.buildHostVerifier).mockResolvedValue({})
-      vi.mocked(tryConnectOnPort).mockResolvedValue()
+      vi.mocked(connectTransport).mockResolvedValue()
       const fsp = await import("node:fs/promises")
       vi.mocked(fsp.readFile).mockResolvedValue(Buffer.from("fake-private-key"))
     })
@@ -4585,10 +4468,12 @@ describe("SshConnectionImpl", () => {
       vi.mocked(buildHostVerifier).mockResolvedValue({
         hostVerifier: vi.fn().mockReturnValue(true),
       })
-      vi.mocked(tryConnectOnPort).mockImplementationOnce(async ({ hostVerifier }) => {
-        hostVerifier?.(acceptedHostKey)
-        await Promise.resolve()
-      })
+      vi.mocked(connectTransport).mockImplementationOnce(
+        async ({ verifyHostKey: hostVerifier }) => {
+          await hostVerifier(acceptedHostKey)
+          await Promise.resolve()
+        }
+      )
 
       const ssh = new SshConnectionImpl("1.2.3.4", {
         expectedHostFingerprint: "SHA256:trusted-fingerprint",
@@ -4613,18 +4498,18 @@ describe("SshConnectionImpl", () => {
 
       await ssh.connect()
 
-      const [callArgs] = vi.mocked(tryConnectOnPort).mock.calls[0]
+      const [callArgs] = vi.mocked(connectTransport).mock.calls[0]
       // The hostVerifier is now a wrapper that delegates to the original
-      expect(callArgs.hostVerifier).not.toBe(fakeVerifier)
-      expect(callArgs.hostVerifier).toBeTypeOf("function")
+      expect(callArgs.verifyHostKey).not.toBe(fakeVerifier)
+      expect(callArgs.verifyHostKey).toBeTypeOf("function")
       // Calling the wrapper should invoke the original verifier
       const testKey = Buffer.from("test-key")
-      callArgs.hostVerifier!(testKey)
+      await callArgs.verifyHostKey(testKey)
       expect(fakeVerifier).toHaveBeenCalledWith(testKey)
     })
 
     it("calls buildHostVerifier once per port when connecting across multiple ports", async () => {
-      vi.mocked(tryConnectOnPort)
+      vi.mocked(connectTransport)
         .mockRejectedValueOnce(new Error("Connection refused on port 22"))
         .mockResolvedValueOnce()
 
@@ -4674,19 +4559,21 @@ describe("SshConnectionImpl", () => {
 
       await ssh.connect()
 
-      const [callArgs] = vi.mocked(tryConnectOnPort).mock.calls[0]
+      const [callArgs] = vi.mocked(connectTransport).mock.calls[0]
       // The wrapper is always present for host-key pinning, even without an original verifier
-      expect(callArgs.hostVerifier).toBeTypeOf("function")
+      expect(callArgs.verifyHostKey).toBeTypeOf("function")
     })
 
     it("does not expose a verified host public key when no verifier-backed trust check ran", async () => {
       const hostKey = Buffer.from("accepted-without-verifier")
       const { buildHostVerifier } = await import("../src/knownHosts.js")
       vi.mocked(buildHostVerifier).mockResolvedValue({})
-      vi.mocked(tryConnectOnPort).mockImplementationOnce(async ({ hostVerifier }) => {
-        hostVerifier?.(hostKey)
-        await Promise.resolve()
-      })
+      vi.mocked(connectTransport).mockImplementationOnce(
+        async ({ verifyHostKey: hostVerifier }) => {
+          await hostVerifier(hostKey)
+          await Promise.resolve()
+        }
+      )
 
       const ssh = new SshConnectionImpl("1.2.3.4", {
         ports: [22],
@@ -4716,10 +4603,12 @@ describe("SshConnectionImpl", () => {
         }),
       }
       vi.mocked(buildHostVerifier).mockResolvedValue(verifierResult)
-      vi.mocked(tryConnectOnPort).mockImplementationOnce(async ({ hostVerifier }) => {
-        hostVerifier?.(Buffer.from("accepted-host-key"))
-        await Promise.resolve()
-      })
+      vi.mocked(connectTransport).mockImplementationOnce(
+        async ({ verifyHostKey: hostVerifier }) => {
+          await hostVerifier(Buffer.from("accepted-host-key"))
+          await Promise.resolve()
+        }
+      )
 
       const ssh = makeSshInstance({ host: "1.2.3.4", ports: [22] })
       let connected = false
@@ -4741,9 +4630,9 @@ describe("SshConnectionImpl", () => {
       const transitionError = new Error("socket closed during host-key persist")
       let emitThrew = false
       const commitAcceptedHostKey = vi.fn(async () => {
-        const [{ client }] = vi.mocked(tryConnectOnPort).mock.calls[0]
+        const client = attempts.at(-1)!
         try {
-          client.emit("error", transitionError)
+          client.disconnect(new TransportError("CONNECT_FAILED", transitionError))
         } catch {
           emitThrew = true
         }
@@ -4758,16 +4647,16 @@ describe("SshConnectionImpl", () => {
           commitAcceptedHostKey: vi.fn().mockResolvedValue(undefined),
           hostVerifier: vi.fn().mockReturnValue(true),
         })
-      vi.mocked(tryConnectOnPort).mockResolvedValue()
-      vi.mocked(cleanupFailedSshClient).mockClear()
+      vi.mocked(connectTransport).mockResolvedValue()
+      vi.mocked(closeTransport).mockClear()
 
       const ssh = makeSshInstance({ host: "1.2.3.4", ports: [22, 2222] })
       await ssh.connect()
 
       expect(emitThrew).toBe(false)
       expect(commitAcceptedHostKey).toHaveBeenCalledOnce()
-      expect(tryConnectOnPort).toHaveBeenCalledTimes(2)
-      expect(cleanupFailedSshClient).toHaveBeenCalledOnce()
+      expect(connectTransport).toHaveBeenCalledTimes(2)
+      expect(closeTransport).toHaveBeenCalledOnce()
     })
 
     it("captures client errors emitted immediately after ready before registration", async () => {
@@ -4777,24 +4666,24 @@ describe("SshConnectionImpl", () => {
       vi.mocked(buildHostVerifier).mockResolvedValue({
         hostVerifier: vi.fn().mockReturnValue(true),
       })
-      vi.mocked(tryConnectOnPort)
-        .mockImplementationOnce(async ({ client }) => {
+      vi.mocked(connectTransport)
+        .mockImplementationOnce(async () => {
           try {
-            client.emit("error", transitionError)
+            attempts.at(-1)!.disconnect(new TransportError("CONNECT_FAILED", transitionError))
           } catch {
             emitThrew = true
           }
           await Promise.resolve()
         })
         .mockResolvedValueOnce()
-      vi.mocked(cleanupFailedSshClient).mockClear()
+      vi.mocked(closeTransport).mockClear()
 
       const ssh = makeSshInstance({ host: "1.2.3.4", ports: [22, 2222] })
       await ssh.connect()
 
       expect(emitThrew).toBe(false)
-      expect(tryConnectOnPort).toHaveBeenCalledTimes(2)
-      expect(cleanupFailedSshClient).toHaveBeenCalledOnce()
+      expect(connectTransport).toHaveBeenCalledTimes(2)
+      expect(closeTransport).toHaveBeenCalledOnce()
       expect(ssh.getConnectionInfo().port).toBe(2222)
     })
 
@@ -4805,14 +4694,14 @@ describe("SshConnectionImpl", () => {
       vi.mocked(buildHostVerifier).mockResolvedValue({
         hostVerifier: vi.fn().mockReturnValue(true),
       })
-      vi.mocked(tryConnectOnPort)
-        .mockImplementationOnce(async ({ hostVerifier }) => {
-          hostVerifier?.(firstKey)
+      vi.mocked(connectTransport)
+        .mockImplementationOnce(async ({ verifyHostKey: hostVerifier }) => {
+          await hostVerifier(firstKey)
           await Promise.resolve()
           throw new Error("first port failed after host verification")
         })
-        .mockImplementationOnce(async ({ hostVerifier }) => {
-          hostVerifier?.(secondKey)
+        .mockImplementationOnce(async ({ verifyHostKey: hostVerifier }) => {
+          await hostVerifier(secondKey)
           await Promise.resolve()
         })
 
@@ -4841,14 +4730,14 @@ describe("SshConnectionImpl", () => {
           commitAcceptedHostKey: secondCommitAcceptedHostKey,
           hostVerifier: vi.fn().mockReturnValue(true),
         })
-      vi.mocked(tryConnectOnPort)
-        .mockImplementationOnce(async ({ hostVerifier }) => {
-          hostVerifier?.(makeWireHostKey("ssh-ed25519", "failed-port-key"))
+      vi.mocked(connectTransport)
+        .mockImplementationOnce(async ({ verifyHostKey: hostVerifier }) => {
+          await hostVerifier(makeWireHostKey("ssh-ed25519", "failed-port-key"))
           await Promise.resolve()
           throw new Error("first port failed after host verification")
         })
-        .mockImplementationOnce(async ({ hostVerifier }) => {
-          hostVerifier?.(makeWireHostKey("ssh-ed25519", "successful-port-key"))
+        .mockImplementationOnce(async ({ verifyHostKey: hostVerifier }) => {
+          await hostVerifier(makeWireHostKey("ssh-ed25519", "successful-port-key"))
           await Promise.resolve()
         })
 
@@ -4861,11 +4750,11 @@ describe("SshConnectionImpl", () => {
     })
 
     it("cleans up exactly once when commitAcceptedHostKey fails after a successful handshake (R-0000198 regression)", async () => {
-      // Regression: when tryConnectOnPort resolved on port A but
+      // Regression: when connectTransport resolved on port A but
       // commitAcceptedHostKey then threw (e.g. ENOSPC on the known_hosts
       // append), the outer catch in tryConnectOnPorts called
-      // cleanupFailedSshClient on a client whose lifecycle was already
-      // governed elsewhere — and tryConnectOnPort did NOT invoke cleanup
+      // closeTransport on a client whose lifecycle was already
+      // governed elsewhere — and connectTransport did NOT invoke cleanup
       // for ports it had already failed. The fix flips the responsibility:
       // the inner connect handles cleanup on its own rejection paths, and
       // the outer catch only cleans up when a downstream step fails on an
@@ -4883,16 +4772,16 @@ describe("SshConnectionImpl", () => {
           commitAcceptedHostKey: succeedingCommit,
           hostVerifier: vi.fn().mockReturnValue(true),
         })
-      vi.mocked(tryConnectOnPort).mockResolvedValue()
-      vi.mocked(cleanupFailedSshClient).mockClear()
+      vi.mocked(connectTransport).mockResolvedValue()
+      vi.mocked(closeTransport).mockClear()
 
       const ssh = makeSshInstance({ host: "1.2.3.4", ports: [22, 2222] })
 
       await ssh.connect()
 
-      // First port: tryConnectOnPort resolved, commit threw, outer catch
+      // First port: connectTransport resolved, commit threw, outer catch
       // performs the single cleanup. Second port: success path, no cleanup.
-      expect(cleanupFailedSshClient).toHaveBeenCalledTimes(1)
+      expect(closeTransport).toHaveBeenCalledTimes(1)
       expect(succeedingCommit).toHaveBeenCalledOnce()
     })
 
@@ -4911,7 +4800,7 @@ describe("SshConnectionImpl", () => {
         commitAcceptedHostKey: failingCommit,
         hostVerifier: vi.fn().mockReturnValue(true),
       })
-      vi.mocked(tryConnectOnPort).mockResolvedValue()
+      vi.mocked(connectTransport).mockResolvedValue()
 
       const abortController = new AbortController()
       const ssh = makeSshInstance({ host: "1.2.3.4", ports: [22] })
@@ -4958,22 +4847,22 @@ async function flushPending(): Promise<void> {
   })
 }
 
-function makeReadySsh(client: Client): SshConnectionImpl {
+function makeReadySsh(client: FakeTransportConnection): SshConnectionImpl {
   const ssh = makeConnectedSsh(client, { user: "deploy" })
   ;(ssh as unknown as Record<string, unknown>).cachedSudoPassword = null
   ;(ssh as unknown as Record<string, unknown>).sudoReady = true
   return ssh
 }
 
-const failOnce = (_command: string, callback: ExecCallback): void => {
-  callback(new Error("boom"), makeStream())
+const failOnce = (_command: string, callback: ChannelDelivery): void => {
+  callback.fail(new Error("boom"))
 }
 
-const succeed = (_command: string, callback: ExecCallback): void => {
+const succeed = (_command: string, callback: ChannelDelivery): void => {
   const stream = makeStream()
-  callback(undefined, stream)
+  callback(stream)
   setImmediate(() => {
-    stream.emit("close", 0)
+    stream.finish(0)
   })
 }
 
@@ -4984,17 +4873,17 @@ describe("SshConnectionImpl session channel cap", () => {
     // issue 8 at once and exhausted the ceiling on archives with many members.
     let concurrent = 0
     let peak = 0
-    const execSpy = vi.fn().mockImplementation((_command: string, callback: ExecCallback) => {
+    const execSpy = vi.fn().mockImplementation((_command: string, callback: ChannelDelivery) => {
       concurrent += 1
       peak = Math.max(peak, concurrent)
       const stream = makeStream()
-      callback(undefined, stream)
+      callback(stream)
       setImmediate(() => {
         concurrent -= 1
-        stream.emit("close", 0)
+        stream.finish(0)
       })
     })
-    const ssh = makeReadySsh(makeClientWithExecSpy(execSpy))
+    const ssh = makeReadySsh(makeConnectionWithExecScenario(execSpy))
 
     const requestCount = 12
     const results = await Promise.all(
@@ -5012,21 +4901,21 @@ describe("SshConnectionImpl session channel cap", () => {
     // The wait can outlive a reconnect, so a queued caller must resolve the
     // client after acquiring its slot. Capturing it beforehand would hand the
     // waiter the client `reconnect()` already replaced.
-    const heldStreams: StreamWithStderr[] = []
-    const firstExec = vi.fn().mockImplementation((_command: string, callback: ExecCallback) => {
+    const heldStreams: FakeExecChannel[] = []
+    const firstExec = vi.fn().mockImplementation((_command: string, callback: ChannelDelivery) => {
       const stream = makeStream()
       heldStreams.push(stream)
-      callback(undefined, stream)
+      callback(stream)
     })
-    const secondExec = vi.fn().mockImplementation((_command: string, callback: ExecCallback) => {
+    const secondExec = vi.fn().mockImplementation((_command: string, callback: ChannelDelivery) => {
       const stream = makeStream()
-      callback(undefined, stream)
+      callback(stream)
       setImmediate(() => {
-        stream.emit("close", 0)
+        stream.finish(0)
       })
     })
 
-    const ssh = makeReadySsh(makeClientWithExecSpy(firstExec))
+    const ssh = makeReadySsh(makeConnectionWithExecScenario(firstExec))
     const requestCount = EXPECTED_SESSION_CHANNEL_CAP * 2
     const pending = Array.from({ length: requestCount }, async (_value, index) =>
       ssh.exec(`echo ${String(index)}`, { silent: true })
@@ -5037,8 +4926,12 @@ describe("SshConnectionImpl session channel cap", () => {
     expect(firstExec).toHaveBeenCalledTimes(EXPECTED_SESSION_CHANNEL_CAP)
 
     // Reconnect underneath the queued callers, then let the in-flight ones finish.
-    ;(ssh as unknown as Record<string, unknown>).client = makeClientWithExecSpy(secondExec)
-    for (const stream of heldStreams) stream.emit("close", 0)
+    ;(
+      ssh as unknown as {
+        registerConnectedClient: (connection: TransportConnection, port: number) => void
+      }
+    ).registerConnectedClient(makeConnectionWithExecScenario(secondExec), 22)
+    for (const stream of heldStreams) stream.finish(0)
 
     await expect(Promise.all(pending)).resolves.toHaveLength(requestCount)
     expect(secondExec).toHaveBeenCalledTimes(EXPECTED_SESSION_CHANNEL_CAP)
@@ -5052,7 +4945,7 @@ describe("SshConnectionImpl session channel cap", () => {
     for (const _slot of Array.from({ length: EXPECTED_SESSION_CHANNEL_CAP })) {
       execSpy.mockImplementationOnce(failOnce)
     }
-    const ssh = makeReadySsh(makeClientWithExecSpy(execSpy))
+    const ssh = makeReadySsh(makeConnectionWithExecScenario(execSpy))
 
     const settled = await Promise.allSettled(
       Array.from({ length: EXPECTED_SESSION_CHANNEL_CAP * 2 }, async (_value, index) =>
@@ -5071,10 +4964,15 @@ describe("SshConnectionImpl session channel cap", () => {
   })
 
   it("names MaxSessions when the server refuses a session channel, with the command masked", async () => {
-    const execSpy = vi.fn().mockImplementation((_command: string, callback: ExecCallback) => {
-      callback(new Error("(SSH) Channel open failure: open failed"), makeStream())
+    const execSpy = vi.fn().mockImplementation((_command: string, callback: ChannelDelivery) => {
+      callback.fail(
+        new TransportError(
+          "CHANNEL_OPEN_FAILED",
+          new Error("(SSH) Channel open failure: open failed")
+        )
+      )
     })
-    const ssh = makeReadySsh(makeClientWithExecSpy(execSpy))
+    const ssh = makeReadySsh(makeConnectionWithExecScenario(execSpy))
 
     const error = await expectRejectedError(
       ssh.exec("echo hunter2-token", { secrets: ["hunter2-token"], silent: true })
@@ -5088,10 +4986,10 @@ describe("SshConnectionImpl session channel cap", () => {
   })
 
   it("leaves an unrelated exec error untouched", async () => {
-    const execSpy = vi.fn().mockImplementation((_command: string, callback: ExecCallback) => {
-      callback(new Error("some other transport problem"), makeStream())
+    const execSpy = vi.fn().mockImplementation((_command: string, callback: ChannelDelivery) => {
+      callback.fail(new Error("some other transport problem"))
     })
-    const ssh = makeReadySsh(makeClientWithExecSpy(execSpy))
+    const ssh = makeReadySsh(makeConnectionWithExecScenario(execSpy))
 
     const error = await expectRejectedError(ssh.exec("echo hi", { silent: true }))
 
@@ -5186,29 +5084,28 @@ describe("transport public error compatibility", () => {
   })
 
   it("rejects a pending public exec with the identical raw disconnect error", async () => {
-    const client = Object.assign(new EventEmitter(), {
-      end: vi.fn(),
-      exec: vi.fn(),
-      sftp: vi.fn(),
-    }) as unknown as Client & EventEmitter
-    const ssh = makeConnectedSshWithCloseListener(client)
+    const client = new FakeTransportConnection({
+      execute: vi.fn(),
+      onClose: vi.fn(),
+    })
+    const ssh = makeConnectedSsh(client)
     const raw = Object.assign(new Error("read ECONNRESET"), { code: "ECONNRESET" })
     const pending = ssh.exec("sleep infinity", { silent: true })
     const failure = pending.catch((error: unknown) => error)
     await vi.waitFor(() => {
       expect(client.exec).toHaveBeenCalledOnce()
     })
-    client.emit("error", raw)
-    client.emit("close")
+    client.disconnect(new TransportError("DISCONNECTED", raw))
+    client.disconnect()
     expect(await failure).toBe(raw)
   })
 
   it("keeps the identical raw error as the channel refusal cause", async () => {
     const raw = Object.assign(new Error("(SSH) Channel open failure: open failed"), { code: 1 })
-    const exec = vi.fn((_command: string, callback: ExecCallback) => {
-      callback(raw, makeStream())
+    const exec = vi.fn((_command: string, callback: ChannelDelivery) => {
+      callback.fail(new TransportError("CHANNEL_OPEN_FAILED", raw))
     })
-    const ssh = makeConnectedSsh(makeClientWithExecSpy(exec))
+    const ssh = makeConnectedSsh(makeConnectionWithExecScenario(exec))
     const error = await expectRejectedError(ssh.exec("true", { silent: true }))
     expect(error.cause).toBe(raw)
     expect(error.message).toContain("the SSH server refused a new session channel")
@@ -5216,10 +5113,10 @@ describe("transport public error compatibility", () => {
 
   it("preserves the public exec error message and errno code", async () => {
     const raw = Object.assign(new Error("read ECONNRESET"), { code: "ECONNRESET" })
-    const exec = vi.fn((_command: string, callback: ExecCallback) => {
-      callback(raw, makeStream())
+    const exec = vi.fn((_command: string, callback: ChannelDelivery) => {
+      callback.fail(new TransportError("INTERNAL", raw))
     })
-    const ssh = makeConnectedSsh(makeClientWithExecSpy(exec))
+    const ssh = makeConnectedSsh(makeConnectionWithExecScenario(exec))
     const error = await expectRejectedError(ssh.exec("true", { silent: true }))
     expect(error).toBe(raw)
     expect(error.message).toBe("read ECONNRESET")
@@ -5228,20 +5125,17 @@ describe("transport public error compatibility", () => {
 
   it("collects data and exit once when a transport only returns a Promise", async () => {
     const stream = makeStream()
-    const exec = vi.fn((_command: string, callback: ExecCallback) => {
-      callback(undefined, stream)
-      stream.emit("data", Buffer.from("out"))
-      stream.stderr.emit("data", Buffer.from("err"))
-      stream.emit("close", 0)
+    const exec = vi.fn((_command: string, callback: ChannelDelivery) => {
+      callback(stream)
+      stream.stdout.send(Buffer.from("out"))
+      stream.stderr.send(Buffer.from("err"))
+      stream.finish(0)
     })
-    const client = makeClientWithExecSpy(exec)
-    const connection = fromSsh2Client(client)
-    const openChannel = connection.exec.bind(connection)
-    connection.exec = async (command) => openChannel(command)
+    const client = new FakeTransportConnection({ execute: exec, promiseOnly: true })
     const ssh = makeConnectedSsh(client)
     const result = await ssh.exec("true", { input: "payload", silent: true })
     expect(result).toStrictEqual({ code: 0, stderr: "err", stdout: "out" })
-    expect(stream.end).toHaveBeenCalledExactlyOnceWith("payload")
+    expect(stream.stdin.end).toHaveBeenCalledExactlyOnceWith("payload")
     expect(exec).toHaveBeenCalledOnce()
   })
 })

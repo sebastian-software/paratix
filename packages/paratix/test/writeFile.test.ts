@@ -1,35 +1,18 @@
-import type { Client, SFTPWrapper } from "ssh2"
-
 import { createHash } from "node:crypto"
-import { EventEmitter } from "node:events"
 import { writeFileSync } from "node:fs"
 import { stat } from "node:fs/promises"
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 
+import type { TransportConnection } from "../src/transport.js"
+
 import { sftpUpload, sftpUploadContent } from "../src/sftp.js"
-import { SshConnectionImpl as OriginalSshConnectionImpl } from "../src/ssh.js"
-import { fromSsh2Client } from "../src/transportSsh2.js"
-
-const { rawClients } = vi.hoisted(() => ({ rawClients: new WeakMap<object, Client>() }))
-function bridgeClient(client: Client) {
-  const connection = fromSsh2Client(client)
-  rawClients.set(connection, client)
-  return connection
-}
-
-class SshConnectionImpl extends OriginalSshConnectionImpl {
-  public constructor(...args: ConstructorParameters<typeof OriginalSshConnectionImpl>) {
-    super(...args)
-    let connection: unknown = null
-    Object.defineProperty(this, "client", {
-      configurable: true,
-      get: () => connection,
-      set(client: Client | null) {
-        connection = client === null ? null : bridgeClient(client)
-      },
-    })
-  }
-}
+import { SshConnectionImpl } from "../src/ssh.js"
+import {
+  type ChannelDelivery,
+  type ExecScenario,
+  FakeExecChannel,
+  FakeTransportConnection,
+} from "./helpers/fakeTransport.js"
 
 // R-0000522: SHA-256 over an empty byte sequence — what `sha256sum` prints
 // when the remote file was finalized as 0 bytes (e.g. after a disk-full
@@ -67,26 +50,12 @@ vi.mock("node:fs/promises", () => ({
   stat: vi.fn().mockResolvedValue({ size: 11 }),
 }))
 
-vi.mock("../src/sftp.js", () => {
-  // oxlint-disable-next-line unicorn/consistent-function-scoping -- keep the helper inside the hoisted module mock factory
-  const legacyMock = (mock = vi.fn()) =>
-    new Proxy(mock, {
-      apply(target, thisArg, args: unknown[]) {
-        const first = args[0]
-        const translated = [...args]
-        if (typeof first === "object" && first !== null)
-          translated[0] = rawClients.get(first) ?? first
-        const result: unknown = Reflect.apply(target, thisArg, translated)
-        return result
-      },
-    })
-  return {
-    SFTP_TIMEOUT: 120_000,
-    sftpDownload: legacyMock(vi.fn().mockResolvedValue(null)),
-    sftpUpload: legacyMock(),
-    sftpUploadContent: legacyMock(),
-  }
-})
+vi.mock("../src/sftp.js", () => ({
+  SFTP_TIMEOUT: 120_000,
+  sftpDownload: vi.fn().mockResolvedValue(null),
+  sftpUpload: vi.fn(),
+  sftpUploadContent: vi.fn(),
+}))
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -113,20 +82,8 @@ function isContentTransportPrintf(command: string): boolean {
   return command.includes("printf '%s' '")
 }
 
-type StreamWithStderr = {
-  close: () => void
-  end: (input?: unknown) => void
-  stderr: EventEmitter
-} & EventEmitter
-
-type ExecCallback = (err: Error | undefined, stream: StreamWithStderr) => void
-
-function makeStream(): StreamWithStderr {
-  const stream = new EventEmitter() as StreamWithStderr
-  stream.close = (): void => undefined
-  stream.end = (): void => undefined
-  stream.stderr = new EventEmitter()
-  return stream
+function makeStream(): FakeExecChannel {
+  return new FakeExecChannel()
 }
 
 // R-0000141: extract the literal directory argument that the dirname-symlink
@@ -153,7 +110,7 @@ type WriteExecOptions = {
   dfOutput?: string
   fallbackTempPath?: string
   finalizeHash?: string
-  inputStream?: StreamWithStderr
+  inputStream?: FakeExecChannel
   size?: number
   tempPath: string
   verifyHash?: string
@@ -180,27 +137,24 @@ function writeResponseData(command: string, options: WriteExecOptions): string {
   return ""
 }
 
-function makeWriteExec(options: WriteExecOptions): ReturnType<typeof vi.fn> {
-  return vi.fn().mockImplementation((command: string, callback: ExecCallback) => {
+function makeWriteExec(options: WriteExecOptions): ReturnType<typeof vi.fn<ExecScenario>> {
+  return vi.fn().mockImplementation((command: string, callback: ChannelDelivery) => {
     const isBase64Input = command.includes("base64 -d") && options.inputStream != null
     const stream = isBase64Input ? options.inputStream! : makeStream()
-    callback(undefined, stream)
+    callback(stream)
     const data = writeResponseData(command, options)
-    stream.emit("data", Buffer.from(data))
-    stream.emit("close", 0)
+    stream.stdout.send(Buffer.from(data))
+    stream.finish(0)
   })
 }
 
-function makeClientWithExecSpy(execSpy: ReturnType<typeof vi.fn>): Client {
-  return {
-    exec: execSpy,
-    sftp: vi.fn().mockImplementation((cb: Parameters<Client["sftp"]>[0]) => {
-      cb(undefined, {} as SFTPWrapper)
-    }),
-  } as unknown as Client
+function makeConnectionWithExecScenario(
+  execSpy: ReturnType<typeof vi.fn<ExecScenario>>
+): FakeTransportConnection {
+  return new FakeTransportConnection({ execute: execSpy })
 }
 
-function makeConnectedSsh(client: Client): SshConnectionImpl {
+function makeConnectedSsh(client: FakeTransportConnection): SshConnectionImpl {
   const config = {
     ports: [22],
     privateKey: "/dev/null",
@@ -208,11 +162,15 @@ function makeConnectedSsh(client: Client): SshConnectionImpl {
   }
   const ssh = new SshConnectionImpl("1.2.3.4", config)
   // Inject the mock client to avoid a real TCP connection.
-  ;(ssh as unknown as Record<string, unknown>).client = client
+  ;(
+    ssh as unknown as {
+      registerConnectedClient: (connection: TransportConnection, port: number) => void
+    }
+  ).registerConnectedClient(client, 22)
   return ssh
 }
 
-function commandsOf(execSpy: ReturnType<typeof vi.fn>): string[] {
+function commandsOf(execSpy: ReturnType<typeof vi.fn<ExecScenario>>): string[] {
   return (execSpy.mock.calls as Array<[string, ...unknown[]]>).map(([command]) => command)
 }
 
@@ -221,7 +179,7 @@ function commandsOf(execSpy: ReturnType<typeof vi.fn>): string[] {
 // ---------------------------------------------------------------------------
 
 describe("SshConnectionImpl.writeFile — small content", () => {
-  let execSpy: ReturnType<typeof vi.fn>
+  let execSpy: ReturnType<typeof vi.fn<ExecScenario>>
 
   beforeEach(() => {
     const hash = sha256Hex(makeSmallContent())
@@ -240,7 +198,7 @@ describe("SshConnectionImpl.writeFile — small content", () => {
 
   it("uses atomic SFTP path (write-to-temp + mv) even for small content", async () => {
     // Arrange
-    const client = makeClientWithExecSpy(execSpy)
+    const client = makeConnectionWithExecScenario(execSpy)
     const ssh = makeConnectedSsh(client)
     const content = makeSmallContent()
 
@@ -264,18 +222,18 @@ describe("SshConnectionImpl.writeFile — small content", () => {
   it("fails closed when the dirname realpath probe fails", async () => {
     const realpathFailureExecSpy = vi
       .fn()
-      .mockImplementationOnce((cmd: string, cb: ExecCallback) => {
+      .mockImplementationOnce((cmd: string, cb: ChannelDelivery) => {
         const stream = makeStream()
-        cb(undefined, stream)
+        cb(stream)
         // #82: the R-0000141/R-0000693 dirname-symlink guard is now folded
         // into the combined `set -eu` prep script that also runs `mktemp`.
         // A realpath failure aborts the whole prep round-trip.
         expect(cmd).toContain("command -p realpath -m -- '/etc'")
         expect(cmd).toContain("mktemp -p '/etc'")
-        stream.stderr.emit("data", Buffer.from("realpath: command not found"))
-        stream.emit("close", 127)
+        stream.stderr.send(Buffer.from("realpath: command not found"))
+        stream.finish(127)
       })
-    const client = makeClientWithExecSpy(realpathFailureExecSpy)
+    const client = makeConnectionWithExecScenario(realpathFailureExecSpy)
     const ssh = makeConnectedSsh(client)
 
     await expect(
@@ -287,7 +245,7 @@ describe("SshConnectionImpl.writeFile — small content", () => {
   })
 
   it("defaults options.mode to 0600 when omitted, matching uploadFile", async () => {
-    const client = makeClientWithExecSpy(execSpy)
+    const client = makeConnectionWithExecScenario(execSpy)
     const ssh = makeConnectedSsh(client)
     const content = makeSmallContent()
 
@@ -302,7 +260,7 @@ describe("SshConnectionImpl.writeFile — small content", () => {
   })
 
   it("throws a clear validation error when options.mode is invalid instead of crashing", async () => {
-    const client = makeClientWithExecSpy(execSpy)
+    const client = makeConnectionWithExecScenario(execSpy)
     const ssh = makeConnectedSsh(client)
     const content = makeSmallContent()
 
@@ -320,7 +278,7 @@ describe("SshConnectionImpl.writeFile — small content", () => {
 // ---------------------------------------------------------------------------
 
 describe("SshConnectionImpl.writeFile — large content (> 64 KB)", () => {
-  let execSpy: ReturnType<typeof vi.fn>
+  let execSpy: ReturnType<typeof vi.fn<ExecScenario>>
 
   beforeEach(() => {
     const hash = sha256Hex(makeLargeContent())
@@ -338,7 +296,7 @@ describe("SshConnectionImpl.writeFile — large content (> 64 KB)", () => {
   })
 
   it("does not create a local content file via writeFileSync", async () => {
-    const client = makeClientWithExecSpy(execSpy)
+    const client = makeConnectionWithExecScenario(execSpy)
     const ssh = makeConnectedSsh(client)
 
     await ssh.writeFile("/etc/large-config", makeLargeContent(), { mode: "0600" })
@@ -347,7 +305,7 @@ describe("SshConnectionImpl.writeFile — large content (> 64 KB)", () => {
   })
 
   it("calls sftpUploadContent with the content and the remote tmp path", async () => {
-    const client = makeClientWithExecSpy(execSpy)
+    const client = makeConnectionWithExecScenario(execSpy)
     const ssh = makeConnectedSsh(client)
     const content = makeLargeContent()
 
@@ -364,7 +322,7 @@ describe("SshConnectionImpl.writeFile — large content (> 64 KB)", () => {
   })
 
   it("moves the remote tmp file to the final destination via mv", async () => {
-    const client = makeClientWithExecSpy(execSpy)
+    const client = makeConnectionWithExecScenario(execSpy)
     const ssh = makeConnectedSsh(client)
 
     await ssh.writeFile("/etc/large-config", makeLargeContent(), { mode: "0600" })
@@ -378,7 +336,7 @@ describe("SshConnectionImpl.writeFile — large content (> 64 KB)", () => {
   })
 
   it("does not remove a local tmp file after a successful upload", async () => {
-    const client = makeClientWithExecSpy(execSpy)
+    const client = makeConnectionWithExecScenario(execSpy)
     const ssh = makeConnectedSsh(client)
 
     await ssh.writeFile("/etc/large-config", makeLargeContent(), { mode: "0600" })
@@ -390,7 +348,7 @@ describe("SshConnectionImpl.writeFile — large content (> 64 KB)", () => {
     // #82: a successful finalize consumes the staged temp via `mv`, so the
     // best-effort `rm -f` cleanup — and its extra exec round-trip — is skipped
     // on the success path. Only prep, stage and finalize should reach the wire.
-    const client = makeClientWithExecSpy(execSpy)
+    const client = makeConnectionWithExecScenario(execSpy)
     const ssh = makeConnectedSsh(client)
 
     await ssh.writeFile("/etc/large-config", makeLargeContent(), { mode: "0600" })
@@ -403,7 +361,7 @@ describe("SshConnectionImpl.writeFile — large content (> 64 KB)", () => {
 
   it("does not create a local tmp file when content upload throws", async () => {
     vi.mocked(sftpUploadContent).mockRejectedValue(new Error("SFTP transfer failed"))
-    const client = makeClientWithExecSpy(execSpy)
+    const client = makeConnectionWithExecScenario(execSpy)
     const ssh = makeConnectedSsh(client)
 
     await expect(
@@ -421,7 +379,7 @@ describe("SshConnectionImpl.writeFile — large content (> 64 KB)", () => {
     const remoteTmpPath = "/etc/paratix-write.CLEANUP"
     vi.mocked(sftpUploadContent).mockRejectedValue(new Error("SFTP transfer failed"))
     const remoteCleanupSpy = makeWriteExec({ size: 100_000, tempPath: remoteTmpPath })
-    const client = makeClientWithExecSpy(remoteCleanupSpy)
+    const client = makeConnectionWithExecScenario(remoteCleanupSpy)
     const ssh = makeConnectedSsh(client)
 
     await expect(
@@ -443,7 +401,7 @@ describe("SshConnectionImpl.writeFile — large content (> 64 KB)", () => {
       size: 0,
       tempPath: remoteTmpPath,
     })
-    const client = makeClientWithExecSpy(stagingMismatchExecSpy)
+    const client = makeConnectionWithExecScenario(stagingMismatchExecSpy)
     const ssh = makeConnectedSsh(client)
 
     await expect(ssh.writeFile(remotePath, makeLargeContent(), { mode: "0600" })).rejects.toThrow(
@@ -466,18 +424,18 @@ describe("SshConnectionImpl.writeFile — large content (> 64 KB)", () => {
     const cleanupExecSpy = vi
       .fn()
       // prep — returns the staged temp path
-      .mockImplementationOnce((_cmd: string, cb: ExecCallback) => {
+      .mockImplementationOnce((_cmd: string, cb: ChannelDelivery) => {
         const stream = makeStream()
-        cb(undefined, stream)
-        stream.emit("data", Buffer.from(remoteTmpPath))
-        stream.emit("close", 0)
+        cb(stream)
+        stream.stdout.send(Buffer.from(remoteTmpPath))
+        stream.finish(0)
       })
       // rm -f in finally — simulates a failure (e.g. permission denied)
-      .mockImplementationOnce((_cmd: string, cb: ExecCallback) => {
-        cb(new Error("rm -f failed unexpectedly"), makeStream())
+      .mockImplementationOnce((_cmd: string, cb: ChannelDelivery) => {
+        cb.fail(new Error("rm -f failed unexpectedly"))
       })
 
-    const client = makeClientWithExecSpy(cleanupExecSpy)
+    const client = makeConnectionWithExecScenario(cleanupExecSpy)
     const ssh = makeConnectedSsh(client)
 
     await expect(
@@ -500,7 +458,7 @@ describe("SshConnectionImpl.writeFile — large content (> 64 KB)", () => {
       verifyHash: sha256Hex(writtenContent),
     })
 
-    const client = makeClientWithExecSpy(execSpy2)
+    const client = makeConnectionWithExecScenario(execSpy2)
     const ssh = makeConnectedSsh(client)
     vi.mocked(sftpUploadContent).mockResolvedValue()
 
@@ -542,7 +500,7 @@ describe("SshConnectionImpl.writeFile — large content (> 64 KB)", () => {
       verifyHash: sha256Hex(largeContent),
     })
 
-    const client = makeClientWithExecSpy(stdinFallbackExecSpy)
+    const client = makeConnectionWithExecScenario(stdinFallbackExecSpy)
     const ssh = makeConnectedSsh(client)
     vi.mocked(sftpUploadContent).mockResolvedValue()
 
@@ -558,10 +516,10 @@ describe("SshConnectionImpl.writeFile — large content (> 64 KB)", () => {
     expect(fallbackCommand).not.toContain("printf '%s'")
     expect(fallbackCommand!.length).toBeLessThan(1000)
     expect(executedCommands.some((command) => command.includes(largeContent))).toBe(false)
-    expect(fallbackInputStream.end).toHaveBeenCalledExactlyOnceWith(
+    expect(fallbackInputStream.stdin.end).toHaveBeenCalledExactlyOnceWith(
       Buffer.from(largeContent, "utf8").toString("base64")
     )
-    const [fallbackInput] = fallbackInputStream.end.mock.calls[0] as [string]
+    const fallbackInput = String(vi.mocked(fallbackInputStream.stdin.end).mock.calls[0][0])
     expect(Buffer.from(fallbackInput, "base64").toString("utf8")).toBe(largeContent)
   })
 
@@ -578,7 +536,7 @@ describe("SshConnectionImpl.writeFile — large content (> 64 KB)", () => {
       size: 0,
       tempPath: "/etc/systemd/system/paratix-write.DISK",
     })
-    const client = makeClientWithExecSpy(execSpy2)
+    const client = makeConnectionWithExecScenario(execSpy2)
     const ssh = makeConnectedSsh(client)
     vi.mocked(sftpUploadContent).mockResolvedValue()
 
@@ -595,7 +553,7 @@ describe("SshConnectionImpl.writeFile — large content (> 64 KB)", () => {
       size: 0,
       tempPath: "/etc/systemd/system/paratix-write.NODISK",
     })
-    const client = makeClientWithExecSpy(execSpy2)
+    const client = makeConnectionWithExecScenario(execSpy2)
     const ssh = makeConnectedSsh(client)
     vi.mocked(sftpUploadContent).mockResolvedValue()
 
@@ -618,40 +576,36 @@ describe("SshConnectionImpl.writeFile — large content (> 64 KB)", () => {
     const cleanupExecSpy = vi
       .fn()
       // prep — returns the staged temp path
-      .mockImplementationOnce((_cmd: string, cb: ExecCallback) => {
+      .mockImplementationOnce((_cmd: string, cb: ChannelDelivery) => {
         const stream = makeStream()
-        cb(undefined, stream)
-        stream.emit("data", Buffer.from(remoteTmpPath))
-        stream.emit("close", 0)
+        cb(stream)
+        stream.stdout.send(Buffer.from(remoteTmpPath))
+        stream.finish(0)
       })
       // stage chmod+stat — reports 0 bytes to force a size mismatch
-      .mockImplementationOnce((_cmd: string, cb: ExecCallback) => {
+      .mockImplementationOnce((_cmd: string, cb: ChannelDelivery) => {
         const stream = makeStream()
-        cb(undefined, stream)
-        stream.emit("data", Buffer.from("0"))
-        stream.emit("close", 0)
+        cb(stream)
+        stream.stdout.send(Buffer.from("0"))
+        stream.finish(0)
       })
       // df -Pk — reports plenty of space, so the verdict is a size mismatch
-      .mockImplementationOnce((_cmd: string, cb: ExecCallback) => {
+      .mockImplementationOnce((_cmd: string, cb: ChannelDelivery) => {
         const stream = makeStream()
-        cb(undefined, stream)
-        stream.emit(
-          "data",
+        cb(stream)
+        stream.stdout.send(
           Buffer.from(
             "Filesystem     1024-blocks    Used Available Capacity Mounted on\n/dev/sda1        10000000  5000000   5000000      50% /"
           )
         )
-        stream.emit("close", 0)
+        stream.finish(0)
       })
       // rm -f in finally — fails with an error whose message contains the password
-      .mockImplementationOnce((_cmd: string, cb: ExecCallback) => {
-        cb(
-          new Error(`permission denied: echo ${sudoPassword} | sudo rm -f ${remoteTmpPath}`),
-          makeStream()
-        )
+      .mockImplementationOnce((_cmd: string, cb: ChannelDelivery) => {
+        cb.fail(new Error(`permission denied: echo ${sudoPassword} | sudo rm -f ${remoteTmpPath}`))
       })
 
-    const client = makeClientWithExecSpy(cleanupExecSpy)
+    const client = makeConnectionWithExecScenario(cleanupExecSpy)
     const ssh = makeConnectedSsh(client)
     ;(ssh as unknown as Record<string, unknown>).cachedSudoPassword = Buffer.from(sudoPassword)
     const content = makeLargeContent()
@@ -690,42 +644,38 @@ describe("SshConnectionImpl.uploadFile — cleanup error secret masking", () => 
     const cleanupExecSpy = vi
       .fn()
       // prep — returns the staged temp path
-      .mockImplementationOnce((_cmd: string, cb: ExecCallback) => {
+      .mockImplementationOnce((_cmd: string, cb: ChannelDelivery) => {
         const stream = makeStream()
-        cb(undefined, stream)
-        stream.emit("data", Buffer.from(remoteTmpPath))
-        stream.emit("close", 0)
+        cb(stream)
+        stream.stdout.send(Buffer.from(remoteTmpPath))
+        stream.finish(0)
       })
       // stage chmod+stat — reports 0 bytes to force a size mismatch
-      .mockImplementationOnce((_cmd: string, cb: ExecCallback) => {
+      .mockImplementationOnce((_cmd: string, cb: ChannelDelivery) => {
         const stream = makeStream()
-        cb(undefined, stream)
-        stream.emit("data", Buffer.from("0"))
-        stream.emit("close", 0)
+        cb(stream)
+        stream.stdout.send(Buffer.from("0"))
+        stream.finish(0)
       })
       // df -Pk — reports plenty of space, so the verdict is a size mismatch
-      .mockImplementationOnce((_cmd: string, cb: ExecCallback) => {
+      .mockImplementationOnce((_cmd: string, cb: ChannelDelivery) => {
         const stream = makeStream()
-        cb(undefined, stream)
-        stream.emit(
-          "data",
+        cb(stream)
+        stream.stdout.send(
           Buffer.from(
             "Filesystem     1024-blocks    Used Available Capacity Mounted on\n/dev/sda1        10000000  5000000   5000000      50% /"
           )
         )
-        stream.emit("close", 0)
+        stream.finish(0)
       })
       // rm -f in finally — fails with an error whose message contains the password
-      .mockImplementationOnce((_cmd: string, cb: ExecCallback) => {
-        cb(
-          new Error(`permission denied: echo ${sudoPassword} | sudo rm -f ${remoteTmpPath}`),
-          makeStream()
-        )
+      .mockImplementationOnce((_cmd: string, cb: ChannelDelivery) => {
+        cb.fail(new Error(`permission denied: echo ${sudoPassword} | sudo rm -f ${remoteTmpPath}`))
       })
 
     vi.mocked(sftpUpload).mockResolvedValue()
 
-    const client = makeClientWithExecSpy(cleanupExecSpy)
+    const client = makeConnectionWithExecScenario(cleanupExecSpy)
     const ssh = makeConnectedSsh(client)
     ;(ssh as unknown as Record<string, unknown>).cachedSudoPassword = Buffer.from(sudoPassword)
 

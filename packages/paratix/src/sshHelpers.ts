@@ -1,11 +1,10 @@
-/* eslint-disable max-lines, max-statements -- ssh2 stream handlers are intentionally co-located */
+/* eslint-disable max-lines, max-statements -- transport stream handlers are intentionally co-located */
 import { StringDecoder } from "node:string_decoder"
 
-import type { TransportConnection, TransportExecChannel } from "./transport.js"
+import type { TransportExecChannel } from "./transport.js"
 import type { ExecOptions, ExecResult } from "./types.js"
 
 import { createTerminalSanitizer } from "./terminalSanitizer.js"
-import { cleanupSsh2Client, connectSsh2Client } from "./transportSsh2.js"
 
 /**
  * Validate that a file mode string is a valid octal permission (e.g. "644", "0755").
@@ -32,7 +31,6 @@ export function shellQuote(s: string): string {
   return `'${s.replaceAll("'", "'\\''")}'`
 }
 
-const CONNECTION_TIMEOUT = 10_000
 export const DEFAULT_MAX_OUTPUT_BYTES = Number("1048576")
 /**
  * Marker appended to {@link CapturedOutput} when the captured stream exceeds
@@ -100,13 +98,6 @@ function resolveMaxOutputBytes(options: ExecOptions): number {
     throw new Error("ExecOptions.maxOutputBytes must be a non-negative finite number")
   }
   return Math.floor(value)
-}
-
-function resolveReadyTimeout(parameters: ConnectParameters): number {
-  return Math.max(
-    1,
-    Math.min(CONNECTION_TIMEOUT, Math.floor(parameters.readyTimeout ?? CONNECTION_TIMEOUT))
-  )
 }
 
 class CapturedOutput {
@@ -402,10 +393,10 @@ function createSanitizedTerminalWriter(silent: boolean): {
 }
 
 /**
- * Normalize ssh2 close-event exit codes. ssh2 may pass `undefined` even though
- * its TypeScript type says `number`; treat that as a successful zero exit code.
+ * Normalize absent transport exit codes to the established successful zero exit.
+ * The ssh2 adapter supplies `null` when the server omitted an exit status.
  *
- * @param code - Exit code from the ssh2 `close` event.
+ * @param code - Exit code supplied by the transport channel.
  * @returns A normalized numeric exit code.
  */
 export function normalizeSshCloseCode(code: null | number | undefined): number {
@@ -463,7 +454,7 @@ type StdoutDecoder = { end: () => string; valid: () => boolean; write: (data: Bu
  * sequences with U+FFFD. With `strict`, a fatal `TextDecoder` is used instead:
  * once it meets invalid UTF-8 (also when the sequence is split across chunks,
  * or left incomplete at the end), the decoder is marked invalid and decodes
- * nothing further, and the caller rejects the command when the stream closes.
+ * nothing further, and the caller rejects the command when the channel exits.
  * `ignoreBOM` keeps a leading byte order mark in the text.
  *
  * @param strict - Whether stdout must be valid UTF-8.
@@ -511,12 +502,12 @@ function invalidUtf8StdoutError(
 }
 
 /**
- * Wire up event listeners on an ssh2 stream to collect stdout/stderr
- * and resolve or reject the promise when the stream closes.
+ * Wire up transport stream and exit listeners to collect stdout/stderr
+ * and resolve or reject the promise when the channel exits.
  *
  * With `ExecOptions.strictUtf8Stdout`, stdout that is not valid UTF-8 makes
- * the promise reject with an {@link InvalidUtf8OutputError} when the stream
- * closes, instead of resolving with replacement characters. The listeners,
+ * the promise reject with an {@link InvalidUtf8OutputError} when the channel
+ * exits, instead of resolving with replacement characters. The listeners,
  * the timer and the single settlement work exactly as in the default mode.
  *
  * @param parameters - Stream collection parameters.
@@ -618,61 +609,5 @@ export function collectStreamOutput(parameters: StreamOutputParameters): void {
       return
     }
     resolve({ code: exitCode, stderr: capturedStderr, stdout: capturedStdout })
-  })
-}
-
-/** Parameters for a single SSH connection attempt on one port. */
-export type ConnectParameters = {
-  /** Optional signal used to abort an in-flight connect attempt. */
-  abortSignal?: AbortSignal
-  /** Path to the SSH agent socket (e.g. `SSH_AUTH_SOCK`). Used when no `privateKey` is provided. */
-  agent?: string
-  /** Forward the local SSH agent to the remote host during this session. */
-  agentForward?: boolean
-  /** The ssh2 `Client` instance to connect with. */
-  client: TransportConnection
-  /** Hostname or IP address of the remote host. */
-  host: string
-  /** Optional host key verifier callback for known_hosts checking. */
-  hostVerifier?: (key: Buffer) => boolean | Promise<boolean>
-  /** Password for keyboard-interactive or password authentication. */
-  password?: string
-  /** Port to connect on. */
-  port: number
-  /** PEM-encoded private key content. Mutually exclusive with `agent`. */
-  privateKey?: Buffer | string
-  /** Per-port connect timeout in milliseconds. Defaults to the standard SSH connection timeout. */
-  readyTimeout?: number
-  /** Username to authenticate as. */
-  username: string
-}
-
-/**
- * Temporary legacy cleanup entry point, retained until PR 3.
- * @param client - The transport connection or legacy fixture to release.
- */
-export function cleanupFailedSshClient(client: unknown): void {
-  cleanupSsh2Client(client)
-}
-
-/**
- * Temporary legacy connect entry point, retained until PR 3.
- * @param parameters - Connection settings and the connection attempt owner.
- * @returns The connected transport.
- */
-export async function tryConnectOnPort(
-  parameters: ConnectParameters
-): Promise<TransportConnection> {
-  return connectSsh2Client(parameters.client, {
-    agent: parameters.agent,
-    agentForward: parameters.agentForward,
-    host: parameters.host,
-    password: parameters.password,
-    port: parameters.port,
-    privateKey: parameters.privateKey,
-    readyTimeout: resolveReadyTimeout(parameters),
-    signal: parameters.abortSignal,
-    username: parameters.username,
-    verifyHostKey: parameters.hostVerifier,
   })
 }
