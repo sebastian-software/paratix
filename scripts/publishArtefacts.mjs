@@ -166,23 +166,85 @@ export function readTarGzEntries(gzipBuffer) {
   return entries
 }
 
-export function findWorkspaceSpecifiers(manifest) {
-  return DEPENDENCY_FIELDS.flatMap((field) => {
-    const dependencies = manifest?.[field]
-    if (typeof dependencies !== "object" || dependencies === null) return []
-    return Object.entries(dependencies)
-      .filter(
-        ([, specifier]) => typeof specifier === "string" && specifier.startsWith("workspace:")
-      )
-      .map(([dependencyName]) => `${field}.${dependencyName}`)
-  })
+const WORKSPACE_PROTOCOL = "workspace:"
+const LINKED_WORKSPACE_SPECIFIER = "workspace:*"
+
+function dependencyEntries(manifest, field) {
+  const dependencies = manifest?.[field]
+  if (typeof dependencies !== "object" || dependencies === null) return []
+  return Object.entries(dependencies)
 }
 
-export function assertNoWorkspaceSpecifiers(manifest, label) {
-  const workspaceSpecifiers = findWorkspaceSpecifiers(manifest)
+function dependencySpecifier(manifest, field, dependencyName) {
+  const dependencies = manifest?.[field]
+  if (typeof dependencies !== "object" || dependencies === null) return
+  return Object.hasOwn(dependencies, dependencyName) ? dependencies[dependencyName] : undefined
+}
+
+function isForbiddenWorkspaceSpecifier(dependencyName, specifier, linkedDependencyNames) {
+  if (typeof specifier !== "string" || !specifier.startsWith(WORKSPACE_PROTOCOL)) return false
+  return specifier !== LINKED_WORKSPACE_SPECIFIER || !linkedDependencyNames.includes(dependencyName)
+}
+
+// #257: `linkedDependencyNames` lists the workspace packages released with
+// the same linked version as the manifest's own package (paratix and
+// create-paratix depend on @paratix/ssh-native). Only for them is exactly
+// `workspace:*` allowed in a source manifest: `pnpm pack` rewrites it to the
+// exact release version, which `assertExactLinkedDependencies` then requires
+// in the tarball. Any other range (`workspace:^`, `workspace:~`, a path)
+// would pack to a loose or foreign specifier and stays forbidden.
+export function findWorkspaceSpecifiers(manifest, options = {}) {
+  const linkedDependencyNames = options.linkedDependencyNames ?? []
+  return DEPENDENCY_FIELDS.flatMap((field) =>
+    dependencyEntries(manifest, field)
+      .filter(([dependencyName, specifier]) =>
+        isForbiddenWorkspaceSpecifier(dependencyName, specifier, linkedDependencyNames)
+      )
+      .map(([dependencyName]) => `${field}.${dependencyName}`)
+  )
+}
+
+export function assertNoWorkspaceSpecifiers(manifest, label, options = {}) {
+  const linkedDependencyNames = options.linkedDependencyNames ?? []
+  const workspaceSpecifiers = findWorkspaceSpecifiers(manifest, { linkedDependencyNames })
   if (workspaceSpecifiers.length === 0) return
+  const exception =
+    linkedDependencyNames.length === 0
+      ? ""
+      : ` Only ${linkedDependencyNames.join(", ")} may use exactly ${LINKED_WORKSPACE_SPECIFIER}.`
   throw new Error(
-    `${label} contains workspace: specifiers (${workspaceSpecifiers.join(", ")}); they must never reach the registry.`
+    `${label} contains workspace: specifiers (${workspaceSpecifiers.join(", ")}); they must never reach the registry.${exception}`
+  )
+}
+
+function linkedDependencyProblems(
+  packedManifest,
+  { linkedDependencyNames, sourceManifest, version }
+) {
+  return DEPENDENCY_FIELDS.flatMap((field) =>
+    linkedDependencyNames.flatMap((dependencyName) => {
+      const declared = dependencySpecifier(sourceManifest, field, dependencyName)
+      const packed = dependencySpecifier(packedManifest, field, dependencyName)
+      if (declared === undefined && packed === undefined) return []
+      if (packed === version) return []
+      return [
+        packed === undefined
+          ? `${field}.${dependencyName} is missing`
+          : `${field}.${dependencyName} is pinned to ${String(packed)}`,
+      ]
+    })
+  )
+}
+
+// #257: a linked workspace dependency must reach the registry pinned to the
+// exact release version in every dependency field the source manifest
+// declares it in (and wherever else the packed manifest carries it), so a
+// published paratix never resolves a different @paratix/ssh-native.
+function assertExactLinkedDependencies(packedManifest, parameters) {
+  const problems = linkedDependencyProblems(packedManifest, parameters)
+  if (problems.length === 0) return
+  throw new Error(
+    `${parameters.label}: packed package.json must pin ${parameters.linkedDependencyNames.join(", ")} to exactly ${parameters.version} in every field the source manifest declares it (${problems.join("; ")}).`
   )
 }
 
@@ -280,6 +342,11 @@ export function inspectPlatformTarball(entries, { binaryFileName, expectedSha256
   }
 }
 
-export function inspectWorkspaceTarball(entries, { name, version }) {
-  assertPackedIdentity(entries, { label: `${name}@${version}`, name, version })
+export function inspectWorkspaceTarball(
+  entries,
+  { linkedDependencyNames = [], name, sourceManifest, version }
+) {
+  const label = `${name}@${version}`
+  const manifest = assertPackedIdentity(entries, { label, name, version })
+  assertExactLinkedDependencies(manifest, { label, linkedDependencyNames, sourceManifest, version })
 }
