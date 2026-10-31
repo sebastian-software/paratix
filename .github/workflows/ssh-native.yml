@@ -243,7 +243,7 @@ jobs:
             cargo-zigbuild --version
           else
             xcrun --show-sdk-version
-            clang --version | head -n 1
+            clang --version | sed -n '1p'
           fi
 
       - name: Build
@@ -453,7 +453,7 @@ jobs:
           smoke="packages/ssh-native/test/smoke/smoke.mjs"
           case "$SMOKE_ENVIRONMENT" in
             host)
-              if [ "$RUNNER_OS" = Linux ]; then ldd --version | head -n 1; else sw_vers; fi
+              if [ "$RUNNER_OS" = Linux ]; then ldd --version | sed -n '1p'; else sw_vers; fi
               node --version
               node "$smoke" 2>&1 | tee "$out"
               ;;
@@ -474,7 +474,7 @@ jobs:
                   mkdir -p /opt/node
                   tar -xJf "/tmp/$tarball" -C /opt/node --strip-components=1
                   export PATH="/opt/node/bin:$PATH"
-                  ldd --version | head -n 1
+                  ldd --version | sed -n 1p
                   node --version
                   node "$SMOKE"
                 ' 2>&1 | tee "$out"
