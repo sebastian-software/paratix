@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.23.1](https://github.com/sebastian-software/paratix/compare/paratix-v0.23.0...paratix-v0.23.1) (2026-10-31)
+
+
+### Code Refactoring
+
+* **paratix:** migrate SSH tests to transport fakes ([0426ba5](https://github.com/sebastian-software/paratix/commit/0426ba5cccdf773ebc6ee8e9d45b1c16df9c4a8a)), closes [#256](https://github.com/sebastian-software/paratix/issues/256)
+
 ## [0.23.0](https://github.com/sebastian-software/paratix/compare/paratix-v0.22.0...paratix-v0.23.0) (2026-10-21)
 
 
