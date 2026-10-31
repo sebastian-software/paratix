@@ -1406,7 +1406,36 @@ async function dryRunSshdConfig(
   }
 }
 
-function isRestartDisconnect(error: unknown): boolean {
+/**
+ * Issue #257: `SshConnectionImpl` copies the transport classification of a
+ * dropped connection onto the rejection of every pending operation as a
+ * non-enumerable `transportCode`. A `DISCONNECTED` code identifies the
+ * connection loss independently of the transport's message text.
+ *
+ * @param error - The error caught from `ssh.exec`.
+ * @returns `true` if the error carries `transportCode === "DISCONNECTED"`.
+ */
+function hasDisconnectedTransportCode(error: unknown): boolean {
+  return (
+    typeof error === "object" &&
+    error !== null &&
+    (error as { transportCode?: unknown }).transportCode === "DISCONNECTED"
+  )
+}
+
+/**
+ * Detect SSH transport disconnects caused by the sshd restart tearing down
+ * the session that issued it. Recognizes the disconnect by its transport code
+ * ({@link hasDisconnectedTransportCode}) or by its message text.
+ *
+ * Exported for tests.
+ *
+ * @internal
+ * @param error - The error caught from `ssh.exec`.
+ * @returns `true` if the error looks like a restart-induced disconnect.
+ */
+export function isRestartDisconnect(error: unknown): boolean {
+  if (hasDisconnectedTransportCode(error)) return true
   const message = error instanceof Error ? error.message : String(error)
   return (
     message.includes("SSH connection closed") ||

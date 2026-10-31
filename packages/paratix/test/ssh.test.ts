@@ -10,6 +10,8 @@ import type * as SshHelpers from "../src/sshHelpers.js"
 
 import { HostKeyVerificationError } from "../src/knownHosts.js"
 import { rsync } from "../src/modules/rsync.js"
+import { isRestartDisconnect } from "../src/modules/sshd.js"
+import { isRebootDisconnect } from "../src/modules/system.js"
 import { sftpDownload } from "../src/sftp.js"
 import { SshConnectionImpl, SudoInputUnsupportedError, validateMktempPath } from "../src/ssh.js"
 import {
@@ -2290,6 +2292,88 @@ describe("SshConnectionImpl", () => {
       client.disconnect(new TransportError("DISCONNECTED", new Error("socket failure")))
 
       await expect(execPromise).rejects.toThrow("socket failure")
+    })
+
+    it("carries the DISCONNECTED transport code to the pending exec() rejection for reboot and restart detection (#257)", async () => {
+      const execSpy = vi.fn().mockImplementation((_command: string, callback: ChannelDelivery) => {
+        callback(makeStream())
+        // Stream intentionally never emits 'close' — the exec() Promise stays pending
+      })
+      const client = new FakeTransportConnection({ execute: execSpy, onClose: vi.fn() })
+      const ssh = makeConnectedSsh(client, {})
+      const execPromise = ssh.exec("shutdown -r now")
+      await Promise.resolve()
+      expect(execSpy).toHaveBeenCalledOnce()
+      // Deliberately none of the message phrases the text heuristics match.
+      const cause = new Error("transport went away")
+
+      client.disconnect(new TransportError("DISCONNECTED", cause))
+      const rejection = await expectRejectedError(execPromise)
+
+      expect(rejection).toBe(cause)
+      expect(rejection).toHaveProperty("transportCode", "DISCONNECTED")
+      expect(Object.getOwnPropertyDescriptor(rejection, "transportCode")).toMatchObject({
+        enumerable: false,
+      })
+      expect(Object.keys(rejection)).not.toContain("transportCode")
+      expect(isRebootDisconnect(rejection)).toBe(true)
+      expect(isRestartDisconnect(rejection)).toBe(true)
+      expect(isRebootDisconnect(new Error("transport went away"))).toBe(false)
+      expect(isRestartDisconnect(new Error("transport went away"))).toBe(false)
+    })
+
+    it("still rejects pending exec() with a frozen disconnect cause that cannot carry the transport code (#257)", async () => {
+      const execSpy = vi.fn().mockImplementation((_command: string, callback: ChannelDelivery) => {
+        callback(makeStream())
+      })
+      const client = new FakeTransportConnection({ execute: execSpy, onClose: vi.fn() })
+      const ssh = makeConnectedSsh(client, {})
+      const execPromise = ssh.exec("sleep infinity")
+      await Promise.resolve()
+      const cause = Object.freeze(new Error("frozen failure"))
+
+      expect(() => {
+        client.disconnect(new TransportError("DISCONNECTED", cause))
+      }).not.toThrow()
+      const rejection = await expectRejectedError(execPromise)
+
+      expect(rejection).toBe(cause)
+      expect(rejection).not.toHaveProperty("transportCode")
+    })
+
+    it("still rejects pending exec() when the disconnect cause refuses the transport code property (#257)", async () => {
+      const execSpy = vi.fn().mockImplementation((_command: string, callback: ChannelDelivery) => {
+        callback(makeStream())
+      })
+      const client = new FakeTransportConnection({ execute: execSpy, onClose: vi.fn() })
+      const ssh = makeConnectedSsh(client, {})
+      const execPromise = ssh.exec("sleep infinity")
+      await Promise.resolve()
+      const cause = new Proxy(new Error("refusing failure"), { defineProperty: () => false })
+
+      expect(() => {
+        client.disconnect(new TransportError("DISCONNECTED", cause))
+      }).not.toThrow()
+      const rejection = await expectRejectedError(execPromise)
+
+      expect(rejection).toBe(cause)
+      expect(rejection).not.toHaveProperty("transportCode")
+    })
+
+    it("still rejects pending exec() with a primitive disconnect cause (#257)", async () => {
+      const execSpy = vi.fn().mockImplementation((_command: string, callback: ChannelDelivery) => {
+        callback(makeStream())
+      })
+      const client = new FakeTransportConnection({ execute: execSpy, onClose: vi.fn() })
+      const ssh = makeConnectedSsh(client, {})
+      const execPromise = ssh.exec("sleep infinity")
+      await Promise.resolve()
+
+      expect(() => {
+        client.disconnect(new TransportError("DISCONNECTED", "primitive failure"))
+      }).not.toThrow()
+
+      await expect(execPromise).rejects.toBe("primitive failure")
     })
 
     it("rejects when client.exec callback receives an error", async () => {

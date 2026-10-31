@@ -29,16 +29,40 @@ export type RebootOptions = {
 }
 
 /**
+ * Issue #257: `SshConnectionImpl` copies the transport classification of a
+ * dropped connection onto the rejection of every pending operation as a
+ * non-enumerable `transportCode`. A `DISCONNECTED` code identifies the
+ * connection loss independently of the transport's message text.
+ *
+ * @param error - The error caught from `ssh.exec`.
+ * @returns `true` if the error carries `transportCode === "DISCONNECTED"`.
+ */
+function hasDisconnectedTransportCode(error: unknown): boolean {
+  return (
+    typeof error === "object" &&
+    error !== null &&
+    (error as { transportCode?: unknown }).transportCode === "DISCONNECTED"
+  )
+}
+
+/**
  * Detect SSH transport disconnects that originate from the remote host
  * tearing down the connection (for example when `shutdown -r now` causes the
  * sshd process to exit before the exec callback completes). Mirrors the
  * heuristic used in {@link import("./sshd.js")} so the reboot path treats a
  * disconnect mid-exec as a successful trigger instead of a hard failure.
  *
+ * Recognizes the disconnect by its transport code
+ * ({@link hasDisconnectedTransportCode}) or by its message text.
+ *
+ * Exported for tests.
+ *
+ * @internal
  * @param error - The error caught from `ssh.exec`.
  * @returns `true` if the error looks like a reboot-induced disconnect.
  */
-function isRebootDisconnect(error: unknown): boolean {
+export function isRebootDisconnect(error: unknown): boolean {
+  if (hasDisconnectedTransportCode(error)) return true
   const message = error instanceof Error ? error.message : String(error)
   return (
     message.includes("SSH connection closed") ||
