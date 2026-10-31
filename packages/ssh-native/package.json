@@ -1,6 +1,6 @@
 {
   "name": "@paratix/ssh-native",
-  "version": "0.0.0",
+  "version": "0.23.1",
   "description": "Native SSH transport for Paratix: a thin napi-rs binding over russh and russh-sftp",
   "license": "MIT",
   "main": "index.js",

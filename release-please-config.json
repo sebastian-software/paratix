@@ -4,7 +4,7 @@
   "plugins": [
     {
       "type": "linked-versions",
-      "components": ["paratix", "create-paratix"],
+      "components": ["paratix", "create-paratix", "ssh-native"],
       "groupName": "paratix workspace packages"
     }
   ],
@@ -18,6 +18,43 @@
       "component": "paratix",
       "package-name": "paratix",
       "release-type": "node"
+    },
+    "packages/ssh-native": {
+      "component": "ssh-native",
+      "package-name": "@paratix/ssh-native",
+      "release-type": "node",
+      "extra-files": [
+        {
+          "type": "json",
+          "path": "npm/linux-x64-gnu/package.json",
+          "jsonpath": "$.version"
+        },
+        {
+          "type": "json",
+          "path": "npm/linux-arm64-gnu/package.json",
+          "jsonpath": "$.version"
+        },
+        {
+          "type": "json",
+          "path": "npm/linux-x64-musl/package.json",
+          "jsonpath": "$.version"
+        },
+        {
+          "type": "json",
+          "path": "npm/linux-arm64-musl/package.json",
+          "jsonpath": "$.version"
+        },
+        {
+          "type": "json",
+          "path": "npm/darwin-x64/package.json",
+          "jsonpath": "$.version"
+        },
+        {
+          "type": "json",
+          "path": "npm/darwin-arm64/package.json",
+          "jsonpath": "$.version"
+        }
+      ]
     }
   }
 }

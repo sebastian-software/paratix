@@ -50,7 +50,7 @@
       "groupName": "russh"
     },
     {
-      "description": "#255 (until the C1 release of @paratix/ssh-native): require Dependency Dashboard approval for every Cargo and npm update under packages/ssh-native so no fix(deps) commit triggers a release before C1. Remove this rule after the C1 release so security updates trigger releases again.",
+      "description": "#255 (until the first release that contains @paratix/ssh-native, expected with C2 #257): require Dependency Dashboard approval for every Cargo and npm update under packages/ssh-native, keep such updates out of automerge and give their commits the hidden type build(deps) instead of fix(deps). Vulnerability-alert PRs bypass dependencyDashboardApproval (Renovate forces its vulnerabilityAlerts defaults over packageRules, and those set dependencyDashboardApproval to false but neither semanticCommitType nor automerge), so the hidden commit type and automerge=false are what keep a security update under packages/ssh-native from becoming a releasable commit or merging without review before configure-trust.sh has run. Remove this rule after that release so security updates trigger releases again as fix(deps).",
       "matchManagers": [
         "cargo",
         "npm"
@@ -58,7 +58,9 @@
       "matchFileNames": [
         "packages/ssh-native/**"
       ],
-      "dependencyDashboardApproval": true
+      "dependencyDashboardApproval": true,
+      "automerge": false,
+      "semanticCommitType": "build"
     }
   ]
 }
