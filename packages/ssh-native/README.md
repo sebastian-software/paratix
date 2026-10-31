@@ -51,7 +51,41 @@ The root `pnpm build` builds the binding as well. `pnpm build` also regenerates 
 `dts-header.txt` (the declarations of the JS wrapper) and the Rust `#[napi(object)]` structs; the
 output is deterministic and CI checks that it is committed unchanged. `pnpm rust:check` at the
 repository root runs `cargo fmt --check`, `cargo clippy`, `cargo test` and
-`cargo deny check licenses bans sources` for this crate.
+`cargo deny check licenses bans sources` for this crate. RustSec advisories are checked weekly
+and on demand by `.github/workflows/ssh-native-advisories.yml`; no pull request check depends on
+it.
+
+## Releases
+
+`@paratix/ssh-native` and its six platform packages are versioned together with `paratix` and
+`create-paratix` (release-please `linked-versions`; the platform manifests are `extra-files` of this
+package). The crate itself stays at `version = "0.0.0"`. A release runs `.github/workflows/publish.yml`:
+
+1. The reusable workflow `ssh-native.yml` builds the six binaries (gnu via `cargo-zigbuild`
+   against glibc 2.35, darwin with a fixed `MACOSX_DEPLOYMENT_TARGET`) and smoke-tests exactly
+   these files on every target, the gnu targets also in `ubuntu:22.04` and the musl targets in
+   `node:24-alpine`.
+2. `scripts/publishWorkspacePackages.mjs` stages the packages under `$RUNNER_TEMP` (the platform
+   manifests plus their binary, and this package with `optionalDependencies` pinned to the exact
+   version), packs all nine with `pnpm pack` and checks the tarballs: the binary SHA-256 against
+   the smoke-tested artifact, the packed `optionalDependencies`, no `.node` file in this package.
+3. Before the first `npm publish` it classifies every package. An already published version is
+   skipped only if its npm provenance names this repository, `publish.yml` and `refs/heads/main`;
+   from the same workflow run its `integrity` must match the local tarball, from an earlier run
+   `packages/ssh-native` must be unchanged since that run's commit. A missing version needs a
+   successful npm OIDC token exchange for that package. Any failure aborts before anything is
+   published, so a rerun (same run or a new one after a fix commit) resumes safely.
+4. It publishes the platform packages, then `@paratix/ssh-native`, then `paratix`, then
+   `create-paratix`.
+
+A manual run of `publish.yml` in mode `verify` performs steps 1 and 2 without publishing and
+uploads the nine tarballs as the artifact `npm-tarballs`.
+
+Trusted publishing for the seven `@paratix/ssh-native*` packages is configured with
+`scripts/configure-trust.sh` (run by an npm owner, see the script header) right before the first
+release PR that contains this package is merged; then "Require two-factor authentication and
+disallow tokens" is enabled for them. npm allows two days between configuring a trusted publisher
+and its first publish.
 
 ## API overview
 
