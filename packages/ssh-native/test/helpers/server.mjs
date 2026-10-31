@@ -338,7 +338,7 @@ function handleSftp(sftp, files) {
  * @param allowedKeys keys allowed to log in
  * @returns whether the key is allowed (and the signature valid)
  */
-function verifyPublicKey(context, allowedKeys) {
+export function verifyPublicKey(context, allowedKeys) {
   const matching = allowedKeys.find(
     (allowed) => allowed.algorithm === context.key.algo && allowed.blob.equals(context.key.data)
   )

@@ -1,0 +1,689 @@
+# Builds @paratix/ssh-native (napi-rs binding over russh) for all six
+# prebuilt targets, smoke-tests exactly the built artifacts, runs the hard
+# proofs against a local non-root sshd (darwin, plus linux-x64-gnu for parity)
+# and the Docker integration suite on ubuntu-24.04-arm.
+#
+# Reusable interface (workflow_call), used by publish.yml from stage B3 on:
+# - Input `skip-integration` (boolean, default false): skips the jobs
+#   `local-proofs` and `docker-integration`; build, smoke and `artifacts`
+#   always run.
+# - Artifacts: one per target, named `ssh-native-<target>`, containing exactly
+#   `ssh-native.<target>.node` (the loader's file name) and
+#   `ssh-native.<target>.node.sha256` (`shasum -a 256` format). Targets:
+#   linux-x64-gnu, linux-arm64-gnu, linux-x64-musl, linux-arm64-musl,
+#   darwin-x64, darwin-arm64. They belong to the caller's workflow run, so
+#   later caller jobs can download them; the caller must not upload artifacts
+#   with these names itself.
+# - Output `sha256`: JSON object mapping each target to the SHA-256 of its
+#   `.node` file. It is set only after every smoke test passed with exactly
+#   that binary.
+# The jobs check out the caller's commit and receive no secrets.
+name: SSH Native
+
+on:
+  pull_request:
+    paths:
+      - "packages/ssh-native/**"
+      - ".github/workflows/ssh-native*.yml"
+  workflow_dispatch:
+    inputs:
+      skip-integration:
+        description: "Skip the local sshd proofs and the Docker integration suite"
+        required: false
+        default: false
+        type: boolean
+  workflow_call:
+    inputs:
+      skip-integration:
+        description: "Skip the local sshd proofs and the Docker integration suite"
+        required: false
+        default: false
+        type: boolean
+    outputs:
+      sha256:
+        description: "JSON object: target -> SHA-256 of ssh-native.<target>.node, verified by the smoke tests"
+        value: ${{ jobs.artifacts.outputs.sha256 }}
+
+# In a called workflow, `github.workflow` and `github.workflow_ref` belong to
+# the caller, so `${{ github.workflow }}-${{ github.ref }}` would equal the
+# caller's own group and deadlock or cancel it. Pull request runs share one
+# group per workflow file and PR, and newer pushes cancel older runs. Every
+# other run (workflow_call from publish.yml, workflow_dispatch) gets a group
+# of its own: it never cancels, queues behind or is replaced by another run;
+# the caller's concurrency settings govern it.
+concurrency:
+  group: ${{ github.event_name == 'pull_request' && format('ssh-native-{0}', github.workflow_ref) || format('ssh-native-run-{0}', github.run_id) }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  # Re-check the tool pins below on every russh / aws-lc-rs update: the gnu
+  # builds depend on zig's glibc stubs and on cargo-zigbuild's versioned
+  # triples. The archives are x86_64 Linux builds, so every Linux build runs
+  # on ubuntu-24.04 (x64) and cross-compiles the arm64 targets.
+  ZIG_VERSION: "0.17.0"
+  # sha256 of zig-x86_64-linux-0.17.0.tar.xz
+  ZIG_SHA256: 1cbe9df9f27e6b78d14ccbca43b6703a404ef79ef1c463de901d7f088d4e2026
+  CARGO_ZIGBUILD_VERSION: "0.24.0"
+  # sha256 of cargo-zigbuild-x86_64-unknown-linux-gnu.tar.xz (v0.24.0)
+  CARGO_ZIGBUILD_SHA256: 3ca25ee4348f9abd0932ed4debe826d246e20fb616d0201de5bd05e7f965e9d9
+  # Highest glibc symbol version the gnu targets may require (Ubuntu 22.04).
+  # Must match MIN_GLIBC in packages/ssh-native/loader.js.
+  GLIBC_MAX: "2.35"
+  # Deployment target of the darwin binaries (ADR 0008: minos 11.0, below
+  # Node 24's own macOS floor). Checked against LC_BUILD_VERSION after the build.
+  MACOSX_DEPLOYMENT_TARGET: "11.0"
+  # Node 24 inside the ubuntu:22.04 smoke containers (official tarball,
+  # verified against SHASUMS256.txt). Not tracked by Renovate; bump by hand.
+  CONTAINER_NODE_VERSION: v24.22.2
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  build:
+    name: build (${{ matrix.target }})
+    runs-on: ${{ matrix.runner }}
+    # A cold release build compiles aws-lc-rs (C, via zig cc on Linux) and
+    # russh. B1 measured about 6.5 min cold on ubuntu-24.04 for a release plus a
+    # debug build; cross builds through zig cc and the slower macos-15-intel
+    # runners take longer, and a Cargo.lock change always means a cold build.
+    # 45 min leaves headroom (the spike used the same limit) while still
+    # stopping a hung build long before the 6 h default.
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: linux-x64-gnu
+            runner: ubuntu-24.04
+            triple: x86_64-unknown-linux-gnu
+            # The .2.35 suffix makes cargo-zigbuild link against glibc 2.35.
+            cargo_target: x86_64-unknown-linux-gnu.2.35
+            builder: zigbuild
+            elf_machine: X86-64
+            objdump: objdump
+            rustflags: ""
+          - target: linux-arm64-gnu
+            runner: ubuntu-24.04
+            triple: aarch64-unknown-linux-gnu
+            cargo_target: aarch64-unknown-linux-gnu.2.35
+            builder: zigbuild
+            elf_machine: AArch64
+            # The x86_64 objdump cannot read AArch64 ELF files.
+            objdump: aarch64-linux-gnu-objdump
+            rustflags: ""
+          - target: linux-x64-musl
+            runner: ubuntu-24.04
+            triple: x86_64-unknown-linux-musl
+            cargo_target: x86_64-unknown-linux-musl
+            builder: zigbuild
+            elf_machine: X86-64
+            objdump: ""
+            # The cdylib must link musl dynamically; crt-static forbids cdylib output.
+            rustflags: "-C target-feature=-crt-static"
+          - target: linux-arm64-musl
+            runner: ubuntu-24.04
+            triple: aarch64-unknown-linux-musl
+            cargo_target: aarch64-unknown-linux-musl
+            builder: zigbuild
+            elf_machine: AArch64
+            objdump: ""
+            rustflags: "-C target-feature=-crt-static"
+          - target: darwin-x64
+            runner: macos-15-intel
+            triple: x86_64-apple-darwin
+            cargo_target: x86_64-apple-darwin
+            builder: cargo
+            macho_arch: x86_64
+            rustflags: ""
+          - target: darwin-arm64
+            runner: macos-15
+            triple: aarch64-apple-darwin
+            cargo_target: aarch64-apple-darwin
+            builder: cargo
+            macho_arch: arm64
+            rustflags: ""
+    env:
+      TARGET: ${{ matrix.target }}
+      TRIPLE: ${{ matrix.triple }}
+      CARGO_TARGET: ${{ matrix.cargo_target }}
+      BUILDER: ${{ matrix.builder }}
+      ELF_MACHINE: ${{ matrix.elf_machine }}
+      OBJDUMP: ${{ matrix.objdump }}
+      MACHO_ARCH: ${{ matrix.macho_arch }}
+      MATRIX_RUSTFLAGS: ${{ matrix.rustflags }}
+    steps:
+      # actions/checkout@v6
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd
+        with:
+          persist-credentials: false
+
+      - name: Install Rust toolchain and target
+        id: rust
+        working-directory: packages/ssh-native
+        # rust-toolchain.toml pins the channel, components and profile but no
+        # targets, so the build target is added explicitly.
+        run: |
+          rustup toolchain install --no-self-update
+          rustup target add "$TRIPLE"
+          rustc --version
+          cargo --version
+          echo "release=$(rustc -vV | sed -n 's/^release: //p')" >> "$GITHUB_OUTPUT"
+          # Tool versions and the deployment target end up in compiled C
+          # objects that cargo does not fingerprint, so they are part of the key.
+          if [ "$BUILDER" = zigbuild ]; then
+            echo "tools=zig-${ZIG_VERSION}-cargo-zigbuild-${CARGO_ZIGBUILD_VERSION}" >> "$GITHUB_OUTPUT"
+          else
+            echo "tools=macos-${MACOSX_DEPLOYMENT_TARGET}" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Cache Rust build and tool downloads
+        # actions/cache@v6.1.0
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            ~/.cache/ssh-native-tools
+            packages/ssh-native/target/
+          key: ssh-native-matrix-${{ runner.os }}-${{ runner.arch }}-${{ matrix.target }}-rust-${{ steps.rust.outputs.release }}-${{ steps.rust.outputs.tools }}-${{ hashFiles('packages/ssh-native/Cargo.lock') }}
+          restore-keys: |
+            ssh-native-matrix-${{ runner.os }}-${{ runner.arch }}-${{ matrix.target }}-rust-${{ steps.rust.outputs.release }}-${{ steps.rust.outputs.tools }}-
+
+      - name: Install zig and cargo-zigbuild
+        if: matrix.builder == 'zigbuild'
+        # The cache keeps only the downloaded archives. Each run verifies their
+        # SHA-256 and extracts them again, so a restored cache is never trusted
+        # unchecked. The install path stays fixed across runs, which keeps the
+        # compiler paths stable for cargo's build-script fingerprints.
+        run: |
+          if [ "$(uname -m)" != x86_64 ]; then
+            echo "::error::The pinned zig and cargo-zigbuild archives are x86_64 builds; this runner is $(uname -m)."
+            exit 1
+          fi
+          downloads="$HOME/.cache/ssh-native-tools/downloads"
+          tools="$HOME/.local/ssh-native-tools"
+          mkdir -p "$downloads"
+          rm -rf "$tools"
+          mkdir -p "$tools/zig" "$tools/bin"
+
+          fetch() {
+            local url="$1" file="$2" sha256="$3"
+            if [ -f "$file" ] && echo "$sha256  $file" | sha256sum -c --status -; then
+              echo "Using cached $(basename "$file")"
+              return
+            fi
+            rm -f "$file"
+            curl -fsSL --retry 5 -o "$file" "$url"
+            echo "$sha256  $file" | sha256sum -c -
+          }
+
+          zig_archive="$downloads/zig-x86_64-linux-${ZIG_VERSION}.tar.xz"
+          fetch "https://ziglang.org/download/${ZIG_VERSION}/zig-x86_64-linux-${ZIG_VERSION}.tar.xz" \
+            "$zig_archive" "$ZIG_SHA256"
+          zigbuild_archive="$downloads/cargo-zigbuild-${CARGO_ZIGBUILD_VERSION}-x86_64-unknown-linux-gnu.tar.xz"
+          fetch "https://github.com/rust-cross/cargo-zigbuild/releases/download/v${CARGO_ZIGBUILD_VERSION}/cargo-zigbuild-x86_64-unknown-linux-gnu.tar.xz" \
+            "$zigbuild_archive" "$CARGO_ZIGBUILD_SHA256"
+
+          tar -xJf "$zig_archive" -C "$tools/zig" --strip-components=1
+          tar -xJf "$zigbuild_archive" -C "$tools/bin" --strip-components=1 \
+            cargo-zigbuild-x86_64-unknown-linux-gnu/cargo-zigbuild
+          echo "$tools/zig" >> "$GITHUB_PATH"
+          echo "$tools/bin" >> "$GITHUB_PATH"
+
+      - name: Show build tool versions
+        run: |
+          if [ "$BUILDER" = zigbuild ]; then
+            zig version
+            cargo-zigbuild --version
+          else
+            xcrun --show-sdk-version
+            clang --version | sed -n '1p'
+          fi
+
+      - name: Build
+        working-directory: packages/ssh-native
+        # Plain cargo instead of `napi build`: napi-rs cannot parse the
+        # versioned .2.35 triples, and the binary does not depend on the CLI
+        # (build.rs runs napi_build::setup for the linker flags). index.d.ts is
+        # diff-checked by ci.yml, not here.
+        run: |
+          if [ -n "$MATRIX_RUSTFLAGS" ]; then
+            export RUSTFLAGS="$MATRIX_RUSTFLAGS"
+          fi
+          if [ "$BUILDER" = zigbuild ]; then
+            cargo zigbuild --release --locked --target "$CARGO_TARGET"
+          else
+            cargo build --release --locked --target "$CARGO_TARGET"
+          fi
+
+      - name: Package as loader-named .node file
+        id: package
+        working-directory: packages/ssh-native
+        run: |
+          case "$RUNNER_OS" in
+            macOS) lib="target/$TRIPLE/release/libparatix_ssh_native.dylib" ;;
+            *) lib="target/$TRIPLE/release/libparatix_ssh_native.so" ;;
+          esac
+          dist="$RUNNER_TEMP/ssh-native-dist"
+          rm -rf "$dist"
+          mkdir -p "$dist"
+          node_file="ssh-native.$TARGET.node"
+          cp "$lib" "$dist/$node_file"
+          (cd "$dist" && shasum -a 256 "$node_file" > "$node_file.sha256")
+          sha256="$(cut -d ' ' -f 1 "$dist/$node_file.sha256")"
+          file "$dist/$node_file" || true
+          ls -l "$dist"
+          echo "dist=$dist" >> "$GITHUB_OUTPUT"
+          echo "sha256=$sha256" >> "$GITHUB_OUTPUT"
+
+      - name: Check the binary (architecture, glibc floor, libc, macOS minos)
+        env:
+          DIST: ${{ steps.package.outputs.dist }}
+        run: |
+          node_file="$DIST/ssh-native.$TARGET.node"
+          fail() {
+            echo "::error::$TARGET: $1"
+            exit 1
+          }
+          max_version() {
+            grep -oE 'GLIBC_[0-9]+(\.[0-9]+)+' | sed 's/^GLIBC_//' | sort -u -V | tail -n 1
+          }
+          case "$TARGET" in
+            linux-*)
+              machine="$(readelf -h "$node_file" | sed -n 's/^ *Machine: *//p')"
+              echo "ELF machine: $machine"
+              case "$machine" in
+                *"$ELF_MACHINE"*) ;;
+                *) fail "ELF machine '$machine' is not $ELF_MACHINE" ;;
+              esac
+              needed="$(readelf -d "$node_file" | sed -n 's/.*(NEEDED).*\[\(.*\)\]/\1/p' | tr '\n' ' ')"
+              echo "NEEDED: ${needed:-none}"
+              ;;
+          esac
+          case "$TARGET" in
+            linux-*-gnu)
+              if ! command -v "$OBJDUMP" > /dev/null; then
+                sudo apt-get update -qq
+                sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq --no-install-recommends \
+                  binutils-aarch64-linux-gnu
+              fi
+              # objdump -T lists the version of every dynamic symbol; readelf -V
+              # also lists version needs without a symbol. Both must stay within
+              # the floor. objdump fails on an unreadable file instead of
+              # printing nothing.
+              "$OBJDUMP" -T "$node_file" > "$RUNNER_TEMP/dynsyms.txt"
+              objdump_max="$(max_version < "$RUNNER_TEMP/dynsyms.txt" || true)"
+              readelf_max="$(readelf -V -W "$node_file" | max_version || true)"
+              echo "Highest GLIBC_ version: objdump -T ${objdump_max:-none}, readelf -V ${readelf_max:-none} (limit $GLIBC_MAX)"
+              for found in "$objdump_max" "$readelf_max"; do
+                if [ -z "$found" ]; then
+                  fail "no GLIBC_ symbol version found; is this a glibc binary?"
+                fi
+                if [ "$(printf '%s\n' "$found" "$GLIBC_MAX" | sort -V | tail -n 1)" != "$GLIBC_MAX" ]; then
+                  fail "requires GLIBC_$found, above the floor GLIBC_$GLIBC_MAX"
+                fi
+              done
+              ;;
+            linux-*-musl)
+              case " $needed " in
+                *" libc.so.6 "* | *" ld-linux"*) fail "musl artifact links glibc (NEEDED: $needed)" ;;
+                *" libc.so "*) ;;
+                # ADR 0008: only a warning; the node:24-alpine smoke is the real check.
+                *) echo "::warning::$TARGET: no musl libc.so in NEEDED (${needed:-none})" ;;
+              esac
+              ;;
+            darwin-*)
+              archs="$(lipo -archs "$node_file")"
+              echo "Mach-O architectures: $archs"
+              if [ "$archs" != "$MACHO_ARCH" ]; then
+                fail "Mach-O architectures '$archs' are not '$MACHO_ARCH'"
+              fi
+              minos="$(otool -l "$node_file" | awk '/LC_BUILD_VERSION/ {b = 1} b && $1 == "minos" {print $2; exit}')"
+              echo "minos: ${minos:-none} (expected $MACOSX_DEPLOYMENT_TARGET)"
+              if [ "$minos" != "$MACOSX_DEPLOYMENT_TARGET" ]; then
+                fail "minos '${minos:-none}' differs from MACOSX_DEPLOYMENT_TARGET $MACOSX_DEPLOYMENT_TARGET"
+              fi
+              ;;
+          esac
+          {
+            echo "### ssh-native.$TARGET.node"
+            echo
+            echo "- size: $(wc -c < "$node_file" | tr -d ' ') bytes"
+            echo "- sha256: \`$(cut -d ' ' -f 1 "$node_file.sha256")\`"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      # actions/upload-artifact@v4
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: ssh-native-${{ matrix.target }}
+          path: |
+            ${{ steps.package.outputs.dist }}/ssh-native.${{ matrix.target }}.node
+            ${{ steps.package.outputs.dist }}/ssh-native.${{ matrix.target }}.node.sha256
+          if-no-files-found: error
+
+  smoke:
+    name: smoke (${{ matrix.target }}, ${{ matrix.environment }})
+    needs: build
+    # Smoke every target that did build, even if another target failed.
+    if: ${{ !cancelled() }}
+    runs-on: ${{ matrix.runner }}
+    # pnpm install, at most one container image or Node tarball download, and
+    # the smoke itself (seconds, 40 short child processes).
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: linux-x64-gnu
+            runner: ubuntu-24.04
+            environment: host
+          - target: linux-x64-gnu
+            runner: ubuntu-24.04
+            environment: ubuntu-22.04
+            node_arch: x64
+          - target: linux-arm64-gnu
+            runner: ubuntu-24.04-arm
+            environment: host
+          - target: linux-arm64-gnu
+            runner: ubuntu-24.04-arm
+            environment: ubuntu-22.04
+            node_arch: arm64
+          # musl runs only in a musl container.
+          - target: linux-x64-musl
+            runner: ubuntu-24.04
+            environment: node-24-alpine
+          - target: linux-arm64-musl
+            runner: ubuntu-24.04-arm
+            environment: node-24-alpine
+          - target: darwin-x64
+            runner: macos-15-intel
+            environment: host
+          - target: darwin-arm64
+            runner: macos-15
+            environment: host
+    env:
+      TARGET: ${{ matrix.target }}
+      SMOKE_ENVIRONMENT: ${{ matrix.environment }}
+      NODE_ARCH: ${{ matrix.node_arch }}
+    steps:
+      # actions/checkout@v6
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd
+        with:
+          persist-credentials: false
+      # pnpm/action-setup@v6.1.0
+      - uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413
+      # actions/setup-node@v6
+      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e
+        with:
+          node-version: "24"
+          cache: pnpm
+      # Provides ssh2 for the in-process test server. Its optional native
+      # addon is built for the runner; inside the containers ssh2 cannot load
+      # it and falls back to its JavaScript implementation.
+      - run: pnpm install --frozen-lockfile
+
+      # actions/download-artifact@v4
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
+        with:
+          name: ssh-native-${{ matrix.target }}
+          path: ${{ runner.temp }}/ssh-native-artifact
+
+      - name: Place the artifact next to the loader
+        # The loader prefers packages/ssh-native/ssh-native.<target>.node; no
+        # platform package is installed, so it cannot load anything else.
+        run: |
+          artifact="$RUNNER_TEMP/ssh-native-artifact"
+          node_file="ssh-native.$TARGET.node"
+          ls -l "$artifact"
+          (cd "$artifact" && shasum -a 256 -c "$node_file.sha256")
+          cp "$artifact/$node_file" "packages/ssh-native/$node_file"
+          echo "SSH_NATIVE_EXPECTED_SHA256=$(cut -d ' ' -f 1 "$artifact/$node_file.sha256")" >> "$GITHUB_ENV"
+
+      - name: Run smoke test
+        # The containers bind-mount the checkout at the same path, so the
+        # relative pnpm symlinks in node_modules resolve unchanged.
+        run: |
+          out="$RUNNER_TEMP/smoke-output.txt"
+          smoke="packages/ssh-native/test/smoke/smoke.mjs"
+          case "$SMOKE_ENVIRONMENT" in
+            host)
+              if [ "$RUNNER_OS" = Linux ]; then ldd --version | sed -n '1p'; else sw_vers; fi
+              node --version
+              node "$smoke" 2>&1 | tee "$out"
+              ;;
+            ubuntu-22.04)
+              docker run --rm \
+                -v "$GITHUB_WORKSPACE:$GITHUB_WORKSPACE" -w "$GITHUB_WORKSPACE" \
+                -e SSH_NATIVE_EXPECTED_SHA256 -e CONTAINER_NODE_VERSION -e NODE_ARCH -e SMOKE="$smoke" \
+                ubuntu:22.04 \
+                bash -euo pipefail -c '
+                  export DEBIAN_FRONTEND=noninteractive
+                  apt-get update -qq
+                  apt-get install -y -qq --no-install-recommends ca-certificates curl xz-utils > /dev/null
+                  base="https://nodejs.org/dist/${CONTAINER_NODE_VERSION}"
+                  tarball="node-${CONTAINER_NODE_VERSION}-linux-${NODE_ARCH}.tar.xz"
+                  curl -fsSL --retry 5 -o "/tmp/$tarball" "$base/$tarball"
+                  curl -fsSL --retry 5 -o /tmp/SHASUMS256.txt "$base/SHASUMS256.txt"
+                  (cd /tmp && grep " ${tarball}\$" SHASUMS256.txt | sha256sum -c -)
+                  mkdir -p /opt/node
+                  tar -xJf "/tmp/$tarball" -C /opt/node --strip-components=1
+                  export PATH="/opt/node/bin:$PATH"
+                  ldd --version | sed -n 1p
+                  node --version
+                  node "$SMOKE"
+                ' 2>&1 | tee "$out"
+              ;;
+            node-24-alpine)
+              docker run --rm \
+                -v "$GITHUB_WORKSPACE:$GITHUB_WORKSPACE" -w "$GITHUB_WORKSPACE" \
+                -e SSH_NATIVE_EXPECTED_SHA256 -e SMOKE="$smoke" \
+                node:24-alpine \
+                sh -euc 'cat /etc/alpine-release; node --version; node "$SMOKE"' 2>&1 | tee "$out"
+              ;;
+            *)
+              echo "::error::unknown smoke environment $SMOKE_ENVIRONMENT"
+              exit 1
+              ;;
+          esac
+
+      - name: Check which binary the smoke test loaded
+        # smoke.mjs already fails on a SHA-256 mismatch; this also checks the
+        # reported target and keeps the evidence in the job summary.
+        run: |
+          line="$(grep -E '^ssh-native smoke: target=' "$RUNNER_TEMP/smoke-output.txt" | tail -n 1 || true)"
+          echo "${line:-no smoke line}"
+          case " $line " in
+            *" target=$TARGET "*) ;;
+            *) echo "::error::smoke did not report target=$TARGET"; exit 1 ;;
+          esac
+          case " $line " in
+            *" sha256=$SSH_NATIVE_EXPECTED_SHA256 "*) ;;
+            *) echo "::error::smoke did not report sha256=$SSH_NATIVE_EXPECTED_SHA256"; exit 1 ;;
+          esac
+          echo "- smoke $TARGET on $SMOKE_ENVIRONMENT: \`$line\`" >> "$GITHUB_STEP_SUMMARY"
+
+  local-proofs:
+    name: local sshd proofs (${{ matrix.target }})
+    needs: build
+    if: ${{ !cancelled() && !inputs.skip-integration }}
+    runs-on: ${{ matrix.runner }}
+    # pnpm install plus the local suite (a non-root sshd and ssh-agent, no
+    # Docker image to build); 30 min as for integration-check.yml.
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: darwin-arm64
+            runner: macos-15
+          - target: darwin-x64
+            runner: macos-15-intel
+          # Parity: the Linux path of the local suite against the shipped
+          # (zig-built, glibc 2.35) artifact. Integration Check runs the Docker
+          # suite against a host build instead.
+          - target: linux-x64-gnu
+            runner: ubuntu-24.04
+    env:
+      TARGET: ${{ matrix.target }}
+    steps:
+      # actions/checkout@v6
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd
+        with:
+          persist-credentials: false
+      # pnpm/action-setup@v6.1.0
+      - uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413
+      # actions/setup-node@v6
+      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e
+        with:
+          node-version: "24"
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+
+      # actions/download-artifact@v4
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
+        with:
+          name: ssh-native-${{ matrix.target }}
+          path: ${{ runner.temp }}/ssh-native-artifact
+
+      - name: Place the artifact next to the loader
+        run: |
+          artifact="$RUNNER_TEMP/ssh-native-artifact"
+          node_file="ssh-native.$TARGET.node"
+          (cd "$artifact" && shasum -a 256 -c "$node_file.sha256")
+          cp "$artifact/$node_file" "packages/ssh-native/$node_file"
+          node -e '
+            const binding = require("./packages/ssh-native")
+            console.log(`loaded ${binding.currentTarget()} (${binding.cryptoBackend()})`)
+            if (binding.currentTarget() !== process.env.TARGET) process.exit(1)
+          '
+
+      - name: Ensure OpenSSH server, client and agent
+        # macOS runners ship /usr/sbin/sshd, ssh-agent and ssh-keygen; Ubuntu
+        # runners may lack the server.
+        run: |
+          if [ "$RUNNER_OS" = Linux ] && [ ! -x /usr/sbin/sshd ]; then
+            sudo apt-get update -qq
+            sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq --no-install-recommends \
+              openssh-server
+          fi
+          for tool in /usr/sbin/sshd "$(command -v ssh-agent)" "$(command -v ssh-keygen)"; do
+            if [ ! -x "$tool" ]; then
+              echo "::error::missing OpenSSH tool: ${tool:-ssh-agent or ssh-keygen}"
+              exit 1
+            fi
+          done
+          ssh -V
+
+      - name: Run hard proofs against a local non-root sshd
+        env:
+          # With CI=true a missing tool or a skipped hard proof fails the suite.
+          CI: "true"
+        run: pnpm --filter @paratix/ssh-native test:integration:local
+
+  docker-integration:
+    name: Docker integration (linux-arm64-gnu)
+    needs: build
+    if: ${{ !cancelled() && !inputs.skip-integration }}
+    # linux-x64 Docker coverage comes from Integration Check (root
+    # test:integration); this job adds arm64 with the shipped artifact.
+    runs-on: ubuntu-24.04-arm
+    # Builds the sshd fixture image and runs the whole suite; same limit as
+    # integration-check.yml.
+    timeout-minutes: 30
+    env:
+      TARGET: linux-arm64-gnu
+    steps:
+      # actions/checkout@v6
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd
+        with:
+          persist-credentials: false
+      # pnpm/action-setup@v6.1.0
+      - uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413
+      # actions/setup-node@v6
+      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e
+        with:
+          node-version: "24"
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+
+      # actions/download-artifact@v4
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
+        with:
+          name: ssh-native-linux-arm64-gnu
+          path: ${{ runner.temp }}/ssh-native-artifact
+
+      - name: Place the artifact next to the loader
+        run: |
+          artifact="$RUNNER_TEMP/ssh-native-artifact"
+          node_file="ssh-native.$TARGET.node"
+          (cd "$artifact" && shasum -a 256 -c "$node_file.sha256")
+          cp "$artifact/$node_file" "packages/ssh-native/$node_file"
+          node -e '
+            const binding = require("./packages/ssh-native")
+            console.log(`loaded ${binding.currentTarget()} (${binding.cryptoBackend()})`)
+            if (binding.currentTarget() !== process.env.TARGET) process.exit(1)
+          '
+
+      - name: Check Docker availability
+        # Fails the job when Docker is unavailable instead of letting the
+        # suite skip (AGENTS.md).
+        run: docker info
+
+      - name: Run the ssh-native integration suite against Docker sshd
+        env:
+          CI: "true"
+        run: pnpm --filter @paratix/ssh-native test:integration
+
+  artifacts:
+    name: verified artifacts
+    needs:
+      - build
+      - smoke
+    runs-on: ubuntu-24.04
+    # Downloads six small artifacts and hashes them.
+    timeout-minutes: 10
+    outputs:
+      sha256: ${{ steps.collect.outputs.sha256 }}
+    steps:
+      # actions/download-artifact@v4
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
+        with:
+          pattern: ssh-native-*
+          path: ${{ runner.temp }}/ssh-native-artifacts
+
+      - name: Check artifact contents and collect SHA-256 values
+        id: collect
+        run: |
+          root="$RUNNER_TEMP/ssh-native-artifacts"
+          sha256='{}'
+          {
+            echo "## ssh-native artifacts"
+            echo
+            echo "| artifact | size (bytes) | sha256 |"
+            echo "| --- | --- | --- |"
+          } >> "$GITHUB_STEP_SUMMARY"
+          for target in linux-x64-gnu linux-arm64-gnu linux-x64-musl linux-arm64-musl darwin-x64 darwin-arm64; do
+            dir="$root/ssh-native-$target"
+            node_file="ssh-native.$target.node"
+            if [ ! -d "$dir" ]; then
+              echo "::error::artifact ssh-native-$target is missing"
+              exit 1
+            fi
+            contents="$(cd "$dir" && find . -mindepth 1 | LC_ALL=C sort | tr '\n' ' ')"
+            if [ "$contents" != "./$node_file ./$node_file.sha256 " ]; then
+              echo "::error::artifact ssh-native-$target must contain exactly $node_file and $node_file.sha256, found: ${contents:-nothing}"
+              exit 1
+            fi
+            (cd "$dir" && sha256sum -c "$node_file.sha256")
+            hash="$(cut -d ' ' -f 1 "$dir/$node_file.sha256")"
+            sha256="$(jq -c --arg target "$target" --arg hash "$hash" '. + {($target): $hash}' <<< "$sha256")"
+            echo "| ssh-native-$target | $(wc -c < "$dir/$node_file") | \`$hash\` |" >> "$GITHUB_STEP_SUMMARY"
+          done
+          echo "$sha256" | jq .
+          echo "sha256=$sha256" >> "$GITHUB_OUTPUT"

@@ -7,7 +7,7 @@ use napi_derive::napi;
 use russh::client::{AuthResult, Handle, KeyboardInteractiveAuthResponse};
 use russh::keys::agent::client::AgentClient;
 use russh::keys::agent::AgentIdentity;
-use russh::keys::{decode_secret_key, HashAlg, PrivateKeyWithHashAlg};
+use russh::keys::{decode_secret_key, Algorithm, HashAlg, PrivateKey, PrivateKeyWithHashAlg};
 use zeroize::Zeroizing;
 
 use crate::error::{from_key_error, BindingError, BindingResult, Code};
@@ -150,10 +150,7 @@ async fn key_auth(
             "the private key is not a text (PEM/OpenSSH) key",
         )
     })?;
-    // russh keeps internal, non-zeroized copies while decoding (base64 String
-    // and DER Vec in keys/format/mod.rs); the parsed ssh-key PrivateKey
-    // zeroizes its key material on drop.
-    let key = decode_secret_key(text, None).map_err(|e| from_key_error(&e))?;
+    let key = decode_private_key(text)?;
     drop(bytes);
     let algorithm = key.algorithm();
     let hash = if algorithm.clone().is_rsa() {
@@ -171,6 +168,29 @@ async fn key_auth(
             attempts: 1,
         }),
         AuthResult::Failure { .. } => Err(auth_failed()),
+    }
+}
+
+/// Decodes a private key and rejects key types the binding cannot sign with,
+/// so they fail as `UNSUPPORTED_KEY` before any login attempt.
+fn decode_private_key(text: &str) -> BindingResult<PrivateKey> {
+    // russh keeps internal, non-zeroized copies while decoding (base64 String
+    // and DER Vec in keys/format/mod.rs); the parsed ssh-key PrivateKey
+    // zeroizes its key material on drop.
+    let key = decode_secret_key(text, None).map_err(|e| from_key_error(&e))?;
+    ensure_signable(&key.algorithm())?;
+    Ok(key)
+}
+
+/// russh signs through ssh-key, which this build compiles with Ed25519, ECDSA
+/// (P-256, P-384, P-521) and RSA support only. `decode_secret_key` still parses
+/// other key types, for example `ssh-dss` in OpenSSH format or security-key
+/// (`sk-*`) keys whose private half lives on a hardware token; without this
+/// check they would only fail at login and surface as `AUTH_FAILED`.
+fn ensure_signable(algorithm: &Algorithm) -> BindingResult<()> {
+    match algorithm {
+        Algorithm::Ed25519 | Algorithm::Ecdsa { .. } | Algorithm::Rsa { .. } => Ok(()),
+        other => Err(BindingError::unsupported_key_type(other.as_str())),
     }
 }
 
@@ -239,6 +259,11 @@ pub fn keyboard_interactive_answers(prompts: usize, password: &Zeroizing<String>
 mod tests {
     use super::*;
     use crate::secret::tests::assert_zeroize_on_drop;
+    use russh::keys::ssh_encoding::Mpint;
+    use russh::keys::ssh_key::private::{DsaKeypair, DsaPrivateKey, Ed25519Keypair, KeypairData};
+    use russh::keys::ssh_key::public::DsaPublicKey;
+    use russh::keys::ssh_key::{Error as KeyError, LineEnding};
+    use russh::keys::EcdsaCurve;
 
     #[test]
     fn secrets_of_every_auth_input_are_zeroizing() {
@@ -253,6 +278,64 @@ mod tests {
                 AuthInput::Agent(_) => {}
             }
         }
+    }
+
+    fn openssh_text(key_data: KeypairData) -> Result<Zeroizing<String>, KeyError> {
+        PrivateKey::new(key_data, "ssh-native-unit")?.to_openssh(LineEnding::LF)
+    }
+
+    fn is_unsupported(result: &BindingResult<impl Sized>, detail: &str) -> bool {
+        matches!(result, Err(err) if err.code == Code::UnsupportedKey && err.detail == detail)
+    }
+
+    #[test]
+    fn rejects_an_openssh_dsa_key_as_unsupported() -> Result<(), KeyError> {
+        // Arbitrary positive components: decoding does not check the DSA math.
+        let mpint = |byte: u8| Mpint::from_positive_bytes(&[byte; 20]);
+        let public = DsaPublicKey::new(mpint(0x11), mpint(0x22), mpint(0x33), mpint(0x44))?;
+        let private = DsaPrivateKey::new(mpint(0x55))?;
+        let text = openssh_text(KeypairData::Dsa(DsaKeypair::new(public, private)?))?;
+        assert!(text.starts_with("-----BEGIN OPENSSH PRIVATE KEY-----"));
+
+        let result = decode_private_key(&text);
+        assert!(is_unsupported(&result, "ssh-dss"), "{:?}", result.err());
+        Ok(())
+    }
+
+    #[test]
+    fn accepts_an_openssh_ed25519_key() -> Result<(), KeyError> {
+        let keypair = Ed25519Keypair::from_seed(&[7; 32]);
+        let text = openssh_text(KeypairData::Ed25519(keypair))?;
+        let result = decode_private_key(&text);
+        assert!(
+            matches!(&result, Ok(key) if key.algorithm() == Algorithm::Ed25519),
+            "{:?}",
+            result.err()
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn only_signable_algorithms_pass() -> Result<(), KeyError> {
+        for algorithm in [
+            Algorithm::Ed25519,
+            Algorithm::Ecdsa {
+                curve: EcdsaCurve::NistP384,
+            },
+            Algorithm::Rsa { hash: None },
+        ] {
+            assert!(ensure_signable(&algorithm).is_ok(), "{algorithm}");
+        }
+        for algorithm in [
+            Algorithm::Dsa,
+            Algorithm::SkEd25519,
+            Algorithm::SkEcdsaSha2NistP256,
+            Algorithm::new("ssh-unknown@example.com")?,
+        ] {
+            let result = ensure_signable(&algorithm);
+            assert!(is_unsupported(&result, algorithm.as_str()), "{algorithm}");
+        }
+        Ok(())
     }
 
     #[test]
