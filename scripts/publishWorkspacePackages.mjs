@@ -888,9 +888,13 @@ function assertPublishOrderConsistency(classifiedPackages) {
 
 // #255 B3: resume rule for a version that is already on npm. Its provenance
 // must name publish.yml on main of this repository. A version from this
-// very workflow run must be byte-identical to the local tarball; a version
-// from an earlier run is only accepted while packages/ssh-native is
-// unchanged since its source commit.
+// very workflow run must be byte-identical to the local tarball. For the
+// seven native packages, a version from an earlier run is only accepted
+// while the binary inputs (packages/ssh-native and the ssh-native.yml build
+// matrix) are unchanged since its source commit, so already published
+// binaries never mix with binaries built from different sources. paratix and
+// create-paratix contain no binary; their earlier-run versions are skipped on
+// valid provenance alone, as before B3.
 async function assertResumablePublishedPackage(
   { commandRunner, environment, fetch },
   packedPackage
@@ -908,10 +912,19 @@ async function assertResumablePublishedPackage(
     if (provenance.integrity !== packedPackage.integrity) {
       throw new Error(
         `${label} was published earlier in this workflow run, but its registry integrity ` +
-          `${provenance.integrity} differs from the local tarball ${packedPackage.integrity}.`
+          `${provenance.integrity} differs from the local tarball ${packedPackage.integrity}. ` +
+          'A "Re-run all jobs" rebuilds the native binaries, which are not bit-identical; use ' +
+          '"Re-run failed jobs" instead, or start a new release run on main (the earlier-run rule ' +
+          "then applies)."
       )
     }
     console.log(`${label} was already published by this workflow run; skipping publish.`)
+    return
+  }
+  if (packedPackage.kind === PACKAGE_KIND_WORKSPACE) {
+    console.log(
+      `${label} was already published by workflow run ${provenance.runId} from ${provenance.commit}; skipping publish.`
+    )
     return
   }
   await assertNativeSourcesUnchangedSince({
@@ -922,7 +935,7 @@ async function assertResumablePublishedPackage(
   })
   console.log(
     `${label} was already published by workflow run ${provenance.runId} from ${provenance.commit}; ` +
-      `${SSH_NATIVE_DISPLAY_DIRECTORY} is unchanged since then; skipping publish.`
+      "its binary inputs are unchanged since then; skipping publish."
   )
 }
 

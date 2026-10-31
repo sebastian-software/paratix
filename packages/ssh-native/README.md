@@ -74,7 +74,10 @@ package). The crate itself stays at `version = "0.0.0"`. A release runs `.github
    from the same workflow run its `integrity` must match the local tarball, from an earlier run
    `packages/ssh-native` must be unchanged since that run's commit. A missing version needs a
    successful npm OIDC token exchange for that package. Any failure aborts before anything is
-   published, so a rerun (same run or a new one after a fix commit) resumes safely.
+   published, so a rerun resumes safely: "Re-run failed jobs" in the same run, or a new release
+   run on main (also after a fix commit). "Re-run all jobs" rebuilds the binaries, which are not
+   bit-identical, and therefore aborts. For the native packages the earlier-run rule also compares
+   `.github/workflows/ssh-native.yml`, which pins the build toolchain.
 4. It publishes the platform packages, then `@paratix/ssh-native`, then `paratix`, then
    `create-paratix`.
 
@@ -83,9 +86,10 @@ uploads the nine tarballs as the artifact `npm-tarballs`.
 
 Trusted publishing for the seven `@paratix/ssh-native*` packages is configured with
 `scripts/configure-trust.sh` (run by an npm owner, see the script header) right before the first
-release PR that contains this package is merged; then "Require two-factor authentication and
-disallow tokens" is enabled for them. npm allows two days between configuring a trusted publisher
-and its first publish.
+release PR after #255 B3 is merged; then "Require two-factor authentication and disallow tokens"
+is enabled for them. Because of `linked-versions`, every release PR from B3 on contains this
+package, whichever commit triggered it; without trust the publish job aborts before publishing
+anything. npm allows two days between configuring a trusted publisher and its first publish.
 
 ## API overview
 

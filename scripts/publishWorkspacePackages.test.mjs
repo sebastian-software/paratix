@@ -45,6 +45,8 @@ const TARGETS = [
 ]
 const PLATFORM_NAMES = TARGETS.map((target) => `${SSH_NATIVE_NAME}-${target}`)
 const RELEASE_ORDER = [...PLATFORM_NAMES, SSH_NATIVE_NAME, PARATIX_NAME, CREATE_PARATIX_NAME]
+const NATIVE_PACKAGE_COUNT = PLATFORM_NAMES.length + 1
+const NATIVE_DIFF_PATHS = "packages/ssh-native .github/workflows/ssh-native.yml"
 const REPOSITORY_ROOT = dirname(import.meta.dirname)
 const REPOSITORY_URL = "https://github.com/sebastian-software/paratix"
 const PUBLISH_WORKFLOW_PATH = ".github/workflows/publish.yml"
@@ -1197,10 +1199,15 @@ async function assertNewRunResume(abortAfter) {
     publishedTarballNames(resumedRun.commandRunner.calls),
     expectedTarballNames(DEFAULT_STABLE_VERSION).slice(abortAfter)
   )
-  assert.equal(resumedRun.commandRunner.diffCalls.length, abortAfter)
+  // Only the seven native packages compare their binary inputs; paratix and
+  // create-paratix from an earlier run are skipped on provenance alone.
+  assert.equal(
+    resumedRun.commandRunner.diffCalls.length,
+    Math.min(abortAfter, NATIVE_PACKAGE_COUNT)
+  )
   assert.equal(
     resumedRun.commandRunner.diffCalls[0],
-    `diff --quiet ${HEAD_COMMIT}..HEAD -- packages/ssh-native`
+    `diff --quiet ${HEAD_COMMIT}..HEAD -- ${NATIVE_DIFF_PATHS}`
   )
 }
 
@@ -1225,7 +1232,7 @@ describe("publishWorkspacePackages resume after an aborted release", () => {
     assert.deepEqual(publishedTarballNames(result.commandRunner.calls), [
       tarballFileName(CREATE_PARATIX_NAME, DEFAULT_STABLE_VERSION),
     ])
-    assert.equal(result.commandRunner.diffCalls.length, RELEASE_ORDER.length - 1)
+    assert.equal(result.commandRunner.diffCalls.length, NATIVE_PACKAGE_COUNT)
     assert.equal(exchangeCalls(result.fetch).length, 1)
   })
 
@@ -1423,10 +1430,23 @@ describe("publishWorkspacePackages provenance of published versions", () => {
 
     const result = await harness.run({ runnerOptions: { diffExitCode: 1 } })
 
-    assertAbortedWithoutPublish(result, "packages/ssh-native changed since then")
+    assertAbortedWithoutPublish(
+      result,
+      "packages/ssh-native and .github/workflows/ssh-native.yml changed since then"
+    )
     assert.deepEqual(result.commandRunner.diffCalls, [
-      `diff --quiet ${EARLIER_COMMIT}..HEAD -- packages/ssh-native`,
+      `diff --quiet ${EARLIER_COMMIT}..HEAD -- ${NATIVE_DIFF_PATHS}`,
     ])
+  })
+
+  it("#255 B3: skips paratix from an earlier run without comparing the native sources", async () => {
+    const harness = createHarness()
+    publishedEarlier(harness.registry, RELEASE_ORDER.slice(0, -1))
+
+    const result = await harness.run({ runnerOptions: { diffExitCode: 0 } })
+
+    assertSucceeded(result)
+    assert.equal(result.commandRunner.diffCalls.length, NATIVE_PACKAGE_COUNT)
   })
 
   it("#255 B3: aborts with a fetch-depth hint when the earlier commit is unknown", async () => {

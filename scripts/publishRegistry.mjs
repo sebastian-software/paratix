@@ -20,7 +20,11 @@ const EXPECTED_WORKFLOW = {
 const INVOCATION_ID_PATTERN =
   /^https:\/\/github\.com\/sebastian-software\/paratix\/actions\/runs\/(?<runId>\d+)\/attempts\/\d+$/v
 const GIT_COMMIT_PATTERN = /^[0-9a-f]{40}$/v
-const NATIVE_SOURCE_DIRECTORY = "packages/ssh-native"
+// Inputs of the native binaries: the binding sources and the build matrix
+// that pins zig, cargo-zigbuild, the glibc floor and the macOS deployment
+// target.
+const NATIVE_SOURCE_PATHS = ["packages/ssh-native", ".github/workflows/ssh-native.yml"]
+const NATIVE_SOURCE_DISPLAY = NATIVE_SOURCE_PATHS.join(" and ")
 // Literal fragments of npm's lib/utils/oidc.js (npm 11.16.0).
 // eslint-disable-next-line no-template-curly-in-string -- Literal source text searched in npm's oidc.js.
 const NPM_OIDC_ENDPOINT_TEMPLATE = "/-/npm/v1/oidc/token/exchange/package/${escapedPackageName}"
@@ -176,19 +180,19 @@ export async function assertNativeSourcesUnchangedSince({
   try {
     await commandRunner.execFile(
       "git",
-      ["diff", "--quiet", `${commit}..HEAD`, "--", NATIVE_SOURCE_DIRECTORY],
+      ["diff", "--quiet", `${commit}..HEAD`, "--", ...NATIVE_SOURCE_PATHS],
       { cwd: repositoryRoot }
     )
   } catch (error) {
     if (error?.code === 1) {
       throw new Error(
-        `${label} was published from ${commit}, but ${NATIVE_SOURCE_DIRECTORY} changed since then. ` +
+        `${label} was published from ${commit}, but ${NATIVE_SOURCE_DISPLAY} changed since then. ` +
           "Bump the release version instead of resuming the earlier release.",
         { cause: error }
       )
     }
     throw new Error(
-      `Could not compare ${NATIVE_SOURCE_DIRECTORY} between ${commit} and HEAD for ${label}. ` +
+      `Could not compare ${NATIVE_SOURCE_DISPLAY} between ${commit} and HEAD for ${label}. ` +
         "publish.yml must check out the full history (actions/checkout with fetch-depth: 0).",
       { cause: error }
     )

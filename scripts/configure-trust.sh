@@ -5,11 +5,19 @@
 # trusted publisher.
 #
 # Run it locally as the npm owner of the @paratix scope, after `npm login`,
-# right before merging the first release-please PR that contains
-# @paratix/ssh-native. Afterwards set "Require two-factor authentication and
-# disallow tokens" for each of the seven packages on npmjs.com. npm gives a
-# freshly configured trusted publisher two days for its first publish; an OIDC
-# token exchange without a publish does not extend that window.
+# right before merging the first release-please PR after #255 B3. Because
+# release-please links ssh-native with paratix and create-paratix, every
+# release PR from then on contains @paratix/ssh-native, whatever commit
+# triggered it. Without trust the publish preflight aborts before anything is
+# published, and paratix stays unreleased until this script has run.
+# Afterwards set "Require two-factor authentication and disallow tokens" for
+# each of the seven packages on npmjs.com. npm gives a freshly configured
+# trusted publisher two days for its first publish; an OIDC token exchange
+# without a publish does not extend that window.
+#
+# `npm trust` only works for existing packages. The seven packages exist since
+# 2026-10-29 as 0.0.0 placeholders (dist-tag latest points at 0.0.0 until the
+# first release); the script aborts if one is missing.
 #
 # Every package gets exactly one GitHub Actions trusted publisher:
 # repository sebastian-software/paratix, workflow publish.yml, environment npm.
@@ -80,7 +88,11 @@ classify() {
       config.type === "github" &&
       config.repository === repository &&
       config.file === file &&
-      config.environment === environment
+      config.environment === environment &&
+      // Configurations from before npm stored permissions carry none; a
+      // current one must allow publishing (npm: createPackage).
+      (config.permissions === undefined ||
+        (Array.isArray(config.permissions) && config.permissions.includes("createPackage")))
     if (configs.length === 1 && matches(configs[0])) {
       console.log("match")
     } else {
