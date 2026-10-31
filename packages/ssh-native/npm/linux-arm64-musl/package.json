@@ -1,6 +1,6 @@
 {
   "name": "@paratix/ssh-native-linux-arm64-musl",
-  "version": "0.0.0",
+  "version": "0.23.1",
   "description": "Prebuilt linux-arm64-musl binary of @paratix/ssh-native (internal native SSH binding of Paratix)",
   "license": "MIT",
   "main": "ssh-native.linux-arm64-musl.node",

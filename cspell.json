@@ -345,6 +345,10 @@
     "unref",
     "chan",
     "pgrep",
-    "KEXINIT"
+    "KEXINIT",
+    "dsse",
+    "oidc",
+    "preflights",
+    "SLSA"
   ]
 }

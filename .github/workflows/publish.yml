@@ -14,11 +14,13 @@ on:
         options:
           - verify
           - release
-          - recover-create-paratix
 
+# #255 B3: never cancel a run on main. A workflow-wide cancellation also stops
+# a running `publish` job (a job-level group cannot prevent that), which could
+# leave a release half-published. Other refs keep cancelling superseded runs.
 concurrency:
   group: "${{ github.workflow }}-${{ github.ref }}"
-  cancel-in-progress: true
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
 
 jobs:
   validate:
@@ -118,10 +120,40 @@ jobs:
           manifest-file: .release-please-manifest.json
           skip-github-pull-request: true
 
+  # #255 B3: builds the six @paratix/ssh-native binaries with the same matrix
+  # as the pull request workflow and smoke-tests exactly the artifacts that
+  # are published (its `sha256` output is set only after every smoke passed).
+  # Runs only for a created release or a manual run; pull requests get the
+  # matrix from ssh-native.yml directly. The local sshd proofs and the Docker
+  # suite are skipped here: they ran on the pull request, and `validate` runs
+  # the Docker integration suites of every package again.
+  native:
+    needs:
+      - validate
+      - release-please-release
+    if: >-
+      always() &&
+      needs.validate.result == 'success' &&
+      (
+        needs.release-please-release.outputs.release_created == 'true' ||
+        github.event_name == 'workflow_dispatch'
+      )
+    permissions:
+      contents: read
+    uses: ./.github/workflows/ssh-native.yml
+    with:
+      skip-integration: true
+
   verify:
     needs:
       - validate
-    if: github.event_name == 'workflow_dispatch' && inputs.mode == 'verify'
+      - native
+    if: >-
+      always() &&
+      github.event_name == 'workflow_dispatch' &&
+      inputs.mode == 'verify' &&
+      needs.validate.result == 'success' &&
+      needs.native.result == 'success'
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     permissions:
@@ -131,6 +163,8 @@ jobs:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd
         with:
           persist-credentials: false
+      # pnpm/action-setup@v6.1.0
+      - uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413
       # actions/setup-node@v6
       - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e
         with:
@@ -141,24 +175,49 @@ jobs:
         with:
           name: package-dist
           path: packages
-      - name: Verify package tarballs
+      # Outside the repository, so the clean-tree check stays meaningful.
+      # actions/download-artifact@v4
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
+        with:
+          pattern: ssh-native-*
+          path: ${{ runner.temp }}/ssh-native-artifacts
+      - name: Pack and verify the nine package tarballs
+        env:
+          SSH_NATIVE_ARTIFACTS_DIR: ${{ runner.temp }}/ssh-native-artifacts
+          SSH_NATIVE_SHA256: ${{ needs.native.outputs.sha256 }}
+          PARATIX_PUBLISH_STAGING_DIR: ${{ runner.temp }}/paratix-publish
         run: node scripts/publishWorkspacePackages.mjs verify
+      # actions/upload-artifact@v4
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: npm-tarballs
+          path: ${{ runner.temp }}/paratix-publish/tarballs
+          if-no-files-found: error
 
   publish:
     needs:
       - validate
       - release-please-release
+      - native
     if: >-
       always() &&
       github.ref == 'refs/heads/main' &&
       needs.validate.result == 'success' &&
+      needs.native.result == 'success' &&
       (
         needs.release-please-release.outputs.release_created == 'true' ||
         (github.event_name == 'workflow_dispatch' && inputs.mode != 'verify')
       )
     runs-on: ubuntu-24.04
     environment: npm
-    timeout-minutes: 30
+    # #255 B3: at most one publish at a time, and a queued publish never
+    # cancels a running one.
+    concurrency:
+      group: npm-publish
+      cancel-in-progress: false
+    # Nine sequential publishes with provenance, each followed by an
+    # availability wait of up to 24 x 10 s.
+    timeout-minutes: 60
     permissions:
       contents: read
       # npm requests an OIDC token for trusted publishing.
@@ -168,6 +227,11 @@ jobs:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd
         with:
           persist-credentials: false
+          # The resume check compares packages/ssh-native between the commit
+          # of an earlier publish run and HEAD (`git diff <commit>..HEAD`).
+          fetch-depth: 0
+      # pnpm/action-setup@v6.1.0
+      - uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413
       # actions/setup-node@v6
       - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e
         with:
@@ -188,10 +252,27 @@ jobs:
         with:
           name: package-dist
           path: packages
-      - if: github.event_name == 'push'
+      # actions/download-artifact@v4
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
+        with:
+          pattern: ssh-native-*
+          path: ${{ runner.temp }}/ssh-native-artifacts
+      # Checks every package (provenance, integrity, OIDC exchange) before the
+      # first `npm publish`, then publishes the platform packages,
+      # @paratix/ssh-native, paratix and create-paratix in this order.
+      - name: Publish the nine packages
+        env:
+          SSH_NATIVE_ARTIFACTS_DIR: ${{ runner.temp }}/ssh-native-artifacts
+          SSH_NATIVE_SHA256: ${{ needs.native.outputs.sha256 }}
+          PARATIX_PUBLISH_STAGING_DIR: ${{ runner.temp }}/paratix-publish
         run: node scripts/publishWorkspacePackages.mjs release
-      - if: github.event_name == 'workflow_dispatch'
-        run: node scripts/publishWorkspacePackages.mjs "${{ inputs.mode }}"
+      # actions/upload-artifact@v4
+      - if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: npm-tarballs
+          path: ${{ runner.temp }}/paratix-publish/tarballs
+          if-no-files-found: ignore
 
   refresh-context7:
     needs:

@@ -1,0 +1,61 @@
+# Checks the Rust dependencies of @paratix/ssh-native against the RustSec
+# advisory database (`cargo deny check advisories`, configured in
+# packages/ssh-native/deny.toml). Runs weekly and on demand; a new advisory
+# fails the run. No pull request check depends on it, so an advisory published
+# upstream never blocks unrelated PRs. RUSTSEC-2023-0071 is a justified
+# exception in deny.toml.
+name: SSH Native Advisories
+
+on:
+  schedule:
+    # Mondays 05:17 UTC (off the full hour to avoid the scheduler peak).
+    - cron: "17 5 * * 1"
+  workflow_dispatch:
+
+concurrency:
+  group: ssh-native-advisories
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  advisories:
+    runs-on: ubuntu-24.04
+    # Installs cargo-deny from source on a cold cache (about 3 min) and fetches
+    # the advisory database; no build.
+    timeout-minutes: 20
+    env:
+      # Must match EXPECTED_CARGO_DENY_VERSION in scripts/rustCheck.mjs.
+      CARGO_DENY_VERSION: "0.20.2"
+      CARGO_TERM_COLOR: always
+    steps:
+      # actions/checkout@v6
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd
+        with:
+          persist-credentials: false
+      - name: Install Rust toolchain
+        id: rust
+        working-directory: packages/ssh-native
+        run: |
+          rustup toolchain install --no-self-update
+          cargo --version
+          echo "host=$(rustc -vV | sed -n 's/^host: //p')" >> "$GITHUB_OUTPUT"
+          echo "release=$(rustc -vV | sed -n 's/^release: //p')" >> "$GITHUB_OUTPUT"
+      - name: Cache cargo-deny
+        # actions/cache@v6.1.0
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9
+        with:
+          path: ~/.cargo-tools
+          key: ssh-native-advisories-${{ runner.os }}-${{ steps.rust.outputs.host }}-rust-${{ steps.rust.outputs.release }}-cargo-deny-${{ env.CARGO_DENY_VERSION }}
+      - name: Install cargo-deny
+        run: |
+          tools="$HOME/.cargo-tools"
+          if [ "$("$tools/bin/cargo-deny" --version 2>/dev/null)" != "cargo-deny $CARGO_DENY_VERSION" ]; then
+            cargo install --locked --root "$tools" "cargo-deny@$CARGO_DENY_VERSION"
+          fi
+          "$tools/bin/cargo-deny" --version
+          echo "$tools/bin" >> "$GITHUB_PATH"
+      - name: Check RustSec advisories
+        working-directory: packages/ssh-native
+        run: cargo deny --locked check advisories

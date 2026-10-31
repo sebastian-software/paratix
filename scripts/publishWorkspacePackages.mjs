@@ -1,9 +1,45 @@
 import { execFile, spawn } from "node:child_process"
 import { realpathSync } from "node:fs"
-import { lstat, readdir, readFile, stat } from "node:fs/promises"
-import { dirname, join, resolve } from "node:path"
+import {
+  appendFile,
+  lstat,
+  mkdir,
+  mkdtemp,
+  readdir,
+  readFile,
+  realpath,
+  rm,
+  stat,
+  writeFile,
+} from "node:fs/promises"
+import { basename, dirname, join, resolve } from "node:path"
 import { fileURLToPath } from "node:url"
 import { promisify } from "node:util"
+
+import {
+  assertNoWorkspaceSpecifiers,
+  inspectPlatformTarball,
+  inspectSshNativeTarball,
+  inspectWorkspaceTarball,
+  readTarGzEntries,
+  tarballIntegrity,
+} from "./publishArtefacts.mjs"
+import {
+  nativeBinaryFileName,
+  platformPackageName,
+  prepareStagingRoot,
+  readNativeInputs,
+  SSH_NATIVE_PACKAGE_NAME,
+  SSH_NATIVE_TARGETS,
+  stageNativePackages,
+  verifyNativeArtifacts,
+} from "./publishNativeStaging.mjs"
+import {
+  assertNativeSourcesUnchangedSince,
+  assertNpmOidcSource,
+  assertTrustedPublishing,
+  readPublishedProvenance,
+} from "./publishRegistry.mjs"
 
 const execFileAsync = promisify(execFile)
 const SCRIPT_DIRECTORY = import.meta.dirname
@@ -36,38 +72,68 @@ const TSUP_CONFIG_FILE = "tsup.config.ts"
 // flow before any registry side effects.
 const PACKAGES_ROOT_DIRECTORY = join(REPOSITORY_ROOT, "packages")
 const PACKAGES_ROOT_DISPLAY_DIRECTORY = "packages"
+const SSH_NATIVE_DISPLAY_DIRECTORY = "packages/ssh-native"
 
-const packages = [
+const PACKAGE_KIND_LOADER = "loader"
+const PACKAGE_KIND_PLATFORM = "platform"
+const PACKAGE_KIND_WORKSPACE = "workspace"
+
+// #255 B3: nine packages are released together with one linked version, in
+// this fixed publish order: the six platform packages (they carry the
+// smoke-tested binaries), the @paratix/ssh-native loader that references
+// them as optionalDependencies, then paratix and create-paratix (R-0000740
+// order). Every package is installable once all its predecessors are.
+const releasePackageDeclarations = [
+  ...SSH_NATIVE_TARGETS.map((target) => ({
+    declaredName: platformPackageName(target),
+    displayDirectory: `${SSH_NATIVE_DISPLAY_DIRECTORY}/npm/${target}`,
+    kind: PACKAGE_KIND_PLATFORM,
+    target,
+  })),
   {
-    directory: join(REPOSITORY_ROOT, "packages/paratix"),
-    displayDirectory: "packages/paratix",
-    name: "paratix",
+    declaredName: SSH_NATIVE_PACKAGE_NAME,
+    displayDirectory: SSH_NATIVE_DISPLAY_DIRECTORY,
+    kind: PACKAGE_KIND_LOADER,
   },
   {
-    directory: join(REPOSITORY_ROOT, "packages/create-paratix"),
+    declaredName: "paratix",
+    displayDirectory: "packages/paratix",
+    kind: PACKAGE_KIND_WORKSPACE,
+  },
+  {
+    declaredName: "create-paratix",
     displayDirectory: "packages/create-paratix",
-    name: "create-paratix",
+    kind: PACKAGE_KIND_WORKSPACE,
   },
 ]
 
-// R-0000740 / #255: workspace packages that live under packages/ but are not
-// published by this script yet. They count as declared for the drift
-// assertion only; release, verify and recover-create-paratix never read,
-// pack or publish them. packages/ssh-native (@paratix/ssh-native) joins the
-// publish flow together with its six platform packages in #255 B3.
-const knownUnpublishedPackageDirectories = ["packages/ssh-native"]
+// R-0000740 / #255 B3: the workspace package directories under packages/.
+// packages/ssh-native is a published package since #255 B3 (its platform
+// packages live below it in npm/<target>), so there is no longer a list of
+// known but unpublished directories.
+const declaredPackageDirectories = [
+  "packages/paratix",
+  "packages/create-paratix",
+  SSH_NATIVE_DISPLAY_DIRECTORY,
+]
 
-const PUBLISH_MODE_RECOVER_CREATE_PARATIX = "recover-create-paratix"
 const PUBLISH_MODE_RELEASE = "release"
 const PUBLISH_MODE_VERIFY = "verify"
-const PUBLISH_MODES = new Set([
-  PUBLISH_MODE_RECOVER_CREATE_PARATIX,
-  PUBLISH_MODE_RELEASE,
-  PUBLISH_MODE_VERIFY,
-])
+const REMOVED_PUBLISH_MODE_RECOVER_CREATE_PARATIX = "recover-create-paratix"
+const PUBLISH_MODES = new Set([PUBLISH_MODE_RELEASE, PUBLISH_MODE_VERIFY])
 
 function validatePublishMode(mode) {
   if (PUBLISH_MODES.has(mode)) return mode
+  // #255 B3: the release mode resumes any partial release (including
+  // "paratix published, create-paratix missing") with provenance and
+  // trusted-publishing checks, so the dedicated recovery mode is gone.
+  if (mode === REMOVED_PUBLISH_MODE_RECOVER_CREATE_PARATIX) {
+    throw new Error(
+      `Publish mode ${JSON.stringify(mode)} was removed. Run the "${PUBLISH_MODE_RELEASE}" mode instead: ` +
+        "it skips versions already published by publish.yml (after verifying their provenance) and " +
+        "publishes the missing packages in order."
+    )
+  }
   throw new Error(
     `Unsupported publish mode ${JSON.stringify(mode)}. Expected one of: ${[...PUBLISH_MODES].join(", ")}.`
   )
@@ -97,10 +163,7 @@ function assertWorkspacePackageDirectoriesMatch(entries) {
     .filter((entry) => entry.isDirectory())
     .map((entry) => entry.name)
     .sort()
-  const declaredDirectories = [
-    ...packages.map((packageInfo) => packageInfo.displayDirectory),
-    ...knownUnpublishedPackageDirectories,
-  ]
+  const declaredDirectories = declaredPackageDirectories
     .map((displayDirectory) => displayDirectory.replace(/^packages\//v, ""))
     .sort()
   const filesystemSet = new Set(filesystemDirectories)
@@ -159,6 +222,7 @@ async function readPackageJson(directory, fs = { readFile }) {
     directory,
     displayDirectory: directory,
     files,
+    manifest: packageJson,
     name: packageJson.name,
     version: packageJson.version,
   }
@@ -280,8 +344,8 @@ async function waitForPublishedPackage(parameters, attempt = 1) {
   if (attempt >= retries) {
     throw new Error(
       `${packageName}@${version} was not visible in the npm registry after ${retries} attempts. ` +
-        `Re-run this script once ${packageName}@${version} is visible on the registry; the existing ` +
-        "manual-recovery branch will then resume and publish create-paratix automatically. " +
+        `Re-run the release once ${packageName}@${version} is visible on the registry; the release ` +
+        "mode then verifies the provenance of the already published packages and publishes the rest. " +
         "Set PARATIX_PUBLISH_AVAILABILITY_RETRIES to extend the wait budget further if needed."
     )
   }
@@ -592,126 +656,43 @@ function buildStaleArtefactMessage({
   )
 }
 
-async function publishPackage({
-  availabilityDelayMilliseconds,
-  availabilityRetries,
-  commandRunner,
-  packageInfo,
-  repositoryRoot,
-}) {
-  if (
-    await isPublished({
-      commandRunner,
-      packageName: packageInfo.name,
-      repositoryRoot,
-      version: packageInfo.version,
-    })
-  ) {
-    console.log(
-      `${packageInfo.name}@${packageInfo.version} is already published; skipping publish.`
-    )
-    return
-  }
-
-  const distributionTag = publishDistributionTag(packageInfo.version)
-  console.log(
-    `Publishing ${packageInfo.name}@${packageInfo.version} under --tag ${distributionTag}.`
-  )
-  await commandRunner.spawn("npm", ["publish", packageInfo.directory, "--tag", distributionTag], {
-    cwd: repositoryRoot,
-  })
-
-  // R-0000861: registry propagation can lag behind a successful
-  // `npm publish`. Use the bounded availability wait after every new
-  // publish instead of aborting on the first missing `npm view` result,
-  // so transient propagation delays get the same retry budget that
-  // protects the paratix -> create-paratix publish order.
-  await waitForPublishedPackage({
-    commandRunner,
-    delayMilliseconds: availabilityDelayMilliseconds,
-    packageName: packageInfo.name,
-    repositoryRoot,
-    retries: availabilityRetries,
-    version: packageInfo.version,
-  })
+// #255 B3: runs `callback` for each item strictly one after another (the
+// publish order is load-bearing) and collects the results.
+async function mapSequentially(items, callback, results = []) {
+  if (results.length === items.length) return results
+  results.push(await callback(items[results.length]))
+  return mapSequentially(items, callback, results)
 }
 
-async function verifyPackageTarball({ commandRunner, packageInfo, repositoryRoot }) {
-  console.log(`Verifying the ${packageInfo.name}@${packageInfo.version} package tarball.`)
-  await commandRunner.spawn("npm", ["pack", packageInfo.directory, "--dry-run", "--json"], {
-    cwd: repositoryRoot,
-  })
+function packageLabel(releasePackage) {
+  return `${releasePackage.name}@${releasePackage.version}`
 }
 
-async function recoverCreateParatixPackage({
-  availabilityDelayMilliseconds,
-  availabilityRetries,
-  commandRunner,
-  createParatixPackage,
-  paratixPackage,
-  repositoryRoot,
-}) {
-  const paratixPublished = await isPublished({
-    commandRunner,
-    packageName: paratixPackage.name,
-    repositoryRoot,
-    version: paratixPackage.version,
-  })
-  const createParatixPublished = await isPublished({
-    commandRunner,
-    packageName: createParatixPackage.name,
-    repositoryRoot,
-    version: createParatixPackage.version,
-  })
-
-  if (!paratixPublished) {
-    throw new Error(
-      `Recovery mode requires ${paratixPackage.name}@${paratixPackage.version} to already be published. ` +
-        "Run the normal release workflow instead."
-    )
-  }
-  if (createParatixPublished) {
-    throw new Error(
-      `Recovery mode requires ${createParatixPackage.name}@${createParatixPackage.version} to be missing. ` +
-        "No recovery publish is needed."
-    )
-  }
-
-  await waitForPublishedPackage({
-    commandRunner,
-    delayMilliseconds: availabilityDelayMilliseconds,
-    packageName: paratixPackage.name,
-    repositoryRoot,
-    retries: availabilityRetries,
-    version: paratixPackage.version,
-  })
-  await publishPackage({
-    availabilityDelayMilliseconds,
-    availabilityRetries,
-    commandRunner,
-    packageInfo: createParatixPackage,
-    repositoryRoot,
-  })
-}
-
-async function readWorkspacePackages(fs) {
+async function readReleasePackages(fs) {
   return Promise.all(
-    packages.map(async (packageInfo) => ({
-      ...(await readPackageJson(packageInfo.directory, fs)),
-      displayDirectory: packageInfo.displayDirectory,
+    releasePackageDeclarations.map(async (declaration) => ({
+      ...(await readPackageJson(join(REPOSITORY_ROOT, declaration.displayDirectory), fs)),
+      ...declaration,
     }))
   )
 }
 
-function packageArtefactsForMode({ createParatixPackage, paratixPackage, publishMode }) {
-  return publishMode === PUBLISH_MODE_RECOVER_CREATE_PARATIX
-    ? [createParatixPackage]
-    : [paratixPackage, createParatixPackage]
+function assertPlatformManifest(releasePackage) {
+  const binaryFileName = nativeBinaryFileName(releasePackage.target)
+  const { files, main } = releasePackage.manifest
+  const hasExactFiles = Array.isArray(files) && files.length === 1 && files[0] === binaryFileName
+  if (hasExactFiles && main === binaryFileName) return
+  throw new Error(
+    `${releasePackage.displayDirectory}/package.json must declare "files": ["${binaryFileName}"] and "main": "${binaryFileName}".`
+  )
 }
 
-function validateWorkspacePackages(workspacePackages) {
-  const unexpectedPackage = workspacePackages.find(
-    (packageInfo, index) => packageInfo.name !== packages[index].name
+// #255 B3: all nine manifests must carry their exact names, one shared
+// version (release-please linked versions), exact platform `files` and no
+// `workspace:` specifier before anything is staged or packed.
+function validateReleasePackages(releasePackages) {
+  const unexpectedPackage = releasePackages.find(
+    (releasePackage) => releasePackage.name !== releasePackage.declaredName
   )
   if (unexpectedPackage !== undefined) {
     throw new Error(
@@ -719,151 +700,373 @@ function validateWorkspacePackages(workspacePackages) {
     )
   }
 
-  const versions = new Set(workspacePackages.map((packageInfo) => packageInfo.version))
+  const versions = new Set(releasePackages.map((releasePackage) => releasePackage.version))
   if (versions.size !== 1) {
-    throw new Error("paratix and create-paratix versions must match before publishing.")
-  }
-}
-
-async function runPublishMode({
-  availabilityDelayMilliseconds,
-  availabilityRetries,
-  commandRunner,
-  createParatixPackage,
-  environment,
-  paratixPackage,
-  publishMode,
-}) {
-  if (publishMode === PUBLISH_MODE_VERIFY) {
-    await verifyPackageTarball({
-      commandRunner,
-      packageInfo: paratixPackage,
-      repositoryRoot: REPOSITORY_ROOT,
-    })
-    await verifyPackageTarball({
-      commandRunner,
-      packageInfo: createParatixPackage,
-      repositoryRoot: REPOSITORY_ROOT,
-    })
-    return
-  }
-
-  await assertPublishGitPreflight({
-    commandRunner,
-    environment,
-    repositoryRoot: REPOSITORY_ROOT,
-  })
-
-  if (
-    (await isPublished({
-      commandRunner,
-      packageName: createParatixPackage.name,
-      repositoryRoot: REPOSITORY_ROOT,
-      version: createParatixPackage.version,
-    })) &&
-    !(await isPublished({
-      commandRunner,
-      packageName: paratixPackage.name,
-      repositoryRoot: REPOSITORY_ROOT,
-      version: paratixPackage.version,
-    }))
-  ) {
     throw new Error(
-      `${createParatixPackage.name}@${createParatixPackage.version} is already published, but ` +
-        `${paratixPackage.name}@${paratixPackage.version} is not available. Publish the runtime package manually ` +
-        "before retrying."
+      `Release package versions must match before publishing (${releasePackages.map((releasePackage) => packageLabel(releasePackage)).join(", ")}).`
     )
   }
 
-  if (publishMode === PUBLISH_MODE_RECOVER_CREATE_PARATIX) {
-    await recoverCreateParatixPackage({
-      availabilityDelayMilliseconds,
-      availabilityRetries,
-      commandRunner,
-      createParatixPackage,
-      paratixPackage,
-      repositoryRoot: REPOSITORY_ROOT,
+  for (const releasePackage of releasePackages) {
+    if (releasePackage.kind === PACKAGE_KIND_PLATFORM) assertPlatformManifest(releasePackage)
+    assertNoWorkspaceSpecifiers(
+      releasePackage.manifest,
+      `${releasePackage.displayDirectory}/package.json`
+    )
+  }
+}
+
+function tarballFileName({ name, version }) {
+  return `${name.replace(/^@/v, "").replace("/", "-")}-${version}.tgz`
+}
+
+function inspectReleaseTarball(packedPackage, { artifacts, platformNames }) {
+  const entries = readTarGzEntries(packedPackage.tarball)
+  const { kind, name, target, version } = packedPackage
+  if (kind === PACKAGE_KIND_PLATFORM) {
+    inspectPlatformTarball(entries, {
+      binaryFileName: nativeBinaryFileName(target),
+      expectedSha256: artifacts.get(target).sha256,
+      name,
+      version,
     })
     return
   }
+  if (kind === PACKAGE_KIND_LOADER) {
+    inspectSshNativeTarball(entries, { name, platformNames, version })
+    return
+  }
+  inspectWorkspaceTarball(entries, { name, version })
+}
 
-  await publishPackage({
-    availabilityDelayMilliseconds,
-    availabilityRetries,
+// #255 B3: packs with `pnpm pack --out <absolute path>` (the staged copy for
+// the seven native packages, the package directory for paratix and
+// create-paratix), then inspects the real tarball and records its npm
+// integrity. The registry later receives exactly this file.
+async function packReleasePackage({ context, packDirectory, releasePackage }) {
+  const { artifacts, commandRunner, fs, platformNames, staging } = context
+  const tarballPath = join(staging.tarballDirectory, tarballFileName(releasePackage))
+  console.log(`Packing ${packageLabel(releasePackage)} into ${tarballPath}.`)
+  await commandRunner.execFile("pnpm", ["pack", "--out", tarballPath], { cwd: packDirectory })
+  const tarball = await fs.readFile(tarballPath)
+  const packedPackage = {
+    ...releasePackage,
+    integrity: tarballIntegrity(tarball),
+    tarball,
+    tarballPath,
+  }
+  inspectReleaseTarball(packedPackage, { artifacts, platformNames })
+  return packedPackage
+}
+
+async function stageReleasePackages({ artifacts, fs, releasePackages, staging }) {
+  return stageNativePackages({
+    artifacts,
+    fs,
+    loaderPackage: releasePackages.find(
+      (releasePackage) => releasePackage.kind === PACKAGE_KIND_LOADER
+    ),
+    platformPackages: releasePackages.filter(
+      (releasePackage) => releasePackage.kind === PACKAGE_KIND_PLATFORM
+    ),
+    staging,
+  })
+}
+
+// #255 B3: common steps of both modes, all before any registry write:
+// drift check, manifest validation, dist freshness, artifact checksums,
+// staging outside the repository, packing and tarball inspection.
+async function prepareReleaseTarballs({ commandRunner, environment, filesystem, fs }) {
+  // R-0000740: assert the static package list matches the actual
+  // `packages/` directory contents before reading any package.json so a
+  // new workspace package added without updating this script aborts the
+  // publish flow with a clear diagnostic instead of being silently
+  // skipped.
+  await assertWorkspacePackagesMatchFilesystem(fs)
+  const releasePackages = await readReleasePackages(fs)
+  validateReleasePackages(releasePackages)
+
+  // R-0000661: verify the dist artefacts before issuing the first npm
+  // publish so a missing or stale artefact never produces a half-published
+  // workspace. Only paratix and create-paratix have a tsup build; the
+  // native packages are checked against the CI artifact checksums instead.
+  await Promise.all(
+    releasePackages
+      .filter((releasePackage) => releasePackage.kind === PACKAGE_KIND_WORKSPACE)
+      .map((releasePackage) => verifyDistributionArtefacts(releasePackage, filesystem))
+  )
+
+  const artifacts = await verifyNativeArtifacts({ ...readNativeInputs(environment), fs })
+  const staging = await prepareStagingRoot({ environment, fs, repositoryRoot: REPOSITORY_ROOT })
+  console.log(`Staging release packages in ${staging.stagingRoot}.`)
+  console.log(`Release tarball directory: ${staging.tarballDirectory}`)
+  const stagedDirectories = await stageReleasePackages({ artifacts, fs, releasePackages, staging })
+  const context = {
+    artifacts,
     commandRunner,
-    packageInfo: paratixPackage,
+    fs,
+    platformNames: SSH_NATIVE_TARGETS.map((target) => platformPackageName(target)),
+    staging,
+  }
+  const packedPackages = await mapSequentially(releasePackages, (releasePackage) =>
+    packReleasePackage({
+      context,
+      packDirectory: stagedDirectories.get(releasePackage.name) ?? releasePackage.directory,
+      releasePackage,
+    })
+  )
+  return { packedPackages, staging }
+}
+
+async function classifyPackages({ commandRunner, packedPackages }) {
+  return mapSequentially(packedPackages, async (packedPackage) => ({
+    ...packedPackage,
+    published: await isPublished({
+      commandRunner,
+      packageName: packedPackage.name,
+      repositoryRoot: REPOSITORY_ROOT,
+      version: packedPackage.version,
+    }),
+  }))
+}
+
+function verificationSummaryMarkdown(rows, tarballDirectory) {
+  const tableRows = rows.map(
+    (row) =>
+      `| ${row.name} | ${row.version} | ${basename(row.tarballPath)} | \`${row.integrity}\` | ${row.published ? "already published" : "new"} |`
+  )
+  return [
+    "### Release tarballs",
+    "",
+    `Tarball directory: \`${tarballDirectory}\``,
+    "",
+    "| Package | Version | Tarball | Integrity | npm |",
+    "| --- | --- | --- | --- | --- |",
+    ...tableRows,
+    "",
+  ].join("\n")
+}
+
+// #255 B3: verify mode packs and inspects all nine tarballs and reports
+// which versions are new on npm. No Git preflight, no OIDC, no publish.
+async function reportVerification({ commandRunner, environment, fs, packedPackages, staging }) {
+  const rows = await classifyPackages({ commandRunner, packedPackages })
+  for (const row of rows) {
+    console.log(
+      `${packageLabel(row)}: ${basename(row.tarballPath)} ${row.integrity} (${row.published ? "already published" : "new"})`
+    )
+  }
+  const newCount = rows.filter((row) => !row.published).length
+  console.log(
+    `Verified ${rows.length} release tarballs: ${newCount} new, ${rows.length - newCount} already published. ` +
+      `Tarballs: ${staging.tarballDirectory}`
+  )
+  const summaryPath = environment.GITHUB_STEP_SUMMARY
+  if (summaryPath == null || summaryPath === "") return
+  await fs.appendFile(summaryPath, verificationSummaryMarkdown(rows, staging.tarballDirectory))
+}
+
+// #255 B3: generalizes the former "create-paratix published but paratix
+// missing" guard. A release only ever progresses along the fixed order, so
+// a published package behind a missing one means foreign registry writes.
+function assertPublishOrderConsistency(classifiedPackages) {
+  const firstMissingIndex = classifiedPackages.findIndex(
+    (packedPackage) => !packedPackage.published
+  )
+  if (firstMissingIndex === -1) return
+  const laterPublished = classifiedPackages
+    .slice(firstMissingIndex + 1)
+    .filter((packedPackage) => packedPackage.published)
+  if (laterPublished.length === 0) return
+  throw new Error(
+    `${laterPublished.map((packedPackage) => packageLabel(packedPackage)).join(", ")} ` +
+      `${laterPublished.length === 1 ? "is" : "are"} already published, but ` +
+      `${packageLabel(classifiedPackages[firstMissingIndex])} is not available although it precedes ` +
+      "them in the publish order. Investigate the registry state manually before retrying."
+  )
+}
+
+// #255 B3: resume rule for a version that is already on npm. Its provenance
+// must name publish.yml on main of this repository. A version from this
+// very workflow run must be byte-identical to the local tarball. For the
+// seven native packages, a version from an earlier run is only accepted
+// while the binary inputs (packages/ssh-native and the ssh-native.yml build
+// matrix) are unchanged since its source commit, so already published
+// binaries never mix with binaries built from different sources. paratix and
+// create-paratix contain no binary; their earlier-run versions are skipped on
+// valid provenance alone, as before B3.
+async function assertResumablePublishedPackage(
+  { commandRunner, environment, fetch },
+  packedPackage
+) {
+  const label = packageLabel(packedPackage)
+  const provenance = await readPublishedProvenance({
+    commandRunner,
+    fetch,
+    name: packedPackage.name,
+    repositoryRoot: REPOSITORY_ROOT,
+    version: packedPackage.version,
+  })
+  const currentRunId = environment.GITHUB_RUN_ID
+  if (currentRunId != null && currentRunId !== "" && provenance.runId === String(currentRunId)) {
+    if (provenance.integrity !== packedPackage.integrity) {
+      throw new Error(
+        `${label} was published earlier in this workflow run, but its registry integrity ` +
+          `${provenance.integrity} differs from the local tarball ${packedPackage.integrity}. ` +
+          'A "Re-run all jobs" rebuilds the native binaries, which are not bit-identical; use ' +
+          '"Re-run failed jobs" instead, or start a new release run on main (the earlier-run rule ' +
+          "then applies)."
+      )
+    }
+    console.log(`${label} was already published by this workflow run; skipping publish.`)
+    return
+  }
+  if (packedPackage.kind === PACKAGE_KIND_WORKSPACE) {
+    console.log(
+      `${label} was already published by workflow run ${provenance.runId} from ${provenance.commit}; skipping publish.`
+    )
+    return
+  }
+  await assertNativeSourcesUnchangedSince({
+    commandRunner,
+    commit: provenance.commit,
+    label,
     repositoryRoot: REPOSITORY_ROOT,
   })
-  await publishPackage({
-    availabilityDelayMilliseconds,
-    availabilityRetries,
+  console.log(
+    `${label} was already published by workflow run ${provenance.runId} from ${provenance.commit}; ` +
+      "its binary inputs are unchanged since then; skipping publish."
+  )
+}
+
+async function publishReleaseTarball(
+  { availabilityDelayMilliseconds, availabilityRetries, commandRunner },
+  packedPackage
+) {
+  const distributionTag = publishDistributionTag(packedPackage.version)
+  console.log(`Publishing ${packageLabel(packedPackage)} under --tag ${distributionTag}.`)
+  await commandRunner.spawn(
+    "npm",
+    [
+      "publish",
+      packedPackage.tarballPath,
+      "--provenance",
+      "--access",
+      "public",
+      "--tag",
+      distributionTag,
+    ],
+    { cwd: REPOSITORY_ROOT }
+  )
+
+  // R-0000861: registry propagation can lag behind a successful
+  // `npm publish`. Use the bounded availability wait after every new
+  // publish instead of aborting on the first missing `npm view` result,
+  // so transient propagation delays get the same retry budget that
+  // protects the publish order.
+  await waitForPublishedPackage({
     commandRunner,
-    packageInfo: createParatixPackage,
+    delayMilliseconds: availabilityDelayMilliseconds,
+    packageName: packedPackage.name,
     repositoryRoot: REPOSITORY_ROOT,
+    retries: availabilityRetries,
+    version: packedPackage.version,
   })
+}
+
+// #255 B3: release mode. Every check (Git preflight, classification, order
+// consistency, provenance of published versions, npm source check and the
+// OIDC exchange for every missing package) completes before the first
+// `npm publish`; only then are the missing packages published in order.
+async function runRelease(context) {
+  const { commandRunner, environment, fetch, fs, packedPackages, workflowCommands } = context
+  await assertPublishGitPreflight({ commandRunner, environment, repositoryRoot: REPOSITORY_ROOT })
+  const classifiedPackages = await classifyPackages({ commandRunner, packedPackages })
+  assertPublishOrderConsistency(classifiedPackages)
+  await mapSequentially(
+    classifiedPackages.filter((packedPackage) => packedPackage.published),
+    (packedPackage) => assertResumablePublishedPackage(context, packedPackage)
+  )
+  const missingPackages = classifiedPackages.filter((packedPackage) => !packedPackage.published)
+  if (missingPackages.length === 0) {
+    console.log(`All ${classifiedPackages.length} release packages are already published.`)
+    return
+  }
+  await assertNpmOidcSource({ commandRunner, fs, repositoryRoot: REPOSITORY_ROOT })
+  await mapSequentially(missingPackages, (packedPackage) =>
+    assertTrustedPublishing({ environment, fetch, name: packedPackage.name, workflowCommands })
+  )
+  await mapSequentially(missingPackages, (packedPackage) =>
+    publishReleaseTarball(context, packedPackage)
+  )
+}
+
+function spawnInherited(command, commandArguments, spawnOptions) {
+  return new Promise((resolve, reject) => {
+    const child = spawn(command, commandArguments, {
+      cwd: REPOSITORY_ROOT,
+      ...spawnOptions,
+      stdio: "inherit",
+    })
+    child.on("error", reject)
+    child.on("exit", (code) => {
+      if (code === 0) {
+        resolve(undefined)
+        return
+      }
+
+      reject(new Error(`${command} ${commandArguments.join(" ")} failed with exit code ${code}.`))
+    })
+  })
+}
+
+const defaultFileSystem = {
+  appendFile,
+  lstat,
+  mkdir,
+  mkdtemp,
+  readdir,
+  readFile,
+  realpath,
+  rm,
+  stat,
+  writeFile,
 }
 
 export async function publishWorkspacePackages(options) {
   const {
     availabilityDelayMilliseconds,
     availabilityRetries,
-    commandRunner = {
-      execFile: execFileAsync,
-      spawn: (command, commandArguments, spawnOptions) =>
-        new Promise((resolve, reject) => {
-          const child = spawn(command, commandArguments, {
-            cwd: REPOSITORY_ROOT,
-            ...spawnOptions,
-            stdio: "inherit",
-          })
-          child.on("error", reject)
-          child.on("exit", (code) => {
-            if (code === 0) {
-              resolve(undefined)
-              return
-            }
-
-            reject(
-              new Error(`${command} ${commandArguments.join(" ")} failed with exit code ${code}.`)
-            )
-          })
-        }),
-    },
+    commandRunner = { execFile: execFileAsync, spawn: spawnInherited },
     environment = process.env,
-    fs = { lstat, readdir, readFile, stat },
+    fetch = globalThis.fetch,
+    fs = defaultFileSystem,
     filesystem = fs,
-    mode = "release",
+    mode = PUBLISH_MODE_RELEASE,
+    workflowCommands = { write: (text) => process.stdout.write(text) },
   } = options ?? {}
   const publishMode = validatePublishMode(mode)
-  // R-0000740: assert the static `packages` list matches the actual
-  // `packages/` directory contents before reading any package.json so a
-  // new workspace package added without updating this script aborts the
-  // publish flow with a clear diagnostic instead of being silently
-  // skipped.
-  await assertWorkspacePackagesMatchFilesystem(fs)
-  const [paratixPackage, createParatixPackage] = await readWorkspacePackages(fs)
-  validateWorkspacePackages([paratixPackage, createParatixPackage])
+  const { packedPackages, staging } = await prepareReleaseTarballs({
+    commandRunner,
+    environment,
+    filesystem,
+    fs,
+  })
 
-  // R-0000661: verify the dist artefacts before issuing the first npm
-  // publish. Splitting the verification out of `publishPackage` keeps the
-  // abort point well before any registry side effects so a missing or stale
-  // artefact never produces a half-published workspace. Recovery mode only
-  // publishes create-paratix; the paratix package is protected by registry
-  // availability checks below instead of local artefact freshness.
-  await Promise.all(
-    packageArtefactsForMode({ createParatixPackage, paratixPackage, publishMode }).map(
-      (packageInfo) => verifyDistributionArtefacts(packageInfo, filesystem)
-    )
-  )
+  if (publishMode === PUBLISH_MODE_VERIFY) {
+    await reportVerification({ commandRunner, environment, fs, packedPackages, staging })
+    return
+  }
 
-  await runPublishMode({
+  await runRelease({
     availabilityDelayMilliseconds,
     availabilityRetries,
     commandRunner,
-    createParatixPackage,
     environment,
-    paratixPackage,
-    publishMode,
+    fetch,
+    fs,
+    packedPackages,
+    workflowCommands,
   })
 }
 

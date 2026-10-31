@@ -1,4 +1,5 @@
 {
   "packages/create-paratix": "0.23.1",
-  "packages/paratix": "0.23.1"
+  "packages/paratix": "0.23.1",
+  "packages/ssh-native": "0.23.1"
 }
