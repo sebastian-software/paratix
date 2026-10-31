@@ -190,6 +190,43 @@ describe("system.reboot — apply", () => {
     expect(result.meta?.some(isSystemRebootMetaEntry)).toBe(true)
   })
 
+  it("treats a DISCONNECTED transport code as a successful reboot trigger regardless of message text (#257)", async () => {
+    const ssh = createMockSsh()
+    const disconnect = Object.defineProperty(new Error("transport went away"), "transportCode", {
+      enumerable: false,
+      value: "DISCONNECTED",
+    })
+    vi.spyOn(ssh, "exec").mockImplementation(async (command: string) => {
+      ssh.calls.push(command)
+      await Promise.resolve()
+      throw disconnect
+    })
+    const mod = system.reboot()
+    const result = await mod.apply(ssh, emptyEnv)
+    expect(result.status).toBe("changed")
+    expect(result.meta?.some(isSystemRebootMetaEntry)).toBe(true)
+  })
+
+  it("still returns failed for a transport code other than DISCONNECTED (#257)", async () => {
+    const ssh = createMockSsh()
+    const channelFailure = Object.defineProperty(
+      new Error("transport went away"),
+      "transportCode",
+      {
+        enumerable: false,
+        value: "CHANNEL_OPEN_FAILED",
+      }
+    )
+    vi.spyOn(ssh, "exec").mockImplementation(async (command: string) => {
+      ssh.calls.push(command)
+      await Promise.resolve()
+      throw channelFailure
+    })
+    const mod = system.reboot()
+    const result = await mod.apply(ssh, emptyEnv)
+    expect(result.status).toBe("failed")
+  })
+
   it("emits system.host meta on disconnect when resolveHost is provided", async () => {
     const ssh = createMockSsh()
     vi.spyOn(ssh, "exec").mockImplementation(async (command: string) => {

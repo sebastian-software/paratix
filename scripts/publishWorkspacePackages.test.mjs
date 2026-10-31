@@ -2112,6 +2112,235 @@ async function assertPublishCallsUseDistributionTag({ expectedTag, version }) {
 }
 
 // ---------------------------------------------------------------------------
+// #257: paratix and create-paratix may reference @paratix/ssh-native as
+// exactly `workspace:*` in any dependency field. `pnpm pack` rewrites it to
+// the exact release version; the packed manifest must carry exactly that
+// version. Every other `workspace:` specifier stays forbidden.
+// ---------------------------------------------------------------------------
+
+const DEPENDENCY_FIELDS = [
+  "dependencies",
+  "devDependencies",
+  "optionalDependencies",
+  "peerDependencies",
+]
+const LINKED_WORKSPACE_SPECIFIER = "workspace:*"
+const LINKED_DEPENDENCY_PACKAGES = [
+  { directory: PARATIX_DIRECTORY, name: PARATIX_NAME },
+  { directory: CREATE_PARATIX_DIRECTORY, name: CREATE_PARATIX_NAME },
+]
+
+function withDependency(field, dependencyName, specifier) {
+  return (manifest) => ({
+    ...manifest,
+    [field]: { ...manifest[field], [dependencyName]: specifier },
+  })
+}
+
+function linkedSourceManifests(field, packages = LINKED_DEPENDENCY_PACKAGES) {
+  return Object.fromEntries(
+    packages.map(({ directory }) => [
+      `${directory}/package.json`,
+      withDependency(field, SSH_NATIVE_NAME, LINKED_WORKSPACE_SPECIFIER),
+    ])
+  )
+}
+
+function resolveWorkspaceSpecifiers(dependencies, version) {
+  return Object.fromEntries(
+    Object.entries(dependencies).map(([dependencyName, specifier]) => [
+      dependencyName,
+      specifier === LINKED_WORKSPACE_SPECIFIER ? version : specifier,
+    ])
+  )
+}
+
+// Mirrors `pnpm pack`: `workspace:*` becomes the exact version in every
+// dependency field, devDependencies included.
+function packLikePnpm({ entries, manifest }) {
+  const resolvedFields = DEPENDENCY_FIELDS.filter((field) => manifest[field] !== undefined).map(
+    (field) => [field, resolveWorkspaceSpecifiers(manifest[field], manifest.version)]
+  )
+  setPackedManifest(entries, { ...manifest, ...Object.fromEntries(resolvedFields) })
+}
+
+function packWithLinkedPin(field, specifier) {
+  return ({ entries, manifest, name }) => {
+    packLikePnpm({ entries, manifest })
+    if (name !== PARATIX_NAME) return
+    const packed = JSON.parse(entries.get(PACKED_MANIFEST).toString("utf8"))
+    setPackedManifest(entries, withDependency(field, SSH_NATIVE_NAME, specifier)(packed))
+  }
+}
+
+function packWithoutLinkedPin(field) {
+  return ({ entries, manifest, name }) => {
+    packLikePnpm({ entries, manifest })
+    if (name !== PARATIX_NAME) return
+    const packed = JSON.parse(entries.get(PACKED_MANIFEST).toString("utf8"))
+    const { [SSH_NATIVE_NAME]: _removed, ...remaining } = packed[field]
+    setPackedManifest(entries, { ...packed, [field]: remaining })
+  }
+}
+
+function packVerbatim() {
+  // Leaves the source manifest untouched, as if the packer had not resolved
+  // the workspace protocol.
+}
+
+const linkedPackedTamperCases = [
+  {
+    expected: `devDependencies.${SSH_NATIVE_NAME} is pinned to 1.2.2`,
+    field: "devDependencies",
+    hook: packWithLinkedPin("devDependencies", "1.2.2"),
+    name: "a packed linked dependency with a diverging version",
+  },
+  {
+    expected: `dependencies.${SSH_NATIVE_NAME} is pinned to ^${DEFAULT_STABLE_VERSION}`,
+    field: "dependencies",
+    hook: packWithLinkedPin("dependencies", `^${DEFAULT_STABLE_VERSION}`),
+    name: "a packed linked dependency with a range instead of the exact version",
+  },
+  {
+    expected: `devDependencies.${SSH_NATIVE_NAME} is missing`,
+    field: "devDependencies",
+    hook: packWithoutLinkedPin("devDependencies"),
+    name: "a packed manifest missing the linked dependency",
+  },
+  {
+    expected: `peerDependencies.${SSH_NATIVE_NAME} is pinned to 1.2.2`,
+    field: "devDependencies",
+    hook: packWithLinkedPin("peerDependencies", "1.2.2"),
+    name: "a packed linked dependency with a diverging version in a field the source omits",
+  },
+  {
+    expected: `contains workspace: specifiers (devDependencies.${SSH_NATIVE_NAME})`,
+    field: "devDependencies",
+    hook: packVerbatim,
+    name: "a packed linked dependency that still carries workspace:*",
+  },
+]
+
+const forbiddenSourceSpecifierCases = [
+  {
+    expected: `contains workspace: specifiers (dependencies.${PARATIX_NAME})`,
+    manifestOverrides: {
+      [`${CREATE_PARATIX_DIRECTORY}/package.json`]: withDependency(
+        "dependencies",
+        PARATIX_NAME,
+        LINKED_WORKSPACE_SPECIFIER
+      ),
+    },
+    name: "workspace:* for a dependency other than @paratix/ssh-native in create-paratix",
+  },
+  {
+    expected: "contains workspace: specifiers (devDependencies.picocolors)",
+    manifestOverrides: {
+      ...linkedSourceManifests("devDependencies"),
+      [`${PARATIX_DIRECTORY}/package.json`]: (manifest) =>
+        withDependency(
+          "devDependencies",
+          "picocolors",
+          LINKED_WORKSPACE_SPECIFIER
+        )(withDependency("devDependencies", SSH_NATIVE_NAME, LINKED_WORKSPACE_SPECIFIER)(manifest)),
+    },
+    name: "workspace:* for another dependency next to the allowed one in paratix",
+  },
+  {
+    expected: `contains workspace: specifiers (dependencies.${SSH_NATIVE_NAME})`,
+    manifestOverrides: {
+      [`${PARATIX_DIRECTORY}/package.json`]: withDependency(
+        "dependencies",
+        SSH_NATIVE_NAME,
+        "workspace:^"
+      ),
+    },
+    name: "workspace:^ for @paratix/ssh-native in paratix",
+  },
+  {
+    expected: `contains workspace: specifiers (optionalDependencies.${SSH_NATIVE_NAME})`,
+    manifestOverrides: {
+      [`${SSH_NATIVE_DIRECTORY}/npm/${FIRST_TARGET}/package.json`]: withDependency(
+        "optionalDependencies",
+        SSH_NATIVE_NAME,
+        LINKED_WORKSPACE_SPECIFIER
+      ),
+    },
+    name: "workspace:* for @paratix/ssh-native in a platform package",
+  },
+  {
+    expected: `contains workspace: specifiers (devDependencies.${PARATIX_NAME})`,
+    manifestOverrides: {
+      [SSH_NATIVE_MANIFEST_PATH]: withDependency(
+        "devDependencies",
+        PARATIX_NAME,
+        LINKED_WORKSPACE_SPECIFIER
+      ),
+    },
+    name: "workspace:* in the ssh-native loader",
+  },
+]
+
+describe("publishWorkspacePackages linked workspace dependencies", () => {
+  for (const field of DEPENDENCY_FIELDS) {
+    it(`#257: accepts workspace:* for @paratix/ssh-native in ${field} of paratix and create-paratix`, async () => {
+      const harness = createHarness()
+
+      const result = await harness.run({
+        fsOptions: { manifestOverrides: linkedSourceManifests(field) },
+        mode: VERIFY_MODE,
+        runnerOptions: { packHook: packLikePnpm },
+      })
+
+      assertSucceeded(result)
+      for (const { name } of LINKED_DEPENDENCY_PACKAGES) {
+        assert.equal(
+          readPackedManifest(harness, name)[field][SSH_NATIVE_NAME],
+          DEFAULT_STABLE_VERSION
+        )
+      }
+    })
+  }
+
+  it("#257: publishes all packages when the packed manifests pin @paratix/ssh-native exactly", async () => {
+    const result = await createHarness().run({
+      fsOptions: { manifestOverrides: linkedSourceManifests("devDependencies") },
+      runnerOptions: { packHook: packLikePnpm },
+    })
+
+    assertSucceeded(result)
+    assert.deepEqual(
+      publishedTarballNames(result.commandRunner.calls),
+      expectedTarballNames(DEFAULT_STABLE_VERSION)
+    )
+  })
+
+  for (const mode of [RELEASE_MODE, VERIFY_MODE]) {
+    for (const testCase of linkedPackedTamperCases) {
+      it(`#257: ${mode} aborts on ${testCase.name}`, async () => {
+        const result = await createHarness().run({
+          fsOptions: { manifestOverrides: linkedSourceManifests(testCase.field) },
+          mode,
+          runnerOptions: { packHook: testCase.hook },
+        })
+
+        assertAbortedWithoutPublish(result, testCase.expected)
+        assert.equal(hasNpmViewCall(result.commandRunner.calls), false)
+      })
+    }
+  }
+
+  for (const testCase of forbiddenSourceSpecifierCases) {
+    it(`#257: rejects ${testCase.name} before any command`, async () => {
+      await assertAbortsBeforeAnyCommand(
+        { manifestOverrides: testCase.manifestOverrides },
+        testCase.expected
+      )
+    })
+  }
+})
+
+// ---------------------------------------------------------------------------
 // R-0000740 / #255 B3: workspace drift. packages/ssh-native is a declared,
 // published package; any other undeclared or missing directory under
 // packages/ must still abort before anything is packed.

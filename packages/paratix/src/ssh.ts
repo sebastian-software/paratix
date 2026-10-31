@@ -76,6 +76,47 @@ function describeChannelOpenFailure(
   )
 }
 
+/**
+ * Unwrap a connection-loss error and keep its transport classification readable.
+ *
+ * Issue #257: reboot and restart detection in the modules (`isRebootDisconnect`,
+ * `isRestartDisconnect`) recognizes a dropped connection by its code instead of
+ * by transport-specific message text. `unwrapTransportError` restores the
+ * public error contract and would discard the code, so it is copied onto the
+ * unwrapped value as a non-enumerable property: serialization, inspection and
+ * equality checks of the error stay unchanged. Primitive, frozen or
+ * non-extensible values and values that already carry their own
+ * `transportCode` are passed through untouched; the disconnect listener this
+ * runs in must never throw.
+ *
+ * @param error - The value handed to the connection's disconnect listener.
+ * @returns The unwrapped value, annotated with `transportCode` when possible.
+ */
+function unwrapDisconnectError(error: unknown): unknown {
+  const cause = unwrapTransportError(error)
+  if (
+    !(error instanceof TransportError) ||
+    typeof cause !== "object" ||
+    cause === null ||
+    !Object.isExtensible(cause) ||
+    Object.hasOwn(cause, "transportCode")
+  ) {
+    return cause
+  }
+  try {
+    Object.defineProperty(cause, "transportCode", {
+      configurable: true,
+      enumerable: false,
+      value: error.transportCode,
+      writable: false,
+    })
+  } catch {
+    // An exotic object (for example a Proxy) may still refuse the property;
+    // the rejection then simply carries no code, as before issue #257.
+  }
+  return cause
+}
+
 async function statLocalFile(path: string): Promise<Stats> {
   // eslint-disable-next-line security/detect-non-literal-fs-filename -- localPath is an explicit caller-provided upload source that must be stat'ed before transfer
   return stat(path)
@@ -2260,7 +2301,7 @@ trap - EXIT
       this.pendingRejects.clear()
     }
     const unsubscribe = client.onDisconnect((error) => {
-      rejectPending(unwrapTransportError(error))
+      rejectPending(unwrapDisconnectError(error))
     })
     this.clientLifecycleListeners.set(client, unsubscribe)
     this.client = client

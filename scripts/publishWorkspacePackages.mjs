@@ -83,6 +83,9 @@ const PACKAGE_KIND_WORKSPACE = "workspace"
 // smoke-tested binaries), the @paratix/ssh-native loader that references
 // them as optionalDependencies, then paratix and create-paratix (R-0000740
 // order). Every package is installable once all its predecessors are.
+// #257: `linkedDependencyNames` are workspace packages of the same linked
+// release that a source manifest may reference as exactly `workspace:*`;
+// the packed manifest must then pin them to the exact release version.
 const releasePackageDeclarations = [
   ...SSH_NATIVE_TARGETS.map((target) => ({
     declaredName: platformPackageName(target),
@@ -99,11 +102,13 @@ const releasePackageDeclarations = [
     declaredName: "paratix",
     displayDirectory: "packages/paratix",
     kind: PACKAGE_KIND_WORKSPACE,
+    linkedDependencyNames: [SSH_NATIVE_PACKAGE_NAME],
   },
   {
     declaredName: "create-paratix",
     displayDirectory: "packages/create-paratix",
     kind: PACKAGE_KIND_WORKSPACE,
+    linkedDependencyNames: [SSH_NATIVE_PACKAGE_NAME],
   },
 ]
 
@@ -689,7 +694,8 @@ function assertPlatformManifest(releasePackage) {
 
 // #255 B3: all nine manifests must carry their exact names, one shared
 // version (release-please linked versions), exact platform `files` and no
-// `workspace:` specifier before anything is staged or packed.
+// `workspace:` specifier before anything is staged or packed. #257: the one
+// exception is `workspace:*` for a declared linked dependency.
 function validateReleasePackages(releasePackages) {
   const unexpectedPackage = releasePackages.find(
     (releasePackage) => releasePackage.name !== releasePackage.declaredName
@@ -711,7 +717,8 @@ function validateReleasePackages(releasePackages) {
     if (releasePackage.kind === PACKAGE_KIND_PLATFORM) assertPlatformManifest(releasePackage)
     assertNoWorkspaceSpecifiers(
       releasePackage.manifest,
-      `${releasePackage.displayDirectory}/package.json`
+      `${releasePackage.displayDirectory}/package.json`,
+      { linkedDependencyNames: releasePackage.linkedDependencyNames ?? [] }
     )
   }
 }
@@ -736,7 +743,12 @@ function inspectReleaseTarball(packedPackage, { artifacts, platformNames }) {
     inspectSshNativeTarball(entries, { name, platformNames, version })
     return
   }
-  inspectWorkspaceTarball(entries, { name, version })
+  inspectWorkspaceTarball(entries, {
+    linkedDependencyNames: packedPackage.linkedDependencyNames ?? [],
+    name,
+    sourceManifest: packedPackage.manifest,
+    version,
+  })
 }
 
 // #255 B3: packs with `pnpm pack --out <absolute path>` (the staged copy for
