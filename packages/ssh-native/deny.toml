@@ -1,7 +1,7 @@
 # cargo-deny 0.20 configuration of the native binding. Run from this
 # directory: `cargo deny --locked check licenses bans sources` (pnpm rust:check);
-# advisories are checked by a scheduled advisory workflow that arrives with
-# stage B3 of #255 (it does not exist yet).
+# advisories are checked by the scheduled workflow
+# .github/workflows/ssh-native-advisories.yml (weekly and on demand).
 
 [graph]
 all-features = false
