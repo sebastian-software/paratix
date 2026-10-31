@@ -59,7 +59,10 @@ it.
 
 `@paratix/ssh-native` and its six platform packages are versioned together with `paratix` and
 `create-paratix` (release-please `linked-versions`; the platform manifests are `extra-files` of this
-package). The crate itself stays at `version = "0.0.0"`. A release runs `.github/workflows/publish.yml`:
+package). The crate itself stays at `version = "0.0.0"`. Until the first `ssh-native-v*` tag exists,
+release-please bootstraps this component from the manifest version and the top-level
+`bootstrap-sha` (the 0.23.1 release commit); without it, it would scan the whole history of this
+directory and pick up older `Release-As` footers. A release runs `.github/workflows/publish.yml`:
 
 1. The reusable workflow `ssh-native.yml` builds the six binaries (gnu via `cargo-zigbuild`
    against glibc 2.35, darwin with a fixed `MACOSX_DEPLOYMENT_TARGET`) and smoke-tests exactly
