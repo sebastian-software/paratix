@@ -325,6 +325,43 @@ describe("runPlaybook secret prewarm phase", () => {
     expect(chronology).toStrictEqual(["op-read", "ssh-connect"])
   })
 
+  it.each([
+    { agentForward: false, expectedMessage: "Native SSH binding unavailable", failure: "binding" },
+    {
+      agentForward: true,
+      expectedMessage: "agentForward requires authentication through an SSH agent",
+      failure: "configuration",
+    },
+  ])(
+    "rejects invalid $failure before secret providers run (#257)",
+    async ({ agentForward, expectedMessage }) => {
+      const spawn = vi.fn(() => createMockSpawnChild("resolved-secret\n"))
+      vi.doMock("node:child_process", () => ({ spawn }))
+      const { assertNativeBindingAvailable } = await import("../src/nativeBinding.js")
+      const { runPlaybook } = await import("../src/runner.js")
+      const { op } = await import("../src/modules/op.js")
+      const bindingFailure = new Error("Native SSH binding unavailable")
+      vi.mocked(assertNativeBindingAvailable).mockRejectedValueOnce(bindingFailure)
+      const definition: ServerDefinition = {
+        host: "1.2.3.4",
+        name: "test-server",
+        run: [op.resolve({ SECRET: "op://vault/item/password" })],
+        ssh: {
+          agentForward,
+          ports: [22],
+          privateKey: "~/.ssh/id",
+          user: "root",
+        },
+      }
+      await expect(runPlaybook(definition)).rejects.toThrow(expectedMessage)
+      vi.mocked(assertNativeBindingAvailable).mockReset().mockResolvedValue(undefined)
+      expect(spawn).not.toHaveBeenCalled()
+      expect(console.log).not.toHaveBeenCalledWith(
+        expect.stringContaining("Resolving secrets before connecting")
+      )
+    }
+  )
+
   it("fails fast: ssh.connect is never reached when the prewarm phase fails", async () => {
     const capturedConfigs: unknown[] = []
 

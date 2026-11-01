@@ -41,23 +41,22 @@ import {
 } from "./sshHelpers.js"
 import { promptTerminal } from "./terminal.js"
 import { TransportError, unwrapTransportError } from "./transport.js"
-import { createSsh2Transport } from "./transportSsh2.js"
+import { createNativeTransport } from "./transportNative.js"
 
 const CONNECTION_TIMEOUT = 10_000
 
 export { shellQuote, validateMktempPath, validateMode }
 
 /**
- * Explain an ssh2 channel-open failure instead of passing it through raw.
+ * Explain an SSH channel-open failure instead of passing it through raw.
  *
- * Issue #178: `(SSH) Channel open failure: open failed` is what the client
- * reports when the server refuses a new session channel, and it is routinely
- * misread as a network or upload problem. Naming `MaxSessions` and the cap
- * paratix itself applies turns it into an actionable message. Every
+ * Issue #178: a refused session channel can be misread as a network or
+ * upload problem. The native transport reports `CHANNEL_OPEN_FAILED`. Naming
+ * `MaxSessions` and the cap paratix applies makes the message actionable. Every
  * interpolated command goes through the prepared-secret sink (R-0000667), so
  * the added diagnosis cannot widen what a failure discloses.
  *
- * @param error - The error ssh2 handed to the `client.exec` callback.
+ * @param error - The transport error from opening the exec channel.
  * @param command - The command whose channel could not be opened.
  * @param secrets - The prepared secret sink used for masking.
  * @returns An annotated error, or the original when it is an unrelated failure.
@@ -275,7 +274,7 @@ function resolveReconnectBudget(
 const EMPTY_FILE_SHA256 = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
 // R-0000209: how long to wait for `client.end()` to complete before
 // forcibly destroying the underlying socket.
-// Issue #178: every `exec` opens its own ssh2 session channel, and OpenSSH
+// Issue #178: every `exec` opens its own SSH session channel, and OpenSSH
 // caps them per connection via `MaxSessions` (default 10). Module-level
 // fan-outs used to issue 8 at once, one channel below that ceiling, which
 // surfaced as an opaque `Channel open failure` on archives with many members.
@@ -284,8 +283,6 @@ const EMPTY_FILE_SHA256 = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca4959
 // the compose image probes all share it, as does any future fan-out. 4 leaves
 // room for a concurrent SFTP channel plus headroom under the stock default.
 const MAX_CONCURRENT_SESSION_CHANNELS = 4
-// ssh2 reports a refused channel as `(SSH) Channel open failure: open failed`,
-// which reads like a transport fault rather than a reached ceiling.
 const JITTER_BASE = 0.75
 const JITTER_RANGE = 0.5
 const RECONNECT_BASE_DELAY = 1000
@@ -302,6 +299,15 @@ type TryConnectOnPortsOptions = {
   privateKey?: Buffer | string
   reconnectDeadline?: number
 }
+type ConnectFailure = { error: unknown; port: number }
+
+function isPermanentKeyError(error: unknown): error is TransportError {
+  return (
+    error instanceof TransportError &&
+    (error.transportCode === "ENCRYPTED_KEY" || error.transportCode === "UNSUPPORTED_KEY")
+  )
+}
+
 type HostKeyAttempt = {
   commit: () => void
   hostVerifier: (key: Buffer) => boolean
@@ -316,6 +322,16 @@ type SshRuntimeState = {
 
 function getAbortReason(signal: AbortSignal): Error {
   return signal.reason instanceof Error ? signal.reason : new Error("SSH operation aborted")
+}
+
+function rethrowConnectAbort(error: unknown, connected: boolean, signal?: AbortSignal): void {
+  if (signal?.aborted !== true) return
+  if (connected) {
+    throw error instanceof Error
+      ? new Error(error.message, { cause: error })
+      : new Error(String(error))
+  }
+  throw getAbortReason(signal)
 }
 
 function toError(error: unknown): Error {
@@ -489,6 +505,7 @@ export class SshConnectionImpl implements SshConnection {
    * behavior expected by the reconnect path.
    */
   private readonly hostKeyCache: HostKeyCache = createHostKeyCache()
+  private lastConnectFailure: ConnectFailure | undefined
   /**
    * Tracks whether the remote host accepts passwordless sudo for the configured
    * user. Set to `true` after a successful `sudo -n true` probe (see
@@ -518,7 +535,7 @@ export class SshConnectionImpl implements SshConnection {
   private sudoProbeFailedReason: Error | null = null
   private sudoProbePromise: null | Promise<void> = null
   private sudoReady = false
-  private readonly transportFactory: () => Transport & TransportConnection = createSsh2Transport
+  private readonly transportFactory: () => Transport & TransportConnection = createNativeTransport
   private verifiedHostKey: Buffer | null = null
 
   public constructor(host: string, config: SshConfig) {
@@ -557,8 +574,7 @@ export class SshConnectionImpl implements SshConnection {
    * Establish the SSH connection using the configured credentials.
    *
    * Authentication strategy (in order):
-   * 1. If `privateKey` is set: connect with the key, optionally falling back to
-   *    password authentication when `passwordFallback` is enabled.
+   * 1. If `privateKey` is set: connect with the key only.
    * 2. If `privateKey` is omitted: connect via the SSH agent identified by
    *    `SSH_AUTH_SOCK`, optionally falling back to password authentication
    *    when `passwordFallback` is enabled. Throws if the environment variable
@@ -568,6 +584,7 @@ export class SshConnectionImpl implements SshConnection {
    * @throws {Error} When no port in `config.ports` accepts the connection.
    */
   public async connect(options?: ConnectOptions): Promise<void> {
+    this.lastConnectFailure = undefined
     // R-0000090: only overwrite the cached prompt signal when the caller
     // actually passed one. `reconnect()` calls `connect()` without options;
     // unconditionally writing `undefined` would silently discard the signal
@@ -650,13 +667,10 @@ export class SshConnectionImpl implements SshConnection {
 
   /**
    * R-0000694: synchronous hard-stop used by the second-SIGINT path in
-   * `runner.ts`. The regular `disconnect()` is queued via a microtask so
-   * ssh2 stream internals have a coherent tick to drain; the second SIGINT
-   * arrives before that microtask runs and is followed immediately by
-   * `process.exit`, which leaves ssh2 cleanup in the middle of an
-   * outstanding stream operation. Calling `client.destroy()` synchronously
-   * tears the underlying socket down inside the same tick so no in-flight
-   * ssh2 callback survives the imminent exit.
+   * `runner.ts`. The regular `disconnect()` is queued via a microtask, but a
+   * second SIGINT may arrive before it runs and is followed immediately by
+   * `process.exit`. Destroying the transport synchronously releases the socket
+   * in the same tick instead of relying on deferred cleanup.
    */
   public forceDestroy(): void {
     if (this.client == null) return
@@ -749,6 +763,7 @@ export class SshConnectionImpl implements SshConnection {
       } catch (error) {
         if (
           error instanceof HostKeyVerificationError ||
+          isPermanentKeyError(error) ||
           (error instanceof Error && error.message === "SSH connection closed")
         )
           throw error
@@ -1446,9 +1461,19 @@ sha256sum -- ${shellQuote(remotePath)} 2>/dev/null || printf 'paratix-hash-faile
     this.registerConnectedClient(client, port)
   }
 
+  private connectionFailure(prefix: string): Error {
+    const failure = this.lastConnectFailure
+    if (failure === undefined) return new Error(prefix)
+    const message = failure.error instanceof Error ? failure.error.message : String(failure.error)
+    return new Error(`${prefix}; last error on port ${failure.port}: ${message}`, {
+      cause: failure.error,
+    })
+  }
+
   private async connectViaAgent(options?: ConnectOptions): Promise<void> {
     const agent = process.env.SSH_AUTH_SOCK
     if (agent == null || agent.length === 0) {
+      if (this.config.agentForward === true) this.rejectAgentForwardWithoutAgent()
       await this.connectWithoutAgentSocket(options)
       return
     }
@@ -1461,8 +1486,8 @@ sha256sum -- ${shellQuote(remotePath)} 2>/dev/null || printf 'paratix-hash-faile
       this.authMethod = "agent"
       return
     }
-    if (await this.tryPasswordFallback(options, agent)) return
-    throw new Error(
+    if (await this.tryPasswordFallback(options)) return
+    throw this.connectionFailure(
       `Could not connect to ${this.runtime.host} via SSH agent on ports ${this.runtime.ports.join(", ")}`
     )
   }
@@ -1474,11 +1499,8 @@ sha256sum -- ${shellQuote(remotePath)} 2>/dev/null || printf 'paratix-hash-faile
     }
     // eslint-disable-next-line security/detect-non-literal-fs-filename
     const privateKey = await readFile(expandHomePath(privateKeyPath))
-    // R-0000521: do not zero the buffer in the success path. ssh2 keeps an
-    // internal reference to the same Buffer object, so a re-key or reconnect
-    // would access a zeroed buffer. The GC reclaims the buffer once all
-    // references are dropped. Only scrub the bytes on the error path for
-    // defensive security hygiene.
+    // R-0000521: the native adapter copies the key for each attempt. The
+    // caller-owned original is no longer needed once all attempts settle.
     try {
       if (
         await this.tryConnectOnPorts({
@@ -1489,14 +1511,11 @@ sha256sum -- ${shellQuote(remotePath)} 2>/dev/null || printf 'paratix-hash-faile
         this.authMethod = "privateKey"
         return
       }
-      if (await this.tryPrivateKeyPasswordFallback(privateKey, options)) return
-      privateKey.fill(0)
-      throw new Error(
+      throw this.connectionFailure(
         `Failed to connect to ${this.runtime.host} on ports: ${this.runtime.ports.join(", ")}`
       )
-    } catch (error) {
+    } finally {
       privateKey.fill(0)
-      throw error
     }
   }
 
@@ -1513,7 +1532,7 @@ sha256sum -- ${shellQuote(remotePath)} 2>/dev/null || printf 'paratix-hash-faile
       throw new Error("No privateKey configured and SSH_AUTH_SOCK is not set")
     }
     if (await this.tryPasswordFallback(options)) return
-    throw new Error(
+    throw this.connectionFailure(
       `No SSH agent (SSH_AUTH_SOCK is not set) and password authentication failed for ${this.config.user}@${this.runtime.host}`
     )
   }
@@ -2100,12 +2119,10 @@ trap - EXIT
     // commit-failure cause via a new Error preserving the original message
     // instead of falling through to the abort path.
     if (error instanceof HostKeyVerificationError) throw error
-    if (tryConnectResolved && this.promptAbortSignal?.aborted === true) {
-      throw error instanceof Error
-        ? new Error(error.message, { cause: error })
-        : new Error(String(error))
+    rethrowConnectAbort(error, tryConnectResolved, this.promptAbortSignal)
+    if (isPermanentKeyError(parameters.error)) {
+      throw parameters.error
     }
-    if (this.promptAbortSignal?.aborted === true) throw getAbortReason(this.promptAbortSignal)
     // Otherwise fall through to try the next port.
   }
 
@@ -2306,6 +2323,12 @@ trap - EXIT
     this.clientLifecycleListeners.set(client, unsubscribe)
     this.client = client
     this.connectedPort = port
+  }
+
+  private rejectAgentForwardWithoutAgent(): never {
+    throw new Error(
+      "agentForward requires authentication through an SSH agent; remove agentForward or configure a working SSH agent"
+    )
   }
 
   /**
@@ -2697,12 +2720,14 @@ trap - EXIT
         return true
       } catch (error) {
         this.handleTryConnectError({ client, error, ...state })
+        this.lastConnectFailure = { error: unwrapTransportError(error), port }
       }
     }
     return false
   }
 
-  private async tryPasswordFallback(options?: ConnectOptions, agent?: string): Promise<boolean> {
+  private async tryPasswordFallback(options?: ConnectOptions): Promise<boolean> {
+    if (this.config.agentForward === true) this.rejectAgentForwardWithoutAgent()
     if (!this.config.passwordFallback) return false
     const password = await promptTerminal(
       `Password for ${this.config.user}@${this.runtime.host}: `,
@@ -2711,7 +2736,7 @@ trap - EXIT
     )
     // R-0000095: register the interactively entered SSH login password in
     // the process-wide secret sink for the duration of the connect attempt.
-    // Without this, a thrown error from `tryConnectOnPorts` (e.g. an ssh2
+    // Without this, a thrown error from `tryConnectOnPorts` (e.g. an SSH
     // protocol failure that includes the credential in its trace) would
     // surface the plaintext password to stderr via `printCommandFailure` /
     // `printVerboseGenericError`. Mirroring the sudo-password handling, the
@@ -2719,7 +2744,6 @@ trap - EXIT
     return withRegisteredSecrets([password], async () => {
       if (
         !(await this.tryConnectOnPorts({
-          agent,
           password,
           reconnectDeadline: options?.reconnectDeadline,
         }))
@@ -2728,38 +2752,6 @@ trap - EXIT
       this.authMethod = "password"
       return true
     })
-  }
-
-  /**
-   * Prompt for a password and retry the connect using both the loaded
-   * private key and the prompt response. R-0000095: the prompt response is
-   * registered in the process-wide secret sink for the duration of the
-   * connect attempt so any thrown diagnostic masks the credential.
-   *
-   * @param privateKey - The loaded private key buffer to combine with the prompt response.
-   * @param options - Prompt options (e.g. abort signal) forwarded from `connect()`.
-   * @returns `true` when the password attempt succeeded, `false` when the fallback was disabled or all ports refused the credential.
-   */
-  private async tryPrivateKeyPasswordFallback(
-    privateKey: Buffer,
-    options?: ConnectOptions
-  ): Promise<boolean> {
-    if (!this.config.passwordFallback) return false
-    const password = await promptTerminal(
-      `Password for ${this.config.user}@${this.runtime.host}: `,
-      true,
-      options
-    )
-    const accepted = await withRegisteredSecrets([password], async () =>
-      this.tryConnectOnPorts({
-        password,
-        privateKey,
-        reconnectDeadline: options?.reconnectDeadline,
-      })
-    )
-    if (!accepted) return false
-    this.authMethod = "password"
-    return true
   }
 
   private async verifyRemoteWriteFile(

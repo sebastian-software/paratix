@@ -10,9 +10,15 @@ When writing Paratix code (playbooks or custom modules), read the [agent authori
 
 Do not use cspell:ignore in the code. Write cspell findings into cspell.json
 
+## Native SSH runtime
+
+`paratix` and `create-paratix` use `@paratix/ssh-native` at runtime; `ssh2` is only a development test server. Keep native platform requirements and authentication changes synchronized with the [user guide](docs/user-guide/README.md#supported-platforms) and [migration notes](docs/user-guide/migration.md).
+
+`pnpm --filter paratix test:dist` and `pnpm --filter paratix test:integration` build only Paratix, so run the root `pnpm build` first to provide the local native binary. Runner unit tests mock `nativeBinding.ts` and need no binary. Preserve binary-free imports, `--help`, and `--version`, and the runtime binding check before secret resolution.
+
 ## Rust toolchain for packages/ssh-native
 
-Building the repository requires a Rust toolchain: `pnpm build` always builds the native binding in `packages/ssh-native` (`@paratix/ssh-native`, incremental). The toolchain is pinned in `packages/ssh-native/rust-toolchain.toml`; install [rustup](https://rustup.rs) and run `rustup toolchain install` inside `packages/ssh-native` to get it.
+Published packages need no Rust toolchain. Contributors building the repository require it: `pnpm build` always builds the native binding in `packages/ssh-native` (`@paratix/ssh-native`, incremental). The toolchain is pinned in `packages/ssh-native/rust-toolchain.toml`; install [rustup](https://rustup.rs) and run `rustup toolchain install` inside `packages/ssh-native` to get it.
 
 `pnpm rust:check` runs `cargo fmt --check`, `cargo clippy` with `-D warnings`, `cargo test` and `cargo deny check licenses bans sources` in `packages/ssh-native`. It needs cargo-deny 0.20.2 (`cargo install --locked cargo-deny@0.20.2`). `pnpm agent:check` calls it, controlled by `PARATIX_RUST_CHECK`:
 

@@ -23,7 +23,6 @@ vi.mock("../../src/terminal.js", async (importOriginal) => ({
   promptTerminal: vi.fn(),
 }))
 
-const MINIMUM_KEYBOARD_TIMEOUT_MS = 9000
 const dockerAvailable =
   spawnSync("docker", ["info"], {
     stdio: "ignore",
@@ -149,39 +148,18 @@ describe.skipIf(!dockerAvailable)("SSH transport parity", { concurrent: false },
     expect(promptTerminal).toHaveBeenCalledOnce()
   })
 
-  /* oxlint-disable vitest/no-conditional-in-test -- only the documented timeout may satisfy this expected-failure cell. */
-  it.fails(
-    "authenticates with keyboard-interactive after the ready-timeout gap is closed",
-    async () => {
-      let connecting = false
-      let started = 0
-      try {
-        vi.mocked(promptTerminal).mockResolvedValue(environment.password)
-        const ssh = createConnection({
-          passwordFallback: true,
-          ports: [environment.keyboardInteractivePort],
-        })
-        started = performance.now()
-        connecting = true
-        await ssh.connect()
-        connecting = false
-        const result = await ssh.exec("true")
-        expect(result.code).toBe(0)
-      } catch (error) {
-        // Only the documented connect timeout may validate the known gap.
-        if (
-          !connecting ||
-          !(error instanceof Error) ||
-          performance.now() - started < MINIMUM_KEYBOARD_TIMEOUT_MS ||
-          !/^Failed to connect to .+ on ports:/v.test(error.message)
-        )
-          return
-        throw error
-      }
-    }
-  )
-
-  /* oxlint-enable vitest/no-conditional-in-test */
+  it("authenticates with keyboard-interactive", async () => {
+    vi.mocked(promptTerminal).mockResolvedValue(environment.password)
+    const ssh = createConnection({
+      passwordFallback: true,
+      ports: [environment.keyboardInteractivePort],
+      privateKey: undefined,
+    })
+    await ssh.connect()
+    const result = await ssh.exec("true")
+    expect(result.code).toBe(0)
+    expect(ssh.getConnectionInfo().authMethod).toBe("password")
+  })
 
   it("forwards only the test agent to a root session when enabled", async () => {
     const testAgent = useTestAgent()

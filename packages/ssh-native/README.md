@@ -8,8 +8,8 @@ russh-sftp 3. The design and the spike that validated it are recorded in
 ## Status
 
 This is an internal binding for Paratix, not a general-purpose SSH library. Its API is narrow and
-shaped by what Paratix needs; it may change with any Paratix release. Paratix consumes it from work
-package C2 (#257) on; until then nothing in `paratix` uses it.
+shaped by what Paratix needs; it may change with any Paratix release. Both `paratix` and `create-paratix` use this binding for SSH connections
+and host-key scanning respectively; `ssh2` remains a development-only test server.
 
 ## Supported targets
 
@@ -32,7 +32,8 @@ created on another platform ([npm/cli#4828](https://github.com/npm/cli/issues/48
 
 ## Building
 
-Building needs the Rust toolchain pinned in `rust-toolchain.toml` (install
+Published packages use prebuilt binaries and need no Rust toolchain. Contributors building from
+source need the Rust toolchain pinned in `rust-toolchain.toml` (install
 [rustup](https://rustup.rs), then run `rustup toolchain install` in this directory).
 
 ```sh
@@ -150,6 +151,31 @@ await session.close() // or session.destroy() right before process.exit()
 Keepalive and an inactivity timeout are off. Channels the server opens are rejected, except
 `auth-agent@openssh.com` with `agentForward: true`. There is no Rust logger; a silent panic hook keeps
 stderr clean.
+
+## Authentication and key formats
+
+Private key files must be unencrypted UTF-8 text in PEM or OpenSSH format. The binding supports
+Ed25519, RSA, and ECDSA (P-256, P-384, P-521). Supported encodings include OpenSSH private keys,
+RSA PEM, and PKCS#8 PEM for supported algorithms.
+
+- Encrypted private key files fail with `ENCRYPTED_KEY`; the binding has no passphrase option.
+  Load a passphrase-protected key into a working SSH agent and omit Paratix's `privateKey` option.
+- DSA (`ssh-dss`) files, hardware-backed security-key (`sk-*`) files, unsupported algorithms,
+  binary files, and corrupt or unrecognized formats fail with `UNSUPPORTED_KEY`.
+- Agent authentication delegates signing to the agent and can use user certificates. These
+  file-format restrictions describe keys passed through `privateKey`, not keys held by the agent.
+  Server host certificates are not supported yet.
+
+The binding selects exactly one authentication method per connection: agent, otherwise private
+key, otherwise password (also used for keyboard-interactive). Paratix connects with a configured
+key file only and never falls back from that file to a password. Without a key file,
+`passwordFallback: true` permits a password attempt after agent authentication fails; that attempt
+does not pass the agent again. `privateKey` with `passwordFallback: true` is rejected.
+
+Paratix requires a working agent for `agentForward: true`. Combining it with `privateKey` is a
+configuration error. A missing or unusable agent, or a failed agent login, aborts before any
+password prompt. `ENCRYPTED_KEY` and `UNSUPPORTED_KEY` stop Paratix after the first attempt,
+including during reconnect; trying another port cannot fix the key.
 
 ## Errors
 

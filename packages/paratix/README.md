@@ -24,6 +24,8 @@ The result is a practical server automation tool with a compact mental model: mo
 
 ## Getting Started
 
+Running playbooks requires Node.js 24 or newer and a supported Linux or macOS controller. See [supported platforms](https://github.com/sebastian-software/paratix/blob/main/docs/user-guide/README.md) for architectures and minimum versions.
+
 If you want the fastest path, scaffold a project first:
 
 ```bash

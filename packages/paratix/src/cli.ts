@@ -14,6 +14,7 @@ import { inspectRedactedDiagnosticValue } from "./errorRedaction.js"
 import { runWithFirstRunFlag, runWithoutFirstRunFlag } from "./firstRunContext.js"
 import { describeHostValidationFailure, validateHostLabel } from "./hostValidation.js"
 import { applyModuleFilter, collectModuleNames, parseFilterNames } from "./moduleFilter.js"
+import { NativeBindingUnavailableError } from "./nativeBindingError.js"
 import { printCliHeader, printWarningLine } from "./output.js"
 import { performLastResortCleanup, type RunOptions, runPlaybook } from "./runner.js"
 import { collectSecretPrewarmCarrierNames } from "./secretPrewarm.js"
@@ -186,7 +187,7 @@ function validateServerDefinition(value: unknown, file: string): asserts value i
  * Inspect bounds used by {@link errorToString} when rendering plain
  * (non-Error) caught values. The bounds keep error rendering cheap and
  * prevent leaking sensitive Buffer contents (private keys) or huge
- * ssh2-internal arrays into stderr; subsequent maskRegisteredSecrets passes
+ * transport-internal arrays into stderr; subsequent maskRegisteredSecrets passes
  * also stay linear in the bounded output size.
  *
  * R-0000262: previously a JSON.stringify branch ran first and only fell back
@@ -302,6 +303,8 @@ function printCauseChain(error: Error): void {
  */
 export function printExceptionError(error: unknown, verbose: boolean): void {
   console.error(`Error: ${errorToString(error)}`)
+  // The loader installation hint is useful only as a verbose diagnostic.
+  if (error instanceof NativeBindingUnavailableError && !verbose) return
 
   if (error instanceof Error) {
     printCauseChain(error)
@@ -1034,7 +1037,7 @@ const LAST_RESORT_EXIT_CODE = 1
 
 /**
  * Last-resort handler for `unhandledRejection` / `uncaughtException`. A promise
- * rejection escaping an ssh2 event callback never reaches the normal
+ * rejection escaping an SSH event callback never reaches the normal
  * `runApplyCommand` catch block or the SIGINT/SIGTERM teardown, so without this
  * the terminal can stay in raw mode with a hidden cursor, registered secrets
  * stay in the sink, and the SSH socket is never destroyed. The handler runs the

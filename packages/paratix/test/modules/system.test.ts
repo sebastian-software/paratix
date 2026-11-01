@@ -177,7 +177,7 @@ describe("system.reboot — apply", () => {
     expect(result.meta?.some(isSystemRebootMetaEntry)).toBe(true)
   })
 
-  it("treats ECONNRESET disconnect during shutdown as a successful reboot trigger", async () => {
+  it("does not treat legacy socket error text as a successful reboot trigger", async () => {
     const ssh = createMockSsh()
     vi.spyOn(ssh, "exec").mockImplementation(async (command: string) => {
       ssh.calls.push(command)
@@ -186,8 +186,8 @@ describe("system.reboot — apply", () => {
     })
     const mod = system.reboot()
     const result = await mod.apply(ssh, emptyEnv)
-    expect(result.status).toBe("changed")
-    expect(result.meta?.some(isSystemRebootMetaEntry)).toBe(true)
+    expect(result.status).toBe("failed")
+    expect(result.meta).toBeUndefined()
   })
 
   it("treats a DISCONNECTED transport code as a successful reboot trigger regardless of message text (#257)", async () => {
@@ -232,7 +232,7 @@ describe("system.reboot — apply", () => {
     vi.spyOn(ssh, "exec").mockImplementation(async (command: string) => {
       ssh.calls.push(command)
       await Promise.resolve()
-      throw new Error("Connection reset by peer")
+      throw Object.assign(new Error("transport disconnected"), { transportCode: "DISCONNECTED" })
     })
     const resolveHost = vi.fn().mockResolvedValue("10.0.0.99")
     const mod = system.reboot({ resolveHost })

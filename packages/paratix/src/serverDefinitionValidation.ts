@@ -136,6 +136,16 @@ function collectOptionalSshFieldErrors(ssh: Record<string, unknown>, errors: str
   collectExpectedHostPublicKeyErrors(ssh, errors)
   collectOptionalBooleanErrors(ssh, "agentForward", errors)
   collectOptionalBooleanErrors(ssh, "passwordFallback", errors)
+  if (ssh.privateKey != null && ssh.agentForward === true) {
+    errors.push(
+      "agentForward requires authentication through an SSH agent; remove privateKey or agentForward"
+    )
+  }
+  if (ssh.privateKey != null && ssh.passwordFallback === true) {
+    errors.push(
+      "passwordFallback requires authentication through an SSH agent; remove privateKey or passwordFallback"
+    )
+  }
   collectOptionalNumberErrors({
     errors,
     key: "reconnectTimeout",

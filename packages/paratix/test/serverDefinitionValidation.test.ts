@@ -36,7 +36,7 @@ describe("collectSshConfigErrors", () => {
 
   it("accepts a fully populated valid config", () => {
     const ssh = baseSsh({
-      agentForward: true,
+      agentForward: false,
       expectedHostFingerprint: "SHA256:abc",
       maxReconnectAttempts: 3,
       passwordFallback: false,
@@ -184,4 +184,28 @@ describe("validateSshConfig", () => {
         "ssh.strictHostKeyChecking must be one of accept-new, no, yes"
     )
   })
+})
+
+describe("native authentication configuration (#257)", () => {
+  it.each([
+    {
+      agentForward: true,
+      message:
+        "agentForward requires authentication through an SSH agent; remove privateKey or agentForward",
+    },
+    {
+      message:
+        "passwordFallback requires authentication through an SSH agent; remove privateKey or passwordFallback",
+      passwordFallback: true,
+    },
+  ])(
+    "rejects key-file combinations requiring an agent: $message",
+    ({ message, ...configuration }) => {
+      const ssh = { ports: [22], privateKey: "~/.ssh/id", user: "root", ...configuration }
+      expect(collectSshConfigErrors(ssh)).toContain(message)
+      expect(() => {
+        validateSshConfig(ssh)
+      }).toThrow(message)
+    }
+  )
 })

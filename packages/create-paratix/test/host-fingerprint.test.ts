@@ -1,16 +1,15 @@
+import type { HostKeyInfo } from "@paratix/ssh-native"
+
 import { createHash } from "node:crypto"
 import { describe, expect, it, vi } from "vitest"
 
-import { readHostFingerprintViaSsh2 as readRawHostFingerprintViaSsh2 } from "../src/hostFingerprintBootstrap.js"
+import { readHostFingerprint as readRawHostFingerprint } from "../src/hostFingerprintBootstrap.js"
 import {
   buildEcdsaHostKeyBuffer,
   buildEcdsaPointFromGeneratedKey,
   buildEd25519HostKeyBuffer,
-  callHostVerifier,
-  createFakeHostKeyClient,
   createWireString,
   type EcdsaHostKeyFixtureSpec,
-  useFakeHostKeyClient,
 } from "./helpers.js"
 
 const ED25519_PUBLIC_KEY_BYTE_LENGTH = 32
@@ -45,51 +44,52 @@ function computeExpectedFingerprint(buffer: Buffer): string {
   return `SHA256:${hash.replaceAll("=", "")}`
 }
 
-async function readHostFingerprintViaSsh2(
-  host: string,
-  options: Parameters<typeof readRawHostFingerprintViaSsh2>[1] = {}
-): ReturnType<typeof readRawHostFingerprintViaSsh2> {
-  return readRawHostFingerprintViaSsh2(host, { allowSsh2HostKeyScan: true, ...options })
+function hostKeyInfo(buffer: Buffer): HostKeyInfo {
+  return {
+    algorithm: "ssh-ed25519",
+    fingerprintSha256: computeExpectedFingerprint(buffer),
+    keyBase64: buffer.toString("base64"),
+    kind: "key",
+  }
 }
 
-describe("readHostFingerprintViaSsh2", () => {
-  it("fails closed unless the caller explicitly opts into a live ssh2 scan", async () => {
-    const fakeClient = createFakeHostKeyClient(() => {
-      throw new Error("scan should not start")
-    })
+async function readHostFingerprint(
+  host: string,
+  options: Parameters<typeof readRawHostFingerprint>[1] = {}
+): ReturnType<typeof readRawHostFingerprint> {
+  return readRawHostFingerprint(host, { allowHostKeyScan: true, ...options })
+}
+
+describe("readHostFingerprint", () => {
+  it("fails closed unless the caller explicitly opts into a live host-key scan", async () => {
+    const scanner = vi.fn().mockRejectedValue(new Error("scan should not start"))
 
     await expect(
-      readRawHostFingerprintViaSsh2("example.com", {
-        clientFactory: () => useFakeHostKeyClient(fakeClient),
+      readRawHostFingerprint("example.com", {
+        scanner,
       })
     ).rejects.toThrow(/without explicit opt-in/v)
-    expect(fakeClient.connect).not.toHaveBeenCalled()
+    expect(scanner).not.toHaveBeenCalled()
   })
 
-  it("derives the OpenSSH fingerprint from the ssh2 hostVerifier key", async () => {
+  it("derives the OpenSSH fingerprint from the native scan key blob", async () => {
     const hostKey = buildEd25519HostKeyBuffer()
-    const fakeClient = createFakeHostKeyClient((config, client) => {
-      callHostVerifier(config, hostKey)
-      setImmediate(() => {
-        client.emit("error", new Error("Host denied"))
-      })
-    })
+    const scanner = vi.fn().mockResolvedValue(hostKeyInfo(hostKey))
 
     await expect(
-      readHostFingerprintViaSsh2("example.com", {
-        clientFactory: () => useFakeHostKeyClient(fakeClient),
+      readHostFingerprint("example.com", {
+        scanner,
       })
     ).resolves.toStrictEqual({
       algorithm: "ssh-ed25519",
       fingerprint: computeExpectedFingerprint(hostKey),
     })
 
-    expect(fakeClient.connect).toHaveBeenCalledWith(
+    expect(scanner).toHaveBeenCalledWith(
       expect.objectContaining({
         host: "example.com",
         port: 22,
-        readyTimeout: 10_000,
-        username: "paratix-hostkey-scan",
+        timeoutMs: 10_000,
       })
     )
   })
@@ -98,58 +98,34 @@ describe("readHostFingerprintViaSsh2", () => {
     "accepts $algorithm host keys when the wire blob is structurally valid",
     async (spec) => {
       const hostKey = buildEcdsaHostKeyBuffer(spec)
-      const fakeClient = createFakeHostKeyClient((config, client) => {
-        callHostVerifier(config, hostKey)
-        setImmediate(() => {
-          client.emit("error", new Error("Host denied"))
-        })
-      })
-
-      await expect(
-        readHostFingerprintViaSsh2("example.com", {
-          clientFactory: () => useFakeHostKeyClient(fakeClient),
-        })
-      ).resolves.toStrictEqual({
+      const scanner = vi
+        .fn()
+        .mockResolvedValue({ ...hostKeyInfo(hostKey), algorithm: spec.algorithm })
+      await expect(readHostFingerprint("example.com", { scanner })).resolves.toStrictEqual({
         algorithm: spec.algorithm,
         fingerprint: computeExpectedFingerprint(hostKey),
       })
     }
   )
 
-  it("fails clearly when ssh2 cannot obtain a host key", async () => {
-    const fakeClient = createFakeHostKeyClient((_config, client) => {
-      setImmediate(() => {
-        client.emit("error", new Error("connect ECONNREFUSED"))
-      })
-    })
-
-    await expect(
-      readHostFingerprintViaSsh2("example.com", {
-        clientFactory: () => useFakeHostKeyClient(fakeClient),
-      })
-    ).rejects.toThrow("Failed to read the host key from example.com:22: connect ECONNREFUSED")
+  it("fails clearly when native scan cannot obtain a host key", async () => {
+    const scanner = vi.fn().mockRejectedValue(new Error("connect ECONNREFUSED"))
+    await expect(readHostFingerprint("example.com", { scanner })).rejects.toThrow(
+      "Failed to read the host key from example.com:22: connect ECONNREFUSED"
+    )
   })
 
   it("rejects with a MITM warning when the presented key uses an unknown algorithm", async () => {
     // Wire-format buffer with algorithm "ssh-bogus" (length-prefixed ASCII).
     const hostKey = Buffer.concat([createWireString("ssh-bogus"), Buffer.from("payload")])
 
-    const verdicts: Array<boolean | undefined> = []
-
-    const fakeClient = createFakeHostKeyClient((config, client) => {
-      verdicts.push(callHostVerifier(config, hostKey))
-      setImmediate(() => {
-        client.emit("error", new Error("Host denied"))
-      })
-    })
+    const scanner = vi.fn().mockResolvedValue(hostKeyInfo(hostKey))
 
     await expect(
-      readHostFingerprintViaSsh2("example.com", {
-        clientFactory: () => useFakeHostKeyClient(fakeClient),
+      readHostFingerprint("example.com", {
+        scanner,
       })
     ).rejects.toThrow(/unsupported SSH host key algorithm "ssh-bogus"/v)
-
-    expect(verdicts).toStrictEqual([false])
   })
 
   // R-0000232: the algorithm label must be validated as printable ASCII
@@ -167,23 +143,18 @@ describe("readHostFingerprintViaSsh2", () => {
       createWireString(Buffer.alloc(32, 0)),
     ])
 
-    const fakeClient = createFakeHostKeyClient((config, client) => {
-      callHostVerifier(config, hostKey)
-      setImmediate(() => {
-        client.emit("error", new Error("Host denied"))
-      })
-    })
+    const scanner = vi.fn().mockResolvedValue(hostKeyInfo(hostKey))
 
     await expect(
-      readHostFingerprintViaSsh2("example.com", {
-        clientFactory: () => useFakeHostKeyClient(fakeClient),
+      readHostFingerprint("example.com", {
+        scanner,
       })
     ).rejects.toThrow(/algorithm field contains non-printable bytes/v)
   })
 
   // R-0000128: ssh-rsa is intentionally absent from the host-key allowlist
   // because we cannot enforce a 2048-bit modulus floor on the wire blob in a
-  // pre-handshake host-verifier callback while keeping the validation logic
+  // host-key scan while keeping the validation logic
   // minimal. Any ssh-rsa scan must be rejected with the unsupported-algorithm
   // error so operators are forced to pin a verified value out of band.
   it("rejects ssh-rsa host keys as unsupported", async () => {
@@ -193,16 +164,11 @@ describe("readHostFingerprintViaSsh2", () => {
       createWireString(Buffer.alloc(256, 1)),
     ])
 
-    const fakeClient = createFakeHostKeyClient((config, client) => {
-      callHostVerifier(config, hostKey)
-      setImmediate(() => {
-        client.emit("error", new Error("Host denied"))
-      })
-    })
+    const scanner = vi.fn().mockResolvedValue(hostKeyInfo(hostKey))
 
     await expect(
-      readHostFingerprintViaSsh2("example.com", {
-        clientFactory: () => useFakeHostKeyClient(fakeClient),
+      readHostFingerprint("example.com", {
+        scanner,
       })
     ).rejects.toThrow(/unsupported SSH host key algorithm "ssh-rsa"/v)
   })
@@ -210,16 +176,11 @@ describe("readHostFingerprintViaSsh2", () => {
   it("rejects with a MITM warning when the presented key buffer is too short", async () => {
     const truncatedKey = Buffer.from([0, 0])
 
-    const fakeClient = createFakeHostKeyClient((config, client) => {
-      callHostVerifier(config, truncatedKey)
-      setImmediate(() => {
-        client.emit("close")
-      })
-    })
+    const scanner = vi.fn().mockResolvedValue(hostKeyInfo(truncatedKey))
 
     await expect(
-      readHostFingerprintViaSsh2("example.com", {
-        clientFactory: () => useFakeHostKeyClient(fakeClient),
+      readHostFingerprint("example.com", {
+        scanner,
       })
     ).rejects.toThrow(/Invalid SSH host key buffer/v)
   })
@@ -228,16 +189,11 @@ describe("readHostFingerprintViaSsh2", () => {
   it("rejects ed25519 host keys whose public-key field is shorter than 32 bytes", async () => {
     const hostKey = buildEd25519HostKeyBuffer(Buffer.alloc(ED25519_PUBLIC_KEY_BYTE_LENGTH - 1, 2))
 
-    const fakeClient = createFakeHostKeyClient((config, client) => {
-      callHostVerifier(config, hostKey)
-      setImmediate(() => {
-        client.emit("error", new Error("Host denied"))
-      })
-    })
+    const scanner = vi.fn().mockResolvedValue(hostKeyInfo(hostKey))
 
     await expect(
-      readHostFingerprintViaSsh2("example.com", {
-        clientFactory: () => useFakeHostKeyClient(fakeClient),
+      readHostFingerprint("example.com", {
+        scanner,
       })
     ).rejects.toThrow(/malformed "ssh-ed25519" host key blob/v)
   })
@@ -245,16 +201,11 @@ describe("readHostFingerprintViaSsh2", () => {
   it("rejects ed25519 host keys whose public-key field is longer than 32 bytes", async () => {
     const hostKey = buildEd25519HostKeyBuffer(Buffer.alloc(ED25519_PUBLIC_KEY_BYTE_LENGTH + 1, 3))
 
-    const fakeClient = createFakeHostKeyClient((config, client) => {
-      callHostVerifier(config, hostKey)
-      setImmediate(() => {
-        client.emit("error", new Error("Host denied"))
-      })
-    })
+    const scanner = vi.fn().mockResolvedValue(hostKeyInfo(hostKey))
 
     await expect(
-      readHostFingerprintViaSsh2("example.com", {
-        clientFactory: () => useFakeHostKeyClient(fakeClient),
+      readHostFingerprint("example.com", {
+        scanner,
       })
     ).rejects.toThrow(/malformed "ssh-ed25519" host key blob/v)
   })
@@ -262,16 +213,11 @@ describe("readHostFingerprintViaSsh2", () => {
   it("rejects ed25519 host keys with trailing data after the public key", async () => {
     const hostKey = Buffer.concat([buildEd25519HostKeyBuffer(), Buffer.from([0x00])])
 
-    const fakeClient = createFakeHostKeyClient((config, client) => {
-      callHostVerifier(config, hostKey)
-      setImmediate(() => {
-        client.emit("error", new Error("Host denied"))
-      })
-    })
+    const scanner = vi.fn().mockResolvedValue(hostKeyInfo(hostKey))
 
     await expect(
-      readHostFingerprintViaSsh2("example.com", {
-        clientFactory: () => useFakeHostKeyClient(fakeClient),
+      readHostFingerprint("example.com", {
+        scanner,
       })
     ).rejects.toThrow(/trailing data after public key/v)
   })
@@ -279,16 +225,11 @@ describe("readHostFingerprintViaSsh2", () => {
   it("rejects ed25519 host keys whose buffer ends after the algorithm label", async () => {
     const hostKey = createWireString("ssh-ed25519")
 
-    const fakeClient = createFakeHostKeyClient((config, client) => {
-      callHostVerifier(config, hostKey)
-      setImmediate(() => {
-        client.emit("error", new Error("Host denied"))
-      })
-    })
+    const scanner = vi.fn().mockResolvedValue(hostKeyInfo(hostKey))
 
     await expect(
-      readHostFingerprintViaSsh2("example.com", {
-        clientFactory: () => useFakeHostKeyClient(fakeClient),
+      readHostFingerprint("example.com", {
+        scanner,
       })
     ).rejects.toThrow(/missing or truncated public-key field/v)
   })
@@ -301,16 +242,11 @@ describe("readHostFingerprintViaSsh2", () => {
       createWireString(point),
     ])
 
-    const fakeClient = createFakeHostKeyClient((config, client) => {
-      callHostVerifier(config, hostKey)
-      setImmediate(() => {
-        client.emit("error", new Error("Host denied"))
-      })
-    })
+    const scanner = vi.fn().mockResolvedValue(hostKeyInfo(hostKey))
 
     await expect(
-      readHostFingerprintViaSsh2("example.com", {
-        clientFactory: () => useFakeHostKeyClient(fakeClient),
+      readHostFingerprint("example.com", {
+        scanner,
       })
     ).rejects.toThrow(/curve identifier "nistp384" does not match "nistp256"/v)
   })
@@ -326,16 +262,11 @@ describe("readHostFingerprintViaSsh2", () => {
       createWireString(point),
     ])
 
-    const fakeClient = createFakeHostKeyClient((config, client) => {
-      callHostVerifier(config, hostKey)
-      setImmediate(() => {
-        client.emit("error", new Error("Host denied"))
-      })
-    })
+    const scanner = vi.fn().mockResolvedValue(hostKeyInfo(hostKey))
 
     await expect(
-      readHostFingerprintViaSsh2("example.com", {
-        clientFactory: () => useFakeHostKeyClient(fakeClient),
+      readHostFingerprint("example.com", {
+        scanner,
       })
     ).rejects.toThrow(/curve identifier contains non-printable bytes/v)
   })
@@ -351,16 +282,11 @@ describe("readHostFingerprintViaSsh2", () => {
       createWireString(wrongLengthPoint),
     ])
 
-    const fakeClient = createFakeHostKeyClient((config, client) => {
-      callHostVerifier(config, hostKey)
-      setImmediate(() => {
-        client.emit("error", new Error("Host denied"))
-      })
-    })
+    const scanner = vi.fn().mockResolvedValue(hostKeyInfo(hostKey))
 
     await expect(
-      readHostFingerprintViaSsh2("example.com", {
-        clientFactory: () => useFakeHostKeyClient(fakeClient),
+      readHostFingerprint("example.com", {
+        scanner,
       })
     ).rejects.toThrow(/EC point/v)
   })
@@ -376,16 +302,11 @@ describe("readHostFingerprintViaSsh2", () => {
       createWireString(compressedPoint),
     ])
 
-    const fakeClient = createFakeHostKeyClient((config, client) => {
-      callHostVerifier(config, hostKey)
-      setImmediate(() => {
-        client.emit("error", new Error("Host denied"))
-      })
-    })
+    const scanner = vi.fn().mockResolvedValue(hostKeyInfo(hostKey))
 
     await expect(
-      readHostFingerprintViaSsh2("example.com", {
-        clientFactory: () => useFakeHostKeyClient(fakeClient),
+      readHostFingerprint("example.com", {
+        scanner,
       })
     ).rejects.toThrow(/EC point is not in uncompressed form/v)
   })
@@ -401,167 +322,69 @@ describe("readHostFingerprintViaSsh2", () => {
       createWireString(offCurvePoint),
     ])
 
-    const fakeClient = createFakeHostKeyClient((config, client) => {
-      callHostVerifier(config, hostKey)
-      setImmediate(() => {
-        client.emit("error", new Error("Host denied"))
-      })
-    })
+    const scanner = vi.fn().mockResolvedValue(hostKeyInfo(hostKey))
 
     await expect(
-      readHostFingerprintViaSsh2("example.com", {
-        clientFactory: () => useFakeHostKeyClient(fakeClient),
+      readHostFingerprint("example.com", {
+        scanner,
       })
     ).rejects.toThrow(/EC point is not on the expected curve/v)
   })
 
-  it("settles host key verifier errors raised from an asynchronous ssh2 callback", async () => {
-    // Wire-format buffer with algorithm "ssh-bogus" (length-prefixed ASCII).
-    const hostKey = Buffer.concat([createWireString("ssh-bogus"), Buffer.from("payload")])
-
-    const verdicts: Array<boolean | undefined> = []
-
-    const fakeClient = createFakeHostKeyClient((config, client) => {
-      setImmediate(() => {
-        verdicts.push(callHostVerifier(config, hostKey))
-        client.emit("error", new Error("Host denied"))
-      })
-    })
-
-    await expect(
-      readHostFingerprintViaSsh2("example.com", {
-        clientFactory: () => useFakeHostKeyClient(fakeClient),
-      })
-    ).rejects.toThrow(/unsupported SSH host key algorithm "ssh-bogus"/v)
-
-    expect(verdicts).toStrictEqual([false])
-  })
-
-  // R-0000127: ssh2 cannot detect a TCP half-open state; if neither close
-  // nor error fires, the Promise must still settle through the watchdog.
-  it("rejects through the watchdog when ssh2 never fires close or error", async () => {
-    vi.useFakeTimers()
-
-    const fakeClient = createFakeHostKeyClient(() => {
-      // Intentionally do not invoke any handler — simulate a half-open
-      // socket where neither error nor close ever fire.
-    })
-
-    try {
-      const promise = readHostFingerprintViaSsh2("example.com", {
-        clientFactory: () => useFakeHostKeyClient(fakeClient),
-        readyTimeoutMs: 5000,
-      })
-
-      // Attach a no-op rejection handler before advancing timers so the
-      // watchdog can settle the promise without an unhandled-rejection
-      // warning from Node, then advance timers and assert.
-      promise.catch(() => {
-        // Swallow the rejection until the assertion below observes it.
-      })
-      // The TCP connect watchdog fires first at readyTimeoutMs = 5000ms,
-      // before the half-open watchdog at readyTimeoutMs * 2 = 10000ms.
-      await vi.advanceTimersByTimeAsync(5001)
-      await expect(promise).rejects.toThrow(/host key scan TCP connect timed out after 5000ms/v)
-
-      expect(fakeClient.removeAllListeners).toHaveBeenCalled()
-    } finally {
-      vi.useRealTimers()
-    }
-  })
-
-  // R-0000188: ssh2's readyTimeout covers only the SSH handshake; an
-  // explicit TCP connect timeout must surface dropped SYN packets quickly,
-  // before falling through to the half-open watchdog at 2x.
-  it("rejects with a TCP connect timeout before the half-open watchdog fires", async () => {
-    vi.useFakeTimers()
-
-    const fakeClient = createFakeHostKeyClient(() => {
-      // Simulate a dropped SYN: ssh2 never reports anything.
-    })
-
-    try {
-      const promise = readHostFingerprintViaSsh2("example.com", {
-        clientFactory: () => useFakeHostKeyClient(fakeClient),
-        readyTimeoutMs: 3000,
-      })
-
-      promise.catch(() => {
-        // Swallow until the assertion observes it.
-      })
-      // Advance just past the TCP connect watchdog at readyTimeoutMs.
-      await vi.advanceTimersByTimeAsync(3001)
-      await expect(promise).rejects.toThrow(/TCP connect timed out after 3000ms/v)
-    } finally {
-      vi.useRealTimers()
-    }
-  })
-
-  // R-0000187: cleanupClient must install a no-op error listener before
-  // removing the original listeners so that late error events emitted during
-  // client.end() (half-closed socket, ssh2-layer throws) do not bubble up
-  // as uncaught errors and crash the process.
-  it("absorbs late error events emitted during client.end()", async () => {
-    const hostKey = buildEd25519HostKeyBuffer()
-    const firstOldErrorListener = vi.fn<(error?: Error) => void>()
-    const secondOldErrorListener = vi.fn<(error?: Error) => void>()
-    const fakeClient = createFakeHostKeyClient((config, client) => {
-      client.on("error", firstOldErrorListener)
-      client.on("error", secondOldErrorListener)
-      callHostVerifier(config, hostKey)
-      setImmediate(() => {
-        client.emit("error", new Error("Host denied"))
-      })
-    })
-    // After removeAllListeners + on("error", noop), end() emits a late
-    // error. The no-op listener installed by cleanupClient must absorb it.
-    fakeClient.end.mockImplementation(() => {
-      fakeClient.emit("error", new Error("late socket teardown error"))
-      return useFakeHostKeyClient(fakeClient)
-    })
-
-    await expect(
-      readHostFingerprintViaSsh2("example.com", {
-        clientFactory: () => useFakeHostKeyClient(fakeClient),
-      })
-    ).resolves.toMatchObject({ algorithm: "ssh-ed25519" })
-
-    // Two error listeners observed in total: the original from
-    // registerFingerprintListeners and the no-op installed during cleanup.
-    const errorListenerRegistrations = fakeClient.on.mock.calls.filter(
-      ([event]) => event === "error"
+  it("rejects a fingerprint that differs from the locally computed key fingerprint", async () => {
+    const info = hostKeyInfo(buildEd25519HostKeyBuffer())
+    const scanner = vi.fn().mockResolvedValue({ ...info, fingerprintSha256: "SHA256:wrong" })
+    await expect(readHostFingerprint("example.com", { scanner })).rejects.toThrow(
+      "fingerprint does not match"
     )
-    expect(errorListenerRegistrations.length).toBeGreaterThanOrEqual(4)
-    expect(firstOldErrorListener).toHaveBeenCalledOnce()
-    expect(secondOldErrorListener).toHaveBeenCalledOnce()
-    expect(firstOldErrorListener).toHaveBeenCalledWith(new Error("Host denied"))
-    expect(secondOldErrorListener).toHaveBeenCalledWith(new Error("Host denied"))
   })
 
-  // R-0000127: when the close handler resolves first, the watchdog must be
-  // cleared so it cannot keep the event loop alive or fire spuriously.
-  it("clears the watchdog on a successful resolution", async () => {
-    const hostKey = buildEd25519HostKeyBuffer()
+  it("rejects an algorithm that differs from the key blob", async () => {
+    const info = hostKeyInfo(buildEd25519HostKeyBuffer())
+    const scanner = vi.fn().mockResolvedValue({ ...info, algorithm: "ecdsa-sha2-nistp256" })
+    await expect(readHostFingerprint("example.com", { scanner })).rejects.toThrow(
+      "algorithm does not match"
+    )
+  })
 
-    const clearTimeoutSpy = vi.spyOn(globalThis, "clearTimeout")
+  it("rejects host certificates even when their plain key is allowed", async () => {
+    const info = hostKeyInfo(buildEd25519HostKeyBuffer())
+    const scanner = vi.fn().mockResolvedValue({ ...info, kind: "certificate" })
+    await expect(readHostFingerprint("example.com", { scanner })).rejects.toThrow(
+      "host certificates are unsupported"
+    )
+  })
 
-    try {
-      const fakeClient = createFakeHostKeyClient((config, client) => {
-        callHostVerifier(config, hostKey)
-        setImmediate(() => {
-          client.emit("error", new Error("Host denied"))
-        })
+  it.each(["R-0000127", "R-0000188"])(
+    "%s: passes the overall timeout to native scan and preserves its timeout error",
+    async () => {
+      const timeoutError = Object.assign(new Error("native scan deadline exceeded"), {
+        code: "TIMEOUT",
       })
-
+      const scanner = vi.fn().mockRejectedValue(timeoutError)
       await expect(
-        readHostFingerprintViaSsh2("example.com", {
-          clientFactory: () => useFakeHostKeyClient(fakeClient),
-        })
-      ).resolves.toMatchObject({ algorithm: "ssh-ed25519" })
-
-      expect(clearTimeoutSpy).toHaveBeenCalled()
-    } finally {
-      clearTimeoutSpy.mockRestore()
+        readHostFingerprint("example.com", { port: 2222, scanner, timeoutMs: 3000 })
+      ).rejects.toMatchObject({
+        cause: timeoutError,
+        message: "Failed to read the host key from example.com:2222: native scan deadline exceeded",
+      })
+      expect(scanner).toHaveBeenCalledExactlyOnceWith({
+        host: "example.com",
+        port: 2222,
+        signal: undefined,
+        timeoutMs: 3000,
+      })
     }
+  )
+
+  it("passes cancellation to native scan and preserves the abort error", async () => {
+    const controller = new AbortController()
+    const abortError = Object.assign(new Error("scan aborted"), { code: "ABORTED" })
+    const scanner = vi.fn().mockRejectedValue(abortError)
+    controller.abort()
+    await expect(
+      readHostFingerprint("example.com", { scanner, signal: controller.signal })
+    ).rejects.toMatchObject({ cause: abortError })
+    expect(scanner).toHaveBeenCalledWith(expect.objectContaining({ signal: controller.signal }))
   })
 })

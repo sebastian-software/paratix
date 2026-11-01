@@ -19,7 +19,9 @@ For fresh machines, it also handles the awkward part that usually gets glossed o
 
 ## Getting Started
 
-Requires Node.js 24 or newer.
+Requires Node.js 24 or newer. Running generated playbooks requires a supported Linux or macOS controller; see [supported platforms](https://github.com/sebastian-software/paratix/blob/main/docs/user-guide/README.md).
+
+The generator offers “Scan host key” only when its native SSH binding can be loaded. Otherwise, pass `--expected-host-fingerprint` with an independently verified value, or keep the placeholder and configure verified `known_hosts` or a host-key pin before connecting.
 
 Create a new project:
 

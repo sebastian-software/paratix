@@ -11,7 +11,9 @@ describe("loadNativeBinding", () => {
     const api = { connect: vi.fn(), scan: vi.fn() }
     const factory = vi.fn(() => ({ default: api }))
     vi.doMock("@paratix/ssh-native", factory)
-    const { loadNativeBinding } = await import("../src/nativeBinding.js")
+    const { assertNativeBindingAvailable, loadNativeBinding } =
+      await import("../src/nativeBinding.js")
+    await expect(assertNativeBindingAvailable()).resolves.toBeUndefined()
     const [first, second] = await Promise.all([loadNativeBinding(), loadNativeBinding()])
     expect(first).toBe(api)
     expect(second).toBe(api)
@@ -32,5 +34,22 @@ describe("loadNativeBinding", () => {
     // Vitest wraps a throwing mock factory; the loader error stays the cause.
     expect((first as Error).cause).toBe(loaderError)
     expect(factory).toHaveBeenCalledOnce()
+  })
+  it("adds platform guidance while keeping the loader failure as cause", async () => {
+    vi.doMock("@paratix/ssh-native", () => {
+      throw new Error("loader installation details")
+    })
+    const { assertNativeBindingAvailable, loadNativeBinding } =
+      await import("../src/nativeBinding.js")
+    const cause = await loadNativeBinding().catch((error: unknown) => error)
+    await expect(assertNativeBindingAvailable()).rejects.toMatchObject({
+      cause,
+      message: expect.stringContaining(
+        `platform ${process.platform}, architecture ${process.arch}`
+      ),
+    })
+    await expect(assertNativeBindingAvailable()).rejects.toThrow("linux-x64-gnu")
+    await expect(assertNativeBindingAvailable()).rejects.toThrow("glibc >= 2.35")
+    await expect(assertNativeBindingAvailable()).rejects.toThrow("#supported-platforms")
   })
 })

@@ -528,7 +528,7 @@ describe("promptForHostFingerprint", () => {
       [
         {
           description:
-            "Read the currently presented host key from SSH port 22 via ssh2 and pin its fingerprint in server.ts.",
+            "Read the currently presented host key from SSH port 22 and pin its fingerprint in server.ts.",
           label: "Scan host key",
           value: "scan",
         },
@@ -540,6 +540,36 @@ describe("promptForHostFingerprint", () => {
         },
       ]
     )
+  })
+
+  it("hides the scan option and explains alternatives when the binding cannot load", async () => {
+    const select = vi.fn().mockResolvedValueOnce("placeholder")
+    const loadScanner = vi.fn().mockRejectedValueOnce(new Error("unsupported platform"))
+
+    await expect(
+      promptForHostFingerprint("example.com", select, { loadScanner })
+    ).resolves.toBeUndefined()
+    expect(select).toHaveBeenCalledWith(expect.any(String), [
+      expect.objectContaining({ value: "placeholder" }),
+    ])
+    expect(console.log).toHaveBeenCalledWith(expect.stringContaining("--expected-host-fingerprint"))
+    expect(console.log).toHaveBeenCalledWith(expect.stringContaining("placeholder"))
+    expect(vi.mocked(console.log).mock.invocationCallOrder[0]).toBeLessThan(
+      select.mock.invocationCallOrder[0]
+    )
+  })
+
+  it("offers scanning when the scanner loader is available", async () => {
+    const select = vi.fn().mockResolvedValueOnce("scan").mockResolvedValueOnce("pin")
+    const scanner = vi.fn().mockResolvedValueOnce({
+      algorithm: "ssh-ed25519",
+      fingerprint: "SHA256:scanned-fingerprint",
+    })
+    const loadScanner = vi.fn().mockResolvedValueOnce(scanner)
+    await expect(promptForHostFingerprint("example.com", select, { loadScanner })).resolves.toBe(
+      "SHA256:scanned-fingerprint"
+    )
+    expect(scanner).toHaveBeenCalledExactlyOnceWith("example.com")
   })
 
   // R-0000122: a single "scan" choice must NOT pin the fingerprint silently.
@@ -627,7 +657,7 @@ describe("promptForHostFingerprint", () => {
 
   // R-0000202: a scan failure must surface as an explicit MITM-style warning
   // and abort instead of silently trusting the presented key.
-  it("emits a MITM warning and rejects after a scan failure", async () => {
+  it("R-0000128: emits a MITM warning and rejects after a scan failure", async () => {
     const select = vi.fn().mockResolvedValueOnce("scan")
     const scanner = vi.fn().mockRejectedValueOnce(new Error("network timeout"))
 

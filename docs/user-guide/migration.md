@@ -4,6 +4,14 @@ This page lists only confirmed changes that require action in an existing projec
 
 ## `paratix`
 
+### 0.24.0: native SSH transport and authentication changes
+
+**Before:** Paratix used `ssh2` at runtime, could prompt for a password after key-file authentication failed, and accepted key files together with `passwordFallback` or `agentForward`.
+
+**Now:** The default transport is `@paratix/ssh-native`. Playbook execution supports Linux x64/arm64 with glibc 2.35 or newer or musl, and macOS x64/arm64 13.5 or newer; Windows is unsupported. Installation, imports, `--help`, and `--version` still work without the binding, but a playbook checks it before resolving secrets. A configured `privateKey` never falls back to a password. Both `privateKey` with `passwordFallback: true` and `privateKey` with `agentForward: true` are rejected. Without a key file, password fallback after agent failure connects without the agent. Forwarding requires a usable agent and successful agent authentication; missing or failed agents do not lead to a password prompt when forwarding is enabled. Native errors contain `[CODE]`; other failures after all ports append `; last error on port <p>: <native message> [<CODE>]`. `ENCRYPTED_KEY` and `UNSUPPORTED_KEY` stop after the first attempt, including during reconnect.
+
+**Upgrade:** Run local and CI playbooks on a [supported controller](./README.md#supported-platforms) and keep optional dependencies enabled so its prebuilt binary is installed. Published packages need no Rust toolchain; only contributors building the repository need Rust. Remove `passwordFallback` and `agentForward` when keeping `privateKey`. To use an encrypted key or agent forwarding, load the key into a working SSH agent and omit `privateKey`. For a password fallback after agent failure, omit `privateKey` and disable `agentForward`. Replace unsupported DSA, hardware-backed `sk-*`, binary, or corrupt key files with a supported file or use a capable agent; see [key requirements](../../packages/ssh-native/README.md#authentication-and-key-formats). Update automation that matches `ssh2` error text, then rerun to verify the intended authentication and port. See [troubleshooting](./troubleshooting.md) for error recovery.
+
 ### 0.2.0: Node.js 24 or newer
 
 **Before:** Paratix could run on older Node.js versions.
@@ -104,6 +112,14 @@ This page lists only confirmed changes that require action in an existing projec
 
 ## `create-paratix`
 
+### 0.24.0: native host-key scanning
+
+**Before:** The interactive generator scanned host keys through `ssh2` without a native platform binary.
+
+**Now:** Host-key scanning uses `@paratix/ssh-native` on the [supported controller platforms](./README.md#supported-platforms). The generator offers “Scan host key” only when the native binding can be loaded. Otherwise it explains the alternatives and offers the placeholder path; an actual scan failure still aborts scaffolding. Scans accept Ed25519 and ECDSA host keys; RSA pins must be supplied explicitly. Generated playbooks use Paratix's native transport and its platform and authentication requirements.
+
+**Upgrade:** For scanning, run the generator on a supported controller with optional dependencies enabled. Otherwise pass `--expected-host-fingerprint` with an independently verified value, or keep the placeholder and configure verified `known_hosts` or a host-key pin before connecting. Compare any scanned fingerprint against an independent trusted source before pinning it. Execute the generated project on a supported controller; published packages need no Rust toolchain.
+
 ### 0.2.0: Node.js 24 or newer
 
 **Before:** The generator could run on older Node.js versions.
@@ -146,7 +162,7 @@ This page lists only confirmed changes that require action in an existing projec
 
 ## Unreleased
 
-There are no confirmed unreleased breaking changes that require user action.
+The 0.24.0 entries above describe the native-transport migration prepared for the next release.
 
 ## Toward 1.0
 

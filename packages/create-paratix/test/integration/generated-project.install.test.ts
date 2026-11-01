@@ -6,6 +6,7 @@ import { describe, expect, it } from "vitest"
 import {
   createScaffoldedProject,
   packParatixTarball,
+  packSshNativeTarball,
   SCAFFOLD_VARIANTS,
 } from "../scaffoldFixtures.js"
 
@@ -16,10 +17,11 @@ const INSTALL_TIMEOUT_MS = 600_000
  *
  * Every other dependency installs from the registry exactly as the scaffold
  * declares it — that is what makes this check able to catch an install-level
- * failure such as a missing build approval. Only `paratix` is redirected, via
- * a `pnpm-workspace.yaml` override, because it is versioned in lockstep with
- * `create-paratix` and so is not on the registry yet at release time; see
- * `packParatixTarball`.
+ * failure such as a missing build approval. `paratix` and `@paratix/ssh-native`
+ * are redirected via `pnpm-workspace.yaml` overrides because both are versioned
+ * in lockstep with `create-paratix` and are not on the registry yet at release
+ * time; see `packParatixTarball`. The native platform package is unnecessary:
+ * these scripts only inspect types and source without loading the binding.
  *
  * The override is reverted once the install is done, so the project's own
  * scripts run against exactly the files the scaffold wrote — `format:check`
@@ -34,7 +36,7 @@ function installProject(projectDirectory: string): SpawnSyncReturns<string> {
 
   writeFileSync(
     workspaceFilePath,
-    `${generatedWorkspaceFile}overrides:\n  paratix: file:${packParatixTarball()}\n`
+    `${generatedWorkspaceFile}overrides:\n  paratix: file:${packParatixTarball()}\n  "@paratix/ssh-native": file:${packSshNativeTarball()}\n`
   )
   try {
     return spawnSync("pnpm", ["install"], {
@@ -62,7 +64,11 @@ function runProjectScript(
   projectDirectory: string,
   script: string
 ): { output: string; status: null | number } {
-  const result = spawnSync("pnpm", [script], {
+  // The generated workspace has been restored after installation. pnpm's
+  // pre-script verification would re-resolve its unpublished release version
+  // against the registry because the installed lockfile records our overrides.
+  // Keep checking the installed tarballs while inspecting the original files.
+  const result = spawnSync("pnpm", ["--config.verifyDepsBeforeRun=false", script], {
     cwd: projectDirectory,
     encoding: "utf8",
     timeout: INSTALL_TIMEOUT_MS,
@@ -78,7 +84,7 @@ function runProjectScript(
  * missing build approval. It needs network access and therefore lives in the
  * integration run rather than in `test` or `test:dist`.
  *
- * `paratix` itself comes from the working tree rather than the registry, for
+ * `paratix` and `@paratix/ssh-native` come from the working tree, for
  * the release-ordering reason `installProject` describes.
  */
 describe("a scaffolded project installs and passes its own scripts", () => {

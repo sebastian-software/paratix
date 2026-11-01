@@ -664,3 +664,51 @@ Offene Befunde nach beiden Runden: keine.
 ## Offene Punkte
 
 - Keine offenen Punkte.
+
+## Nachtrag C2 (#257): Freigegebene Abweichungen, Entscheidungen 3–7
+
+Die Planung von #257 präzisiert die ursprünglichen C2-Schritte. Die folgenden
+Entscheidungen ersetzen die entsprechenden Annahmen oben; sie ändern den Status
+dieses Master-Plans nicht.
+
+3. **Kein Rückfall von Key-Datei auf Passwort.** Mit `privateKey` wird nur die
+   Key-Datei versucht. `privateKey` mit `passwordFallback: true` wird statisch
+   abgelehnt. Nach einem gescheiterten Agent-Login bleibt der Passwort-Rückfall
+   ohne Agent erhalten; mit `agentForward: true` bricht er vor dem Prompt ab.
+   Die Keyboard-Interactive-Zelle der Paritätsmatrix wechselt von `it.fails`
+   auf `it` und verwendet ausschließlich ein Passwort. Die übrigen Zellen
+   bleiben unverändert.
+4. **Reboot- und Restart-Erkennung über `DISCONNECTED`.** Der Adapter bildet
+   Disconnect-Events auf `TransportError` mit Event-Code oder `DISCONNECTED`
+   und dem Paratix-Text „SSH connection closed unexpectedly“ ab. `ssh.ts`
+   erhält `transportCode` nicht aufzählbar am `cause`, bevor offene Execs
+   abgelehnt werden. Die Module erkennen den Code; die bestehende Prüfung auf
+   „SSH connection closed“ bleibt. `ECONNRESET` und „Connection reset“ entfallen
+   in PR 2. Ein neu geöffneter Exec auf einer bereits toten Verbindung bleibt
+   ohne diesen Code und gilt nicht als erfolgreicher Reboot.
+5. **`agentForward` setzt Agent-Authentifizierung voraus.** Die Kombination
+   mit `privateKey` wird vor dem Vorwärmen der Secrets statisch abgelehnt.
+   Fehlendes `SSH_AUTH_SOCK`, ein nicht existierender Socket-Pfad oder ein
+   gescheiterter Agent-Login führen ohne Passwort-Prompt zum Fehler. C1 hielt
+   diese Lücke mit `INTERNAL` fest; C2 ersetzt den Test durch Validierungs-
+   und Laufzeittests. Meldungen: „agentForward requires authentication through
+   an SSH agent; remove privateKey or agentForward“ beziehungsweise
+   „agentForward requires authentication through an SSH agent; remove
+   agentForward or configure a working SSH agent“.
+6. **Laden an einer Stelle, Prüfung im Runner.** `nativeBinding.ts` kapselt
+   den dynamischen CJS-Import mit Zugriff über den Default-Export und einem
+   pro Prozess zwischengespeicherten Promise. `runner.ts` prüft die Anbindung
+   direkt vor `prewarmRunSecrets`, nicht die CLI vor `prewarmSecrets`.
+   Die Fehlermeldung nennt Plattform, Architektur, unterstützte Ziele, glibc
+   ab 2.35 und den User Guide; der Loader-Fehler erscheint nur mit `--verbose`
+   als `cause`. Import, `--help` und `--version` bleiben ohne Anbindung
+   nutzbar. `create-paratix` bietet den Scan nur bei ladbarer Anbindung an;
+   sonst nennt es `--expected-host-fingerprint` oder den Platzhalter.
+7. **Native Fehlertexte mit Code.** Der Adapter reicht Fehler als
+   `<native message> [<CODE>]` weiter. Die Paratix-Texte für Host-Key-Prüfung,
+   Kanal-Ablehnung und Verbindungsende sowie die Präfixe der drei finalen
+   Verbindungsfehler bleiben erhalten. Nach allen Ports ergänzt der letzte
+   Fehler `; last error on port <p>: <native message> [<CODE>]` und ist `cause`.
+   `ENCRYPTED_KEY` und `UNSUPPORTED_KEY` beenden bereits den ersten Versuch
+   ohne weitere Ports oder Reconnect-Versuche. Migration und Troubleshooting
+   dokumentieren diese Verhaltensänderungen.

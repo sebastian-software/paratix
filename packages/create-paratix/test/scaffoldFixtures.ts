@@ -12,6 +12,7 @@ const PACK_TIMEOUT_MS = 120_000
 
 const packageRoot = resolve(fileURLToPath(new URL("..", import.meta.url)))
 const paratixPackageRoot = resolve(fileURLToPath(new URL("../../paratix", import.meta.url)))
+const sshNativePackageRoot = resolve(fileURLToPath(new URL("../../ssh-native", import.meta.url)))
 const paratixDeclarationPath = join(paratixPackageRoot, "dist", "index.d.ts")
 
 // The workspace aliases `typescript` to @typescript/typescript6, whose binary
@@ -106,10 +107,8 @@ export function linkParatixRuntime(projectDirectory: string): void {
   symlinkSync(paratixPackageRoot, join(nodeModulesDirectory, "paratix"))
 }
 
-function readParatixVersion(): string {
-  const manifest: unknown = JSON.parse(
-    readFileSync(join(paratixPackageRoot, "package.json"), "utf8")
-  )
+function readPackageVersion(packageDirectory: string): string {
+  const manifest: unknown = JSON.parse(readFileSync(join(packageDirectory, "package.json"), "utf8"))
 
   if (
     typeof manifest !== "object" ||
@@ -117,13 +116,13 @@ function readParatixVersion(): string {
     !("version" in manifest) ||
     typeof manifest.version !== "string"
   ) {
-    throw new Error("paratix package.json must contain a version.")
+    throw new Error(`${packageDirectory}/package.json must contain a version.`)
   }
 
   return manifest.version
 }
 
-let packedParatixTarball: string | undefined
+const packedTarballs = new Map<string, string>()
 
 /**
  * Pack the working tree's `paratix` and return the tarball's path.
@@ -141,27 +140,36 @@ let packedParatixTarball: string | undefined
  * @returns Absolute path to the packed tarball.
  */
 export function packParatixTarball(): string {
-  if (packedParatixTarball !== undefined) return packedParatixTarball
+  return packWorkspaceTarball("paratix", paratixPackageRoot)
+}
+
+export function packSshNativeTarball(): string {
+  return packWorkspaceTarball("paratix-ssh-native", sshNativePackageRoot)
+}
+
+function packWorkspaceTarball(tarballName: string, packageDirectory: string): string {
+  const cachedTarball = packedTarballs.get(packageDirectory)
+  if (cachedTarball !== undefined) return cachedTarball
 
   const destination = mkdtempSync(join(tmpdir(), "create-paratix-tarball-"))
   const result = spawnSync("pnpm", ["pack", "--pack-destination", destination], {
-    cwd: paratixPackageRoot,
+    cwd: packageDirectory,
     encoding: "utf8",
     timeout: PACK_TIMEOUT_MS,
   })
   if (result.status !== 0) {
-    throw new Error(`pnpm pack failed for paratix:\n${result.stdout}\n${result.stderr}`)
+    throw new Error(`pnpm pack failed for ${packageDirectory}:\n${result.stdout}\n${result.stderr}`)
   }
 
   // Derive the name rather than read it off pnpm's output: `pnpm pack` prints
   // the packed file listing ahead of the path, and that layout is not a
   // contract. The name is — npm builds it from the manifest.
-  const tarball = join(destination, `paratix-${readParatixVersion()}.tgz`)
+  const tarball = join(destination, `${tarballName}-${readPackageVersion(packageDirectory)}.tgz`)
   if (!existsSync(tarball)) {
     throw new Error(`pnpm pack reported success but wrote no ${tarball}:\n${result.stdout}`)
   }
 
-  packedParatixTarball = tarball
+  packedTarballs.set(packageDirectory, tarball)
   return tarball
 }
 

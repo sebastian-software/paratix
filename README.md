@@ -20,6 +20,7 @@ If you already know tools like Ansible, the core idea will feel familiar. The di
 ## Prerequisites
 
 - Node.js `>=24.0.0`
+- For SSH operations, run Paratix on Linux x64/arm64 with glibc 2.35 or newer or musl, or macOS x64/arm64 13.5 or newer. Windows is unsupported for SSH operations. See [supported platforms](./docs/user-guide/README.md#supported-platforms).
 - pnpm 12, or pnpm 11.28.6 or newer (the repo pins the exact version in the `packageManager` field and a global pnpm switches to it automatically; see [pnpm installation](https://pnpm.io/installation))
 
 ## Usage
@@ -101,8 +102,8 @@ If you are starting on GitHub, use this README as the overview and then jump int
 
 ## Documentation
 
-- [TypeScript API, module, and agent reference](./packages/paratix/llm-guide.md) — the current normative reference
 - [User-guide overview](./docs/user-guide/README.md) — current user documentation, including [troubleshooting](./docs/user-guide/troubleshooting.md), [tool comparison](./docs/user-guide/comparison.md), and [migration notes](./docs/user-guide/migration.md)
+- [TypeScript API, module, and agent reference](./packages/paratix/llm-guide.md) — the current normative reference
 - [`docs/adr/`](./docs/adr/) — durable architecture decision records
 - [`docs/plan/`](./docs/plan/) — time-bound implementation plans, including completed work; not a current product reference
 - `docs/review/` — historical review reports when present

@@ -1130,7 +1130,12 @@ describe("sshd.port — apply: validation and rollback", () => {
       { code: 1 }, // sshd.socket missing
       { code: 0 }, // sshd.service exists
       { code: 0 }, // sshd.service enabled
-      { kind: "reject", reason: new Error("ECONNRESET") },
+      {
+        kind: "reject",
+        reason: Object.assign(new Error("transport disconnected"), {
+          transportCode: "DISCONNECTED",
+        }),
+      },
     ])
     execSpy.mockImplementation(execSequence.exec)
 

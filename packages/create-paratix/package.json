@@ -24,11 +24,10 @@
     "test:integration": "vitest run --config vitest.integration.config.ts"
   },
   "dependencies": {
-    "ssh2": "^1.16.0"
+    "@paratix/ssh-native": "workspace:*"
   },
   "devDependencies": {
     "@types/node": "24.19.2",
-    "@types/ssh2": "^1.15.6",
     "tsup": "^8.4.0",
     "typescript": "npm:@typescript/typescript6@^6.0.2",
     "vitest": "5.0.4"
