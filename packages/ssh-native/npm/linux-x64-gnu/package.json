@@ -1,6 +1,6 @@
 {
   "name": "@paratix/ssh-native-linux-x64-gnu",
-  "version": "0.23.1",
+  "version": "0.24.0",
   "description": "Prebuilt linux-x64-gnu binary of @paratix/ssh-native (internal native SSH binding of Paratix)",
   "license": "MIT",
   "main": "ssh-native.linux-x64-gnu.node",
