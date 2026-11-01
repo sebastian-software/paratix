@@ -822,7 +822,7 @@ async function runPublish(harness, runOptions) {
   try {
     await publishWorkspacePackages({
       availabilityDelayMilliseconds: 0,
-      availabilityRetries: runOptions.availabilityRetries ?? 2,
+      availabilityRetries: runOptions.availabilityRetries,
       commandRunner,
       environment: { ...harness.environment, GITHUB_RUN_ID: runId, ...environment },
       fetch,
@@ -1953,6 +1953,21 @@ describe("publishWorkspacePackages release validations", () => {
     // One classification lookup plus three availability attempts.
     assert.equal(result.commandRunner.viewCounts.get(`${PARATIX_NAME}@1.2.3`), 4)
     assert.equal(harness.registry.size, RELEASE_ORDER.length)
+  })
+
+  it("continues the release when registry propagation exceeds the former four-minute budget", async () => {
+    const harness = createHarness()
+    const result = await harness.run({
+      runnerOptions: { hiddenViewsAfterPublish: { [FIRST_PLATFORM_NAME]: 55 } },
+    })
+
+    assertSucceeded(result)
+    // One classification lookup plus 56 availability attempts (over nine minutes at 10s).
+    assert.equal(result.commandRunner.viewCounts.get(`${FIRST_PLATFORM_NAME}@1.2.3`), 57)
+    assert.deepEqual(
+      publishedTarballNames(result.commandRunner.calls),
+      expectedTarballNames(DEFAULT_STABLE_VERSION)
+    )
   })
 
   it("R-0000861: stops after the availability retry budget", async () => {

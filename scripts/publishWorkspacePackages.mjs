@@ -53,11 +53,12 @@ function readEnvironmentAvailabilityRetries() {
   return parsedValue
 }
 
-// R-0000501: doubled the prior 12 × 10s (= 2 min) budget to ~4 min so the
-// registry has enough time to expose paratix before we attempt to publish
-// create-paratix. Operators can override the value via
-// PARATIX_PUBLISH_AVAILABILITY_RETRIES when the registry is unusually slow.
-const DEFAULT_AVAILABILITY_RETRIES = readEnvironmentAvailabilityRetries() ?? 24
+// The first native release exceeded the former ~4 min propagation budget:
+// npm accepted darwin-arm64, but exposed it only after the job had stopped.
+// Allow ~15 min per package before publishing its dependents. The publish
+// job timeout covers all nine sequential waits. Operators can still override
+// this budget with PARATIX_PUBLISH_AVAILABILITY_RETRIES.
+const DEFAULT_AVAILABILITY_RETRIES = readEnvironmentAvailabilityRetries() ?? 90
 const DEFAULT_AVAILABILITY_DELAY_MS = 10_000
 const PACKAGE_JSON_FILE = "package.json"
 const TSUP_CONFIG_FILE = "tsup.config.ts"
