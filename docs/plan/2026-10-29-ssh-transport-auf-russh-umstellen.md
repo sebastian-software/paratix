@@ -1,8 +1,45 @@
 # SSH-Transport von ssh2 auf eine eigene russh-Anbindung umstellen
 
-**Planungsstatus:** Nicht umgesetzt
+**Planungsstatus:** Umgesetzt mit den unten dokumentierten Abweichungen; veröffentlicht als 0.24.0 am 1. November 2026
 **Quelle:** effective-flow plan – Nutzerauftrag vom 29.10.2026 auf Basis der T3-Code-Session „Secrets auf dem T3-Code-Server verwalten“ (36655bc5)
 **Empfohlener Workflow:** Feature (`effective-flow build`)
+
+## Umsetzungsstand – 1. November 2026
+
+Der Umfang dieses Masterplans (A, B, C1 und C2) ist abgeschlossen. Die folgenden
+Planungsabschnitte beschreiben den Ausgangsstand vom 29. Oktober 2026; die
+Präzisierungen und freigegebenen Abweichungen haben Vorrang.
+
+- **A / #254:** ADR 0008 und Spike sind abgeschlossen; die harten Nachweise stehen im ADR.
+- **B / #255:** Anbindung und Tooling (#262), Integrationstests und Plattformmatrix (#264)
+  sowie Release-Pipeline (#267) sind gemergt. Alle sechs Plattformen haben Build- und
+  Smoke-Nachweise; der separate Advisory-Lauf ist [grün](https://github.com/sebastian-software/paratix/actions/runs/41202213449).
+- **C1 / #256:** Paritätsmatrix (#261), interne Schnittstelle (#263) und Transport-Fakes
+  (#265) sind umgesetzt und mit [0.23.1](https://github.com/sebastian-software/paratix/pull/266) veröffentlicht.
+- **C2 / #257:** Der inaktive native Adapter (#268) und die Umschaltung samt Entfernen
+  von `ssh2` aus den Laufzeit-Abhängigkeiten (#269) sind gemergt. CI, Integration Check,
+  Plattformmatrix, Publish-Verify und Release-Dry-Run sind im
+  [Umsetzungs-PR](https://github.com/sebastian-software/paratix/pull/269) nachgewiesen.
+- **Erster nativer Release:** [#270](https://github.com/sebastian-software/paratix/pull/270)
+  veröffentlicht alle neun Pakete als 0.24.0. Der
+  [Publish-Lauf](https://github.com/sebastian-software/paratix/actions/runs/41302896531)
+  ist erfolgreich, einschließlich Provenance und Context7-Refresh. Trusted Publisher
+  und verpflichtende 2FA ohne Bypass-Tokens sind für alle sieben neuen Pakete eingerichtet.
+  Eine Neuinstallation aus npm auf macOS arm64 hat CLI, Loader, Host-Key-Prüfung,
+  Ed25519-Anmeldung, Löschen des Key-Puffers und Exec gegen einen lokalen Testserver bestätigt.
+  Die befristete Renovate-Regel ist mit [#271](https://github.com/sebastian-software/paratix/pull/271) entfernt.
+
+**Freigegebene Abweichungen:** Der zusätzliche lokale Podman-Lauf wurde in der
+Planung von #257 durch die grüne CI-Integration ersetzt. Die manuellen Real-Host-Läufe
+von macOS arm64 und Linux x64 wurden durch die ausdrückliche
+[Nutzerentscheidung](https://github.com/sebastian-software/paratix/issues/257#issuecomment-6545254672)
+erlassen. Sie wurden nicht durchgeführt und gelten nicht als bestanden. Der lokale
+Installationstest gegen einen Testserver ersetzt keinen Real-Host-Nachweis.
+
+**Weiter offen außerhalb dieses Plans:** Benutzerzertifikate im Controller (#248),
+Host-Zertifikatsprüfung im Controller (#258), die Zielsystem-Module (#249, #250 und
+#251) sowie die dokumentierte Host-Key-Lücke beim Rekey (#260). Epic #252 bleibt
+deshalb offen; diese Folgearbeiten blockieren den abgeschlossenen Transportwechsel nicht.
 
 ## Anforderung
 
@@ -74,7 +111,7 @@ C1 wird in drei aufeinanderfolgenden PRs umgesetzt: Paritätsmatrix, interne Sch
 - C2 muss die rohen Meldungsprüfungen in `isRebootDisconnect` (`modules/system.ts`) und `isRestartDisconnect` (`modules/sshd.ts`) berücksichtigen. C1 erhält `ECONNRESET` und `Connection reset` über den unveränderten Rohfehler; Meldungen des nativen Adapters können abweichen.
 - Die interne Schnittstelle erlaubt zusätzlich eine optionale synchrone Übergabe von Exec-Kanal und SFTP-Sitzung. Sie erhält die bisherigen Tick- und Setup-Invarianten. Aufrufer verarbeiten auch das Promise-Ergebnis und entdoppeln die Übergabe; ein künftiger Adapter darf die optionale Übergabe ignorieren. Gepufferte Daten und Exit bleiben dann vollständig verfügbar.
 
-### Verifizierter Ist-Zustand
+### Verifizierter Ist-Zustand der Planung vom 29. Oktober 2026
 
 **Wo `ssh2` steckt**
 
@@ -489,22 +526,25 @@ Nicht relevant: keine Oberfläche.
 
 ## Akzeptanzkriterien
 
-- [ ] [A] ADR `docs/adr/0008-ssh-transport-russh-napi.md` liegt englisch mit Status „accepted“ vor. Es enthält die Ergebnisse jedes Nachweises aus A.1/A.2 selbst. Jeder harte Nachweis ist bestanden. Jeder weiche ist bestanden oder als Einschränkung begründet.
-- [ ] [B] Die Matrix baut alle sechs Ziele. Der Smoke-Test besteht je Ziel mit dem Artefakt, das veröffentlicht wird. `linux-x64-gnu` besteht zusätzlich in `ubuntu:22.04`. Laut `objdump -T` liegt keine `GLIBC_`-Version über 2.35.
-- [ ] [B] `publish.yml` im Modus `verify` erzeugt neun Tarballs. Jedes Manifest hat `repository`, und die Plattformpakete haben korrekte `os`/`cpu`/`libc`. `@paratix/ssh-native`, `paratix` und `create-paratix` enthalten exakte Versionen statt `workspace:`. Das Manifest im Tarball von `@paratix/ssh-native` listet alle sechs Plattformpakete in `optionalDependencies` mit exakter Release-Version.
-- [ ] [B] Ein Node-Test der Anbindung meldet sich per Agent mit Schlüssel und Benutzerzertifikat an einem Docker-sshd an, der nur `TrustedUserCAKeys` akzeptiert.
-- [ ] [B] In CI sind `rust:check` (fmt, clippy, test, `deny` für Lizenzen, Bans und Quellen) und der Diff-Check von `index.d.ts` grün. Der Advisory-Job existiert und läuft zeitgesteuert.
-- [ ] [C1] Release mit `transport.ts` und `transportSsh2.ts`. Unit-Tests laufen gegen den Transport-Fake. `pnpm --filter paratix test:integration` ist mit der Paritätsmatrix aus C1.4 grün, gegen `ssh2`.
-- [ ] [C2] `pnpm why ssh2 --prod` zeigt weder für `paratix` noch für `create-paratix` einen Eintrag. `transportSsh2.ts` ist gelöscht. In `pnpm-workspace.yaml` stehen `ssh2: false` und `cpu-features: false`.
-- [ ] [C2] `pnpm agent:check`, `pnpm test:integration` und `bash scripts/runPodmanIntegration.sh pnpm agent:check:integration` sind grün. Die Paritätsmatrix aus C1.4 läuft unverändert gegen die Anbindung. Gelöschte oder ersetzte Tests stehen im PR einzeln mit Begründung, mindestens R-0000521.
-- [ ] [C2] Ein Test belegt für ed25519-, RSA- und ECDSA-Hosts: gleicher ausgehandelter Host-Key-Typ wie bei `ssh2`, und `verifiedHostPublicKey` ist byte-gleich.
-- [ ] [C2] `transportNative.test.ts` deckt jeden Fehlercode ab und belegt: Ein vom Verifier geworfener `HostKeyVerificationError` kommt als dasselbe Objekt beim Aufrufer an.
-- [ ] [C2] Ein Test mit überschriebenem `process.platform`/`arch` belegt drei Punkte:
+- [x] [A] ADR `docs/adr/0008-ssh-transport-russh-napi.md` liegt englisch mit Status „accepted“ vor. Es enthält die Ergebnisse jedes Nachweises aus A.1/A.2 selbst. Jeder harte Nachweis ist bestanden. Jeder weiche ist bestanden oder als Einschränkung begründet.
+- [x] [B] Die Matrix baut alle sechs Ziele. Der Smoke-Test besteht je Ziel mit dem Artefakt, das veröffentlicht wird. `linux-x64-gnu` besteht zusätzlich in `ubuntu:22.04`. Laut `objdump -T` liegt keine `GLIBC_`-Version über 2.35.
+- [x] [B] `publish.yml` im Modus `verify` erzeugt neun Tarballs. Jedes Manifest hat `repository`, und die Plattformpakete haben korrekte `os`/`cpu`/`libc`. `@paratix/ssh-native`, `paratix` und `create-paratix` enthalten exakte Versionen statt `workspace:`. Das Manifest im Tarball von `@paratix/ssh-native` listet alle sechs Plattformpakete in `optionalDependencies` mit exakter Release-Version.
+- [x] [B] Ein Node-Test der Anbindung meldet sich per Agent mit Schlüssel und Benutzerzertifikat an einem Docker-sshd an, der nur `TrustedUserCAKeys` akzeptiert.
+- [x] [B] In CI sind `rust:check` (fmt, clippy, test, `deny` für Lizenzen, Bans und Quellen) und der Diff-Check von `index.d.ts` grün. Der Advisory-Job existiert und läuft zeitgesteuert.
+- [x] [C1] Release 0.23.1 mit `transport.ts` und dem damaligen `transportSsh2.ts`. Unit-Tests laufen gegen den Transport-Fake. `pnpm --filter paratix test:integration` ist mit der Paritätsmatrix aus C1.4 grün, gegen `ssh2`.
+- [x] [C2] `pnpm why ssh2 --prod` zeigt weder für `paratix` noch für `create-paratix` einen Eintrag. `transportSsh2.ts` ist gelöscht. In `pnpm-workspace.yaml` stehen `ssh2: false` und `cpu-features: false`.
+- [x] [C2] `pnpm agent:check` ist lokal grün; die Integrationssuite ist im CI-Job `integration-check` grün. Der zusätzliche lokale Podman-Lauf entfällt gemäß der genehmigten Abweichung. Die Paritätsmatrix aus C1.4 läuft unverändert gegen die Anbindung. Gelöschte oder ersetzte Tests stehen im PR einzeln mit Begründung, mindestens R-0000521.
+- [x] [C2] Ein Test belegt für ed25519-, RSA- und ECDSA-Hosts: gleicher ausgehandelter Host-Key-Typ wie bei `ssh2`, und `verifiedHostPublicKey` ist byte-gleich.
+- [x] [C2] `transportNative.test.ts` deckt jeden Fehlercode ab und belegt: Ein vom Verifier geworfener `HostKeyVerificationError` kommt als dasselbe Objekt beim Aufrufer an.
+- [x] [C2] Ein Test mit überschriebenem `process.platform`/`arch` belegt drei Punkte:
   - `import "paratix"` gelingt.
-  - Die CLI bricht vor `prewarmSecrets` mit der dokumentierten Meldung ab.
+  - Der Runner bricht vor `prewarmRunSecrets` mit der dokumentierten Meldung ab.
   - `create-paratix` scaffoldet ohne Scan.
-- [ ] [C2] `generated-project.install.test.ts` ist grün auf einem Commit mit erhöhter, nicht veröffentlichter Version und nutzt dabei das im Arbeitsbaum gebaute Binary.
-- [ ] [C2] Die manuellen Läufe von macOS arm64 und Linux x64 gegen echte Hosts sind im PR mit Datum und Version dokumentiert.
+- [x] [C2] `generated-project.install.test.ts` ist grün auf einem Commit mit erhöhter, nicht veröffentlichter Version und nutzt dabei das im Arbeitsbaum gebaute Binary.
+
+Die ursprünglich geforderten manuellen Real-Host-Läufe sind durch die oben verlinkte
+Nutzerentscheidung entfallen. Sie bleiben manuell unbestätigt und sind kein offenes
+Abnahmekriterium dieses abgeschlossenen Plans.
 
 ## Validierungsplan
 

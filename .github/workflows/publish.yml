@@ -216,8 +216,9 @@ jobs:
       group: npm-publish
       cancel-in-progress: false
     # Nine sequential publishes with provenance, each followed by an
-    # availability wait of up to 24 x 10 s.
-    timeout-minutes: 60
+    # availability wait of up to 90 x 10 s (~15 min). Cover all nine waits
+    # (~135 min) plus checkout, packing, provenance and registry uploads.
+    timeout-minutes: 180
     permissions:
       contents: read
       # npm requests an OIDC token for trusted publishing.
