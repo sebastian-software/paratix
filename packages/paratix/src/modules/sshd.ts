@@ -1437,11 +1437,7 @@ function hasDisconnectedTransportCode(error: unknown): boolean {
 export function isRestartDisconnect(error: unknown): boolean {
   if (hasDisconnectedTransportCode(error)) return true
   const message = error instanceof Error ? error.message : String(error)
-  return (
-    message.includes("SSH connection closed") ||
-    message.includes("ECONNRESET") ||
-    message.includes("Connection reset")
-  )
+  return message.includes("SSH connection closed")
 }
 
 function buildSshdConfigContent(

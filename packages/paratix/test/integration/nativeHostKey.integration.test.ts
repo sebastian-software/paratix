@@ -7,7 +7,6 @@ import type { Transport, TransportConnection, TransportExit } from "../../src/tr
 
 import { extractAlgoFromKey } from "../../src/knownHosts.js"
 import { createNativeTransport } from "../../src/transportNative.js"
-import { createSsh2Transport } from "../../src/transportSsh2.js"
 import { createIntegrationEnvironment, type IntegrationEnvironment } from "./harness.js"
 
 const READY_TIMEOUT_MS = 20_000
@@ -92,9 +91,6 @@ describe.skipIf(!dockerAvailable)("native transport host keys", { concurrent: fa
       const port = environment[profile.port]
       const native = await presentedHostKey(createNativeTransport(), port)
       expect(native).toBe(knownHostKey(profile.type))
-      // PR 2 of #257 removes this ssh2 comparison together with transportSsh2.ts.
-      const ssh2 = await presentedHostKey(createSsh2Transport(), port)
-      expect(native).toBe(ssh2)
     })
   }
 })

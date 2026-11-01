@@ -13,6 +13,11 @@ import type {
 import { clearRegisteredSecrets } from "../../src/secretSink.js"
 import { createTestSignalBus, resetSignalBus, setSignalBus } from "../../src/signalBus.js"
 
+vi.mock("../../src/nativeBinding.js", () => ({
+  assertNativeBindingAvailable: vi.fn().mockResolvedValue(undefined),
+  loadNativeBinding: vi.fn().mockResolvedValue({}),
+}))
+
 let signalBus: TestSignalBus
 const DEFAULT_SSH_PORT = 22
 const DEFAULT_CONFIGURED_PORTS = [DEFAULT_SSH_PORT]

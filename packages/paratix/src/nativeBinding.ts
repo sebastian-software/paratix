@@ -1,8 +1,12 @@
 // Issue #257: the single place that loads the native SSH binding.
 import type * as SshNative from "@paratix/ssh-native"
 
+import { createRequire } from "node:module"
+
+import { NativeBindingUnavailableError } from "./nativeBindingError.js"
+
 /** The public API of `@paratix/ssh-native`: the CommonJS `module.exports` object. */
-export type NativeBinding = (typeof SshNative)["default"]
+export type NativeBinding = Omit<typeof SshNative, "default">
 
 let pendingBinding: Promise<NativeBinding> | undefined
 
@@ -20,6 +24,35 @@ let pendingBinding: Promise<NativeBinding> | undefined
  *   for this platform can be loaded.
  */
 export async function loadNativeBinding(): Promise<NativeBinding> {
-  pendingBinding ??= import("@paratix/ssh-native").then((module) => module.default)
+  pendingBinding ??= import("@paratix/ssh-native").then((module: unknown) => {
+    if (typeof module !== "object" || module === null || !("default" in module)) {
+      throw new TypeError("Native SSH module has no CommonJS default export")
+    }
+    // eslint-disable-next-line @typescript-eslint/no-unsafe-type-assertion -- Node wraps the typed CommonJS API in default; Bundler resolution does not model that wrapper.
+    return module.default as NativeBinding
+  })
   return pendingBinding
+}
+
+/** Check platform support before resolving any playbook secrets. */
+export async function assertNativeBindingAvailable(): Promise<void> {
+  try {
+    await loadNativeBinding()
+  } catch (error) {
+    // Read binary-free loader metadata, without evaluating the package entrypoint.
+    const loader: unknown = createRequire(import.meta.url)("@paratix/ssh-native/loader.js")
+    if (
+      typeof loader !== "object" ||
+      loader === null ||
+      !("SUPPORTED_TARGETS" in loader) ||
+      !Array.isArray(loader.SUPPORTED_TARGETS) ||
+      !loader.SUPPORTED_TARGETS.every((target: unknown) => typeof target === "string")
+    ) {
+      throw new Error("Invalid native SSH loader metadata", { cause: error })
+    }
+    throw new NativeBindingUnavailableError(
+      `Paratix could not load its native SSH binding for platform ${process.platform}, architecture ${process.arch}. Supported targets: ${loader.SUPPORTED_TARGETS.join(", ")}. Linux glibc targets require glibc >= 2.35. See https://github.com/sebastian-software/paratix/blob/main/docs/user-guide/README.md#supported-platforms`,
+      { cause: error }
+    )
+  }
 }

@@ -210,7 +210,7 @@ function resolvePayloadOffset(
  * (truncated, wrong curve, point off-curve) before pinning a fingerprint
  * keeps create-paratix from anchoring trust to garbage.
  *
- * @param keyBuffer - Raw host-key wire blob as received from ssh2.
+ * @param keyBuffer - Raw SSH host-key wire blob.
  * @param algorithm - Algorithm label already validated against the allowlist.
  * @param payloadOffsetHint - Optional offset from a caller that already
  *   parsed the algorithm wire field (R-0000733). When provided it must

@@ -141,7 +141,6 @@ export default server({
     user: "root",
     ports: [22, 22022], // Ports werden der Reihe nach durchprobiert
     privateKey: "~/.ssh/id_ed25519",
-    passwordFallback: true, // bei Key-Fehler interaktiv nach Passwort fragen
   },
 
   env: {
@@ -336,24 +335,30 @@ ssh: {
   user: "root",
   ports: [22, 22022],
   privateKey: "~/.ssh/id_ed25519",
-  passwordFallback: true,
   sudoPassword: "...",       // optional, fuer non-root User
 }
 ```
 
 ### Authentifizierung
 
-Paratix authentifiziert sich bevorzugt per **SSH-Key**. Der Pfad zum privaten
-Schlüssel wird in der Serverdefinition angegeben (`privateKey`). Mit
-`passwordFallback: true` wird der Benutzer interaktiv im Terminal nach dem
-Passwort gefragt, falls die Key-Authentifizierung fehlschlägt — z.B. bei der
-Ersteinrichtung eines frischen Servers, auf dem der eigene Key noch nicht
-hinterlegt ist. Passwörter werden nicht in der Serverdefinition gespeichert.
+Mit `privateKey` authentifiziert sich Paratix ausschließlich über die angegebene
+Key-Datei. Ein abgelehnter Key führt nicht zu einer Passwortabfrage.
+`privateKey` zusammen mit `passwordFallback: true` oder `agentForward: true`
+wird bei der Validierung abgelehnt.
 
-Reihenfolge der Authentifizierung:
+Ohne `privateKey` verwendet Paratix den Agent aus `SSH_AUTH_SOCK`. Mit
+`passwordFallback: true` folgt nach einem gescheiterten Agent-Login oder bei
+fehlendem Agent eine interaktive Passwortabfrage; dieser Versuch verwendet
+keinen Agent. `agentForward: true` setzt dagegen einen funktionierenden Agent
+und erfolgreichen Agent-Login voraus. Fehlt der Agent oder scheitert er,
+bricht der Lauf ohne Passwortabfrage ab.
 
-1. Key-basiert (`privateKey`)
-2. Interaktive Passwortabfrage im Terminal (falls `passwordFallback: true`)
+Key-Dateien müssen unverschlüsselter PEM-/OpenSSH-Text für Ed25519, RSA oder
+ECDSA sein. Verschlüsselte Dateien (`ENCRYPTED_KEY`), DSA, hardwaregebundene
+`sk-*`-Dateien und nicht unterstützte oder beschädigte Formate
+(`UNSUPPORTED_KEY`) beenden den ersten Versuch ohne weitere Ports oder
+Reconnect-Versuche. Verschlüsselte Schlüssel können über einen Agent genutzt
+werden; dann entfällt `privateKey`.
 
 ### Sudo (Privilege Escalation)
 
@@ -1010,15 +1015,24 @@ zwei Netzwerke hinweg gesplittet (ADR-0006).
 
 ### SSH-Library
 
-Paratix nutzt `ssh2` (npm) fuer die SSH-Verbindung. Die Library bietet volle
-Kontrolle ueber Connections, SFTP, Streaming und Reconnect-Logik. Die
-`SshConnection`-API mappt direkt auf `ssh2`-Primitiven.
+Paratix nutzt `@paratix/ssh-native`, eine native russh-Anbindung, über die
+Transport-Schnittstelle. `ssh2` bleibt nur als Test-Gegenstelle in den
+Entwicklungsabhängigkeiten. Unterstützte Controller sind Linux x64/arm64 mit
+glibc ab 2.35 oder musl und macOS x64/arm64 ab 13.5; Windows wird nicht
+unterstützt. Veröffentlichte Pakete enthalten vorkompilierte Binärdateien;
+Rust wird nur für Beiträge und Builds aus dem Repository benötigt.
+
+Der Runner prüft die Anbindung vor dem Auflösen der Playbook-Secrets.
+Import, `--help` und `--version` laden sie nicht. Native Fehlertexte enthalten
+`[CODE]`; nach anderen Verbindungsfehlern über alle Ports endet die Meldung
+mit `; last error on port <p>: <native message> [<CODE>]`.
+Aktuelle Details stehen im [User Guide](./user-guide/README.md#supported-platforms).
 
 ### SSH: Connection-Modell
 
 Eine einzelne persistente SSH-Verbindung pro Run. Sequenzielle Ausfuehrung
 benoetigt keine parallelen Connections. Die `SshConnection`-Klasse kapselt
-eine `ssh2`-Connection mit integrierter Reconnect-Logik.
+eine native SSH-Session mit integrierter Reconnect-Logik.
 
 ### SSH: Reconnect-Backoff
 
@@ -1356,7 +1370,7 @@ interface SshConfig {
   ports: number[]
   /** Private-Key-Pfad. Optional; ohne Wert nutzt Paratix SSH_AUTH_SOCK. */
   privateKey?: string
-  /** Lokalen SSH-Agent an die Remote-Session weiterreichen. */
+  /** Agent weiterreichen; nur ohne privateKey und mit funktionierendem Agent-Login. */
   agentForward?: boolean
   /** Erwarteter SHA256-Host-Fingerprint als Trust Anchor. */
   expectedHostFingerprint?: string
@@ -1364,6 +1378,7 @@ interface SshConfig {
   expectedHostPublicKey?: string
   /** Host-Key-Prüfung: "yes" ist Default, "accept-new" ist explizites TOFU. */
   strictHostKeyChecking?: "accept-new" | "no" | "yes"
+  /** Passwortabfrage nach Agent-Fehler; nicht zusammen mit privateKey. */
   passwordFallback?: boolean
   reconnectTimeout?: number
   maxReconnectAttempts?: number

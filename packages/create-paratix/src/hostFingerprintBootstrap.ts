@@ -1,16 +1,26 @@
+import type { HostKeyInfo, ScanOptions } from "@paratix/ssh-native"
+
 import { createHash } from "node:crypto"
-import { Client, type ConnectConfig } from "ssh2"
 
 import { validateHostKeyBlob } from "./hostKeyBlobValidation.js"
 
-type HostKeyClient = Pick<Client, "connect" | "end" | "on" | "removeAllListeners">
-type HostKeyClientFactory = () => HostKeyClient
+export type HostKeyScanner = (options: ScanOptions) => Promise<HostKeyInfo>
 
 type HostFingerprintBootstrapOptions = {
-  allowSsh2HostKeyScan?: boolean
-  clientFactory?: HostKeyClientFactory
+  allowHostKeyScan?: boolean
   port?: number
-  readyTimeoutMs?: number
+  scanner?: HostKeyScanner
+  signal?: AbortSignal
+  timeoutMs?: number
+}
+
+let pendingScanner: Promise<HostKeyScanner> | undefined
+
+export async function loadHostKeyScanner(): Promise<HostKeyScanner> {
+  // The native package is CommonJS. Loading is deferred until a live scan
+  // is offered, so importing the generator also works without a binary.
+  pendingScanner ??= import("@paratix/ssh-native").then((module) => module.default.scan)
+  return pendingScanner
 }
 
 // R-0000123: callers need both the algorithm and the fingerprint so an
@@ -22,12 +32,12 @@ export type HostFingerprintScanResult = {
 }
 
 const DEFAULT_HOST_FINGERPRINT_PORT = 22
-const DEFAULT_READY_TIMEOUT_MS = 10_000
+const DEFAULT_SCAN_TIMEOUT_MS = 10_000
 const SSH_KEY_ALGO_LENGTH_FIELD_BYTES = 4
 
 // R-0000128: ssh-rsa is intentionally absent from this allowlist. The wire
 // blob alone does not let us cheaply enforce a 2048-bit modulus floor in a
-// pre-handshake host-verifier callback while keeping the validation logic
+// host-key scan while keeping the validation logic
 // minimal, and modern Linux distributions ship ed25519 host keys by default.
 // Operators who must pin an RSA host key should pass --expected-host-fingerprint
 // with an out-of-band verified value instead. This is a breaking change for
@@ -106,248 +116,51 @@ function computeFingerprint(key: Buffer): string {
 
 function toError(error: unknown, host: string, port: number): Error {
   const message = error instanceof Error ? error.message : String(error)
-  return new Error(`Failed to read the host key from ${host}:${port}: ${message}`)
+  return new Error(`Failed to read the host key from ${host}:${port}: ${message}`, { cause: error })
 }
 
-function createConnectionConfig(parameters: {
-  captureHostVerifierError: (error: unknown) => void
-  captureScanResult: (result: HostFingerprintScanResult) => void
-  host: string
-  port: number
-  readyTimeoutMs: number
-}): ConnectConfig {
-  const { captureHostVerifierError, captureScanResult, host, port, readyTimeoutMs } = parameters
-  return {
-    host,
-    hostVerifier(key: Buffer): boolean {
-      const buffer = Buffer.from(key)
-      try {
-        // R-0000123: capture the algorithm name alongside the fingerprint so
-        // the interactive prompt can show both values to the operator.
-        // R-0000733: extractHostKeyAlgorithm also returns the wire offset
-        // that follows the algorithm field, so validateHostKeyBlob can
-        // consume the authoritative position instead of recomputing it
-        // from the algorithm string length.
-        const { algorithm, nextOffset } = assertSupportedHostKeyAlgorithm(buffer)
-        // R-0000128: an algorithm label alone proves nothing — a MITM can
-        // ship arbitrary bytes after the label. Reject malformed wire
-        // payloads (truncated, wrong curve, point off-curve) before we
-        // pin a fingerprint computed over them.
-        validateHostKeyBlob(buffer, algorithm, nextOffset)
-        captureScanResult({ algorithm, fingerprint: computeFingerprint(buffer) })
-      } catch (error) {
-        captureHostVerifierError(error)
-      }
-      return false
-    },
-    port,
-    readyTimeout: readyTimeoutMs,
-    username: "paratix-hostkey-scan",
+function validateScanResult(info: HostKeyInfo): HostFingerprintScanResult {
+  if (info.kind !== "key") {
+    throw new Error("Refusing to capture host fingerprint: SSH host certificates are unsupported.")
   }
-}
-
-function resolveBootstrapOptions(options: HostFingerprintBootstrapOptions): {
-  client: HostKeyClient
-  port: number
-  readyTimeoutMs: number
-} {
-  const clientFactory = options.clientFactory ?? (() => new Client())
-  return {
-    client: clientFactory(),
-    port: options.port ?? DEFAULT_HOST_FINGERPRINT_PORT,
-    readyTimeoutMs: options.readyTimeoutMs ?? DEFAULT_READY_TIMEOUT_MS,
+  const buffer = Buffer.from(info.keyBase64, "base64")
+  const { algorithm, nextOffset } = assertSupportedHostKeyAlgorithm(buffer)
+  // R-0000128: an algorithm label alone proves nothing. Validate the raw
+  // wire blob before trusting either the label or its fingerprint.
+  validateHostKeyBlob(buffer, algorithm, nextOffset)
+  if (algorithm !== info.algorithm) {
+    throw new Error("SSH host key algorithm does not match the scanned key blob.")
   }
-}
-
-function cleanupClient(client: HostKeyClient): void {
-  // R-0000187: removeAllListeners drops the original error listener. If
-  // client.end() then synchronously or asynchronously emits an error event
-  // (half-closed socket, ssh2-layer throw), Node treats it as an uncaught
-  // error and crashes the process. Install a no-op error listener first so
-  // the cleanup path always has a sink for late error events.
-  client.removeAllListeners()
-  client.on("error", () => {
-    // Swallow late errors emitted while shutting the connection down — at
-    // this point the fingerprint promise has already settled.
-  })
-  try {
-    client.end()
-  } catch {
-    // best-effort cleanup
+  const fingerprint = computeFingerprint(buffer)
+  if (fingerprint !== info.fingerprintSha256) {
+    throw new Error("SSH host key fingerprint does not match the scanned key blob.")
   }
+  return { algorithm, fingerprint }
 }
 
-function createSettlementHandlers(parameters: {
-  cleanup: () => void
-  host: string
-  port: number
-  reject: (reason: Error) => void
-  resolve: (result: HostFingerprintScanResult) => void
-}): {
-  rejectOnce: (error: unknown) => void
-  resolveOnce: (result: HostFingerprintScanResult) => void
-} {
-  const { cleanup, host, port, reject, resolve } = parameters
-  let settled = false
-
-  return {
-    rejectOnce(error: unknown): void {
-      if (settled) return
-      settled = true
-      cleanup()
-      reject(toError(error, host, port))
-    },
-    resolveOnce(result: HostFingerprintScanResult): void {
-      if (settled) return
-      settled = true
-      cleanup()
-      resolve(result)
-    },
-  }
-}
-
-function registerFingerprintListeners(parameters: {
-  client: HostKeyClient
-  onHostVerifierError: () => unknown
-  onScanResult: () => HostFingerprintScanResult | null
-  rejectOnce: (error: unknown) => void
-  resolveOnce: (result: HostFingerprintScanResult) => void
-}): void {
-  const { client, onHostVerifierError, onScanResult, rejectOnce, resolveOnce } = parameters
-
-  client.on("close", () => {
-    const hostVerifierError = onHostVerifierError()
-    if (hostVerifierError != null) {
-      rejectOnce(hostVerifierError)
-      return
-    }
-
-    const capturedResult = onScanResult()
-    if (capturedResult != null) {
-      resolveOnce(capturedResult)
-    }
-  })
-
-  client.on("error", (error: unknown) => {
-    const hostVerifierError = onHostVerifierError()
-    if (hostVerifierError != null) {
-      rejectOnce(hostVerifierError)
-      return
-    }
-
-    const capturedResult = onScanResult()
-    if (capturedResult != null) {
-      resolveOnce(capturedResult)
-      return
-    }
-    rejectOnce(error)
-  })
-}
-
-/**
- * Arm the connect/half-open watchdogs that guarantee the fingerprint Promise
- * always settles.
- *
- * R-0000127: ssh2 does not emit `error`/`close` for a half-open TCP socket,
- * so we fall back to a timer at twice the readyTimeoutMs.
- *
- * R-0000188: ssh2's `readyTimeout` only covers the SSH handshake phase, not
- * the TCP connect itself. A dropped TCP `SYN` would otherwise hang the
- * connect call until the OS default (~75–180 s). We arm an explicit TCP
- * connect timeout at `readyTimeoutMs` so connect failures surface promptly.
- * Neither watchdog uses `unref()` — the cleanup path explicitly clears them
- * once the promise settles, so they are guaranteed to participate in keeping
- * the event loop alive until that happens.
- *
- * @param parameters - Watchdog configuration.
- * @param parameters.readyTimeoutMs - The ssh2 ready timeout in milliseconds.
- * @param parameters.rejectOnce - Idempotent rejection callback.
- * @returns A cleanup function that disarms both watchdogs.
- */
-function armHalfOpenWatchdog(parameters: {
-  readyTimeoutMs: number
-  rejectOnce: (error: unknown) => void
-}): () => void {
-  const { readyTimeoutMs, rejectOnce } = parameters
-  const tcpConnectTimeout: NodeJS.Timeout = setTimeout(() => {
-    rejectOnce(
-      new Error(
-        `host key scan TCP connect timed out after ${String(readyTimeoutMs)}ms (no SYN-ACK?)`
-      )
-    )
-  }, readyTimeoutMs)
-  const halfOpenWatchdog: NodeJS.Timeout = setTimeout(() => {
-    rejectOnce(
-      new Error(`host key scan timed out after ${String(readyTimeoutMs * 2)}ms (TCP half-open?)`)
-    )
-  }, readyTimeoutMs * 2)
-  return () => {
-    clearTimeout(tcpConnectTimeout)
-    clearTimeout(halfOpenWatchdog)
-  }
-}
-
-async function readFingerprintFromClient(
-  client: HostKeyClient,
-  parameters: { host: string; port: number; readyTimeoutMs: number }
-): Promise<HostFingerprintScanResult> {
-  const { host, port, readyTimeoutMs } = parameters
-  let capturedResult: HostFingerprintScanResult | null = null
-  let hostVerifierError: unknown = null
-
-  return new Promise((resolve, reject) => {
-    let disarmWatchdog: (() => void) | null = null
-    const cleanup = (): void => {
-      disarmWatchdog?.()
-      disarmWatchdog = null
-      cleanupClient(client)
-    }
-    const { rejectOnce, resolveOnce } = createSettlementHandlers({
-      cleanup,
-      host,
-      port,
-      reject,
-      resolve,
-    })
-    disarmWatchdog = armHalfOpenWatchdog({ readyTimeoutMs, rejectOnce })
-    registerFingerprintListeners({
-      client,
-      onHostVerifierError: () => hostVerifierError,
-      onScanResult: () => capturedResult,
-      rejectOnce,
-      resolveOnce,
-    })
-
-    try {
-      client.connect(
-        createConnectionConfig({
-          captureHostVerifierError(error) {
-            hostVerifierError = error
-          },
-          captureScanResult(result) {
-            capturedResult = result
-          },
-          host,
-          port,
-          readyTimeoutMs,
-        })
-      )
-    } catch (error) {
-      rejectOnce(error)
-    }
-  })
-}
-
-export async function readHostFingerprintViaSsh2(
+export async function readHostFingerprint(
   host: string,
   options: HostFingerprintBootstrapOptions = {}
 ): Promise<HostFingerprintScanResult> {
-  if (options.allowSsh2HostKeyScan !== true) {
+  if (options.allowHostKeyScan !== true) {
     throw new Error(
-      "Refusing to start ssh2 host-key scan without explicit opt-in. " +
-        "Pass allowSsh2HostKeyScan: true only after the operator requested a live SSH scan."
+      "Refusing to start host-key scan without explicit opt-in. " +
+        "Pass allowHostKeyScan: true only after the operator requested a live SSH scan."
     )
   }
-  const { client, port, readyTimeoutMs } = resolveBootstrapOptions(options)
-  return readFingerprintFromClient(client, { host, port, readyTimeoutMs })
+  const port = options.port ?? DEFAULT_HOST_FINGERPRINT_PORT
+  try {
+    const scanner = options.scanner ?? (await loadHostKeyScanner())
+    // R-0000127, R-0000188: the native deadline covers both TCP and the
+    // handshake, and cancellation belongs to the native operation itself.
+    const info = await scanner({
+      host,
+      port,
+      signal: options.signal,
+      timeoutMs: options.timeoutMs ?? DEFAULT_SCAN_TIMEOUT_MS,
+    })
+    return validateScanResult(info)
+  } catch (error) {
+    throw toError(error, host, port)
+  }
 }

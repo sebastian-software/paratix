@@ -1,8 +1,6 @@
-import type { Client, ConnectConfig } from "ssh2"
-
 import { generateKeyPairSync } from "node:crypto"
 import { readFileSync } from "node:fs"
-import { expect, type Mock, vi } from "vitest"
+import { expect } from "vitest"
 
 const UINT32_BYTE_LENGTH = 4
 const BITS_PER_BYTE = 8
@@ -190,71 +188,6 @@ export function buildEcdsaPointFromGeneratedKey(jwkCurveName: "P-256" | "P-384" 
     decodeBase64Url(jwk.x),
     decodeBase64Url(jwk.y),
   ])
-}
-
-type FakeHostKeyClientHandler = (error?: Error) => void
-type FakeHostKeyClientConnect = (config: ConnectConfig) => Client
-type FakeHostKeyClientEmit = (event: string, error?: Error) => boolean
-type FakeHostKeyClientEnd = () => Client
-type FakeHostKeyClientOn = (event: string, handler: FakeHostKeyClientHandler) => Client
-type FakeHostKeyClientRemoveAllListeners = (event?: string) => Client
-
-export type FakeHostKeyClient = {
-  connect: Mock<FakeHostKeyClientConnect>
-  emit: Mock<FakeHostKeyClientEmit>
-  end: Mock<FakeHostKeyClientEnd>
-  handlers: Record<string, FakeHostKeyClientHandler[]>
-  on: Mock<FakeHostKeyClientOn>
-  removeAllListeners: Mock<FakeHostKeyClientRemoveAllListeners>
-}
-
-export function createFakeHostKeyClient(
-  connectImplementation: (config: ConnectConfig, client: FakeHostKeyClient) => void
-): FakeHostKeyClient {
-  const fakeClient: FakeHostKeyClient = {
-    connect: vi.fn<FakeHostKeyClientConnect>((config) => {
-      connectImplementation(config, fakeClient)
-      return fakeClient as unknown as Client
-    }),
-    emit: vi.fn<FakeHostKeyClientEmit>((event, error) => {
-      const listeners = [...(fakeClient.handlers[event] ?? [])]
-      if (listeners.length === 0) {
-        if (event === "error" && error !== undefined) throw error
-        return false
-      }
-      for (const handler of listeners) {
-        handler(error)
-      }
-      return true
-    }),
-    end: vi.fn<FakeHostKeyClientEnd>(() => fakeClient as unknown as Client),
-    handlers: {},
-    on: vi.fn<FakeHostKeyClientOn>((event, handler) => {
-      fakeClient.handlers[event] ??= []
-      fakeClient.handlers[event].push(handler)
-      return fakeClient as unknown as Client
-    }),
-    removeAllListeners: vi.fn<FakeHostKeyClientRemoveAllListeners>((event) => {
-      if (event === undefined) {
-        fakeClient.handlers = {}
-      } else {
-        fakeClient.handlers[event] = []
-      }
-      return fakeClient as unknown as Client
-    }),
-  }
-
-  return fakeClient
-}
-
-export function useFakeHostKeyClient(fakeClient: FakeHostKeyClient): Client {
-  return fakeClient as unknown as Client
-}
-
-export function callHostVerifier(config: ConnectConfig, key: Buffer): boolean | undefined {
-  const hostVerifier = config.hostVerifier as ((key: Buffer) => boolean | undefined) | undefined
-  const verdict = hostVerifier?.(key)
-  return typeof verdict === "boolean" ? verdict : undefined
 }
 
 export async function expectProcessExit(

@@ -64,11 +64,7 @@ function hasDisconnectedTransportCode(error: unknown): boolean {
 export function isRebootDisconnect(error: unknown): boolean {
   if (hasDisconnectedTransportCode(error)) return true
   const message = error instanceof Error ? error.message : String(error)
-  return (
-    message.includes("SSH connection closed") ||
-    message.includes("ECONNRESET") ||
-    message.includes("Connection reset")
-  )
+  return message.includes("SSH connection closed")
 }
 
 /**
@@ -85,10 +81,9 @@ async function triggerReboot(ssh: SshConnection): Promise<ModuleResult | null> {
       return failedCommand("[system.reboot] shutdown -r now failed", result)
     }
   } catch (error) {
-    // Many systems tear down the SSH session before the exec callback
-    // returns with exit code 0, surfacing as an SSH disconnect error in
-    // ssh2. Treat such disconnects as a successful reboot trigger so the
-    // runner still receives the system.reboot meta and can reconnect.
+    // Many systems tear down the SSH session before exec returns exit code
+    // 0, surfacing as a transport disconnect. Treat it as a successful reboot
+    // trigger so the runner receives system.reboot meta and can reconnect.
     if (!isRebootDisconnect(error)) {
       const message = error instanceof Error ? error.message : String(error)
       return failed(`[system.reboot] shutdown -r now failed\n${message}`)

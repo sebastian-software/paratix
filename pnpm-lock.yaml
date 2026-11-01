@@ -202,16 +202,13 @@ importers:
 
   packages/create-paratix:
     dependencies:
-      ssh2:
-        specifier: ^1.16.0
-        version: 1.17.0
+      '@paratix/ssh-native':
+        specifier: workspace:*
+        version: link:../ssh-native
     devDependencies:
       '@types/node':
         specifier: 24.19.2
         version: 24.19.2
-      '@types/ssh2':
-        specifier: ^1.15.6
-        version: 1.15.6
       tsup:
         specifier: ^8.4.0
         version: 8.5.1(@typescript/typescript6@6.0.2)(jiti@2.7.0)(postcss@8.5.30)(supports-color@10.2.2)(tsx@4.23.15)(yaml@2.9.0)
@@ -224,22 +221,19 @@ importers:
 
   packages/paratix:
     dependencies:
+      '@paratix/ssh-native':
+        specifier: workspace:*
+        version: link:../ssh-native
       commander:
         specifier: ^15.0.0
         version: 15.0.0
       picocolors:
         specifier: ^1.1.1
         version: 1.1.1
-      ssh2:
-        specifier: ^1.16.0
-        version: 1.17.0
       tsx:
         specifier: ^4.23.15
         version: 4.23.15
     devDependencies:
-      '@paratix/ssh-native':
-        specifier: workspace:*
-        version: link:../ssh-native
       '@types/node':
         specifier: 24.19.2
         version: 24.19.2
@@ -249,6 +243,9 @@ importers:
       '@vitest/coverage-v8':
         specifier: 5.0.4
         version: 5.0.4(vitest@5.0.4)
+      ssh2:
+        specifier: ^1.16.0
+        version: 1.17.0
       tsup:
         specifier: ^8.4.0
         version: 8.5.1(@typescript/typescript6@6.0.2)(jiti@2.7.0)(postcss@8.5.30)(supports-color@10.2.2)(tsx@4.23.15)(yaml@2.9.0)

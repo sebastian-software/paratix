@@ -38,10 +38,10 @@ const { attempts, closeTransport, connectTransport } = vi.hoisted(() => ({
   closeTransport: vi.fn(),
   connectTransport: vi.fn<(options: TransportConnectOptions) => Promise<void>>(),
 }))
-vi.mock("../src/transportSsh2.js", async () => {
+vi.mock("../src/transportNative.js", async () => {
   const { FakeTransportConnection: ConnectionFake } = await import("./helpers/fakeTransport.js")
   return {
-    createSsh2Transport() {
+    createNativeTransport() {
       const connection = new ConnectionFake({
         onClose: closeTransport,
         onConnect: connectTransport,
@@ -210,6 +210,7 @@ function makeSshInstance(
   overrides: {
     host?: string
     maxReconnectAttempts?: number
+    passwordFallback?: boolean
     ports?: number[]
     reconnectTimeout?: number
     user?: string
@@ -217,6 +218,7 @@ function makeSshInstance(
 ): SshConnectionImpl {
   const config = {
     maxReconnectAttempts: overrides.maxReconnectAttempts,
+    passwordFallback: overrides.passwordFallback,
     ports: overrides.ports ?? [22],
     privateKey: "/dev/null",
     reconnectTimeout: overrides.reconnectTimeout,
@@ -1138,7 +1140,7 @@ describe("SshConnectionImpl", () => {
       // R-0000039 / R-0000198: a rejected connect attempt owns its cleanup.
       // The policy must create one transport per port and must not close an
       // already-released failed connection. Raw listener and socket cleanup
-      // is covered by the adapter tests in transportSsh2.test.ts.
+      // is covered by the adapter tests in transportNative.test.ts.
       vi.useFakeTimers()
       vi.mocked(connectTransport).mockImplementation(async () => {
         // The fake destroys its connection on rejection, matching the adapter's
@@ -1467,7 +1469,7 @@ describe("SshConnectionImpl", () => {
     })
 
     it("connects on second attempt when agent-only fails and passwordFallback is true", async () => {
-      // Arrange: first call (agent-only) rejects, second call (agent + password) resolves
+      // Arrange: first call (agent-only) rejects, second call (password-only) resolves
       vi.mocked(connectTransport)
         .mockRejectedValueOnce(new Error("Agent auth failed"))
         .mockResolvedValueOnce()
@@ -1486,7 +1488,7 @@ describe("SshConnectionImpl", () => {
         Parameters<typeof connectTransport>,
       ]
       expect(secondCallArgs[0].password).toBe("secret-password")
-      expect(secondCallArgs[0].agent).toBe(AGENT_SOCKET)
+      expect(secondCallArgs[0].agent).toBeUndefined()
       expect(promptTerminal).toHaveBeenCalledOnce()
     })
 
@@ -1554,7 +1556,7 @@ describe("SshConnectionImpl", () => {
       )
       // Prompt must have been shown once (fallback was attempted)
       expect(promptTerminal).toHaveBeenCalledOnce()
-      // Both agent-only and agent+password attempts must have been made
+      // Both agent-only and password-only attempts must have been made
       expect(connectTransport).toHaveBeenCalledTimes(2)
     })
 
@@ -1574,6 +1576,130 @@ describe("SshConnectionImpl", () => {
       // Only one attempt (no fallback)
       expect(connectTransport).toHaveBeenCalledTimes(1)
     })
+  })
+
+  describe("native authentication policy (#257)", () => {
+    it("does not prompt after a configured private key is rejected", async () => {
+      connectTransport.mockRejectedValue(
+        new TransportError("AUTH_FAILED", new Error("Key rejected [AUTH_FAILED]"))
+      )
+      const ssh = makeSshInstance({ passwordFallback: true })
+      await expect(ssh.connect()).rejects.toThrow("Key rejected [AUTH_FAILED]")
+      expect(promptTerminal).not.toHaveBeenCalled()
+      expect(connectTransport).toHaveBeenCalledOnce()
+    })
+
+    it.each(["ENCRYPTED_KEY", "UNSUPPORTED_KEY"] as const)(
+      "stops immediately for %s, including reconnect",
+      async (code) => {
+        const failure = new TransportError(code, new Error(`Cannot read key [${code}]`))
+        connectTransport.mockRejectedValue(failure)
+        const ssh = makeSshInstance({ ports: [22, 2222] })
+        await expect(ssh.connect()).rejects.toBe(failure)
+        expect(connectTransport).toHaveBeenCalledOnce()
+        connectTransport.mockClear()
+        await expect(ssh.reconnect()).rejects.toBe(failure)
+        expect(connectTransport).toHaveBeenCalledOnce()
+        expect(promptTerminal).not.toHaveBeenCalled()
+      }
+    )
+
+    it("keeps the original key readable through all ports and scrubs it after success", async () => {
+      const { readFile } = await import("node:fs/promises")
+      const original = Buffer.from("private-key-material")
+      vi.mocked(readFile).mockResolvedValueOnce(original)
+      connectTransport
+        .mockImplementationOnce(async (options) => {
+          expect(options.privateKey).toStrictEqual(Buffer.from("private-key-material"))
+          await Promise.resolve()
+          throw new TransportError(
+            "CONNECT_FAILED",
+            new Error("Connection refused [CONNECT_FAILED]")
+          )
+        })
+        .mockImplementationOnce(async (options) => {
+          expect(options.privateKey).toStrictEqual(Buffer.from("private-key-material"))
+          await Promise.resolve()
+        })
+      await makeSshInstance({ ports: [22, 2222] }).connect()
+      expect(original).toStrictEqual(Buffer.alloc(original.length))
+    })
+
+    it.each([undefined, "", "/missing/agent.sock"])(
+      "rejects forwarding without a usable agent (%s) before ports or prompt",
+      async (socket) => {
+        vi.stubEnv("SSH_AUTH_SOCK", socket)
+        vi.mocked(stat).mockRejectedValueOnce(new Error("ENOENT"))
+        try {
+          await expect(
+            makeSshInstanceWithAgent({ agentForward: true, passwordFallback: true }).connect()
+          ).rejects.toThrow("agentForward requires authentication through an SSH agent")
+          expect(connectTransport).not.toHaveBeenCalled()
+          expect(promptTerminal).not.toHaveBeenCalled()
+        } finally {
+          vi.unstubAllEnvs()
+        }
+      }
+    )
+
+    it("rejects forwarding before prompting after a failed agent login", async () => {
+      vi.stubEnv("SSH_AUTH_SOCK", "/working/agent.sock")
+      connectTransport.mockRejectedValueOnce(
+        new TransportError("AUTH_FAILED", new Error("Agent rejected [AUTH_FAILED]"))
+      )
+      try {
+        await expect(
+          makeSshInstanceWithAgent({ agentForward: true, passwordFallback: true }).connect()
+        ).rejects.toThrow("agentForward requires authentication through an SSH agent")
+        expect(connectTransport).toHaveBeenCalledOnce()
+        expect(promptTerminal).not.toHaveBeenCalled()
+      } finally {
+        vi.unstubAllEnvs()
+      }
+    })
+
+    it.each([
+      {
+        create: () => makeSshInstance({ ports: [22, 2222] }),
+        method: "key",
+        prefix: "Failed to connect to 1.2.3.4 on ports: 22, 2222",
+        socket: undefined,
+      },
+      {
+        create: () => makeSshInstanceWithAgent({ ports: [22, 2222] }),
+        method: "agent",
+        prefix: "Could not connect to 1.2.3.4 via SSH agent on ports 22, 2222",
+        socket: "/working/agent.sock",
+      },
+      {
+        create: () => makeSshInstanceWithAgent({ passwordFallback: true, ports: [22, 2222] }),
+        method: "password",
+        prefix:
+          "No SSH agent (SSH_AUTH_SOCK is not set) and password authentication failed for root@1.2.3.4",
+        socket: undefined,
+      },
+    ])(
+      "preserves the failure prefix and last port cause for $method authentication",
+      async ({ create, prefix, socket }) => {
+        const first = new Error("First port refused [CONNECT_FAILED]")
+        const last = new Error("Last port timed out [TIMEOUT]")
+        connectTransport
+          .mockRejectedValueOnce(new TransportError("CONNECT_FAILED", first))
+          .mockRejectedValueOnce(new TransportError("TIMEOUT", last))
+        vi.mocked(promptTerminal).mockResolvedValueOnce("login-password")
+        vi.stubEnv("SSH_AUTH_SOCK", socket)
+        try {
+          const ssh = create()
+          const error = await expectRejectedError(ssh.connect())
+          expect(error.message).toBe(
+            `${prefix}; last error on port 2222: Last port timed out [TIMEOUT]`
+          )
+          expect(error.cause).toBe(last)
+        } finally {
+          vi.unstubAllEnvs()
+        }
+      }
+    )
   })
 
   // -------------------------------------------------------------------------
@@ -1601,12 +1727,9 @@ describe("SshConnectionImpl", () => {
       expect(calledOptions).toBeUndefined()
     })
 
-    // R-0000521: ssh2 retains an internal reference to the private key Buffer
-    // for re-key / reconnect operations. Zeroing the buffer in the success path
-    // would corrupt ssh2's internal state. The buffer is only zeroed on the
-    // error path — see the corresponding error-path test below.
-    it("does NOT zero the private key Buffer after a successful connection (finally-block)", async () => {
-      // R-0000521: the transport retains this key buffer for the live connection.
+    // R-0000521: native transport copies each key before connecting, so the
+    // original can be scrubbed after success as well as after failure.
+    it("zeroes the private key Buffer after a successful connection", async () => {
       // Arrange
       const { readFile } = await import("node:fs/promises")
       const fakeKeyBuffer = Buffer.from("sensitive-private-key")
@@ -1618,9 +1741,7 @@ describe("SshConnectionImpl", () => {
       // Act
       await ssh.connect()
 
-      // Assert: buffer must NOT be zeroed in the success path — ssh2 needs the
-      // reference intact for re-keying and reconnect operations.
-      expect(fakeKeyBuffer.every((byte) => byte === 0)).toBe(false)
+      expect(fakeKeyBuffer.every((byte) => byte === 0)).toBe(true)
     })
 
     it("zeroes the private key Buffer even when the connection fails (finally-block on error)", async () => {

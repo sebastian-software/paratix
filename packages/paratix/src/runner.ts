@@ -20,6 +20,7 @@ import {
   isSystemRebootMetaEntry,
   mergeEnvironmentFromMeta,
 } from "./meta.js"
+import { assertNativeBindingAvailable } from "./nativeBinding.js"
 import {
   printCommandFailure,
   printInfoLine,
@@ -129,7 +130,7 @@ function performShutdownBestEffortCleanup(): void {
 /**
  * Last-resort cleanup for the process-level `unhandledRejection` /
  * `uncaughtException` handlers in `cli.ts`. A promise rejection escaping an
- * ssh2 event callback never reaches {@link teardownPlaybookResources} or the
+ * SSH event callback never reaches {@link teardownPlaybookResources} or the
  * signal path, so without this hook the terminal can stay in raw mode / with a
  * hidden cursor, registered secrets stay in the sink, and the underlying
  * socket is never destroyed before `process.exit`.
@@ -137,8 +138,8 @@ function performShutdownBestEffortCleanup(): void {
  * It reuses the exact same building blocks as the second-SIGINT teardown:
  * {@link performShutdownBestEffortCleanup} restores the terminal and clears
  * secrets, and every registered SSH connection is force-destroyed
- * synchronously so no ssh2 callback survives the imminent exit. Each step is
- * best-effort and the registry is drained so a second invocation is a no-op.
+ * synchronously so no deferred transport cleanup is needed after exit. Each
+ * step is best-effort and the registry is drained so a second invocation is a no-op.
  */
 export function performLastResortCleanup(): void {
   performShutdownBestEffortCleanup()
@@ -171,14 +172,10 @@ function setupShutdownHandlers(): ShutdownState {
       // the terminal is not left in raw mode / cursor hidden, and so the
       // secret sink does not retain registered values.
       performShutdownBestEffortCleanup()
-      // R-0000694: synchronously destroy the ssh2 client before exiting.
-      // The first SIGINT queued `ssh.disconnect()` as a microtask
-      // (R-0000257) so ssh2 stream internals had a coherent tick to
-      // drain. The second SIGINT may arrive before that microtask has
-      // run, so any in-flight ssh2 callback would die mid-flight on
-      // `process.exit`. Calling `forceDestroy()` here tears down the
-      // underlying socket inside the current tick — fully synchronous, no
-      // microtask required — so no ssh2 state is left dangling.
+      // R-0000694: destroy the transport synchronously before exiting.
+      // The first signal queued disconnect() as a microtask (R-0000257),
+      // which may not have run yet. forceDestroy() releases the socket in
+      // this tick, before process.exit can prevent deferred cleanup.
       ssh?.forceDestroy()
       // eslint-disable-next-line node/no-process-exit
       process.exit(signalExitCode(signal))
@@ -191,11 +188,10 @@ function setupShutdownHandlers(): ShutdownState {
     // R-0000257: defer ssh.disconnect() to a microtask. The signal handler
     // runs synchronously inside Node's signal dispatch and disconnect ->
     // disconnectTransport iterates pendingRejects, which calls reject
-    // handlers that may reentrantly invoke ssh2 stream internals. ssh2
-    // assumes coherent event-loop tick lifetimes and reentrant stream
-    // access is a known crash source. Returning to the next microtask
-    // first lets the signal handler complete cleanly and lets ssh2
-    // process any in-flight events before teardown begins.
+    // handlers that may reenter transport or stream code. Returning to the
+    // next microtask lets signal dispatch finish before teardown begins.
+    // This ordering was introduced for the former ssh2 transport and is
+    // preserved for the native transport.
     const sshToDisconnect = ssh
     queueMicrotask(() => {
       sshToDisconnect?.disconnect()
@@ -1401,6 +1397,7 @@ async function runPlaybookLifecycle(
         // Resolving the secrets first is the point of this phase: the provider
         // interaction happens right here, before any connection is opened, and
         // an unavailable provider aborts the run before remote work started.
+        await assertNativeBindingAvailable()
         await prewarmRunSecrets(definition)
         const connectedSsh = await connectAndRegister({
           definition,

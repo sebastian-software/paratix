@@ -65,9 +65,7 @@ export default [
 `
 
 export const PNPM_WORKSPACE_TEMPLATE = `allowBuilds:
-  cpu-features: true
   esbuild: true
-  ssh2: true
   unrs-resolver: false
 `
 

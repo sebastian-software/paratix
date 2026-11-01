@@ -7,6 +7,15 @@ TypeScript API, built-in modules, authoring patterns, and common mistakes.
 
 Paratix is a CLI tool for idempotent VPS configuration via SSH using TypeScript playbooks. Each playbook exports a `server()` definition containing an ordered list of modules that are checked and applied over SSH. Modules follow a check/apply pattern: `check` determines if work is needed, `apply` enforces the desired state.
 
+## Controller requirements
+
+Paratix uses `@paratix/ssh-native` for SSH. Controllers need Node.js 24 or newer and Linux
+x64/arm64 (glibc 2.35 or newer, or musl), or macOS x64/arm64 13.5 or newer. Windows is not
+supported for playbook execution. See [supported platforms](https://github.com/sebastian-software/paratix/blob/main/docs/user-guide/README.md).
+Published packages include prebuilt binaries through optional dependencies; users do not need Rust.
+Contributors building the repository need the pinned Rust toolchain. The runner checks the binding
+before resolving playbook secrets; imports, `--help`, and `--version` do not load it.
+
 ## Agent authoring guidance
 
 When generating or changing Paratix playbooks or custom modules, automated coding agents should use
@@ -140,6 +149,25 @@ Use `paratix/modules` for built-in modules in new playbooks. The same 30 module 
 re-exported from `paratix` for compatibility with existing playbooks, and both entry points return
 the same references. Only these two package entry points are public; do not use deep imports.
 
+## SSH authentication
+
+With `ssh.privateKey`, Paratix uses that file only: a rejected key does not trigger a password
+prompt. Both `privateKey` with `passwordFallback: true` and `privateKey` with `agentForward: true`
+are rejected during validation. Omit `privateKey` to use the agent in `SSH_AUTH_SOCK`.
+`passwordFallback: true` permits a password prompt after an agent login fails (or no agent is
+available); the password connection does not reuse the agent. `agentForward: true` requires a
+working agent and successful agent authentication: a missing/unusable socket or failed login
+aborts before a password prompt.
+
+Key files must be unencrypted PEM/OpenSSH text for Ed25519, RSA, or ECDSA (P-256/P-384/P-521).
+Encrypted files (`ENCRYPTED_KEY`), DSA, hardware-backed `sk-*` key files, and unsupported or corrupt
+formats (`UNSUPPORTED_KEY`) fail on the first attempt, without further ports or reconnect retries.
+To use an encrypted key, load it into an agent and omit `privateKey`. See the
+[native binding's key requirements](https://github.com/sebastian-software/paratix/blob/main/packages/ssh-native/README.md).
+Native errors include `[CODE]`; after other connection failures, the final message includes
+`; last error on port <p>: <native message> [<CODE>]`. See
+[SSH troubleshooting](https://github.com/sebastian-software/paratix/blob/main/docs/user-guide/troubleshooting.md).
+
 ## Playbook Structure
 
 A playbook is a TypeScript file with a default export of `server()`:
@@ -158,7 +186,7 @@ export default server({
     privateKey: "~/.ssh/id_ed25519", // Optional -- "~" is expanded; omit to use SSH agent
     // Optional:
     // agentForward: false,          // Forward SSH agent to remote
-    // passwordFallback: false,
+    // passwordFallback: false,     // Only without privateKey; fallback after failed agent login
     // sudoPassword: "...",
     // reconnectTimeout: 30000,
     // strictHostKeyChecking: "yes", // default; set "accept-new" only for explicit TOFU

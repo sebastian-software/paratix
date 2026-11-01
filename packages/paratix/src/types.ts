@@ -428,7 +428,11 @@ export async function guardedWriteFile(
 
 /** SSH connection parameters for a server. */
 export type SshConfig = {
-  /** Forward the local SSH agent to the remote host. */
+  /**
+   * Forward the local SSH agent to the remote host.
+   * Requires successful agent authentication; cannot be combined with `privateKey`.
+   * An unavailable or failed agent aborts without a password fallback prompt.
+   */
   agentForward?: boolean
   /** Expected SHA256 host fingerprint used as a pinned trust anchor. */
   expectedHostFingerprint?: string
@@ -436,14 +440,20 @@ export type SshConfig = {
   expectedHostPublicKey?: string
   /** Maximum number of reconnection attempts before giving up. */
   maxReconnectAttempts?: number
-  /** Fall back to password authentication if key auth fails. */
+  /**
+   * Fall back to a password prompt after a failed SSH agent login.
+   * Also permits a password prompt when no agent is available.
+   * Cannot be combined with `privateKey`; forwarding must be disabled for the fallback.
+   */
   passwordFallback?: boolean
   /** Ordered list of candidate ports -- the runner tries each until one connects. */
   ports: number[]
   /**
    * Absolute path to the private key file used for authentication.
    * When omitted, the SSH agent referenced by `SSH_AUTH_SOCK` is used instead.
-   * Exactly one of `privateKey` or a running SSH agent must be available.
+   * A configured key is used without password fallback. Encrypted or unsupported
+   * files fail immediately; load encrypted keys into an agent instead.
+   * Without a key or usable agent, `passwordFallback` permits a password prompt.
    */
   privateKey?: string
   /** Maximum time in milliseconds to spend attempting reconnection before giving up. */

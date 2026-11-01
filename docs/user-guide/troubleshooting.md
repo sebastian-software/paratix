@@ -2,6 +2,52 @@
 
 Start with the exact error message. Use `--verbose` when a failed remote command needs more context, but review output before sharing it because it can contain host-specific information.
 
+## The native SSH binding cannot be loaded
+
+**Symptom:** A playbook reports `Paratix could not load its native SSH binding for platform ...` and exits before resolving playbook secrets. `--help`, `--version`, and package imports may still work.
+
+**Likely cause:** The controller is outside the [supported platforms](./README.md#supported-platforms), its Linux glibc is older than 2.35, or the optional platform package was not installed.
+
+**Diagnose:** Compare the platform and architecture in the error with the supported-platform table. On a supported system, run with `--verbose` to inspect the underlying loader error. Check whether installation omitted optional dependencies or reused a lockfile that lacks the current platform's optional package.
+
+**Fix:** Run playbooks on a supported controller. On a supported system, reinstall with optional dependencies enabled and follow the loader's installation details. Building Rust is a contributor workflow and is not required to use published packages.
+
+**Verify:** Rerun the playbook. It should pass the binding check before resolving its secrets.
+
+## A key file fails with `ENCRYPTED_KEY` or `UNSUPPORTED_KEY`
+
+**Symptom:** The error ends with `[ENCRYPTED_KEY]` or `[UNSUPPORTED_KEY]`. Paratix stops after the first attempt without trying further ports; reconnect also stops immediately for these codes.
+
+**Likely cause:** The private key is encrypted, has an unsupported algorithm or format, or is corrupt. DSA and hardware-backed `sk-*` private key files are unsupported. Supported files are unencrypted PEM/OpenSSH text for Ed25519, RSA, or ECDSA; see the [key requirements](../../packages/ssh-native/README.md#authentication-and-key-formats).
+
+**Diagnose:** Check the configured `ssh.privateKey` path and identify its format locally without printing key material into logs.
+
+**Fix:** For an encrypted key, load it into a working SSH agent and omit `privateKey`. For an unsupported file, configure a supported key or use an agent that can sign with the intended identity. `passwordFallback: true` cannot be combined with `privateKey` and does not recover a rejected key file.
+
+**Verify:** Rerun with the corrected authentication configuration and confirm that the first connection succeeds.
+
+## Agent forwarding or password fallback is rejected
+
+**Symptom:** Validation reports `agentForward requires authentication through an SSH agent; remove privateKey or agentForward` or `passwordFallback requires authentication through an SSH agent; remove privateKey or passwordFallback`. A runtime forwarding failure reports `agentForward requires authentication through an SSH agent; remove agentForward or configure a working SSH agent` without a password prompt.
+
+**Likely cause:** A key file was combined with one of these options, or forwarding was requested without a usable agent or after an agent login failed.
+
+**Diagnose:** Check `ssh.privateKey`, `ssh.agentForward`, `ssh.passwordFallback`, and whether `SSH_AUTH_SOCK` points to the intended running agent. Confirm that the agent holds an identity authorized on the target.
+
+**Fix:** Choose key-file authentication without forwarding or password fallback, or omit `privateKey` and configure a working agent. If a password fallback is intended after a failed agent login, disable `agentForward`; the password attempt does not reuse or forward the agent.
+
+**Verify:** Rerun and confirm that validation succeeds and the intended authentication method connects.
+
+## A connection failure includes a native error code
+
+**Symptom:** A native SSH failure contains `[CODE]`. When all candidate ports fail, the existing final-message prefix is followed by `; last error on port <p>: <native message> [<CODE>]`.
+
+**Diagnose:** Use the last port and error code together. `AUTH_FAILED` means login was refused; `CONNECT_FAILED` points to TCP connection failure; `TIMEOUT` means the handshake, host verification, or login did not finish in time. The [binding error reference](../../packages/ssh-native/README.md#errors) lists the codes. Tools that matched old `ssh2` message text need to account for these messages.
+
+**Fix:** Correct the credentials, host reachability, or timeout cause indicated by the error. A configured key file is tried without a password fallback. For a password attempt after agent failure, omit `privateKey` and use `passwordFallback: true` without `agentForward`.
+
+**Verify:** Rerun and confirm that the intended host and port connect.
+
 ## `tsx` cannot be loaded
 
 **Symptom:** A TypeScript playbook exits with code 2 and reports that `tsx` is required but could not be loaded.
@@ -68,9 +114,9 @@ The Paratix CLI also suggests a global installation, but a project-local depende
 
 **Verify:** Connect with SSH directly, then rerun Paratix and confirm that it reconnects within the configured window.
 
-## A step fails with `Channel open failure`
+## A step fails with `CHANNEL_OPEN_FAILED`
 
-**Symptom:** A step fails with `(SSH) Channel open failure: open failed`, often on `archive.extract` against an archive with many members. The message mentions `MaxSessions`. The failure is not cumulative — it reproduces on a rerun in which every preceding step reports `ok` — and it looks like a transport or upload problem rather than a limit being reached.
+**Symptom:** A step fails with `[CHANNEL_OPEN_FAILED]`, often on `archive.extract` against an archive with many members. The message mentions `MaxSessions`. The failure is not cumulative — it reproduces on a rerun in which every preceding step reports `ok` — and it looks like a transport or upload problem rather than a limit being reached.
 
 **Likely cause:** The SSH server refused a new session channel. Every remote command runs on its own channel, and OpenSSH caps concurrent channels per connection through `MaxSessions` (default 10). Paratix opens at most 4 concurrent channels per connection, which stays under that default and leaves room for a parallel SFTP transfer. A host whose `sshd_config` lowers `MaxSessions` below that can still refuse them.
 
