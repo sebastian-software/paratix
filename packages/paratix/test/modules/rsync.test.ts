@@ -244,7 +244,7 @@ describe("rsync.sync — check", () => {
     expect(cmd).toBe("rsync")
     const args = getArgs()
     expect(args).toContain("/local/src")
-    expect(args).toContain("root@1.2.3.4:'/remote/dest'")
+    expect(args).toContain("root@1.2.3.4:/remote/dest")
   })
 
   it("includes --dry-run flag", async () => {
@@ -375,7 +375,7 @@ describe("rsync.sync — apply", () => {
     expect(cmd).toBe("rsync")
     const args = getArgs()
     expect(args).toContain("/local/src")
-    expect(args).toContain("root@1.2.3.4:'/remote/dest'")
+    expect(args).toContain("root@1.2.3.4:/remote/dest")
   })
 
   it("succeeds even when rsync produces multi-megabyte stdout (R-0000040 regression)", async () => {
@@ -848,12 +848,12 @@ describe("rsync.sync — argument building", () => {
     expect(getArgs()).toContain("--chmod=644")
   })
 
-  it("builds correct remote destination as user@host:quoted-dest", async () => {
+  it("leaves a simple remote destination unquoted for modern and legacy rsync", async () => {
     const mockSsh = createMockSsh()
     const mod = rsync.sync({ dest: "/var/www/html", src: "/local/src" })
     await mod.apply(mockSsh, emptyEnv)
 
-    expect(getArgs()).toContain("root@1.2.3.4:'/var/www/html'")
+    expect(getArgs()).toContain("root@1.2.3.4:/var/www/html")
   })
 
   it("quotes remote destinations that contain shell metacharacters", async () => {
@@ -885,7 +885,7 @@ describe("rsync.sync — argument building", () => {
     const mod = rsync.sync({ dest: "/var/www/html", src: "/local/src" })
     await mod.apply(mockSsh, emptyEnv)
 
-    expect(getArgs()).toContain("root@[2001:db8::10]:'/var/www/html'")
+    expect(getArgs()).toContain("root@[2001:db8::10]:/var/www/html")
   })
 })
 

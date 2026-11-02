@@ -138,7 +138,12 @@ function buildRemoteSpec(
   const remoteHost = connectionInfo.host.includes(":")
     ? `[${connectionInfo.host}]`
     : connectionInfo.host
-  return `${connectionInfo.user}@${remoteHost}:${shellQuote(destination)}`
+  // Simple paths need no shell escaping. Modern rsync preserves extra quotes
+  // as filename characters, while older clients pass them to the remote shell.
+  const remoteDestination = /^[\w.\/\-]+$/v.test(destination)
+    ? destination
+    : shellQuote(destination)
+  return `${connectionInfo.user}@${remoteHost}:${remoteDestination}`
 }
 
 function formatKnownHostsLabel(host: string, port: number): string {
