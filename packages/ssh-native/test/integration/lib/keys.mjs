@@ -10,6 +10,7 @@ import { runTool } from "./tools.mjs"
 
 const PRIVATE = 0o600
 const PUBLIC = 0o644
+const SSH_KEYGEN = "ssh-keygen"
 
 /**
  * @typedef {object} Fixtures
@@ -20,6 +21,10 @@ const PUBLIC = 0o644
  * @property {string} certKey key with `<certKey>-cert.pub`, never in authorized_keys
  * @property {string} bareCertKey copy of `certKey` without its certificate
  * @property {string} certPrincipal principal of the user certificate
+ * @property {string} authorizedPrincipals server-approved certificate principals
+ * @property {string} filePrincipal a permitted principal different from the login user
+ * @property {Record<"rsa" | "p384" | "p521", string>} fileCertKeys certified private key paths
+ * @property {Record<"expired" | "future" | "host" | "untrusted" | "wrongPrincipal", string>} invalidCertificates certificate paths
  * @property {Record<"ed25519" | "p384" | "p521", string>} keys authorized key paths
  * @property {string} unauthorizedKey a valid key that is not authorized
  * @property {string} encryptedKey a passphrase-protected ed25519 key
@@ -35,7 +40,7 @@ const PUBLIC = 0o644
  * @returns resolves once the key pair exists
  */
 function keygen(path, args) {
-  return runTool("ssh-keygen", ["-q", ...args, "-C", "ssh-native-it", "-f", path])
+  return runTool(SSH_KEYGEN, ["-q", ...args, "-C", "ssh-native-it", "-f", path])
 }
 
 /**
@@ -72,12 +77,116 @@ async function generateCertificateKey(dir, userCa, principal) {
   const certKey = join(dir, "cert_user_ed25519")
   await keygen(certKey, ["-t", "ed25519", "-N", ""])
   const identity = ["-I", "ssh-native-it-user", "-n", principal, "-V", "-5m:+1d"]
-  await runTool("ssh-keygen", ["-q", "-s", userCa, ...identity, `${certKey}.pub`])
+  await runTool(SSH_KEYGEN, ["-q", "-s", userCa, ...identity, `${certKey}.pub`])
   // ssh-add loads `<key>-cert.pub` next to a key; the bare copy has none.
   await mkdir(join(dir, "bare"), { mode: 0o700 })
   const bareCertKey = join(dir, "bare", "cert_user_ed25519")
   await writeFile(bareCertKey, await readFile(certKey), { mode: PRIVATE })
   return { bareCertKey, certKey }
+}
+
+/**
+ * File credentials include RSA user and CA keys, ECDSA curves, a different
+ * authorized principal and locally invalid material. Only the server decides
+ * whether a well-formed certificate's CA and principal are authorized.
+ *
+ * @param dir fixture directory
+ * @param userCa existing ed25519 CA private key
+ * @param principal the login user
+ * @returns the file certificate fixtures and combined CA trust file
+ */
+async function generateFileCertificates(dir, userCa, principal) {
+  const rsaCa = join(dir, "user_ca_rsa")
+  const untrustedCa = join(dir, "untrusted_ca")
+  await keygen(rsaCa, ["-t", "rsa", "-b", "2048", "-N", ""])
+  await keygen(untrustedCa, ["-t", "ed25519", "-N", ""])
+  const filePrincipal = "ssh-native-authorized-principal"
+  const authorizedPrincipals = join(dir, "authorized_principals")
+  await writeFile(authorizedPrincipals, `${principal}\n${filePrincipal}\n`, { mode: PUBLIC })
+  const userCaPublic = join(dir, "user_cas.pub")
+  await writeFile(
+    userCaPublic,
+    (await readFile(`${userCa}.pub`, "utf8")) + (await readFile(`${rsaCa}.pub`, "utf8")),
+    { mode: PUBLIC }
+  )
+  const fileCertKeys = await generateFileCertificateKeys(dir, { filePrincipal, rsaCa, userCa })
+  const invalidCertificates = await generateInvalidCertificates(dir, {
+    filePrincipal,
+    keyPath: fileCertKeys.p384,
+    untrustedCa,
+    userCa,
+  })
+  return { authorizedPrincipals, fileCertKeys, filePrincipal, invalidCertificates, userCaPublic }
+}
+
+/**
+ * @param dir fixture directory
+ * @param options trusted authorities and approved principal
+ * @returns the three private key paths, with certificates beside them
+ */
+async function generateFileCertificateKeys(dir, options) {
+  const { filePrincipal, rsaCa, userCa } = options
+  const fileCertKeys = {
+    p384: join(dir, "cert_file_p384"),
+    p521: join(dir, "cert_file_p521"),
+    rsa: join(dir, "cert_file_rsa"),
+  }
+  await keygen(fileCertKeys.rsa, ["-t", "rsa", "-b", "2048", "-N", ""])
+  await keygen(fileCertKeys.p384, ["-t", "ecdsa", "-b", "384", "-N", ""])
+  await keygen(fileCertKeys.p521, ["-t", "ecdsa", "-b", "521", "-N", ""])
+  for (const [kind, path] of Object.entries(fileCertKeys)) {
+    // eslint-disable-next-line no-await-in-loop -- ssh-keygen writes each certificate beside its key
+    await runTool(SSH_KEYGEN, [
+      "-q",
+      "-s",
+      kind === "rsa" ? rsaCa : userCa,
+      "-I",
+      "ssh-native-it-file",
+      "-n",
+      filePrincipal,
+      "-V",
+      "-5m:+1d",
+      `${path}.pub`,
+    ])
+  }
+  return fileCertKeys
+}
+
+/**
+ * @param dir fixture directory
+ * @param options authorities, approved principal and matching private key
+ * @returns paths for local failures and server rejection cases
+ */
+async function generateInvalidCertificates(dir, options) {
+  const { filePrincipal, keyPath, untrustedCa, userCa } = options
+  const invalidCertificates = {}
+  for (const [name, ca, validity, certPrincipal, extra] of [
+    ["expired", userCa, "-2d:-1d", filePrincipal, []],
+    ["future", userCa, "+1d:+2d", filePrincipal, []],
+    ["host", userCa, "-5m:+1d", filePrincipal, ["-h"]],
+    ["untrusted", untrustedCa, "-5m:+1d", filePrincipal, []],
+    ["wrongPrincipal", userCa, "-5m:+1d", "ssh-native-not-authorized", []],
+  ]) {
+    const path = join(dir, `cert_${name}`)
+    // eslint-disable-next-line no-await-in-loop -- each public key gets its own output path
+    await writeFile(`${path}.pub`, await readFile(`${keyPath}.pub`), { mode: PUBLIC })
+    // eslint-disable-next-line no-await-in-loop -- ssh-keygen writes the next fixture
+    await runTool(SSH_KEYGEN, [
+      "-q",
+      "-s",
+      ca,
+      "-I",
+      "ssh-native-it-private-id",
+      "-n",
+      certPrincipal,
+      "-V",
+      validity,
+      ...extra,
+      `${path}.pub`,
+    ])
+    invalidCertificates[name] = `${path}-cert.pub`
+  }
+  return invalidCertificates
 }
 
 /**
@@ -124,6 +233,7 @@ async function writeDsaKeys(dir) {
 export async function generateFixtures(dir, principal) {
   const { hostKey, userCa } = await generateAuthorities(dir)
   const cert = await generateCertificateKey(dir, userCa, principal)
+  const fileCertificates = await generateFileCertificates(dir, userCa, principal)
   const client = await generateClientKeys(dir)
   const dsa = await writeDsaKeys(dir)
   const authorizedKeys = join(dir, "authorized_keys")
@@ -135,11 +245,11 @@ export async function generateFixtures(dir, principal) {
     ...cert,
     ...client,
     ...dsa,
+    ...fileCertificates,
     authorizedKeys,
     certPrincipal: principal,
     dir,
     hostKey,
     hostKeyBase64: await publicKeyBase64(`${hostKey}.pub`),
-    userCaPublic: `${userCa}.pub`,
   }
 }

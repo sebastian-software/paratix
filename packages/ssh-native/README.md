@@ -124,7 +124,7 @@ await session.close() // or session.destroy() right before process.exit()
   covers TCP, handshake, verification and login; a verifier that never settles ends with `TIMEOUT`.
   An `AbortSignal` ends a pending connect with `ABORTED`; an already aborted signal does so without
   opening TCP. `agentForward: true` bridges server-opened agent channels to `agent`.
-- `privateKey`, `password`, the exec `stdin` option and every Buffer written to `stdin` are
+- `privateKey`, `certificate`, `password`, the exec `stdin` option and every Buffer written to `stdin` are
   zero-filled by the binding in every path, including success. A stdin chunk is zero-filled once the
   binding copied it, immediately if `stdin` no longer accepts data, and on exit, `cancel()` or
   destroy if it is still queued.
@@ -159,12 +159,26 @@ Ed25519, RSA, and ECDSA (P-256, P-384, P-521). Supported encodings include OpenS
 RSA PEM, and PKCS#8 PEM for supported algorithms.
 
 - Encrypted private key files fail with `ENCRYPTED_KEY`; the binding has no passphrase option.
-  Load a passphrase-protected key into a working SSH agent and omit Paratix's `privateKey` option.
+  Load a passphrase-protected key into a working SSH agent and omit Paratix's `privateKey` and
+  `certificate` options.
 - DSA (`ssh-dss`) files, hardware-backed security-key (`sk-*`) files, unsupported algorithms,
   binary files, and corrupt or unrecognized formats fail with `UNSUPPORTED_KEY`.
 - Agent authentication delegates signing to the agent and can use user certificates. These
   file-format restrictions describe keys passed through `privateKey`, not keys held by the agent.
   Server host certificates are not supported yet.
+
+For file-based user-certificate authentication, pass `certificate: Buffer` containing OpenSSH
+certificate text alongside `privateKey: Buffer`. `certificate` requires `privateKey` without an
+`agent`; invalid combinations throw `TypeError`. Before TCP, the binding checks format, user
+certificate type, issuer signature, key match, and validity against the controller clock.
+Encrypted/unsupported private-key decoding still returns `ENCRYPTED_KEY`/`UNSUPPORTED_KEY`.
+RSA user certificates negotiate RSA-SHA2 without enabling legacy `ssh-rsa`.
+
+The issuer signature check does not establish CA trust. The server decides authorization through
+`TrustedUserCAKeys` and its principal policy, including `AuthorizedPrincipalsFile`; no local rule
+requires `user` to match a certificate principal. Agent-held certificate identities keep their
+existing authentication path; an external certificate attached to a raw agent key is unsupported.
+User certificates do not add host-certificate or host-CA support.
 
 The binding selects exactly one authentication method per connection: agent, otherwise private
 key, otherwise password (also used for keyboard-interactive). Paratix connects with a configured
@@ -184,7 +198,7 @@ secrets:
 
 | Code                  | Meaning                                                                                                     |
 | --------------------- | ----------------------------------------------------------------------------------------------------------- |
-| `AUTH_FAILED`         | login refused, or no usable agent identity                                                                  |
+| `AUTH_FAILED`         | login refused, no usable agent identity, or local user-certificate validation failed                        |
 | `HOST_KEY_REJECTED`   | the verifier did not return `true`                                                                          |
 | `TIMEOUT`             | `readyTimeoutMs` / `timeoutMs` elapsed                                                                      |
 | `ABORTED`             | an `AbortSignal` fired or `cancel()` was called                                                             |
@@ -196,6 +210,15 @@ secrets:
 | `UNSUPPORTED_KEY`     | the private key type or format is not supported                                                             |
 | `ENCRYPTED_KEY`       | the private key is encrypted (passphrases are not supported)                                                |
 | `INTERNAL`            | a bug in the binding, including a caught panic                                                              |
+
+Local certificate validation returns `AUTH_FAILED` with `detail` exactly `certificate-invalid`
+(format, user type, or issuer signature), `certificate-key-mismatch`, `certificate-expired`, or
+`certificate-not-yet-valid`. Messages omit certificate contents, key IDs, and principals. Paratix
+treats only these four `AUTH_FAILED` details as permanent: no further ports, retries, or reconnect
+attempts. Server authentication rejections remain generic `AUTH_FAILED`, keep the existing retry
+behavior, and suggest checking server CA/principal configuration without claiming a specific cause.
+Paratix reloads both configured files on reconnect, so renewed certificates are read and expired
+ones fail local validation.
 
 `INTERNAL` always carries the fixed message `internal error in the native SSH binding`; the native
 text is discarded. Invalid arguments (wrong types, missing credentials) throw a `TypeError`.

@@ -11,6 +11,8 @@ authorized=/home/paratix/.ssh/authorized_keys
 chown root:root "$keys/host_ed25519" "$keys/user_ca.pub"
 chmod 0600 "$keys/host_ed25519"
 chmod 0644 "$keys/user_ca.pub"
+chown root:root "$keys/authorized_principals"
+chmod 0644 "$keys/authorized_principals"
 chown paratix:paratix "$authorized"
 chmod 0600 "$authorized"
 

@@ -30,6 +30,25 @@ describe("isValidTcpPort", () => {
 })
 
 describe("collectSshConfigErrors", () => {
+  it("accepts a certificate only alongside a private key", () => {
+    expect(
+      collectSshConfigErrors(baseSsh({ certificate: "~/.ssh/id-cert.pub", privateKey: "KEY" }))
+    ).toStrictEqual([])
+    expect(collectSshConfigErrors(baseSsh({ certificate: "cert" }))).toContain(
+      "ssh.certificate requires ssh.privateKey"
+    )
+    expect(collectSshConfigErrors(baseSsh({ certificate: "cert", privateKey: null }))).toContain(
+      "ssh.certificate requires ssh.privateKey"
+    )
+    expect(collectSshConfigErrors(baseSsh({ certificate: null }))).toStrictEqual([])
+  })
+
+  it.each(["", 42, true])("rejects an invalid certificate path: %s", (certificate) => {
+    expect(collectSshConfigErrors(baseSsh({ certificate, privateKey: "KEY" }))).not.toStrictEqual(
+      []
+    )
+  })
+
   it("returns no errors for a minimal valid config", () => {
     expect(collectSshConfigErrors(baseSsh())).toStrictEqual([])
   })

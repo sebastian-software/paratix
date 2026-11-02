@@ -49,6 +49,8 @@ export interface ConnectOptions {
   agent?: string
   /** PEM or OpenSSH private key. Zero-filled by `connect` in every path. */
   privateKey?: Buffer
+  /** OpenSSH user certificate, with privateKey and no agent. Zero-filled in every path. */
+  certificate?: Buffer
   /** Password, also used for keyboard-interactive. Zero-filled by `connect` in every path. */
   password?: Buffer
   /** Bridge server-opened `auth-agent@openssh.com` channels to `agent`. */

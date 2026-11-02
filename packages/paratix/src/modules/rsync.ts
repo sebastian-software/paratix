@@ -199,6 +199,35 @@ function cleanupVerifiedKnownHostsFile(path: null | string): void {
   }
 }
 
+function quoteCertificateFileOption(path: string): string {
+  // OpenSSH parses -o values as configuration, after rsync splits the command.
+  const value = path.replaceAll("\\", "\\\\").replaceAll('"', '\\"')
+  // Use the alternate POSIX quote splice: rsync does not interpret backslash
+  // escapes outside quotes, whereas both parsers accept the double-quoted quote.
+  return shellQuote(`CertificateFile="${value}"`).replaceAll("'\\''", "'\"'\"'")
+}
+
+function buildIdentityFlags(connectionInfo: {
+  agentSocket?: string
+  certificatePath?: string
+  privateKeyPath?: string
+}): string {
+  let sshFlags = ""
+  if (connectionInfo.privateKeyPath != null) {
+    // -o IdentitiesOnly=yes prevents OpenSSH from also offering identities from
+    // a running ssh-agent (the default `IdentitiesOnly=no` would let rsync pick
+    // an unrelated agent key). With this option rsync only ever uses the key
+    // configured for this Paratix session.
+    sshFlags = ` -i ${shellQuote(connectionInfo.privateKeyPath)} -o IdentitiesOnly=yes`
+    if (connectionInfo.certificatePath != null) {
+      sshFlags += ` -o ${quoteCertificateFileOption(connectionInfo.certificatePath)}`
+    }
+  } else if (connectionInfo.agentSocket != null) {
+    sshFlags = ` -o IdentityAgent=${shellQuote(connectionInfo.agentSocket)}`
+  }
+  return sshFlags
+}
+
 /**
  * Assemble the full rsync argument list for a transfer.
  *
@@ -218,6 +247,7 @@ function cleanupVerifiedKnownHostsFile(path: null | string): void {
  * @param parameters.connectionInfo - SSH connection details obtained from `SshConnection.getConnectionInfo`.
  * @param parameters.connectionInfo.agentSocket - SSH agent socket path (`SSH_AUTH_SOCK`), used when no private key is configured.
  * @param parameters.connectionInfo.authMethod - Authentication method that established the current SSH session.
+ * @param parameters.connectionInfo.certificatePath - Expanded path to the matching user certificate.
  * @param parameters.connectionInfo.host - The remote host address.
  * @param parameters.connectionInfo.port - The SSH port number.
  * @param parameters.connectionInfo.privateKeyPath - Absolute path to the SSH private key.
@@ -230,6 +260,7 @@ function buildArguments(parameters: {
   connectionInfo: {
     agentSocket?: string
     authMethod?: "agent" | "password" | "privateKey"
+    certificatePath?: string
     host: string
     port: number
     privateKeyPath?: string
@@ -246,16 +277,7 @@ function buildArguments(parameters: {
     result.push("--dry-run")
   }
 
-  let sshFlags = ""
-  if (connectionInfo.privateKeyPath != null) {
-    // -o IdentitiesOnly=yes prevents OpenSSH from also offering identities from
-    // a running ssh-agent (the default `IdentitiesOnly=no` would let rsync pick
-    // an unrelated agent key). With this option rsync only ever uses the key
-    // configured for this Paratix session.
-    sshFlags = ` -i ${shellQuote(connectionInfo.privateKeyPath)} -o IdentitiesOnly=yes`
-  } else if (connectionInfo.agentSocket != null) {
-    sshFlags = ` -o IdentityAgent=${shellQuote(connectionInfo.agentSocket)}`
-  }
+  const sshFlags = buildIdentityFlags(connectionInfo)
   // R-0000714: rsync is only ever invoked with a pre-built trust-anchor
   // known_hosts file written from the verified host key of the active
   // Paratix SSH session. `executeRsync` raises a `RsyncMissingTrustAnchorError`

@@ -351,13 +351,13 @@ export type SshConnection = {
   exists: (remotePath: string) => Promise<boolean>
   /**
    * Return the low-level connection parameters for this session.
-   * `privateKeyPath` and `agentSocket` reflect the authentication method that
-   * was actually used for the current session. `privateKeyPath` is returned as
-   * an expanded filesystem path.
+   * `privateKeyPath`, `certificatePath` and `agentSocket` reflect the authentication
+   * method actually used for the current session. File paths are expanded.
    */
   getConnectionInfo: () => {
     agentSocket?: string
     authMethod?: "agent" | "password" | "privateKey"
+    certificatePath?: string
     configuredPorts: number[]
     host: string
     port: number
@@ -434,6 +434,8 @@ export type SshConfig = {
    * An unavailable or failed agent aborts without a password fallback prompt.
    */
   agentForward?: boolean
+  /** Path to an OpenSSH user certificate matching the configured `privateKey`. */
+  certificate?: string
   /** Expected SHA256 host fingerprint used as a pinned trust anchor. */
   expectedHostFingerprint?: string
   /** Expected OpenSSH public key (`"<algorithm> <base64>"`) used as a pinned trust anchor. */

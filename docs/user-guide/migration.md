@@ -10,7 +10,19 @@ This page lists only confirmed changes that require action in an existing projec
 
 **Now:** The default transport is `@paratix/ssh-native`. Playbook execution supports Linux x64/arm64 with glibc 2.35 or newer or musl, and macOS x64/arm64 13.5 or newer; Windows is unsupported. Installation, imports, `--help`, and `--version` still work without the binding, but a playbook checks it before resolving secrets. A configured `privateKey` never falls back to a password. Both `privateKey` with `passwordFallback: true` and `privateKey` with `agentForward: true` are rejected. Without a key file, password fallback after agent failure connects without the agent. Forwarding requires a usable agent and successful agent authentication; missing or failed agents do not lead to a password prompt when forwarding is enabled. Native errors contain `[CODE]`; other failures after all ports append `; last error on port <p>: <native message> [<CODE>]`. `ENCRYPTED_KEY` and `UNSUPPORTED_KEY` stop after the first attempt, including during reconnect.
 
-**Upgrade:** Run local and CI playbooks on a [supported controller](./README.md#supported-platforms) and keep optional dependencies enabled so its prebuilt binary is installed. Published packages need no Rust toolchain; only contributors building the repository need Rust. Remove `passwordFallback` and `agentForward` when keeping `privateKey`. To use an encrypted key or agent forwarding, load the key into a working SSH agent and omit `privateKey`. For a password fallback after agent failure, omit `privateKey` and disable `agentForward`. Replace unsupported DSA, hardware-backed `sk-*`, binary, or corrupt key files with a supported file or use a capable agent; see [key requirements](../../packages/ssh-native/README.md#authentication-and-key-formats). Update automation that matches `ssh2` error text, then rerun to verify the intended authentication and port. See [troubleshooting](./troubleshooting.md) for error recovery.
+**Upgrade:** Run local and CI playbooks on a [supported controller](./README.md#supported-platforms) and keep optional dependencies enabled so its prebuilt binary is installed. Published packages need no Rust toolchain; only contributors building the repository need Rust. Remove `passwordFallback` and `agentForward` when keeping `privateKey`. To use an encrypted key or agent forwarding, load the key into a working SSH agent and omit both `privateKey` and `certificate`. For a password fallback after agent failure, omit `privateKey` and disable `agentForward`. Replace unsupported DSA, hardware-backed `sk-*`, binary, or corrupt key files with a supported file or use a capable agent; see [key requirements](../../packages/ssh-native/README.md#authentication-and-key-formats). Update automation that matches `ssh2` error text, then rerun to verify the intended authentication and port. See [troubleshooting](./troubleshooting.md) for error recovery.
+
+When moving a CA-only login from an agent-held certificate to file authentication, configure
+both `ssh.privateKey` and the matching `ssh.certificate`; a certificate path alone is invalid.
+Existing bare-key and agent configurations require no certificate option. Agent-held certificates
+continue to work with both file options omitted; an external certificate plus a raw agent key is
+unsupported. File-certificate authentication keeps the existing key-file restrictions above.
+Reconnect reloads both files and stops immediately on local certificate validation failures;
+renew the certificate at the configured path before retrying. Custom consumers of
+`getConnectionInfo()` can use optional `certificatePath` only after successful file-certificate
+authentication; rsync propagates it automatically as `CertificateFile`. Host-certificate trust is
+unchanged and remains unsupported. See the [user-certificate guide](./README.md#authenticate-with-a-user-certificate)
+and [recovery steps](./troubleshooting.md#a-user-certificate-fails).
 
 ### 0.2.0: Node.js 24 or newer
 

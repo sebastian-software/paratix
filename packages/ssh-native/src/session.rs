@@ -13,6 +13,7 @@ use crate::auth::{authenticate, AuthInfo, AuthInput};
 use crate::connect::{bounded, tcp_and_handshake};
 use crate::error::{BindingError, Code};
 use crate::exec::{event_sink, start_exec, ExecChannel, ExecRequest};
+use crate::file_certificate::FileCertificate;
 use crate::guarded;
 use crate::handler::{ClientHandler, DisconnectFn, DisconnectInfo, HostCheck, Shared, VerifyFn};
 use crate::hostkey::HostKeyInfo;
@@ -106,6 +107,7 @@ struct ConnectInput {
     ready_timeout_ms: u32,
     agent: Option<String>,
     private_key: Option<Buffer>,
+    certificate: Option<Buffer>,
     password: Option<Buffer>,
     agent_forward: bool,
 }
@@ -122,6 +124,7 @@ pub fn connect<'env>(
     ready_timeout_ms: u32,
     agent: Option<String>,
     private_key: Option<Buffer>,
+    certificate: Option<Buffer>,
     password: Option<Buffer>,
     agent_forward: bool,
     verify_host: Function<'_, sys::napi_value, Promise<bool>>,
@@ -135,10 +138,18 @@ pub fn connect<'env>(
         ready_timeout_ms,
         agent,
         private_key,
+        certificate,
         password,
         agent_forward,
     };
     let port = port_of(options.port)?;
+    if options.certificate.is_some() && (options.private_key.is_none() || options.agent.is_some()) {
+        return Err(BindingError::new(
+            Code::AuthFailed,
+            "certificate requires privateKey without an agent",
+        )
+        .into());
+    }
     // Copy secrets synchronously: JS zero-fills its buffers right after this
     // call returns, before the future below runs.
     let auth = if let Some(socket) = options.agent.clone() {
@@ -151,6 +162,7 @@ pub fn connect<'env>(
         return Err(BindingError::new(Code::AuthFailed, "no authentication method given").into());
     };
     let agent_forward = options.agent_forward;
+    let certificate = options.certificate.as_ref().map(copy_secret);
     let agent_forward_socket = match (agent_forward, options.agent.clone()) {
         (false, _) => None,
         (true, Some(socket)) => Some(socket),
@@ -169,9 +181,19 @@ pub fn connect<'env>(
     let host = options.host;
     let user = options.user;
     drop(options.private_key);
+    drop(options.certificate);
     drop(options.password);
 
     env.spawn_future(guarded(async move {
+        // Invalid local material must fail before TCP/handshake, even when
+        // the configured host is unreachable. No username/principal rule:
+        // AuthorizedPrincipalsFile can authorize a different principal.
+        let auth = match (auth, certificate) {
+            (AuthInput::PrivateKey(key), Some(certificate)) => {
+                AuthInput::Certificate(Box::new(FileCertificate::prepare(key, certificate)?))
+            }
+            (auth, _) => auth,
+        };
         let shared = Shared::new(Some(on_disconnect));
         let handler = ClientHandler {
             host_check: HostCheck::Verify(Some(verify_host)),

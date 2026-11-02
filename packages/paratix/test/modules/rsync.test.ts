@@ -1,12 +1,17 @@
+import type * as ChildProcess from "node:child_process"
+import type * as FileSystem from "node:fs"
+
 import { spawn } from "node:child_process"
 import { randomUUID } from "node:crypto"
 import { unlinkSync, writeFileSync } from "node:fs"
+import { tmpdir } from "node:os"
+import { join } from "node:path"
 import { EventEmitter, Readable } from "node:stream"
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 
 import { rsync } from "../../src/modules/rsync.js"
 import { setRunnerAbortSignal } from "../../src/runnerAbortSignal.js"
-import { CommandError } from "../../src/sshHelpers.js"
+import { CommandError, shellQuote } from "../../src/sshHelpers.js"
 import { createMockSsh } from "../helpers/mockSsh.js"
 
 const KNOWN_HOSTS_TEST_UUID = vi.hoisted<ReturnType<typeof randomUUID>>(
@@ -146,6 +151,37 @@ function mockFailureWithStderr(
 
 function getArgs(): string[] {
   return mockSpawn.mock.calls[0][1] as string[]
+}
+
+async function parseCertificateThroughRsyncAndSsh(command: string): Promise<string> {
+  const fs = await vi.importActual<typeof FileSystem>("node:fs")
+  const child = await vi.importActual<typeof ChildProcess>("node:child_process")
+  const directory = fs.mkdtempSync(join(tmpdir(), "paratix-rsync-certificate-"))
+  const script = join(directory, "capture.cjs")
+  const capture = join(directory, "arguments")
+  try {
+    // Capture rsync's real command splitting without making a network connection.
+    fs.writeFileSync(
+      script,
+      "require('node:fs').writeFileSync(process.argv[2], process.argv.slice(3).join('\\0'))"
+    )
+    const captureCommand = command.replace(
+      /^ssh/v,
+      `${shellQuote(process.execPath)} ${shellQuote(script)} ${shellQuote(capture)}`
+    )
+    child.spawnSync("rsync", ["-n", "-e", captureCommand, "/dev/null", "host:/tmp/dest"], {
+      timeout: 5000,
+    })
+    const args = fs.readFileSync(capture, "utf8").split("\0")
+    // -G only parses configuration; -F excludes user configuration and Match commands.
+    return child.execFileSync("ssh", ["-G", "-F", "/dev/null", ...args], {
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "pipe"],
+      timeout: 5000,
+    })
+  } finally {
+    fs.rmSync(directory, { force: true, recursive: true })
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -861,6 +897,46 @@ describe("rsync.sync — SSH auth method in transport flag", () => {
   beforeEach(() => {
     mockSpawn.mockReset()
     mockSuccess()
+  })
+
+  it.each([
+    "/home/deploy/cert dir/deployment-cert.pub",
+    "/home/deploy/cert dir/it's $USER-cert.pub",
+    '/home/deploy/cert dir/"quoted" back\\slash-cert.pub',
+  ])("preserves certificate path %s through rsync and OpenSSH parsing", async (certificatePath) => {
+    const mockSsh = createMockSsh()
+    vi.spyOn(mockSsh, "getConnectionInfo").mockReturnValue({
+      authMethod: "privateKey",
+      certificatePath,
+      configuredPorts: [22],
+      host: "1.2.3.4",
+      port: 22,
+      privateKeyPath: "/home/deploy/id",
+      user: "root",
+      verifiedHostPublicKey: "ssh-ed25519 AAAAMOCKVERIFIEDKEY",
+    })
+    await rsync.sync({ dest: "/dest", src: "/src" }).apply(mockSsh, emptyEnv)
+    const args = getArgs()
+    const command = args[args.indexOf("-e") + 1]
+    expect(command).toContain("-o IdentitiesOnly=yes")
+    const configuration = await parseCertificateThroughRsyncAndSsh(command)
+    const option = "CertificateFile".toLowerCase()
+    expect(configuration.split("\n")).toContain(`${option} ${certificatePath}`)
+  })
+
+  it("does not pass a file certificate for agent sessions", async () => {
+    const mockSsh = createMockSsh()
+    vi.spyOn(mockSsh, "getConnectionInfo").mockReturnValue({
+      agentSocket: "/agent.sock",
+      authMethod: "agent",
+      configuredPorts: [22],
+      host: "1.2.3.4",
+      port: 22,
+      user: "root",
+      verifiedHostPublicKey: "ssh-ed25519 AAAAMOCKVERIFIEDKEY",
+    })
+    await rsync.sync({ dest: "/dest", src: "/src" }).apply(mockSsh, emptyEnv)
+    expect(getArgs()[getArgs().indexOf("-e") + 1]).not.toContain("CertificateFile")
   })
 
   it("sets -o IdentityAgent=<socket> when agentSocket is provided", async () => {

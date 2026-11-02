@@ -28,11 +28,12 @@ const PENALTIES_OFF = "PerSourcePenalties no"
  * @returns the sshd_config text
  */
 function localConfig(fixtures, paths, extraOptions = []) {
-  const { mainPort, runDir, userCaPort } = paths
+  const { mainPort, rsaCaPort, runDir, userCaPort } = paths
   const extra = extraOptions.map((option) => `${option}\n`).join("")
   return `# Generated per run by test/integration/lib/local-target.mjs.
 Port ${mainPort}
 Port ${userCaPort}
+Port ${rsaCaPort}
 ListenAddress 127.0.0.1
 HostKey ${fixtures.hostKey}
 PidFile ${join(runDir, "sshd.pid")}
@@ -53,8 +54,16 @@ ${extra}
 # H1: only the user CA vouches for keys on this port.
 Match LocalPort ${userCaPort}
   TrustedUserCAKeys ${fixtures.userCaPublic}
+  AuthorizedPrincipalsFile ${fixtures.authorizedPrincipals}
   AuthorizedKeysFile none
   AuthenticationMethods publickey
+
+Match LocalPort ${rsaCaPort}
+  TrustedUserCAKeys ${fixtures.userCaPublic}
+  AuthorizedPrincipalsFile ${fixtures.authorizedPrincipals}
+  AuthorizedKeysFile none
+  AuthenticationMethods publickey
+  PubkeyAcceptedAlgorithms rsa-sha2-512-cert-v01@openssh.com,rsa-sha2-256-cert-v01@openssh.com
 `
 }
 
@@ -104,8 +113,8 @@ export async function startLocalTarget(fixtures, options) {
   const { defer, runDir } =
     /** @type {{ runDir: string, defer: (cleanup: () => Promise<void>) => void }} */ (options)
   // Distinct ports: every listener stays open until both are taken.
-  const [mainPort, userCaPort] = await freePorts(2)
-  const ports = { mainPort, userCaPort }
+  const [mainPort, userCaPort, rsaCaPort] = await freePorts(3)
+  const ports = { mainPort, rsaCaPort, userCaPort }
   const configPath = join(runDir, "sshd_config")
   await writeLocalConfig(configPath, fixtures, { ...ports, runDir })
   const logPath = join(runDir, "sshd.log")
@@ -120,7 +129,7 @@ export async function startLocalTarget(fixtures, options) {
   })
   try {
     // Ready only once every profile port greets.
-    await waitForBanners([mainPort, userCaPort], READY_TIMEOUT_MS, { process: child })
+    await waitForBanners([mainPort, userCaPort, rsaCaPort], READY_TIMEOUT_MS, { process: child })
   } catch (error) {
     const output = await readFile(logPath, "utf8").catch(() => "")
     throw new Error(`local sshd did not start: ${output.trim()}`, { cause: error })
@@ -134,6 +143,7 @@ export async function startLocalTarget(fixtures, options) {
       keyboardInteractive: null,
       main: mainPort,
       password: null,
+      rsaCa: rsaCaPort,
       userCa: userCaPort,
     },
     user: userInfo().username,

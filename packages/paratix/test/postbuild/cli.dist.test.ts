@@ -1549,6 +1549,7 @@ type PublicTypeContract = {
 type ExpectedConnectionInfo = {
   agentSocket?: string
   authMethod?: "agent" | "password" | "privateKey"
+  certificatePath?: string
   configuredPorts: number[]
   host: string
   port: number

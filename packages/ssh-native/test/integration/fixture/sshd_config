@@ -5,10 +5,12 @@
 #   2223  user CA only (H1): TrustedUserCAKeys, no authorized_keys
 #   2224  password only
 #   2225  keyboard-interactive only
+#   2226  user CA only, RSA-SHA2 certificates only
 Port 2222
 Port 2223
 Port 2224
 Port 2225
+Port 2226
 ListenAddress 0.0.0.0
 
 HostKey /etc/ssh/ssh-native-it/host_ed25519
@@ -31,6 +33,7 @@ LogLevel VERBOSE
 # H1: the certified key is in no authorized_keys file; only the CA vouches for it.
 Match LocalPort 2223
   TrustedUserCAKeys /etc/ssh/ssh-native-it/user_ca.pub
+  AuthorizedPrincipalsFile /etc/ssh/ssh-native-it/authorized_principals
   AuthorizedKeysFile none
   AuthenticationMethods publickey
 
@@ -39,3 +42,10 @@ Match LocalPort 2224
 
 Match LocalPort 2225
   AuthenticationMethods keyboard-interactive
+
+Match LocalPort 2226
+  TrustedUserCAKeys /etc/ssh/ssh-native-it/user_ca.pub
+  AuthorizedPrincipalsFile /etc/ssh/ssh-native-it/authorized_principals
+  AuthorizedKeysFile none
+  AuthenticationMethods publickey
+  PubkeyAcceptedAlgorithms rsa-sha2-512-cert-v01@openssh.com,rsa-sha2-256-cert-v01@openssh.com

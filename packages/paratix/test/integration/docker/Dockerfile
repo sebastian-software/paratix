@@ -3,7 +3,7 @@ FROM debian:bookworm-slim
 ARG CLIENT_PUBLIC_KEY
 
 RUN apt-get update \
-  && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends curl openssh-client openssh-server python3 sudo unzip zip \
+  && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends curl openssh-client openssh-server python3 rsync sudo unzip zip \
   && rm -rf /var/lib/apt/lists/*
 
 RUN useradd --create-home --shell /bin/bash paratix \
@@ -30,8 +30,9 @@ COPY test/integration/docker/sshd_config /etc/ssh/sshd_config
 COPY test/integration/docker/sshd_config.* /etc/ssh/
 COPY test/integration/docker/start-sshd.sh /usr/local/bin/start-sshd.sh
 
-RUN chmod 0755 /usr/local/bin/start-sshd.sh
+RUN chmod 0755 /usr/local/bin/start-sshd.sh \
+  && touch /etc/ssh/test-user-ca.pub /etc/ssh/test-authorized-principals
 
-EXPOSE 22 2222 2223 2224 2225 2226 2227 2228 2229
+EXPOSE 22 2222 2223 2224 2225 2226 2227 2228 2229 2230
 
 CMD ["/usr/local/bin/start-sshd.sh"]

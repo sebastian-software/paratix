@@ -1,6 +1,6 @@
 import { execFile } from "node:child_process"
 import { createHash } from "node:crypto"
-import { stat } from "node:fs/promises"
+import { readFile, stat } from "node:fs/promises"
 import { homedir } from "node:os"
 import { join } from "node:path"
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
@@ -1579,6 +1579,135 @@ describe("SshConnectionImpl", () => {
   })
 
   describe("native authentication policy (#257)", () => {
+    it.each([
+      "certificate-invalid",
+      "certificate-key-mismatch",
+      "certificate-expired",
+      "certificate-not-yet-valid",
+    ])("stops ports and reconnect retries for local %s", async (detail) => {
+      const failure = new TransportError(
+        "AUTH_FAILED",
+        Object.assign(new Error("Certificate rejected [AUTH_FAILED]"), { detail })
+      )
+      connectTransport.mockRejectedValue(failure)
+      const ssh = new SshConnectionImpl("1.2.3.4", {
+        certificate: "~/.ssh/id-cert.pub",
+        ports: [22, 2222],
+        privateKey: "/dev/null",
+        user: "root",
+      })
+      await expect(ssh.connect()).rejects.toBe(failure)
+      expect(connectTransport).toHaveBeenCalledOnce()
+      connectTransport.mockClear()
+      await expect(ssh.reconnect()).rejects.toBe(failure)
+      expect(connectTransport).toHaveBeenCalledOnce()
+      expect(promptTerminal).not.toHaveBeenCalled()
+      expect(ssh.getConnectionInfo().certificatePath).toBeUndefined()
+    })
+
+    it("continues through ports on ordinary server authentication rejection", async () => {
+      connectTransport
+        .mockRejectedValueOnce(
+          new TransportError("AUTH_FAILED", new Error("Authentication rejected [AUTH_FAILED]"))
+        )
+        .mockResolvedValueOnce()
+      await makeSshInstance({ ports: [22, 2222] }).connect()
+      expect(connectTransport).toHaveBeenCalledTimes(2)
+    })
+
+    it("reloads renewed certificates on reconnect and exposes only successful file metadata", async () => {
+      const buffers = ["key1", "cert1", "key2", "cert2"].map((value) => Buffer.from(value))
+      for (const buffer of buffers) vi.mocked(readFile).mockResolvedValueOnce(buffer)
+      const seen: string[] = []
+      connectTransport.mockImplementation(async (options) => {
+        await Promise.resolve()
+        seen.push(String(options.certificate))
+      })
+      const ssh = new SshConnectionImpl("1.2.3.4", {
+        certificate: "~/.ssh/cert directory/id-cert.pub",
+        ports: [22],
+        privateKey: "~/.ssh/id",
+        user: "root",
+      })
+      expect(ssh.getConnectionInfo().certificatePath).toBeUndefined()
+      await ssh.connect()
+      expect(ssh.getConnectionInfo().certificatePath).toBe(
+        join(homedir(), ".ssh/cert directory/id-cert.pub")
+      )
+      await ssh.reconnect()
+      expect(seen).toStrictEqual(["cert1", "cert2"])
+      expect(readFile).toHaveBeenNthCalledWith(
+        2,
+        join(homedir(), ".ssh/cert directory/id-cert.pub")
+      )
+      expect(readFile).toHaveBeenNthCalledWith(
+        4,
+        join(homedir(), ".ssh/cert directory/id-cert.pub")
+      )
+      for (const buffer of buffers) expect(buffer).toStrictEqual(Buffer.alloc(buffer.length))
+      ssh.disconnect()
+      expect(ssh.getConnectionInfo().certificatePath).toBeUndefined()
+    })
+
+    it("does not silently reuse the previous certificate after it expires on reconnect", async () => {
+      vi.mocked(readFile).mockImplementation(async () => {
+        await Promise.resolve()
+        return Buffer.from("file material")
+      })
+      const failure = new TransportError(
+        "AUTH_FAILED",
+        Object.assign(new Error("Certificate expired"), { detail: "certificate-expired" })
+      )
+      connectTransport.mockResolvedValueOnce().mockRejectedValue(failure)
+      const ssh = new SshConnectionImpl("1.2.3.4", {
+        certificate: "/certificate",
+        ports: [22, 2222],
+        privateKey: "/key",
+        user: "root",
+      })
+      await ssh.connect()
+      await expect(ssh.reconnect()).rejects.toBe(failure)
+      expect(connectTransport).toHaveBeenCalledTimes(2)
+      expect(readFile).toHaveBeenCalledTimes(4)
+      expect(ssh.getConnectionInfo().certificatePath).toBeUndefined()
+    })
+
+    it("scrubs key and certificate after all ports fail", async () => {
+      const key = Buffer.from("private key")
+      const certificate = Buffer.from("certificate")
+      vi.mocked(readFile).mockResolvedValueOnce(key).mockResolvedValueOnce(certificate)
+      connectTransport.mockImplementation(async (options) => {
+        await Promise.resolve()
+        expect(options.privateKey).toBe(key)
+        expect(options.certificate?.toString()).toBe("certificate")
+        throw new TransportError("CONNECT_FAILED", new Error("Connection refused"))
+      })
+      const ssh = new SshConnectionImpl("1.2.3.4", {
+        certificate: "/cert",
+        ports: [22, 2222],
+        privateKey: "/key",
+        user: "root",
+      })
+      await expect(ssh.connect()).rejects.toThrow("Connection refused")
+      expect(connectTransport).toHaveBeenCalledTimes(2)
+      expect(key).toStrictEqual(Buffer.alloc(key.length))
+      expect(certificate).toStrictEqual(Buffer.alloc(certificate.length))
+    })
+
+    it("scrubs the private key when loading the certificate fails", async () => {
+      const key = Buffer.from("private key")
+      vi.mocked(readFile).mockResolvedValueOnce(key).mockRejectedValueOnce(new Error("ENOENT"))
+      const ssh = new SshConnectionImpl("1.2.3.4", {
+        certificate: "/cert",
+        ports: [22],
+        privateKey: "/key",
+        user: "root",
+      })
+      await expect(ssh.connect()).rejects.toThrow("ENOENT")
+      expect(key).toStrictEqual(Buffer.alloc(key.length))
+      expect(connectTransport).not.toHaveBeenCalled()
+    })
+
     it("does not prompt after a configured private key is rejected", async () => {
       connectTransport.mockRejectedValue(
         new TransportError("AUTH_FAILED", new Error("Key rejected [AUTH_FAILED]"))
@@ -1605,7 +1734,6 @@ describe("SshConnectionImpl", () => {
     )
 
     it("keeps the original key readable through all ports and scrubs it after success", async () => {
-      const { readFile } = await import("node:fs/promises")
       const original = Buffer.from("private-key-material")
       vi.mocked(readFile).mockResolvedValueOnce(original)
       connectTransport
@@ -1709,7 +1837,6 @@ describe("SshConnectionImpl", () => {
   describe("connect (private key auth)", () => {
     it("reads the private key as a Buffer (no utf8 encoding)", async () => {
       // Arrange: readFile mock returns a Buffer to simulate binary-safe read
-      const { readFile } = await import("node:fs/promises")
       const fakeKeyBuffer = Buffer.from("fake-pem-key-content")
       vi.mocked(readFile).mockResolvedValueOnce(fakeKeyBuffer)
       vi.mocked(connectTransport).mockResolvedValueOnce()
@@ -1731,7 +1858,6 @@ describe("SshConnectionImpl", () => {
     // original can be scrubbed after success as well as after failure.
     it("zeroes the private key Buffer after a successful connection", async () => {
       // Arrange
-      const { readFile } = await import("node:fs/promises")
       const fakeKeyBuffer = Buffer.from("sensitive-private-key")
       vi.mocked(readFile).mockResolvedValueOnce(fakeKeyBuffer)
       vi.mocked(connectTransport).mockResolvedValueOnce()
@@ -1746,7 +1872,6 @@ describe("SshConnectionImpl", () => {
 
     it("zeroes the private key Buffer even when the connection fails (finally-block on error)", async () => {
       // Arrange
-      const { readFile } = await import("node:fs/promises")
       const fakeKeyBuffer = Buffer.from("sensitive-private-key")
       vi.mocked(readFile).mockResolvedValueOnce(fakeKeyBuffer)
       // All ports fail — tryConnectOnPorts returns false, connect() throws
@@ -1763,7 +1888,6 @@ describe("SshConnectionImpl", () => {
 
     it("passes the Buffer directly to connectTransport as privateKey", async () => {
       // Arrange
-      const { readFile } = await import("node:fs/promises")
       const fakeKeyBuffer = Buffer.from("my-rsa-key")
       vi.mocked(readFile).mockResolvedValueOnce(fakeKeyBuffer)
       vi.mocked(connectTransport).mockResolvedValueOnce()
@@ -1861,7 +1985,6 @@ describe("SshConnectionImpl", () => {
     })
 
     it("expands ~/ privateKey paths for connect() and getConnectionInfo()", async () => {
-      const { readFile } = await import("node:fs/promises")
       const expandedPrivateKeyPath = join(homedir(), ".ssh", "id_ed25519")
       vi.mocked(connectTransport).mockResolvedValueOnce()
 

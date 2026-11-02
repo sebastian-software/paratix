@@ -22,9 +22,45 @@ Start with the exact error message. Use `--verbose` when a failed remote command
 
 **Diagnose:** Check the configured `ssh.privateKey` path and identify its format locally without printing key material into logs.
 
-**Fix:** For an encrypted key, load it into a working SSH agent and omit `privateKey`. For an unsupported file, configure a supported key or use an agent that can sign with the intended identity. `passwordFallback: true` cannot be combined with `privateKey` and does not recover a rejected key file.
+**Fix:** For an encrypted key, load it into a working SSH agent and omit both `privateKey` and `certificate`. For an unsupported file, configure a supported key or use an agent that can sign with the intended identity. `passwordFallback: true` cannot be combined with `privateKey` and does not recover a rejected key file.
 
 **Verify:** Rerun with the corrected authentication configuration and confirm that the first connection succeeds.
+
+## A user certificate fails
+
+**Symptom:** Validation reports `ssh.certificate requires ssh.privateKey`, or the first attempt
+fails with `the user certificate failed local validation [AUTH_FAILED]`. Local certificate
+failures stop before TCP without trying other ports or retrying, including during reconnect.
+
+**Diagnose:** Confirm that `ssh.certificate` points to an OpenSSH user certificate and
+`ssh.privateKey` to its matching unencrypted private key. The native error's `detail` identifies
+these local checks without including certificate contents, key IDs, or principals:
+
+| Native `detail`             | Check and recovery                                                                                                                            |
+| --------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------- |
+| `certificate-invalid`       | Replace a malformed certificate, a host certificate, or a certificate with an invalid issuer signature with a valid OpenSSH user certificate. |
+| `certificate-key-mismatch`  | Configure the private key matching the certificate's public key.                                                                              |
+| `certificate-expired`       | Renew the certificate and check the controller clock.                                                                                         |
+| `certificate-not-yet-valid` | Check the controller clock and certificate validity start; obtain a currently valid certificate if needed.                                    |
+
+A file-read error instead means the configured file could not be loaded; check the path and local
+read permissions. Do not paste key or certificate contents into logs or support messages.
+
+**Fix:** Configure both file paths, or omit both to use an agent-held certificate. An external
+certificate with a raw agent key is unsupported. Reconnect reads the files again, so publish a
+renewed certificate at the configured path before retrying. Increasing timeouts cannot repair
+invalid local certificate material.
+
+If the server rejects a locally valid certificate, Paratix reports a generic `AUTH_FAILED` with a
+CA/principal hint and keeps its existing retry behavior. The client cannot distinguish the exact
+server rejection reason. Check the server's `TrustedUserCAKeys`, allowed principals, and login
+policy through an existing administrative session or console. Local signature validation does
+not establish trust in the issuing CA. `AuthorizedPrincipalsFile` can authorize a principal
+different from `ssh.user`; do not assume a username mismatch alone proves the cause.
+
+**Verify:** Rerun against the intended account and port after correcting the files or server
+policy. Retain the verified host-key pin or `known_hosts` entry: user certificates do not add
+host-certificate or host-CA support. See the [certificate configuration](./README.md#authenticate-with-a-user-certificate).
 
 ## Agent forwarding or password fallback is rejected
 
@@ -42,7 +78,7 @@ Start with the exact error message. Use `--verbose` when a failed remote command
 
 **Symptom:** A native SSH failure contains `[CODE]`. When all candidate ports fail, the existing final-message prefix is followed by `; last error on port <p>: <native message> [<CODE>]`.
 
-**Diagnose:** Use the last port and error code together. `AUTH_FAILED` means login was refused; `CONNECT_FAILED` points to TCP connection failure; `TIMEOUT` means the handshake, host verification, or login did not finish in time. The [binding error reference](../../packages/ssh-native/README.md#errors) lists the codes. Tools that matched old `ssh2` message text need to account for these messages.
+**Diagnose:** Use the last port and error code together. `AUTH_FAILED` means login was refused or a [local user-certificate check](#a-user-certificate-fails) failed; `CONNECT_FAILED` points to TCP connection failure; `TIMEOUT` means the handshake, host verification, or login did not finish in time. The [binding error reference](../../packages/ssh-native/README.md#errors) lists the codes. Tools that matched old `ssh2` message text need to account for these messages.
 
 **Fix:** Correct the credentials, host reachability, or timeout cause indicated by the error. A configured key file is tried without a password fallback. For a password attempt after agent failure, omit `privateKey` and use `passwordFallback: true` without `agentForward`.
 
