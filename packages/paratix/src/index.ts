@@ -66,11 +66,13 @@ export {
   user,
 } from "./modules/index.js"
 export type {
+  AuthorizedPrincipalsOptions,
   ManualSecretProviderOptions,
   SecretInput,
   SecretProvider,
   SecretResolver,
   SecretTotpInput,
+  TrustedUserCaOptions,
   UnifiedDiffOptions,
 } from "./modules/index.js"
 export type { PodmanLoginOptions, PodmanOptions } from "./modules/podman.js"

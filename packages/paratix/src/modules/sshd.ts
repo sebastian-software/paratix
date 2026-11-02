@@ -15,6 +15,7 @@ import {
 import { flagLockDisplayPath, withMutexLock } from "./moduleHelpers.js"
 import {
   applySshdSettingToContent,
+  collectEffectiveSshdDirectiveValues,
   collectTopLevelSshdDirectiveValues,
   findContradictingSshdMatchBlockOverride,
   findNonMatchingEffectiveSshdSetting,
@@ -1992,6 +1993,132 @@ function rejectWhenTargetPortIsNotConfigured(
     `[sshd.port: ${String(targetPort)}] target port is not listed in static ssh.ports ` +
       `configuration; add ${String(targetPort)} to ssh.ports before changing sshd_config`
   )
+}
+
+/** Internal shared controls; callers already own their file snapshot/rollback. */
+export type SshdConfigTransaction = {
+  readEffective: (settings: Record<string, string>) => Promise<void>
+  reload: () => Promise<void>
+  restoreReload: () => Promise<void>
+  validate: (content: string, settings: Record<string, string>) => Promise<void>
+}
+
+function assertCertificateEffectiveSettings(
+  output: string,
+  settings: Record<string, string>
+): void {
+  for (const [directive, expected] of Object.entries(settings)) {
+    const actual = collectEffectiveSshdDirectiveValues(output, directive).join(" ") || "<missing>"
+    if (actual !== expected) {
+      throw new Error(
+        `${directive}: expected ${expected}, actual ${actual}; check sshd Include order (first value wins)`
+      )
+    }
+  }
+}
+
+async function validateCertificateCandidate(
+  ssh: SshConnection,
+  parameters: { content: string; dryRun: boolean; settings: Record<string, string> }
+): Promise<void> {
+  if (parameters.dryRun && !(await privilegeSeparationDirectoryExists(ssh)))
+    throw new Error("/run/sshd is missing; cannot validate sshd candidate without creating it")
+  const allocation = await allocateProspectiveSshdConfigPath(ssh)
+  if (typeof allocation !== "string")
+    throw allocation.error ?? new Error("sshd candidate allocation failed")
+  try {
+    await ssh.writeFile(allocation, parameters.content, { mode: SSHD_DRY_RUN_TEMP_MODE })
+    if (!parameters.dryRun) {
+      const failure = await ensurePrivilegeSeparationDirectory(ssh)
+      if (failure !== null)
+        throw failure.error ?? new Error("sshd privilege separation directory creation failed")
+    }
+    // Validate syntax and effective settings against one candidate so every
+    // temporary configuration is covered by the checked cleanup below.
+    const syntax = await ssh.exec(`sshd -t -f ${shellQuote(allocation)}`, {
+      ignoreExitCode: true,
+      silent: true,
+    })
+    throwIfRollbackExecFailed("sshd -t candidate validation failed", syntax)
+    const effective = await ssh.exec(`sshd -T -f ${shellQuote(allocation)}`, {
+      ignoreExitCode: true,
+      silent: true,
+    })
+    throwIfRollbackExecFailed("sshd -T candidate verification failed", effective)
+    assertCertificateEffectiveSettings(effective.stdout, parameters.settings)
+  } finally {
+    const cleanup = await ssh.exec(`rm -f -- ${shellQuote(allocation)}`, {
+      ignoreExitCode: true,
+      silent: true,
+    })
+    throwIfRollbackExecFailed("sshd candidate cleanup failed", cleanup)
+  }
+}
+
+/**
+ * Shares the existing sshd mutex, validation, effective-value and reload mechanics.
+ *
+ * @internal
+ * @param ssh - The active SSH connection.
+ * @param parameters - Transaction body and dry-run policy.
+ * @param parameters.dryRun - Execute without acquiring a mutating remote mutex.
+ * @param parameters.name - Name used in mutex failure diagnostics.
+ * @param parameters.section - Body called with the existing sshd controls.
+ * @returns The transaction result, or the existing mutex acquisition failure.
+ */
+export async function withSshdConfigTransaction(
+  ssh: SshConnection,
+  parameters: {
+    dryRun: boolean
+    name: string
+    section: (transaction: SshdConfigTransaction) => Promise<ModuleResult>
+  }
+): Promise<ModuleResult> {
+  let serviceUnit: Promise<SshdServiceUnit> | undefined
+  const resolveUnit = async (): Promise<SshdServiceUnit> => {
+    serviceUnit ??= resolveSshServiceUnit(ssh)
+    return serviceUnit
+  }
+  const transaction: SshdConfigTransaction = {
+    async readEffective(settings) {
+      // A check/dry-run may never create /run/sshd as a side effect.
+      if (!(await privilegeSeparationDirectoryExists(ssh)))
+        throw new Error("/run/sshd is missing; cannot verify sshd -T")
+      const result = await ssh.exec(SSHD_EFFECTIVE_CONFIG_COMMAND, {
+        ignoreExitCode: true,
+        silent: true,
+      })
+      if (result.code !== 0)
+        throw (
+          failedCommand("sshd -T verification failed", result).error ??
+          new Error("sshd -T verification failed")
+        )
+      assertCertificateEffectiveSettings(result.stdout, settings)
+    },
+    async reload() {
+      const result = await reloadSshd(ssh, await resolveUnit())
+      if (result.status === "failed") throw result.error ?? new Error("sshd reload failed")
+    },
+    async restoreReload() {
+      const unit = await resolveUnit()
+      if (!(await sshdUnitDefinesExecReload(ssh, unit))) {
+        throw new Error(`Unit ${unit} has no ExecReload; manual restart required for live rollback`)
+      }
+      const result = await reloadSshdWithoutRestartFallback(ssh, unit)
+      if (result.status === "failed") throw result.error ?? new Error("sshd rollback reload failed")
+    },
+    async validate(content, settings) {
+      await validateCertificateCandidate(ssh, { content, dryRun: parameters.dryRun, settings })
+    },
+  }
+  if (parameters.dryRun) return parameters.section(transaction)
+  const lockResult = await withMutexLock(ssh, {
+    failureMessage: `[${parameters.name}] failed to acquire sshd_config mutex`,
+    lockName: SSHD_CONFIG_FILE_MUTEX,
+    propagateSectionThrows: true,
+    section: async () => parameters.section(transaction),
+  })
+  return lockResult.kind === "ok" ? lockResult.value : lockResult.failure
 }
 
 /**

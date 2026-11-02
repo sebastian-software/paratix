@@ -70,6 +70,7 @@ import type {
   Environment,
   EnvironmentMetaEntry,
   EnvironmentValue,
+  AuthorizedPrincipalsOptions as RootAuthorizedPrincipalsOptions,
   ExecOptions,
   ExecResult,
   MetaEnvironmentValue,
@@ -90,6 +91,7 @@ import type {
   SshdPortMetaEntry,
   SystemHostMetaEntry,
   SystemRebootMetaEntry,
+  TrustedUserCaOptions as RootTrustedUserCaOptions,
   UnifiedDiffOptions,
 } from "paratix"
 
@@ -138,14 +140,16 @@ import type {
   SecretProvider,
   SecretResolver,
   SecretTotpInput,
+  AuthorizedPrincipalsOptions,
   UnifiedDiffOptions as ModulesUnifiedDiffOptions,
+  TrustedUserCaOptions,
   UpgradeOptions,
 } from "paratix/modules"
 ```
 
 <!-- public-api-imports:end -->
 
-Use `paratix/modules` for built-in modules in new playbooks. The same 30 module values are also
+Use `paratix/modules` for built-in modules in new playbooks. The same built-in module values are also
 re-exported from `paratix` for compatibility with existing playbooks, and both entry points return
 the same references. Only these two package entry points are public; do not use deep imports.
 
@@ -190,6 +194,55 @@ include certificate contents, key IDs, or principals.
 Native errors include `[CODE]`; after other connection failures, the final message includes
 `; last error on port <p>: <native message> [<CODE>]`. See
 [SSH troubleshooting](https://github.com/sebastian-software/paratix/blob/main/docs/user-guide/troubleshooting.md).
+
+### Server-side user-CA trust and principals
+
+Use `ssh.authorizedPrincipals` to manage the per-user principals file before enabling trust, then
+use `ssh.trustedUserCa` to manage the shared user-CA trust. The CA module writes the global
+`TrustedUserCAKeys` and `AuthorizedPrincipalsFile` directives; it does not manage
+`AuthorizedPrincipalsCommand`, which remains an independent OpenSSH policy boundary.
+
+```typescript
+import { server } from "paratix"
+import { ssh, user as userModule } from "paratix/modules"
+
+const user = "deploy"
+const caPublicKeys = "ssh-ed25519 AAAA... ca-one\nssh-ed25519 AAAA... ca-two"
+const principalsBeforeTrust = ssh.authorizedPrincipals(user, ["deploy", "release"])
+const trust = ssh.trustedUserCa({
+  publicKey: caPublicKeys, // one or more complete OpenSSH public-key lines
+  principalsFile: "/etc/ssh/auth_principals/%u", // optional; must match every call
+  revokedKeys: "/etc/ssh/revoked_user_keys", // optional
+})
+
+export default server({
+  name: "certificate-host",
+  host: "203.0.113.10",
+  ssh: { user: "root", ports: [22], privateKey: "~/.ssh/admin" },
+  run: [userModule.present(user, { homeMode: "0700" }), principalsBeforeTrust, trust],
+})
+```
+
+`publicKey` may contain multiple CA keys; Paratix validates and deterministically normalizes them.
+Principal names are single, injection-safe lines and an empty principal array creates an empty
+file. The default template is `/etc/ssh/auth_principals/%u`; a custom template must be an absolute,
+normalized `/etc/ssh/` path ending in exactly one `%u`, and the same template must be used by the
+CA and principal modules because the CA resource is global. The modules reject path/file
+collisions, symlinks, unsafe ancestors, and an existing root-only `0700` ancestor that the login
+user cannot traverse. Managed files are root-owned and mode `0644`; newly created directories are
+`0755`.
+
+If `revokedKeys` is set and absent, Paratix creates an empty text revocation file before enabling
+the directives. Existing text lists and binary OpenSSH KRLs are preserved byte-for-byte, including
+safe metadata such as mode `0600`; Paratix never creates or deletes revocation entries. Omitting
+`revokedKeys` leaves `RevokedKeys` unmanaged.
+
+Removal must be ordered explicitly: first apply `ssh.trustedUserCa({ state: "absent" })`, which
+validates, deactivates, and reloads sshd before removing the CA file; then remove principal files
+with `ssh.authorizedPrincipals(user, [], { state: "absent" })`. Principal files and revocation
+files are retained when CA trust is removed. A second apply or dry-run is idempotent. The modules
+refuse managed directives inside `Match` blocks and unresolved or conflicting `Include` layouts;
+they report effective-value mismatches rather than rewriting foreign drop-ins.
 
 ## Playbook Structure
 
@@ -1192,10 +1245,12 @@ behavior; they do not satisfy a stopped or disabled target.
 
 ### `ssh`
 
-| Method               | Signature                                                                                                                              | Idempotent |
-| -------------------- | -------------------------------------------------------------------------------------------------------------------------------------- | ---------- |
-| `ssh.authorizedKeys` | `(user: string, key: string, options?: { state?: "absent" \| "present" }): Module`                                                     | Yes        |
-| `ssh.knownHosts`     | `(host: string, options?: { expectedFingerprint?: string; port?: number; publicKey?: string; state?: "absent" \| "present" }): Module` | Yes        |
+| Method                     | Signature                                                                                                                              | Idempotent |
+| -------------------------- | -------------------------------------------------------------------------------------------------------------------------------------- | ---------- |
+| `ssh.authorizedKeys`       | `(user: string, key: string, options?: { state?: "absent" \| "present" }): Module`                                                     | Yes        |
+| `ssh.authorizedPrincipals` | `(user: string, principals: string[], options?: AuthorizedPrincipalsOptions): Module`                                                  | Yes        |
+| `ssh.knownHosts`           | `(host: string, options?: { expectedFingerprint?: string; port?: number; publicKey?: string; state?: "absent" \| "present" }): Module` | Yes        |
+| `ssh.trustedUserCa`        | `(options: TrustedUserCaOptions): Module`                                                                                              | Yes        |
 
 **Trust anchor requirement for `ssh.knownHosts` (`state: "present"`):** In the default `present` state, either `expectedFingerprint` or `publicKey` must be set. Without a trust anchor, the module constructor throws immediately because `check` would otherwise treat any existing `known_hosts` entry, including older and potentially compromised TOFU acceptances, as `ok` and skip the anchor comparison. No anchor is required for `state: "absent"`, because that state removes the entry.
 

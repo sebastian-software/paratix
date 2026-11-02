@@ -32,6 +32,7 @@ export type {
 } from "./secret.js"
 export { service } from "./service.js"
 export { ssh } from "./ssh.js"
+export type { AuthorizedPrincipalsOptions, TrustedUserCaOptions } from "./ssh.js"
 export { sshd } from "./sshd.js"
 export { swap } from "./swap.js"
 export { sysctl } from "./sysctl.js"

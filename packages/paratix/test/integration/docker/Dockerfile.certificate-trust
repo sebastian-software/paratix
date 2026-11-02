@@ -1,0 +1,21 @@
+FROM debian:bookworm-slim
+
+ARG CLIENT_PUBLIC_KEY
+
+RUN apt-get update \
+  && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends openssh-client openssh-server \
+  && rm -rf /var/lib/apt/lists/* \
+  && useradd --create-home --shell /bin/sh deploy \
+  && passwd -d root && passwd -d deploy \
+  && mkdir -p /root/.ssh /run/sshd \
+  && printf '%s\n' "$CLIENT_PUBLIC_KEY" > /root/.ssh/authorized_keys \
+  && chmod 0700 /root/.ssh && chmod 0600 /root/.ssh/authorized_keys \
+  && rm -f /etc/ssh/ssh_host_* \
+  && ssh-keygen -A
+
+COPY test/integration/docker/entrypoint-certificate-trust.sh /usr/local/bin/entrypoint-certificate-trust
+COPY test/integration/docker/systemctl-certificate-trust.sh /usr/local/bin/systemctl
+RUN chmod 0755 /usr/local/bin/entrypoint-certificate-trust /usr/local/bin/systemctl
+
+EXPOSE 22
+CMD ["/usr/local/bin/entrypoint-certificate-trust"]

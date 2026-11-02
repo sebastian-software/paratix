@@ -54,6 +54,57 @@ unsupported; retain your verified host-key pin or `known_hosts` entry. See the
 [authentication reference](../../packages/paratix/llm-guide.md#ssh-authentication) and
 [certificate troubleshooting](./troubleshooting.md#a-user-certificate-fails).
 
+## Configure server-side user certificates
+
+For a server that should trust one or more user CAs, create each user's principal file before
+activating the shared CA trust. The controller connection used by these modules needs permission
+to manage `/etc/ssh` and reload sshd:
+
+```typescript
+import { server } from "paratix"
+import { ssh, user } from "paratix/modules"
+
+const principalsFile = "/etc/ssh/auth_principals/%u"
+
+export default server({
+  name: "certificate-host",
+  host: "203.0.113.10",
+  ssh: { user: "root", ports: [22], privateKey: "~/.ssh/admin" },
+  run: [
+    user.present("deploy", { homeMode: "0700" }),
+    ssh.authorizedPrincipals("deploy", ["deploy", "release"], { principalsFile }),
+    ssh.trustedUserCa({
+      publicKey: "ssh-ed25519 AAAA... ca-one\nssh-ed25519 AAAA... ca-two",
+      principalsFile,
+      revokedKeys: "/etc/ssh/revoked_user_keys",
+    }),
+  ],
+})
+```
+
+`ssh.trustedUserCa` manages the global `TrustedUserCAKeys` and `AuthorizedPrincipalsFile`
+directives. `ssh.authorizedPrincipals` manages only the expanded file for the named Unix user.
+The default template is `/etc/ssh/auth_principals/%u`; if you customize it, use the identical
+normalized `/etc/ssh/` template in every call. It must end in exactly one `%u`. The CA file is a
+shared global resource, so separate calls with different templates are rejected. `publicKey` may
+contain multiple complete OpenSSH public-key lines. Principal names are normalized, one per line,
+and unsafe names or CA options/certificates/private keys are rejected.
+
+The modules enforce root ownership and safe permissions (`0644` for managed files and `0755` for
+new directories), reject symlinks and unsafe ancestors, and ensure the login user can traverse and
+read its principal file. A root-owned `0700` ancestor is rejected when that user cannot traverse
+it. `revokedKeys` is optional: when configured and absent, Paratix creates an empty **text** file;
+an existing text list or binary OpenSSH KRL is preserved byte-for-byte, including a safe `0600`
+mode. Without `revokedKeys`, no `RevokedKeys` directive or revocation file is managed. The modules
+do not manage `AuthorizedPrincipalsCommand`; that is an independent OpenSSH policy boundary.
+
+Removal is ordered: apply `ssh.trustedUserCa({ state: "absent" })` first so the directives are
+validated, disabled, and reloaded before the CA file is removed. Then remove a user's principal
+file with `ssh.authorizedPrincipals("deploy", [], { principalsFile, state: "absent" })`. Removal
+does not delete principal files belonging to other users or revocation data. `Match`-scoped managed
+directives, unresolved includes, and effective-value conflicts are refused without rewriting
+foreign configuration. Repeating apply or dry-run is idempotent.
+
 ## Guides
 
 Use these guides alongside the package READMEs:
