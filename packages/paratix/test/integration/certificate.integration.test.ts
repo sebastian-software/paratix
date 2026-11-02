@@ -1,5 +1,5 @@
 import { spawnSync } from "node:child_process"
-import { access, writeFile } from "node:fs/promises"
+import { access, copyFile, writeFile } from "node:fs/promises"
 import { join, resolve } from "node:path"
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest"
 
@@ -143,17 +143,23 @@ describe.skipIf(!dockerAvailable)("OpenSSH user certificates", { concurrent: fal
     expect(ssh.getConnectionInfo().privateKeyPath).toBeUndefined()
   })
 
-  it("transfers real rsync data using an external certificate path with spaces and the verified host anchor", async () => {
+  it("transfers real rsync data using an external certificate path with spaces and percent tokens", async () => {
     const target = fixture()
     await expect(access(`${target.filePrivateKeyPath}-cert.pub`)).rejects.toThrow(/ENOENT/v)
     expect(target.certificatePath).toContain("external certificates/deployment certificate.pub")
+    const certificatePath = join(
+      target.workspaceHome,
+      "external certificates",
+      "deployment 100% %r %h %% certificate.pub"
+    )
+    await copyFile(target.certificatePath, certificatePath)
     const source = join(target.workspaceHome, "rsync-source.txt")
     const destination = "/tmp/paratix-certificate-rsync.txt"
     const content = "transferred through the external user certificate\n"
     await writeFile(source, content)
-    const ssh = createConnection()
+    const ssh = createConnection({ certificate: certificatePath })
     await ssh.connect()
-    expect(ssh.getConnectionInfo().certificatePath).toBe(target.certificatePath)
+    expect(ssh.getConnectionInfo().certificatePath).toBe(certificatePath)
     expect(ssh.getConnectionInfo().verifiedHostPublicKey).toBe(
       target.hostPublicKey.split(/\s+/v).slice(0, 2).join(" ")
     )

@@ -206,7 +206,8 @@ function cleanupVerifiedKnownHostsFile(path: null | string): void {
 
 function quoteCertificateFileOption(path: string): string {
   // OpenSSH parses -o values as configuration, after rsync splits the command.
-  const value = path.replaceAll("\\", "\\\\").replaceAll('"', '\\"')
+  // CertificateFile also expands percent tokens when loading the identity.
+  const value = path.replaceAll("%", "%%").replaceAll("\\", "\\\\").replaceAll('"', '\\"')
   // Use the alternate POSIX quote splice: rsync does not interpret backslash
   // escapes outside quotes, whereas both parsers accept the double-quoted quote.
   return shellQuote(`CertificateFile="${value}"`).replaceAll("'\\''", "'\"'\"'")
