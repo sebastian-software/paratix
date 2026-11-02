@@ -128,8 +128,16 @@ function collectExpectedHostPublicKeyErrors(ssh: Record<string, unknown>, errors
   if (error != null) errors.push(`Invalid property 'ssh.expectedHostPublicKey': ${error}`)
 }
 
+function collectCertificateErrors(ssh: Record<string, unknown>, errors: string[]): void {
+  collectOptionalStringErrors(ssh, "certificate", errors)
+  if (ssh.certificate != null && ssh.privateKey == null) {
+    errors.push("ssh.certificate requires ssh.privateKey")
+  }
+}
+
 function collectOptionalSshFieldErrors(ssh: Record<string, unknown>, errors: string[]): void {
   collectOptionalStringErrors(ssh, "privateKey", errors)
+  collectCertificateErrors(ssh, errors)
   collectOptionalStringErrors(ssh, "sudoPassword", errors)
   collectOptionalStringErrors(ssh, "expectedHostFingerprint", errors)
   collectOptionalStringErrors(ssh, "expectedHostPublicKey", errors)
@@ -185,6 +193,8 @@ export function collectSshConfigErrors(value: unknown): string[] {
 function normalizeServerDefinitionSshError(error: string): string {
   const mappedErrors: Record<string, string> = {
     "Missing property 'ssh.user' (expected string)": "ssh.user is required",
+    "Property 'ssh.certificate' must not be an empty string":
+      "ssh.certificate must not be an empty string",
     "Property 'ssh.expectedHostFingerprint' must not be an empty string":
       "ssh.expectedHostFingerprint must not be an empty string",
     "Property 'ssh.expectedHostPublicKey' must not be an empty string":

@@ -14,7 +14,7 @@ import { missingTools } from "./tools.mjs"
  * @property {string} host sshd host
  * @property {string} user login user
  * @property {string | null} password the user's password (Docker only)
- * @property {{ main: number, userCa: number, password: number | null, keyboardInteractive: number | null }} ports profile ports
+ * @property {{ main: number, userCa: number, rsaCa: number, password: number | null, keyboardInteractive: number | null }} ports profile ports
  * @property {{ pam: boolean, tmpfs: boolean }} features what the target offers
  * @property {string} [container] Docker container name
  */

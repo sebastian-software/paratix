@@ -18,6 +18,7 @@ mod auth;
 mod connect;
 mod error;
 mod exec;
+mod file_certificate;
 mod handler;
 mod hostkey;
 mod js;

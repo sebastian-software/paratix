@@ -443,6 +443,26 @@ function createHostVerifier(verifyHostKey: TransportConnectOptions["verifyHostKe
   }
 }
 
+function copyNativeSecrets(
+  options: TransportConnectOptions,
+  secrets: Buffer[]
+): Pick<ConnectOptions, "certificate" | "password" | "privateKey"> {
+  const nativeOptions: Pick<ConnectOptions, "certificate" | "password" | "privateKey"> = {}
+  if (options.privateKey != null) {
+    nativeOptions.privateKey = Buffer.from(options.privateKey)
+    secrets.push(nativeOptions.privateKey)
+  }
+  if (options.certificate != null) {
+    nativeOptions.certificate = Buffer.from(options.certificate)
+    secrets.push(nativeOptions.certificate)
+  }
+  if (typeof options.password === "string") {
+    nativeOptions.password = Buffer.from(options.password, "utf8")
+    secrets.push(nativeOptions.password)
+  }
+  return nativeOptions
+}
+
 /**
  * Start the native connect with per-attempt copies of the secrets.
  *
@@ -475,14 +495,7 @@ function startNativeConnect(
     if (options.agent != null) nativeOptions.agent = options.agent
     if (options.agentForward === true) nativeOptions.agentForward = true
     if (options.signal !== undefined) nativeOptions.signal = options.signal
-    if (options.privateKey != null) {
-      nativeOptions.privateKey = Buffer.from(options.privateKey)
-      secrets.push(nativeOptions.privateKey)
-    }
-    if (typeof options.password === "string") {
-      nativeOptions.password = Buffer.from(options.password, "utf8")
-      secrets.push(nativeOptions.password)
-    }
+    Object.assign(nativeOptions, copyNativeSecrets(options, secrets))
     return { pending: binding.connect(nativeOptions, verify) }
   } finally {
     for (const secret of secrets) secret.fill(0)

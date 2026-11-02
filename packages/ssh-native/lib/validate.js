@@ -78,10 +78,16 @@ function checkExecArguments(command, stdin, signal) {
 
 /** @param options connect options */
 function checkSecrets(options) {
-  for (const name of ["privateKey", "password"]) {
+  for (const name of ["privateKey", "certificate", "password"]) {
     if (options[name] !== undefined && !Buffer.isBuffer(options[name])) {
       throw new TypeError(`${name} must be a Buffer`)
     }
+  }
+  if (
+    options.certificate !== undefined &&
+    (options.privateKey === undefined || options.agent !== undefined)
+  ) {
+    throw new TypeError("certificate requires privateKey without an agent")
   }
 }
 

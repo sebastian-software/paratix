@@ -11,6 +11,7 @@ use russh::keys::{decode_secret_key, Algorithm, HashAlg, PrivateKey, PrivateKeyW
 use zeroize::Zeroizing;
 
 use crate::error::{from_key_error, BindingError, BindingResult, Code};
+use crate::file_certificate::FileCertificate;
 use crate::handler::ClientHandler;
 use crate::secret::{SecretAnswers, SecretBytes};
 
@@ -18,6 +19,8 @@ pub enum AuthInput {
     Agent(String),
     /// Copied out of the JS buffer synchronously; zeroized on drop.
     PrivateKey(SecretBytes),
+    /// Parsed, locally verified certificate and its zeroizing private key.
+    Certificate(Box<FileCertificate>),
     /// Copied out of the JS buffer synchronously; zeroized on drop.
     Password(SecretBytes),
 }
@@ -58,6 +61,7 @@ pub async fn authenticate(
     match input {
         AuthInput::Agent(socket) => agent_auth(handle, user, &socket).await,
         AuthInput::PrivateKey(bytes) => key_auth(handle, user, bytes).await,
+        AuthInput::Certificate(identity) => certificate_auth(handle, user, *identity).await,
         AuthInput::Password(bytes) => password_auth(handle, user, bytes).await,
     }
 }
@@ -144,14 +148,7 @@ async fn key_auth(
     user: &str,
     bytes: SecretBytes,
 ) -> BindingResult<AuthInfo> {
-    let text = std::str::from_utf8(&bytes).map_err(|_| {
-        BindingError::new(
-            Code::UnsupportedKey,
-            "the private key is not a text (PEM/OpenSSH) key",
-        )
-    })?;
-    let key = decode_private_key(text)?;
-    drop(bytes);
+    let key = decode_key_bytes(bytes)?;
     let algorithm = key.algorithm();
     let hash = if algorithm.clone().is_rsa() {
         rsa_hash(handle).await
@@ -168,6 +165,51 @@ async fn key_auth(
             attempts: 1,
         }),
         AuthResult::Failure { .. } => Err(auth_failed()),
+    }
+}
+
+pub fn decode_key_bytes(bytes: SecretBytes) -> BindingResult<PrivateKey> {
+    let text = std::str::from_utf8(&bytes).map_err(|_| {
+        BindingError::new(
+            Code::UnsupportedKey,
+            "the private key is not a text (PEM/OpenSSH) key",
+        )
+    })?;
+    let key = decode_private_key(text)?;
+    drop(bytes);
+    Ok(key)
+}
+
+async fn certificate_auth(
+    handle: &mut Handle<ClientHandler>,
+    user: &str,
+    identity: FileCertificate,
+) -> BindingResult<AuthInfo> {
+    let hash = if identity.certificate.algorithm().is_rsa() {
+        rsa_hash(handle).await
+    } else {
+        None
+    };
+    let algorithm = if identity.certificate.algorithm().is_rsa() {
+        Algorithm::Rsa { hash }
+    } else {
+        identity.certificate.algorithm()
+    };
+    let mut signer = identity.signer;
+    match handle
+        .authenticate_certificate_with(user, identity.certificate, hash, &mut signer)
+        .await?
+    {
+        AuthResult::Success => Ok(AuthInfo {
+            method: "publickey".into(),
+            identity_kind: Some("certificate".into()),
+            algorithm: Some(algorithm.to_certificate_type()),
+            attempts: 1,
+        }),
+        AuthResult::Failure { .. } => Err(BindingError::new(
+            Code::AuthFailed,
+            "certificate authentication failed; check the server CA and principal configuration",
+        )),
     }
 }
 
@@ -275,7 +317,7 @@ mod tests {
                 AuthInput::PrivateKey(bytes) | AuthInput::Password(bytes) => {
                     assert_zeroize_on_drop(bytes);
                 }
-                AuthInput::Agent(_) => {}
+                AuthInput::Agent(_) | AuthInput::Certificate(_) => {}
             }
         }
     }

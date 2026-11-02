@@ -37,6 +37,7 @@ export function unwrapTransportError(error: unknown): unknown {
 export type TransportConnectOptions = {
   agent?: string
   agentForward?: boolean
+  certificate?: Buffer
   host: string
   password?: string
   port: number

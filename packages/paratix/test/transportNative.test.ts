@@ -476,6 +476,52 @@ describe("native transport", () => {
   })
 
   describe("native transport: secrets", () => {
+    it.each(["success", "reject"])(
+      "copies and scrubs the certificate on native %s while preserving its owner",
+      async (outcome) => {
+        const certificate = Buffer.from("certificate bytes")
+        let copy: Buffer | undefined
+        binding.connect.mockImplementationOnce(async (options) => {
+          copy = options.certificate
+          expect(copy).not.toBe(certificate)
+          expect(copy?.toString()).toBe("certificate bytes")
+          await nextTurn()
+          if (outcome === "reject") {
+            throw nativeError("AUTH_FAILED", "Invalid certificate", {
+              detail: "certificate-invalid",
+            })
+          }
+          return new FakeNativeSession().api
+        })
+        const pending = createNativeTransport().connect({
+          ...baseOptions,
+          certificate,
+          privateKey: "key",
+        })
+        const [result] = await Promise.allSettled([pending])
+        const expectedStatus: Record<string, string> = { reject: "rejected", success: "fulfilled" }
+        expect(result.status).toBe(expectedStatus[outcome])
+        expect(copy).toStrictEqual(Buffer.alloc(certificate.length))
+        expect(certificate.toString()).toBe("certificate bytes")
+      }
+    )
+
+    it.each([
+      "certificate-invalid",
+      "certificate-key-mismatch",
+      "certificate-expired",
+      "certificate-not-yet-valid",
+    ])("preserves the permanent certificate detail %s", async (detail) => {
+      binding.connect.mockRejectedValueOnce(
+        nativeError("AUTH_FAILED", "Invalid certificate", { detail })
+      )
+      const error = expectTransportError(
+        await rejection(createNativeTransport().connect({ ...baseOptions })),
+        "AUTH_FAILED"
+      )
+      expect(error.cause).toMatchObject({ code: "AUTH_FAILED", detail })
+    })
+
     it("hands a copy of the key to the binding and leaves the caller's buffer unchanged", async () => {
       const session = new FakeNativeSession()
       const key = Buffer.from("-----BEGIN OPENSSH PRIVATE KEY-----")

@@ -162,8 +162,31 @@ aborts before a password prompt.
 Key files must be unencrypted PEM/OpenSSH text for Ed25519, RSA, or ECDSA (P-256/P-384/P-521).
 Encrypted files (`ENCRYPTED_KEY`), DSA, hardware-backed `sk-*` key files, and unsupported or corrupt
 formats (`UNSUPPORTED_KEY`) fail on the first attempt, without further ports or reconnect retries.
-To use an encrypted key, load it into an agent and omit `privateKey`. See the
+To use an encrypted key, load it into an agent and omit both `privateKey` and `certificate`. See the
 [native binding's key requirements](https://github.com/sebastian-software/paratix/blob/main/packages/ssh-native/README.md).
+
+For file-based OpenSSH user-certificate authentication, set `ssh.certificate` to a nonempty path
+alongside the matching `ssh.privateKey`. Both paths expand `~`. A certificate without a key file is
+invalid; attaching an external certificate to a raw agent key is unsupported. To use an
+agent-held certificate, omit both file options and let the existing agent identity path sign.
+
+Before TCP, Paratix checks the certificate's OpenSSH format, user type, issuer signature, key
+match, and validity window against the controller clock. Signature validation does not establish
+CA trust: the server's `TrustedUserCAKeys` and principal policy determine authorization. Paratix
+has no local rule requiring `ssh.user` to occur in the certificate principals;
+`AuthorizedPrincipalsFile` can authorize a different principal. RSA user certificates use
+RSA-SHA2 without enabling legacy `ssh-rsa`. Host certificates and host-CA trust are unsupported;
+keep the existing verified host-key pin or `known_hosts` trust anchor.
+
+Local certificate failures use `AUTH_FAILED` with native `detail` equal to
+`certificate-invalid`, `certificate-key-mismatch`, `certificate-expired`, or
+`certificate-not-yet-valid`. These stop immediately without trying more ports or retrying,
+including during reconnect. Other `AUTH_FAILED` failures keep the existing retry behavior;
+a server rejection gives a generic CA/principal hint because the exact server reason is unknown.
+Each reconnect reloads both files, so a renewed certificate is read and an expired one fails
+validation. Private-key and certificate input buffers are zero-filled after use; errors do not
+include certificate contents, key IDs, or principals.
+
 Native errors include `[CODE]`; after other connection failures, the final message includes
 `; last error on port <p>: <native message> [<CODE>]`. See
 [SSH troubleshooting](https://github.com/sebastian-software/paratix/blob/main/docs/user-guide/troubleshooting.md).
@@ -185,6 +208,7 @@ export default server({
     ports: [22], // Array -- runner tries each port in order
     privateKey: "~/.ssh/id_ed25519", // Optional -- "~" is expanded; omit to use SSH agent
     // Optional:
+    // certificate: "~/.ssh/id_ed25519-cert.pub", // Matching user certificate; requires privateKey
     // agentForward: false,          // Forward SSH agent to remote
     // passwordFallback: false,     // Only without privateKey; fallback after failed agent login
     // sudoPassword: "...",
@@ -1028,6 +1052,10 @@ It does not expand release/deployment permissions.
 When the active Paratix SSH session already verified the host via `ssh.expectedHostFingerprint`
 or `ssh.expectedHostPublicKey`, `rsync.sync()` reuses that verified host key for the external
 rsync SSH process and does not depend on a local `known_hosts` entry.
+After successful file-key authentication with `ssh.certificate`, rsync also passes the expanded,
+shell-quoted certificate path as `-o CertificateFile=...` alongside the matching private key.
+Agent and password sessions do not set `CertificateFile`, including sessions using an agent-held
+certificate.
 
 ### `script`
 
@@ -1368,27 +1396,30 @@ The remaining public helpers cover validation, narrowing, and conversion:
 
 Methods available on the `ssh` parameter:
 
-| Method                                            | Return type                                                                                                 | Description                                                                                            |
-| ------------------------------------------------- | ----------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------ |
-| `ssh.addPort(port)`                               | `boolean`                                                                                                   | Register a reconnect candidate; return `true` when it was added.                                       |
-| `ssh.disconnect()`                                | `void`                                                                                                      | Close the SSH connection.                                                                              |
-| `ssh.downloadFile(remotePath, localPath)`         | `Promise<void>`                                                                                             | Download a remote file.                                                                                |
-| `ssh.exec(command, options?)`                     | `Promise<ExecResult>`                                                                                       | Run a command and return `{ code, stdout, stderr }`. Throws on non-zero unless `ignoreExitCode: true`. |
-| `ssh.exists(remotePath)`                          | `Promise<boolean>`                                                                                          | Check whether a remote path exists.                                                                    |
-| `ssh.getConnectionInfo()`                         | `{ agentSocket?, authMethod?, configuredPorts, host, port, privateKeyPath?, user, verifiedHostPublicKey? }` | Return the active connection and authentication details.                                               |
-| `ssh.lines(command)`                              | `Promise<string[]>`                                                                                         | Run a command and return stdout split into lines.                                                      |
-| `ssh.output(command)`                             | `Promise<string>`                                                                                           | Run a command and return trimmed stdout.                                                               |
-| `ssh.probeSudo()`                                 | `Promise<void>`                                                                                             | Probe and cache sudo access, prompting interactively if needed.                                        |
-| `ssh.readFile(remotePath)`                        | `Promise<string>`                                                                                           | Read the full contents of a remote file.                                                               |
-| `ssh.reconnect(options?)`                         | `Promise<void>`                                                                                             | Reconnect; `options.defaultTimeout` supplies a call-specific fallback in milliseconds.                 |
-| `ssh.removePort(port)`                            | `void`                                                                                                      | Remove a registered reconnect candidate.                                                               |
-| `ssh.sha256(remotePath)`                          | `Promise<string \| null>`                                                                                   | Return the SHA-256 hex digest, or `null` when the file is not found.                                   |
-| `ssh.test(command)`                               | `Promise<boolean>`                                                                                          | Run a command and return whether its exit code is zero.                                                |
-| `ssh.updateHost(host)`                            | `void`                                                                                                      | Update the target host address.                                                                        |
-| `ssh.uploadFile(localPath, remotePath, options?)` | `Promise<void>`                                                                                             | Upload through SFTP; `options.mode` defaults to `"0600"`.                                              |
-| `ssh.writeFile(remotePath, content, options?)`    | `Promise<void>`                                                                                             | Create or replace a remote file; `options.mode` defaults to `"0600"`.                                  |
+| Method                                            | Return type                                                                                                                   | Description                                                                                            |
+| ------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------ |
+| `ssh.addPort(port)`                               | `boolean`                                                                                                                     | Register a reconnect candidate; return `true` when it was added.                                       |
+| `ssh.disconnect()`                                | `void`                                                                                                                        | Close the SSH connection.                                                                              |
+| `ssh.downloadFile(remotePath, localPath)`         | `Promise<void>`                                                                                                               | Download a remote file.                                                                                |
+| `ssh.exec(command, options?)`                     | `Promise<ExecResult>`                                                                                                         | Run a command and return `{ code, stdout, stderr }`. Throws on non-zero unless `ignoreExitCode: true`. |
+| `ssh.exists(remotePath)`                          | `Promise<boolean>`                                                                                                            | Check whether a remote path exists.                                                                    |
+| `ssh.getConnectionInfo()`                         | `{ agentSocket?, authMethod?, certificatePath?, configuredPorts, host, port, privateKeyPath?, user, verifiedHostPublicKey? }` | Return the active connection and authentication details.                                               |
+| `ssh.lines(command)`                              | `Promise<string[]>`                                                                                                           | Run a command and return stdout split into lines.                                                      |
+| `ssh.output(command)`                             | `Promise<string>`                                                                                                             | Run a command and return trimmed stdout.                                                               |
+| `ssh.probeSudo()`                                 | `Promise<void>`                                                                                                               | Probe and cache sudo access, prompting interactively if needed.                                        |
+| `ssh.readFile(remotePath)`                        | `Promise<string>`                                                                                                             | Read the full contents of a remote file.                                                               |
+| `ssh.reconnect(options?)`                         | `Promise<void>`                                                                                                               | Reconnect; `options.defaultTimeout` supplies a call-specific fallback in milliseconds.                 |
+| `ssh.removePort(port)`                            | `void`                                                                                                                        | Remove a registered reconnect candidate.                                                               |
+| `ssh.sha256(remotePath)`                          | `Promise<string \| null>`                                                                                                     | Return the SHA-256 hex digest, or `null` when the file is not found.                                   |
+| `ssh.test(command)`                               | `Promise<boolean>`                                                                                                            | Run a command and return whether its exit code is zero.                                                |
+| `ssh.updateHost(host)`                            | `void`                                                                                                                        | Update the target host address.                                                                        |
+| `ssh.uploadFile(localPath, remotePath, options?)` | `Promise<void>`                                                                                                               | Upload through SFTP; `options.mode` defaults to `"0600"`.                                              |
+| `ssh.writeFile(remotePath, content, options?)`    | `Promise<void>`                                                                                                               | Create or replace a remote file; `options.mode` defaults to `"0600"`.                                  |
 
 `getConnectionInfo().authMethod`, when present, is `"agent"`, `"password"`, or `"privateKey"`.
+`certificatePath` is the expanded configured path only after successful file-key authentication
+with a certificate; it is absent for agent and password authentication. Certificate-based file
+authentication still reports `authMethod: "privateKey"`.
 `reconnect` accepts `options?: { defaultTimeout?: number }`; `uploadFile` and `writeFile` accept
 `options?: { mode?: string }`.
 
@@ -1811,7 +1842,7 @@ and `apply` contract and may return a short `detail`; do not depend on internal 
     - inside a recipe, that recipe's signals
     - at the top level, `server(...).signals`
 13. Do NOT call `server()` without all required fields (`name`, `host`, `ssh`, `run`) -- it throws at construction time. `name` and `host` must not be empty strings.
-14. Do NOT use empty arrays for `ssh.ports` or empty strings for `ssh.user`/`ssh.privateKey` -- validation rejects these. `ssh.privateKey` may be omitted entirely to use the SSH agent instead.
+14. Do NOT use empty arrays for `ssh.ports` or empty strings for `ssh.user`/`ssh.privateKey`/`ssh.certificate` -- validation rejects these. `ssh.certificate` requires `ssh.privateKey`; omit both to use the SSH agent instead.
 15. Do NOT return loose `meta: { ... }` maps from custom modules -- always use typed meta entries.
 16. Do NOT set `ssh.sudoPassword` or initial SSH credentials to values from `secret.provider(...).resolve(...)`, `op.resolve()`, or `meta.env()` -- `SshConfig` is frozen at server construction time, before any module in `run` executes. This still holds even though `op.resolve` now resolves its references up front, right after the command starts: that up-front resolution runs inside `runPlaybook`, which is already after construction time, so it is exactly as unreachable for `SshConfig` as the module's own `apply()` step always was. Use a static source like `process.env.SUDO_PASSWORD` or a variable populated before the server definition is imported.
 

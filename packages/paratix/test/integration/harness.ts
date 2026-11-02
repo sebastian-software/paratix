@@ -32,6 +32,7 @@ const SSH_POLL_INTERVAL = 250
 const SSH_READY_TIMEOUT = 30_000
 
 const PROFILE_PORTS = {
+  certificatePort: 2230,
   ecdsaPort: 2228,
   ed25519Port: 2226,
   forwardingPort: 2225,
@@ -480,6 +481,7 @@ async function readPublishedPorts(containerName: string): Promise<PublishedPorts
   const readPort = async (port: number): Promise<number> =>
     parseDockerPort(await runCommand("docker", ["port", containerName, `${port}/tcp`]))
   return {
+    certificatePort: await readPort(PROFILE_PORTS.certificatePort),
     ecdsaPort: await readPort(PROFILE_PORTS.ecdsaPort),
     ed25519Port: await readPort(PROFILE_PORTS.ed25519Port),
     forwardingPort: await readPort(PROFILE_PORTS.forwardingPort),

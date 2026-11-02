@@ -81,7 +81,7 @@ class ConnectAttempt {
    * @returns the pending native session
    */
   start(options) {
-    const secrets = [options?.privateKey, options?.password].filter((value) =>
+    const secrets = [options?.privateKey, options?.certificate, options?.password].filter((value) =>
       Buffer.isBuffer(value)
     )
     try {
@@ -140,6 +140,7 @@ class ConnectAttempt {
       options.readyTimeoutMs ?? DEFAULT_READY_TIMEOUT_MS,
       options.agent ?? null,
       options.privateKey ?? null,
+      options.certificate ?? null,
       options.password ?? null,
       options.agentForward === true,
       this.verify,

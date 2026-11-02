@@ -12,7 +12,13 @@ import { runTool } from "./tools.mjs"
 
 const FIXTURE_DIR = join(import.meta.dirname, "..", "fixture")
 const LABEL_PREFIX = "com.sebastian-software.paratix.ssh-native-integration"
-const PROFILE_PORTS = { keyboardInteractive: 2225, main: 2222, password: 2224, userCa: 2223 }
+const PROFILE_PORTS = {
+  keyboardInteractive: 2225,
+  main: 2222,
+  password: 2224,
+  rsaCa: 2226,
+  userCa: 2223,
+}
 // The full-file-system test writes more than this into the tmpfs.
 export const FULL_FS_PATH = "/mnt/full"
 const FULL_FS_SIZE = "1m"
@@ -144,6 +150,7 @@ async function copyKeys(name, fixtures) {
   const copies = [
     [fixtures.hostKey, `${KEY_DIR}/host_ed25519`],
     [fixtures.userCaPublic, `${KEY_DIR}/user_ca.pub`],
+    [fixtures.authorizedPrincipals, `${KEY_DIR}/authorized_principals`],
     [fixtures.authorizedKeys, AUTHORIZED_KEYS],
   ]
   for (const [source, destination] of copies) {

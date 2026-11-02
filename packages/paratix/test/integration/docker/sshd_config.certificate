@@ -1,0 +1,16 @@
+Port 2230
+PidFile /run/sshd-certificate.pid
+HostKey /etc/ssh/ssh_host_ed25519_key
+ListenAddress 0.0.0.0
+AuthorizedKeysFile none
+TrustedUserCAKeys /etc/ssh/test-user-ca.pub
+AuthorizedPrincipalsFile /etc/ssh/test-authorized-principals
+PermitRootLogin no
+AllowUsers paratix
+PermitUserEnvironment no
+Subsystem sftp internal-sftp
+LogLevel VERBOSE
+PubkeyAuthentication yes
+PasswordAuthentication no
+KbdInteractiveAuthentication no
+UsePAM no

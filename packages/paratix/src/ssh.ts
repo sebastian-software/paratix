@@ -295,6 +295,7 @@ type SudoCommandResult = { command: string; mode: SudoCommandMode; needsPassword
 type ConnectOptions = { reconnectDeadline?: number } & PromptOptions
 type TryConnectOnPortsOptions = {
   agent?: string
+  certificate?: Buffer
   password?: string
   privateKey?: Buffer | string
   reconnectDeadline?: number
@@ -304,7 +305,20 @@ type ConnectFailure = { error: unknown; port: number }
 function isPermanentKeyError(error: unknown): error is TransportError {
   return (
     error instanceof TransportError &&
-    (error.transportCode === "ENCRYPTED_KEY" || error.transportCode === "UNSUPPORTED_KEY")
+    (error.transportCode === "ENCRYPTED_KEY" ||
+      error.transportCode === "UNSUPPORTED_KEY" ||
+      (error.transportCode === "AUTH_FAILED" && isPermanentCertificateDetail(error.cause)))
+  )
+}
+
+function isPermanentCertificateDetail(cause: unknown): boolean {
+  if (typeof cause !== "object" || cause === null) return false
+  const detail: unknown = Reflect.get(cause, "detail")
+  return (
+    detail === "certificate-invalid" ||
+    detail === "certificate-key-mismatch" ||
+    detail === "certificate-expired" ||
+    detail === "certificate-not-yet-valid"
   )
 }
 
@@ -574,7 +588,7 @@ export class SshConnectionImpl implements SshConnection {
    * Establish the SSH connection using the configured credentials.
    *
    * Authentication strategy (in order):
-   * 1. If `privateKey` is set: connect with the key only.
+   * 1. If `privateKey` is set: connect with the key and optional certificate.
    * 2. If `privateKey` is omitted: connect via the SSH agent identified by
    *    `SSH_AUTH_SOCK`, optionally falling back to password authentication
    *    when `passwordFallback` is enabled. Throws if the environment variable
@@ -688,6 +702,10 @@ export class SshConnectionImpl implements SshConnection {
     return {
       agentSocket: this.authMethod === "agent" ? (this.agentSocket ?? undefined) : undefined,
       authMethod: this.authMethod ?? undefined,
+      certificatePath:
+        this.authMethod === "privateKey" && this.config.certificate != null
+          ? expandHomePath(this.config.certificate)
+          : undefined,
       configuredPorts: [...this.config.ports],
       host: this.runtime.host,
       port: this.connectedPort,
@@ -1465,9 +1483,19 @@ sha256sum -- ${shellQuote(remotePath)} 2>/dev/null || printf 'paratix-hash-faile
     const failure = this.lastConnectFailure
     if (failure === undefined) return new Error(prefix)
     const message = failure.error instanceof Error ? failure.error.message : String(failure.error)
-    return new Error(`${prefix}; last error on port ${failure.port}: ${message}`, {
-      cause: failure.error,
-    })
+    const certificateHint =
+      this.config.certificate != null &&
+      typeof failure.error === "object" &&
+      failure.error !== null &&
+      Reflect.get(failure.error, "code") === "AUTH_FAILED"
+        ? "; the server rejected authentication; check its trusted CA and allowed principals configuration"
+        : ""
+    return new Error(
+      `${prefix}; last error on port ${failure.port}: ${message}${certificateHint}`,
+      {
+        cause: failure.error,
+      }
+    )
   }
 
   private async connectViaAgent(options?: ConnectOptions): Promise<void> {
@@ -1499,11 +1527,17 @@ sha256sum -- ${shellQuote(remotePath)} 2>/dev/null || printf 'paratix-hash-faile
     }
     // eslint-disable-next-line security/detect-non-literal-fs-filename
     const privateKey = await readFile(expandHomePath(privateKeyPath))
+    let certificate: Buffer | undefined
     // R-0000521: the native adapter copies the key for each attempt. The
     // caller-owned original is no longer needed once all attempts settle.
     try {
+      if (this.config.certificate != null) {
+        // eslint-disable-next-line security/detect-non-literal-fs-filename -- explicit configured certificate path, reloaded on every connect
+        certificate = await readFile(expandHomePath(this.config.certificate))
+      }
       if (
         await this.tryConnectOnPorts({
+          certificate,
           privateKey,
           reconnectDeadline: options?.reconnectDeadline,
         })
@@ -1516,6 +1550,7 @@ sha256sum -- ${shellQuote(remotePath)} 2>/dev/null || printf 'paratix-hash-faile
       )
     } finally {
       privateKey.fill(0)
+      certificate?.fill(0)
     }
   }
 
@@ -2242,6 +2277,7 @@ trap - EXIT
       await client.connect({
         agent: options.agent,
         agentForward: this.config.agentForward,
+        certificate: options.certificate,
         host: this.runtime.host,
         password: options.password,
         port,
