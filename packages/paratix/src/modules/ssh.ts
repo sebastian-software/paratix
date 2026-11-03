@@ -8,12 +8,21 @@ import { assertValidUserName } from "./posixNames.js"
 import { applyAuthorizedKeys, checkAuthorizedKeys } from "./sshAuthorizedKeysHelpers.js"
 import { authorizedPrincipals } from "./sshAuthorizedPrincipals.js"
 import { trustedUserCa } from "./sshCertificateModules.js"
+import { knownHostsCertAuthority } from "./sshKnownHostsCertAuthority.js"
+import {
+  confirmKnownHostsTarget,
+  KnownHostsFileError,
+  knownHostsTarget,
+  withKnownHostsLock,
+} from "./sshKnownHostsFiles.js"
 import { assertAuthorizedKeyValue } from "./sshPublicKeyValidation.js"
 
 export type {
   AuthorizedPrincipalsOptions,
   TrustedUserCaOptions,
 } from "./sshCertificateValidation.js"
+
+export type { KnownHostsCertAuthorityOptions } from "./sshKnownHostsCaValidation.js"
 
 type KnownHostsOptions = {
   expectedFingerprint?: string
@@ -43,6 +52,7 @@ const DEFAULT_SSH_PORT = 22
 const ASCII_SPACE_CODE_POINT = 0x20
 const ASCII_DELETE_CODE_POINT = 0x7f
 const KNOWN_HOSTS_TEMPORARY_PREFIX = ".paratix-known-hosts"
+const SSH_DIRECTORY_SUFFIX = "/.ssh"
 const MUTATION_EXEC_OPTS = { ignoreExitCode: true, silent: true } as const
 
 function assertAuthorizedKeysState(state: unknown): asserts state is AuthorizedKeysState {
@@ -85,7 +95,7 @@ function parseHostKeyLines(output: string): string[] {
   return output
     .split("\n")
     .map((line) => line.trim())
-    .filter((line) => line.length > 0 && !line.startsWith("#"))
+    .filter((line) => line.length > 0 && !line.startsWith("#") && !line.startsWith("@"))
 }
 
 function scannedLinePublicKey(line: string): string {
@@ -217,12 +227,9 @@ async function resolveKnownHostsPaths(conn: SshConnection): Promise<{
   sshDirectoryPath: string
 }> {
   const home = validateKnownHostsHome(await conn.output("printf '%s' \"$HOME\""))
-  const sshDirectoryPath = `${home}/.ssh`
-  return {
-    home,
-    knownHostsPath: `${sshDirectoryPath}/known_hosts`,
-    sshDirectoryPath,
-  }
+  const target = knownHostsTarget(home)
+  await confirmKnownHostsTarget(conn, target)
+  return target
 }
 
 async function resolveKnownHostsPathsForState(
@@ -246,10 +253,11 @@ async function resolveKnownHostsPathsForState(
 
 function isKnownHostsPathValidationError(error: unknown): error is Error {
   return (
-    error instanceof Error &&
-    (error.message.startsWith("Unexpected mktemp output:") ||
-      error.message.startsWith("Unexpected mktemp directory:") ||
-      error.message === "failed to resolve a safe home directory")
+    error instanceof KnownHostsFileError ||
+    (error instanceof Error &&
+      (error.message.startsWith("Unexpected mktemp output:") ||
+        error.message.startsWith("Unexpected mktemp directory:") ||
+        error.message === "failed to resolve a safe home directory"))
   )
 }
 
@@ -405,7 +413,7 @@ async function hasKnownHostEntry(
   if (!isExpectedSshKeygenLookupExitCode(result.code)) {
     throw new SshKeygenLookupError(host, result.code, result.stderr)
   }
-  return true
+  return parseHostKeyLines(result.stdout).length > 0
 }
 
 async function resolveKnownHostsAbsentLookup(
@@ -556,7 +564,10 @@ async function reconcileKnownHostsState(
   }
   return {
     failure: null,
-    lines: await filterMissingKnownHostLines(conn, knownHostsPath, verifiedLines),
+    lines:
+      existingLines.length > 0
+        ? []
+        : await filterMissingKnownHostLines(conn, knownHostsPath, verifiedLines),
     mode: "append",
   }
 }
@@ -631,15 +642,14 @@ async function rewriteReconciledKnownHosts(
  * @param parameters - Apply context for the present-state branch.
  * @param parameters.host - The hostname or IP address to scan.
  * @param parameters.options - Configuration including the trust anchor.
+ * @param parameters.paths - The canonical paths protected by the shared file lock.
  * @returns A {@link ModuleResult} describing the outcome.
  */
 async function applyKnownHostsPresent(
   conn: SshConnection,
-  parameters: { host: string; options?: KnownHostsOptions }
+  parameters: { host: string; options?: KnownHostsOptions; paths: KnownHostsPaths }
 ): Promise<ModuleResult> {
-  const { host, options } = parameters
-  const pathResolution = await resolveKnownHostsPathsForState(conn, { host, state: "present" })
-  if (pathResolution.failure) return pathResolution.failure
+  const { host, options, paths } = parameters
 
   const scan = await runSshKeyscanForKnownHosts(conn, host, options)
   if (scan.failure) return scan.failure
@@ -648,13 +658,13 @@ async function applyKnownHostsPresent(
 
   const pathFailure = await ensureKnownHostsPresentPath(conn, {
     host,
-    paths: pathResolution.paths,
+    paths,
   })
   if (pathFailure) return pathFailure
 
   const existing = await resolveExistingKnownHostLines(conn, {
     host,
-    knownHostsPath: pathResolution.paths.knownHostsPath,
+    knownHostsPath: paths.knownHostsPath,
     options,
   })
   if (existing.failure) return existing.failure
@@ -662,7 +672,7 @@ async function applyKnownHostsPresent(
   const reconciled = await reconcileKnownHostsState(conn, {
     existingLines: existing.existingLines,
     host,
-    knownHostsPath: pathResolution.paths.knownHostsPath,
+    knownHostsPath: paths.knownHostsPath,
     options,
     verifiedLines: verification.verifiedLines,
   })
@@ -670,7 +680,7 @@ async function applyKnownHostsPresent(
   return rewriteReconciledKnownHosts(conn, {
     host,
     options,
-    paths: pathResolution.paths,
+    paths,
     reconciled,
   })
 }
@@ -688,17 +698,19 @@ function knownHostsStageCommand(parameters: {
   const quotedTemporaryPath = shellQuote(temporaryPath)
   const quotedTemporaryBackupPath = shellQuote(`${temporaryPath}.old`)
   const existingKnownHostsGuard = `[ ! -L ${quotedKnownHostsPath} ] || { echo 'known_hosts must not be a symlink' >&2; exit 1; }; [ -f ${quotedKnownHostsPath} ] || { echo 'known_hosts must be a regular file' >&2; exit 1; }`
-  const writeLines = `printf '%s\\n' ${lines.map((line) => shellQuote(line)).join(" ")}`
+  const ensureSeparator = `if [ -s ${quotedTemporaryPath} ] && [ -n "$(tail -c 1 -- ${quotedTemporaryPath})" ]; then printf '\\n' >> ${quotedTemporaryPath}; fi`
+  const writeLines =
+    lines.length === 0 ? ":" : `printf '%s\\n' ${lines.map((line) => shellQuote(line)).join(" ")}`
   const copyExistingKnownHosts = `if [ -e ${quotedKnownHostsPath} ]; then ${existingKnownHostsGuard}; dd if=${quotedKnownHostsPath} iflag=nofollow status=none of=${quotedTemporaryPath} || exit $?; else : > ${quotedTemporaryPath}; fi`
 
   if (mode === "replace") {
-    return `{ ${copyExistingKnownHosts}; ssh-keygen -R ${quotedLookupTarget} -f ${quotedTemporaryPath} >/dev/null || exit $?; rm -f -- ${quotedTemporaryBackupPath} || exit $?; ${writeLines} >> ${quotedTemporaryPath}; }`
+    return `{ ${copyExistingKnownHosts}; ssh-keygen -R ${quotedLookupTarget} -f ${quotedTemporaryPath} >/dev/null || exit $?; rm -f -- ${quotedTemporaryBackupPath} || exit $?; ${lines.length === 0 ? ":" : ensureSeparator}; ${writeLines} >> ${quotedTemporaryPath}; }`
   }
 
   const appendMissingLines = lines
     .map(
       (line) =>
-        `grep -qxF ${shellQuote(line)} ${quotedTemporaryPath}; grep_status=$?; if [ "$grep_status" -eq 0 ]; then :; elif [ "$grep_status" -eq 1 ]; then printf '%s\\n' ${shellQuote(line)} >> ${quotedTemporaryPath}; else exit "$grep_status"; fi`
+        `grep -qxF ${shellQuote(line)} ${quotedTemporaryPath}; grep_status=$?; if [ "$grep_status" -eq 0 ]; then :; elif [ "$grep_status" -eq 1 ]; then ${ensureSeparator}; printf '%s\\n' ${shellQuote(line)} >> ${quotedTemporaryPath}; else exit "$grep_status"; fi`
     )
     .join("; ")
   // R-0000626: read the existing known_hosts through `dd ... iflag=nofollow`
@@ -828,45 +840,49 @@ async function checkKnownHostsAbsentPath(
   return { exists: await conn.exists(paths.knownHostsPath), failure: null }
 }
 
-async function removeKnownHostEntry(
-  conn: SshConnection,
-  parameters: { host: string; knownHostsPath: string; options?: KnownHostsOptions }
-): Promise<ModuleResult> {
-  const { host, knownHostsPath, options } = parameters
-  const removeResult = await conn.exec(
-    `ssh-keygen -R ${shellQuote(knownHostsLookupTarget(host, options))} -f ${shellQuote(knownHostsPath)}`,
-    MUTATION_EXEC_OPTS
-  )
-  if (removeResult.code !== 0) {
-    return failedCommand(`[ssh.knownHosts: ${host} (absent)] ssh-keygen -R failed`, removeResult)
-  }
-  return { status: "changed" }
-}
-
 async function applyKnownHostsAbsent(
   conn: SshConnection,
-  parameters: { host: string; options?: KnownHostsOptions }
+  parameters: { host: string; options?: KnownHostsOptions; paths: KnownHostsPaths }
 ): Promise<ModuleResult> {
-  const { host, options } = parameters
-  const pathResolution = await resolveKnownHostsPathsForState(conn, { host, state: "absent" })
-  if (pathResolution.failure) return pathResolution.failure
-
-  const pathCheck = await checkKnownHostsAbsentPath(conn, { host, paths: pathResolution.paths })
+  const { host, options, paths } = parameters
+  const pathCheck = await checkKnownHostsAbsentPath(conn, { host, paths })
   if (pathCheck.failure) return pathCheck.failure
   if (!pathCheck.exists) return { status: "ok" }
 
   const lookup = await resolveKnownHostsAbsentLookup(conn, {
     host,
-    knownHostsPath: pathResolution.paths.knownHostsPath,
+    knownHostsPath: paths.knownHostsPath,
     options,
   })
   if (lookup.failure != null) return lookup.failure
   if (!lookup.known) return { status: "ok" }
 
-  return removeKnownHostEntry(conn, {
+  return rewriteKnownHostsFile(conn, {
     host,
-    knownHostsPath: pathResolution.paths.knownHostsPath,
+    knownHostsPath: paths.knownHostsPath,
+    lines: [],
+    mode: "replace",
     options,
+    sshDirectoryPath: paths.sshDirectoryPath,
+  })
+}
+
+async function applyKnownHosts(
+  conn: SshConnection,
+  parameters: { host: string; options?: KnownHostsOptions; state: KnownHostsState }
+): Promise<ModuleResult> {
+  const { host, options, state } = parameters
+  const resolution = await resolveKnownHostsPathsForState(conn, { host, state })
+  if (resolution.failure) return resolution.failure
+  const paths = resolution.paths
+  const target = knownHostsTarget(paths.sshDirectoryPath.slice(0, -SSH_DIRECTORY_SUFFIX.length))
+  return withKnownHostsLock(conn, target, {
+    name: `ssh.knownHosts: ${host} (${state})`,
+    async section() {
+      return state === "present"
+        ? applyKnownHostsPresent(conn, { host, options, paths })
+        : applyKnownHostsAbsent(conn, { host, options, paths })
+    },
   })
 }
 
@@ -965,8 +981,14 @@ export const ssh = {
    * Ensure a host is present in (or absent from) the connecting user's `~/.ssh/known_hosts`.
    *
    * When `state` is `"present"` (the default), the host's public keys are fetched
-   * via `ssh-keyscan` and written to `~/.ssh/known_hosts`. When `state` is
-   * `"absent"`, the host entry is removed via `ssh-keygen -R`.
+   * via `ssh-keyscan` and written to `~/.ssh/known_hosts`. Only marker-free raw
+   * host-key lines participate in lookup, trust-anchor, and reconciliation decisions;
+   * existing `@cert-authority` and `@revoked` lines are preserved byte-for-byte.
+   * When `state` is `"absent"`, the raw host-key entry is removed from a staged file
+   * with `ssh-keygen -R`; marker lines are not treated as removable raw entries.
+   * Both states use the same canonical known_hosts path and cooperative mutex as
+   * {@link knownHostsCertAuthority}, so Paratix writers to one file serialize together.
+   * The mutex does not coordinate unrelated external writers.
    *
    * @param host - The hostname or IP address to manage.
    * @param options - Optional settings.
@@ -992,11 +1014,13 @@ export const ssh = {
       async apply(conn: null | SshConnection): Promise<ModuleResult> {
         if (!conn) return failed(`[ssh.knownHosts: ${host} (${state})] SSH connection is required`)
 
-        if (state === "present") {
-          return applyKnownHostsPresent(conn, { host, options })
+        try {
+          return await applyKnownHosts(conn, { host, options, state })
+        } catch (error) {
+          return failed(
+            `[ssh.knownHosts: ${host} (${state})] ${error instanceof Error ? error.message : String(error)}`
+          )
         }
-
-        return applyKnownHostsAbsent(conn, { host, options })
       },
       async check(conn: null | SshConnection): Promise<"needs-apply" | "ok"> {
         if (!conn) return NEEDS_APPLY
@@ -1020,6 +1044,8 @@ export const ssh = {
       name: `ssh.knownHosts: ${host} (${state})`,
     }
   },
+
+  knownHostsCertAuthority,
 
   /**
    * Manage the host-wide SSH user-certificate CA trust configuration.

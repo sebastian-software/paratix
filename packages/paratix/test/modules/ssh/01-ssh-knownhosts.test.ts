@@ -85,6 +85,7 @@ const successfulSshApplyResponseStubs: NonNullable<MockSshOptions["responseStubs
 ]
 
 const successfulSshApplyOptions: MockSshOptions = {
+  allowFlagLockInternalDefaults: true,
   responseStubs: successfulSshApplyResponseStubs,
 }
 
@@ -95,9 +96,19 @@ const successfulSshApplyOptions: MockSshOptions = {
 const createMockSsh: typeof createBaseMockSsh = (responses, options) =>
   createBaseMockSsh(responses, {
     ...options,
+    allowFlagLockInternalDefaults: true,
     responseStubs: [
+      {
+        command: /\nreadlink -m -- '[^']+\/\.ssh\/known_hosts'$/v,
+        result: { stdout: knownHostsPath },
+      },
       { command: "printf '%s' \"$HOME\"", result: { stdout: knownHostsHome } },
       ...(options?.responseStubs ?? []),
+      {
+        command: /^mkdir \/var\/lib\/paratix\/flags\/'ssh-known-hosts-[a-f0-9]+'$/v,
+        result: { code: 0 },
+      },
+      { command: "hostname", result: { stdout: "mockhost" } },
     ],
   })
 
@@ -192,17 +203,13 @@ function createKnownHostsTrackingMock(
   baseResponses: Record<string, { code?: number; stderr?: string; stdout?: string }>
 ): ReturnType<typeof createMockSsh> {
   const grepCommand = `grep -qxF '${line}' '/home/paratix/.ssh/known_hosts'`
-  // R-0000626: the append-branch reads the existing known_hosts via
-  // `dd ... iflag=nofollow` so the open(2) uses `O_NOFOLLOW` and the
-  // TOCTOU window between the `[ ! -L ]` probe and the read is closed.
-  const stageCommand = `{ if [ -e '/home/paratix/.ssh/known_hosts' ]; then [ ! -L '/home/paratix/.ssh/known_hosts' ] || { echo 'known_hosts must not be a symlink' >&2; exit 1; }; [ -f '/home/paratix/.ssh/known_hosts' ] || { echo 'known_hosts must be a regular file' >&2; exit 1; }; dd if='/home/paratix/.ssh/known_hosts' iflag=nofollow status=none of='/home/paratix/.ssh/.paratix-known-hosts.ABC123' || exit $?; else : > '/home/paratix/.ssh/.paratix-known-hosts.ABC123'; fi; grep -qxF '${line}' '/home/paratix/.ssh/.paratix-known-hosts.ABC123'; grep_status=$?; if [ "$grep_status" -eq 0 ]; then :; elif [ "$grep_status" -eq 1 ]; then printf '%s\\n' '${line}' >> '/home/paratix/.ssh/.paratix-known-hosts.ABC123'; else exit "$grep_status"; fi; }`
   let present = false
   const base = createSshApplyMockSsh(baseResponses)
   return {
     ...base,
     async exec(command: string, options?: Parameters<typeof base.exec>[1]) {
       const result = await base.exec(command, options)
-      if (command === stageCommand) present = true
+      if (isKnownHostsRewriteStage(command)) present = true
       return result
     },
     test: async (command: string): Promise<boolean> =>
@@ -432,7 +439,10 @@ describe("ssh.knownHosts", () => {
 
   it("check returns needs-apply when host is known (state: absent)", async () => {
     const mockSsh = createMockSsh({
-      [`ssh-keygen -F 'github.com' -f '${knownHostsPath}'`]: { code: 0 },
+      [`ssh-keygen -F 'github.com' -f '${knownHostsPath}'`]: {
+        code: 0,
+        stdout: `${scannedLine}\n`,
+      },
     })
     const mod = ssh.knownHosts("github.com", { state: "absent" })
     const result = await mod.check(mockSsh, emptyEnv)
@@ -740,16 +750,19 @@ describe("ssh.knownHosts", () => {
     )
   })
 
-  it("apply removes host via ssh-keygen -R (state: absent)", async () => {
+  it("apply removes host via staged ssh-keygen -R (state: absent)", async () => {
     const mockSsh = createSshApplyMockSsh({
       "[ -e '/home/paratix/.ssh/known_hosts' ]": { code: 0 },
-      "ssh-keygen -F 'github.com' -f '/home/paratix/.ssh/known_hosts'": { code: 0 },
+      "ssh-keygen -F 'github.com' -f '/home/paratix/.ssh/known_hosts'": {
+        code: 0,
+        stdout: `${scannedLine}\n`,
+      },
     })
     const mod = ssh.knownHosts("github.com", { state: "absent" })
     const result = await mod.apply(mockSsh, emptyEnv)
     expect(result.status).toBe("changed")
-    expect(mockSsh.calls).toContain(
-      "ssh-keygen -R 'github.com' -f '/home/paratix/.ssh/known_hosts'"
+    expect(mockSsh.calls.find(isKnownHostsRewriteStage)).toContain(
+      "ssh-keygen -R 'github.com' -f '/home/paratix/.ssh/.paratix-known-hosts.ABC123'"
     )
   })
 
@@ -790,15 +803,18 @@ describe("ssh.knownHosts", () => {
   it("apply removes a non-standard-port host entry via a bracketed ssh-keygen -R target", async () => {
     const mockSsh = createSshApplyMockSsh({
       "[ -e '/home/paratix/.ssh/known_hosts' ]": { code: 0 },
-      "ssh-keygen -F '[github.com]:2222' -f '/home/paratix/.ssh/known_hosts'": { code: 0 },
+      "ssh-keygen -F '[github.com]:2222' -f '/home/paratix/.ssh/known_hosts'": {
+        code: 0,
+        stdout: `${scannedLine}\n`,
+      },
     })
     const mod = ssh.knownHosts("github.com", { port: 2222, state: "absent" })
 
     const result = await mod.apply(mockSsh, emptyEnv)
 
     expect(result.status).toBe("changed")
-    expect(mockSsh.calls).toContain(
-      "ssh-keygen -R '[github.com]:2222' -f '/home/paratix/.ssh/known_hosts'"
+    expect(mockSsh.calls.find(isKnownHostsRewriteStage)).toContain(
+      "ssh-keygen -R '[github.com]:2222' -f '/home/paratix/.ssh/.paratix-known-hosts.ABC123'"
     )
   })
 
@@ -806,22 +822,33 @@ describe("ssh.knownHosts", () => {
   // `ignoreExitCode`, so a permission-denied or corrupted-known_hosts error
   // would propagate as an uncaught exception. The fix mirrors R-0000170 for
   // the present-state path: surface a failedCommand result instead.
-  it("R-0000212: apply returns failedCommand when ssh-keygen -R fails (state: absent)", async () => {
-    const mockSsh = createSshApplyMockSsh({
-      "[ -e '/home/paratix/.ssh/known_hosts' ]": { code: 0 },
-      "ssh-keygen -F 'github.com' -f '/home/paratix/.ssh/known_hosts'": { code: 0 },
-      "ssh-keygen -R 'github.com' -f '/home/paratix/.ssh/known_hosts'": {
-        code: 255,
-        stderr: "/root/.ssh/known_hosts: Permission denied",
+  it("R-0000212: apply returns failedCommand when staged ssh-keygen -R fails (state: absent)", async () => {
+    const mockSsh = createMockSsh(
+      {
+        "[ -e '/home/paratix/.ssh/known_hosts' ]": { code: 0 },
+        "ssh-keygen -F 'github.com' -f '/home/paratix/.ssh/known_hosts'": {
+          code: 0,
+          stdout: `${scannedLine}\n`,
+        },
       },
-    })
+      {
+        allowFlagLockInternalDefaults: true,
+        responseStubs: [
+          {
+            command:
+              /^\{ if \[ -e '\/home\/paratix\/\.ssh\/known_hosts' \]; then .+ssh-keygen -R .+; \}$/v,
+            result: { code: 255, stderr: "known_hosts staging removal: Permission denied" },
+          },
+          ...successfulSshApplyResponseStubs,
+        ],
+      }
+    )
     const mod = ssh.knownHosts("github.com", { state: "absent" })
-
     const result = await mod.apply(mockSsh, emptyEnv)
-
     expect(result.status).toBe("failed")
-    expect(String(result.error)).toContain("[ssh.knownHosts: github.com (absent)]")
-    expect(String(result.error)).toContain("ssh-keygen -R failed")
+    expect(String(result.error)).toContain("failed to stage known_hosts rewrite")
+    expect(String(result.error)).toContain("Permission denied")
+    expect(mockSsh.calls.some(isKnownHostsFinalReplace)).toBe(false)
   })
 
   // R-0000215: the final known_hosts write can fail (permission denied,
@@ -833,6 +860,7 @@ describe("ssh.knownHosts", () => {
         "ssh-keyscan -H 'github.com'": { stdout: `${scannedLine}\n` },
       },
       {
+        allowFlagLockInternalDefaults: true,
         responseStubs: [
           {
             command:
@@ -899,6 +927,7 @@ describe("ssh.knownHosts", () => {
         "ssh-keyscan -H 'github.com'": { stdout: `${scannedLine}\n` },
       },
       {
+        allowFlagLockInternalDefaults: true,
         responseStubs: [
           {
             command:
@@ -951,6 +980,7 @@ describe("ssh.knownHosts", () => {
         "ssh-keyscan -H 'github.com'": { stdout: `${scannedLine}\n` },
       },
       {
+        allowFlagLockInternalDefaults: true,
         responseStubs: [
           {
             command:
@@ -1029,4 +1059,59 @@ describe("ssh.knownHosts", () => {
     const result = await mod.apply(conn, emptyEnv)
     expect(result.status).toBe("failed")
   })
+
+  it.each([
+    { hostField: "github.com", lookup: "github.com", port: undefined, scanPort: "" },
+    {
+      hostField: "|1|hashed-host|hashed-value",
+      lookup: "github.com",
+      port: undefined,
+      scanPort: "",
+    },
+    {
+      hostField: "[github.com]:2222",
+      lookup: "[github.com]:2222",
+      port: 2222,
+      scanPort: "-p 2222 ",
+    },
+  ])(
+    "keeps matching raw keys converged beside CA/revocation markers: $hostField",
+    async ({ hostField, lookup, port, scanPort }) => {
+      const raw = `${hostField} ${hostPublicKey}`
+      const markers = `@cert-authority ${hostField} ${hostPublicKey} ca-comment\n@revoked ${hostField} ${hostPublicKey} revoked-comment`
+      const mockSsh = createSshApplyMockSsh({
+        "[ -e '/home/paratix/.ssh/known_hosts' ]": { code: 0 },
+        [`ssh-keygen -F '${lookup}' -f '${knownHostsPath}'`]: { stdout: `${markers}\n${raw}\n` },
+        [`ssh-keyscan ${scanPort}-H 'github.com'`]: {
+          stdout: `${raw}\n`,
+        },
+      })
+      const mod = ssh.knownHosts("github.com", { port, publicKey: hostPublicKey })
+      expect(await mod.check(mockSsh, {})).toBe("ok")
+      expect(await mod.apply(mockSsh, {})).toMatchObject({ status: "ok" })
+      expect(await mod.check(mockSsh, {})).toBe("ok")
+      expect(mockSsh.calls.filter(isKnownHostsRewriteStage)).toHaveLength(0)
+    }
+  )
+
+  it.each([
+    { lookup: "github.com", port: undefined },
+    { lookup: "[github.com]:2222", port: 2222 },
+  ])(
+    "CA/revocation markers alone satisfy absent and cannot satisfy a raw trust anchor, port %s",
+    async ({ lookup, port }) => {
+      const markers = `@cert-authority ${lookup} ${hostPublicKey} ca\n@revoked ${lookup} ${hostPublicKey} revoked\n`
+      const mockSsh = createSshApplyMockSsh({
+        "[ -e '/home/paratix/.ssh/known_hosts' ]": { code: 0 },
+        [`ssh-keygen -F '${lookup}' -f '${knownHostsPath}'`]: { code: 0, stdout: markers },
+      })
+      const present = ssh.knownHosts("github.com", { port, publicKey: hostPublicKey })
+      const absent = ssh.knownHosts("github.com", { port, state: "absent" })
+      expect(await present.check(mockSsh, {})).toBe("needs-apply")
+      expect(await absent.check(mockSsh, {})).toBe("ok")
+      expect(await absent.apply(mockSsh, {})).toMatchObject({ status: "ok" })
+      expect(await absent.apply(mockSsh, {})).toMatchObject({ status: "ok" })
+      expect(mockSsh.calls.filter(isKnownHostsRewriteStage)).toHaveLength(0)
+    }
+  )
 })

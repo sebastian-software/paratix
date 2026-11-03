@@ -73,6 +73,7 @@ import type {
   AuthorizedPrincipalsOptions as RootAuthorizedPrincipalsOptions,
   ExecOptions,
   ExecResult,
+  KnownHostsCertAuthorityOptions as RootKnownHostsCertAuthorityOptions,
   MetaEnvironmentValue,
   Module,
   ModuleMetaEntry,
@@ -132,6 +133,7 @@ import {
 } from "paratix/modules"
 
 import type {
+  KnownHostsCertAuthorityOptions,
   ManualSecretProviderOptions,
   PackageSpec,
   PodmanLoginOptions,
@@ -179,8 +181,10 @@ match, and validity window against the controller clock. Signature validation do
 CA trust: the server's `TrustedUserCAKeys` and principal policy determine authorization. Paratix
 has no local rule requiring `ssh.user` to occur in the certificate principals;
 `AuthorizedPrincipalsFile` can authorize a different principal. RSA user certificates use
-RSA-SHA2 without enabling legacy `ssh-rsa`. Host certificates and host-CA trust are unsupported;
-keep the existing verified host-key pin or `known_hosts` trust anchor.
+RSA-SHA2 without enabling legacy `ssh-rsa`. The Paratix controller does not support host
+certificates or host-CA trust; keep its verified host-key pin or `known_hosts` trust anchor.
+For OpenSSH clients running on a managed target, use
+[`ssh.knownHostsCertAuthority`](#target-user-host-certificate-trust).
 
 Local certificate failures use `AUTH_FAILED` with native `detail` equal to
 `certificate-invalid`, `certificate-key-mismatch`, `certificate-expired`, or
@@ -1263,14 +1267,114 @@ behavior; they do not satisfy a stopped or disabled target.
 
 ### `ssh`
 
-| Method                     | Signature                                                                                                                              | Idempotent |
-| -------------------------- | -------------------------------------------------------------------------------------------------------------------------------------- | ---------- |
-| `ssh.authorizedKeys`       | `(user: string, key: string, options?: { state?: "absent" \| "present" }): Module`                                                     | Yes        |
-| `ssh.authorizedPrincipals` | `(user: string, principals: string[], options?: AuthorizedPrincipalsOptions): Module`                                                  | Yes        |
-| `ssh.knownHosts`           | `(host: string, options?: { expectedFingerprint?: string; port?: number; publicKey?: string; state?: "absent" \| "present" }): Module` | Yes        |
-| `ssh.trustedUserCa`        | `(options: TrustedUserCaOptions): Module`                                                                                              | Yes        |
+| Method                        | Signature                                                                                                                              | Idempotent |
+| ----------------------------- | -------------------------------------------------------------------------------------------------------------------------------------- | ---------- |
+| `ssh.authorizedKeys`          | `(user: string, key: string, options?: { state?: "absent" \| "present" }): Module`                                                     | Yes        |
+| `ssh.authorizedPrincipals`    | `(user: string, principals: string[], options?: AuthorizedPrincipalsOptions): Module`                                                  | Yes        |
+| `ssh.knownHosts`              | `(host: string, options?: { expectedFingerprint?: string; port?: number; publicKey?: string; state?: "absent" \| "present" }): Module` | Yes        |
+| `ssh.knownHostsCertAuthority` | `(user: string, options: KnownHostsCertAuthorityOptions): Module`                                                                      | Yes        |
+| `ssh.trustedUserCa`           | `(options: TrustedUserCaOptions): Module`                                                                                              | Yes        |
 
 **Trust anchor requirement for `ssh.knownHosts` (`state: "present"`):** In the default `present` state, either `expectedFingerprint` or `publicKey` must be set. Without a trust anchor, the module constructor throws immediately because `check` would otherwise treat any existing `known_hosts` entry, including older and potentially compromised TOFU acceptances, as `ok` and skip the anchor comparison. No anchor is required for `state: "absent"`, because that state removes the entry.
+
+`ssh.knownHosts` manages only marker-free raw host-key entries. `@cert-authority` and
+`@revoked` lines do not satisfy its trust-anchor checks and are preserved during replacement
+or removal, including for overlapping hosts. An `absent` declaration is satisfied when only
+marker lines remain.
+
+#### Target-user host certificate trust
+
+`ssh.knownHostsCertAuthority(user, options)` manages a host CA in the named target user's
+`~/.ssh/known_hosts` for OpenSSH clients running as that user. The controller connection needs
+permission to manage that user's files and ownership. This does not change how the Paratix
+controller verifies its own SSH connections.
+
+`KnownHostsCertAuthorityOptions` is exported from both `paratix/modules` and `paratix`:
+
+```typescript
+type KnownHostsCertAuthorityOptions =
+  | { hosts: string[]; publicKey: string; state?: "present" }
+  | { hosts?: string[]; publicKey: string; state: "absent" }
+```
+
+Read the independently verified CA public key on the controller and put the returned module in
+your server's `run` list. The Unix account must already exist on the target:
+
+```typescript
+import { readFileSync } from "node:fs"
+import { ssh } from "paratix/modules"
+import type { KnownHostsCertAuthorityOptions } from "paratix/modules"
+
+const publicKey = readFileSync("./host_ca.pub", "utf8")
+const trust: KnownHostsCertAuthorityOptions = {
+  publicKey,
+  hosts: ["*.example.test", "[git.example.test]:2222", "2001:db8::1"],
+}
+
+const ensureHostCa = ssh.knownHostsCertAuthority("deploy", trust)
+```
+
+The default state is `present`. To remove this CA later, replace that declaration with:
+
+```typescript
+const removeHostCa = ssh.knownHostsCertAuthority("deploy", {
+  publicKey,
+  state: "absent",
+})
+```
+
+`publicKey` is required in both states and must contain exactly one complete raw OpenSSH public
+key with a supported algorithm and matching key blob. Outer whitespace and a final `.pub` newline
+are accepted; additional key lines, private keys, certificates, and `authorized_keys` options are
+rejected. The Base64 field must equal the canonical encoding of the validated bytes: missing or
+extra padding and noncanonical pad bits are rejected before target mutations. An optional key
+comment is ignored and omitted from the managed line.
+
+`hosts` is required and nonempty for `present`. Positive OpenSSH patterns accept `*` and `?`,
+IPv6 literals, and `[host-or-pattern]:port` with a port from 1 to 65535, including
+`[2001:db8::1]:2222`. Negations, empty elements, commas within an element, whitespace,
+control/format characters, and marker, comment, or hashed-host syntax are rejected. There is no
+separate `port` option or DNS lookup. Exact duplicates are removed and patterns are sorted.
+For `absent`, `hosts` may be omitted; if supplied it is validated but does not filter removal.
+
+A resource is identified by the resolved target file, the `@cert-authority` marker, and the key
+algorithm plus validated decoded bytes. `present` merges all recognized lines for that CA into
+one canonical `@cert-authority <patterns> <algorithm> <base64>` line. Changing the patterns
+updates that same resource. Once canonical, changing only the key comment or the host list's
+order/duplicates causes no drift. `absent` removes all recognized lines for that CA regardless
+of their previous patterns or comments.
+Other CAs, raw keys (including hashed entries), `@revoked` lines, comments, blank lines, and
+unrecognized or incomplete lines retain their bytes and order. Appending to a file without a
+final newline adds the necessary separator.
+
+The existing target account supplies the absolute home directory and actual primary group;
+the SSH or sudo session's `$HOME` does not select this file. Missing accounts, failed group
+resolution, unsafe or ambiguous home paths, symlink ancestors, symlinks, and special files at
+`.ssh` or `known_hosts` fail. In `present`, `.ssh` is a real directory with mode `0700` and
+`known_hosts` a regular file with mode `0600`, both owned by the target user and primary group.
+Content and metadata drift are corrected without reconfiguring the home directory itself.
+An already satisfied `absent` creates no missing directory/file and leaves existing metadata
+unchanged. Removing an entry from an existing file publishes it with the protected modes and
+ownership above.
+
+`check` and dry-run compare content and metadata without creating a lock, directory, file,
+backup, or temporary file, or changing permissions/ownership. Dry-run reports required changes
+and readable unsafe-target failures. Apply stages on the target filesystem and checks target
+identity, observed content, and metadata around publication; detectable conflicts or failed
+post-publication checks return `failed`.
+
+Both known-hosts writers share a lock for the same confirmed canonical target path, covering
+fresh reads through publication. This serializes cooperating Paratix writers, including raw-key
+and CA updates. The lock is independent of the key, patterns, and replaceable file inode.
+External writers and a concurrently hostile file owner do not share that guarantee; distinct
+paths through bind mounts or hard links have no general shared-lock guarantee.
+
+For rotation, add the new CA and explicitly remove the old one when clients no longer need it.
+A different key is a different resource and does not remove the old CA automatically. Two
+declarations of the same CA with different desired pattern lists conflict; they do not form a
+union. Existing raw-key pins can still authorize an unsigned host, and preserved revocations
+can prevent OpenSSH from accepting otherwise matching trust. This module manages no system-wide
+trust or revocation policy and does not require hosts to use certificates.
 
 ### `sshd`
 

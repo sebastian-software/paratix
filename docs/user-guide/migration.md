@@ -20,8 +20,11 @@ unsupported. File-certificate authentication keeps the existing key-file restric
 Reconnect reloads both files and stops immediately on local certificate validation failures;
 renew the certificate at the configured path before retrying. Custom consumers of
 `getConnectionInfo()` can use optional `certificatePath` only after successful file-certificate
-authentication; rsync propagates it automatically as `CertificateFile`. Host-certificate trust is
-unchanged and remains unsupported. See the [user-certificate guide](./README.md#authenticate-with-a-user-certificate)
+authentication; rsync propagates it automatically as `CertificateFile`. Host-certificate trust in
+the Paratix controller is unchanged and remains unsupported. Target-user OpenSSH trust can be
+managed separately with
+[`ssh.knownHostsCertAuthority`](../../packages/paratix/llm-guide.md#target-user-host-certificate-trust);
+existing controller host-key pins or `known_hosts` anchors are still required. See the [user-certificate guide](./README.md#authenticate-with-a-user-certificate)
 and [recovery steps](./troubleshooting.md#a-user-certificate-fails).
 
 ### 0.2.0: Node.js 24 or newer
