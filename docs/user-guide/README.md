@@ -49,8 +49,11 @@ an expired or otherwise invalid certificate stops the reconnect immediately. Aft
 file-certificate login, `rsync.sync()` passes the same expanded certificate path to OpenSSH as
 `CertificateFile`. Agent and password sessions do not set that option.
 
-User certificates authenticate you to the server. Host certificates and host-CA trust are
-unsupported; retain your verified host-key pin or `known_hosts` entry. See the
+User certificates authenticate you to the server. The Paratix controller does not support host
+certificates or host-CA trust; retain its verified host-key pin or `known_hosts` entry. For
+OpenSSH clients running on a managed target,
+[`ssh.knownHostsCertAuthority`](../../packages/paratix/llm-guide.md#target-user-host-certificate-trust)
+manages a CA in an explicitly named user's `known_hosts`; it does not change controller trust. See the
 [authentication reference](../../packages/paratix/llm-guide.md#ssh-authentication) and
 [certificate troubleshooting](./troubleshooting.md#a-user-certificate-fails).
 

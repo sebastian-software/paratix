@@ -67,6 +67,7 @@ export {
 } from "./modules/index.js"
 export type {
   AuthorizedPrincipalsOptions,
+  KnownHostsCertAuthorityOptions,
   ManualSecretProviderOptions,
   SecretInput,
   SecretProvider,
