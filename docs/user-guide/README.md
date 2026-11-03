@@ -50,7 +50,10 @@ file-certificate login, `rsync.sync()` passes the same expanded certificate path
 `CertificateFile`. Agent and password sessions do not set that option.
 
 User certificates authenticate you to the server. To verify the server through a host CA, use
-the separate [host-certificate trust policy](#trust-a-server-through-a-host-ca). See the
+the separate [host-certificate trust policy](#trust-a-server-through-a-host-ca). For OpenSSH
+clients running on a managed target,
+[`ssh.knownHostsCertAuthority`](../../packages/paratix/llm-guide.md#target-user-host-certificate-trust)
+manages a CA in an explicitly named user's `known_hosts`; it does not change controller trust. See the
 [authentication reference](../../packages/paratix/llm-guide.md#ssh-authentication) and
 [certificate troubleshooting](./troubleshooting.md#a-user-certificate-fails).
 

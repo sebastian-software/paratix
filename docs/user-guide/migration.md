@@ -21,7 +21,9 @@ Reconnect reloads both files and stops immediately on local certificate validati
 renew the certificate at the configured path before retrying. Custom consumers of
 `getConnectionInfo()` can use optional `certificatePath` only after successful file-certificate
 authentication; rsync propagates it automatically as `CertificateFile`. Host-certificate trust
-uses the separate controller policy below. See the [user-certificate guide](./README.md#authenticate-with-a-user-certificate)
+uses the separate controller policy below. Target-user OpenSSH trust can be managed separately with
+[`ssh.knownHostsCertAuthority`](../../packages/paratix/llm-guide.md#target-user-host-certificate-trust);
+this does not change controller trust. See the [user-certificate guide](./README.md#authenticate-with-a-user-certificate)
 and [recovery steps](./troubleshooting.md#a-user-certificate-fails).
 
 ### Controller host-CA trust and rsync wrappers

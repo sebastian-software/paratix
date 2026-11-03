@@ -349,6 +349,7 @@
     "dsse",
     "oidc",
     "preflights",
-    "SLSA"
+    "SLSA",
+    "nonblock"
   ]
 }
