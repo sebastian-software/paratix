@@ -14,6 +14,7 @@ Port 2226
 ListenAddress 0.0.0.0
 
 HostKey /etc/ssh/ssh-native-it/host_ed25519
+HostCertificate /etc/ssh/ssh-native-it/host_ed25519-cert.pub
 AuthorizedKeysFile .ssh/authorized_keys
 
 PubkeyAuthentication yes

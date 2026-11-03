@@ -9,6 +9,7 @@ import { join } from "node:path"
 import { EventEmitter, Readable } from "node:stream"
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 
+import { loadRsyncTrustSnapshot } from "../../src/knownHosts.js"
 import { rsync } from "../../src/modules/rsync.js"
 import { setRunnerAbortSignal } from "../../src/runnerAbortSignal.js"
 import { CommandError, shellQuote } from "../../src/sshHelpers.js"
@@ -29,6 +30,10 @@ vi.mock("node:child_process", () => ({
 vi.mock("node:fs", () => ({
   unlinkSync: vi.fn(),
   writeFileSync: vi.fn(),
+}))
+
+vi.mock("../../src/knownHosts.js", () => ({
+  loadRsyncTrustSnapshot: vi.fn().mockResolvedValue([]),
 }))
 
 const emptyEnv = {}
@@ -451,6 +456,7 @@ describe("rsync.sync — apply", () => {
     void resultPromise.then(() => {
       resolved = true
     })
+    await vi.advanceTimersByTimeAsync(0)
     controller.abort()
 
     await vi.advanceTimersByTimeAsync(0)
@@ -565,6 +571,14 @@ describe("rsync.sync — argument building", () => {
     vi.spyOn(mockSsh, "getConnectionInfo").mockReturnValue({
       configuredPorts: [22],
       host: "1.2.3.4",
+      hostVerificationEvidence: {
+        explicitPins: true,
+        host: "1.2.3.4",
+        kind: "key",
+        port: 22,
+        publicKey: "ssh-ed25519 AAAAPINNEDKEY",
+        revocations: [],
+      },
       port: 22,
       privateKeyPath: "~/.ssh/id",
       user: "root",
@@ -616,12 +630,20 @@ describe("rsync.sync — argument building", () => {
     vi.spyOn(mockSsh, "getConnectionInfo").mockReturnValue({
       configuredPorts: [22],
       host: "1.2.3.4",
-      port: 22,
-      privateKeyPath: "$HOME/.ssh/deploy key",
-      user: "root",
       // R-0000714: rsync now refuses to transfer without a verified host
       // trust anchor; supply one so the privateKey-quoting assertion can
       // observe the constructed SSH transport string.
+      hostVerificationEvidence: {
+        explicitPins: true,
+        host: "1.2.3.4",
+        kind: "key",
+        port: 22,
+        publicKey: "ssh-ed25519 AAAAMOCKVERIFIEDKEY",
+        revocations: [],
+      },
+      port: 22,
+      privateKeyPath: "$HOME/.ssh/deploy key",
+      user: "root",
       verifiedHostPublicKey: "ssh-ed25519 AAAAMOCKVERIFIEDKEY",
     })
     const mod = rsync.sync({ dest: "/remote/dest", src: "/local/src" })
@@ -730,6 +752,14 @@ describe("rsync.sync — argument building", () => {
     vi.spyOn(mockSsh, "getConnectionInfo").mockReturnValue({
       configuredPorts: [22],
       host: "fresh-host.example",
+      hostVerificationEvidence: {
+        explicitPins: true,
+        host: "fresh-host.example",
+        kind: "key",
+        port: 22,
+        publicKey: "ssh-ed25519 AAAAFRESHKEY",
+        revocations: [],
+      },
       port: 22,
       privateKeyPath: "~/.ssh/id",
       user: "root",
@@ -877,6 +907,14 @@ describe("rsync.sync — argument building", () => {
     vi.spyOn(mockSsh, "getConnectionInfo").mockReturnValue({
       configuredPorts: [22],
       host: "2001:db8::10",
+      hostVerificationEvidence: {
+        explicitPins: true,
+        host: "2001:db8::10",
+        kind: "key",
+        port: 22,
+        publicKey: "ssh-ed25519 AAAAMOCKVERIFIEDKEY",
+        revocations: [],
+      },
       port: 22,
       privateKeyPath: "~/.ssh/id",
       user: "root",
@@ -910,6 +948,14 @@ describe("rsync.sync — SSH auth method in transport flag", () => {
       certificatePath,
       configuredPorts: [22],
       host: "1.2.3.4",
+      hostVerificationEvidence: {
+        explicitPins: true,
+        host: "1.2.3.4",
+        kind: "key",
+        port: 22,
+        publicKey: "ssh-ed25519 AAAAMOCKVERIFIEDKEY",
+        revocations: [],
+      },
       port: 22,
       privateKeyPath: "/home/deploy/id",
       user: "root",
@@ -931,6 +977,14 @@ describe("rsync.sync — SSH auth method in transport flag", () => {
       authMethod: "agent",
       configuredPorts: [22],
       host: "1.2.3.4",
+      hostVerificationEvidence: {
+        explicitPins: true,
+        host: "1.2.3.4",
+        kind: "key",
+        port: 22,
+        publicKey: "ssh-ed25519 AAAAMOCKVERIFIEDKEY",
+        revocations: [],
+      },
       port: 22,
       user: "root",
       verifiedHostPublicKey: "ssh-ed25519 AAAAMOCKVERIFIEDKEY",
@@ -945,6 +999,14 @@ describe("rsync.sync — SSH auth method in transport flag", () => {
       agentSocket: "/run/user/1000/gnupg/S.gpg-agent.ssh",
       configuredPorts: [22],
       host: "1.2.3.4",
+      hostVerificationEvidence: {
+        explicitPins: true,
+        host: "1.2.3.4",
+        kind: "key",
+        port: 22,
+        publicKey: "ssh-ed25519 AAAAMOCKVERIFIEDKEY",
+        revocations: [],
+      },
       port: 22,
       user: "root",
       verifiedHostPublicKey: "ssh-ed25519 AAAAMOCKVERIFIEDKEY",
@@ -966,6 +1028,14 @@ describe("rsync.sync — SSH auth method in transport flag", () => {
       agentSocket: "/tmp/ssh-agent $USER.sock",
       configuredPorts: [22],
       host: "1.2.3.4",
+      hostVerificationEvidence: {
+        explicitPins: true,
+        host: "1.2.3.4",
+        kind: "key",
+        port: 22,
+        publicKey: "ssh-ed25519 AAAAMOCKVERIFIEDKEY",
+        revocations: [],
+      },
       port: 22,
       user: "root",
       verifiedHostPublicKey: "ssh-ed25519 AAAAMOCKVERIFIEDKEY",
@@ -986,6 +1056,14 @@ describe("rsync.sync — SSH auth method in transport flag", () => {
       agentSocket: "/run/user/1000/gnupg/S.gpg-agent.ssh",
       configuredPorts: [22],
       host: "1.2.3.4",
+      hostVerificationEvidence: {
+        explicitPins: true,
+        host: "1.2.3.4",
+        kind: "key",
+        port: 22,
+        publicKey: "ssh-ed25519 AAAAMOCKVERIFIEDKEY",
+        revocations: [],
+      },
       port: 22,
       privateKeyPath: "~/.ssh/deploy_key",
       user: "root",
@@ -1006,6 +1084,14 @@ describe("rsync.sync — SSH auth method in transport flag", () => {
     vi.spyOn(mockSsh, "getConnectionInfo").mockReturnValue({
       configuredPorts: [22],
       host: "1.2.3.4",
+      hostVerificationEvidence: {
+        explicitPins: true,
+        host: "1.2.3.4",
+        kind: "key",
+        port: 22,
+        publicKey: "ssh-ed25519 AAAAMOCKVERIFIEDKEY",
+        revocations: [],
+      },
       port: 22,
       privateKeyPath: "~/.ssh/id",
       user: "root",
@@ -1026,6 +1112,14 @@ describe("rsync.sync — SSH auth method in transport flag", () => {
     vi.spyOn(mockSsh, "getConnectionInfo").mockReturnValue({
       configuredPorts: [22],
       host: "1.2.3.4",
+      hostVerificationEvidence: {
+        explicitPins: true,
+        host: "1.2.3.4",
+        kind: "key",
+        port: 22,
+        publicKey: "ssh-ed25519 AAAAMOCKVERIFIEDKEY",
+        revocations: [],
+      },
       port: 22,
       privateKeyPath: "~/.ssh/id",
       user: "root",
@@ -1049,6 +1143,14 @@ describe("rsync.sync — SSH auth method in transport flag", () => {
       agentSocket: "/run/user/1000/ssh-agent.sock",
       configuredPorts: [22],
       host: "1.2.3.4",
+      hostVerificationEvidence: {
+        explicitPins: true,
+        host: "1.2.3.4",
+        kind: "key",
+        port: 22,
+        publicKey: "ssh-ed25519 AAAAMOCKVERIFIEDKEY",
+        revocations: [],
+      },
       port: 22,
       user: "root",
       verifiedHostPublicKey: "ssh-ed25519 AAAAMOCKVERIFIEDKEY",
@@ -1070,6 +1172,14 @@ describe("rsync.sync — SSH auth method in transport flag", () => {
     vi.spyOn(mockSsh, "getConnectionInfo").mockReturnValue({
       configuredPorts: [22],
       host: "1.2.3.4",
+      hostVerificationEvidence: {
+        explicitPins: true,
+        host: "1.2.3.4",
+        kind: "key",
+        port: 22,
+        publicKey: "ssh-ed25519 AAAAMOCKVERIFIEDKEY",
+        revocations: [],
+      },
       port: 22,
       user: "root",
       verifiedHostPublicKey: "ssh-ed25519 AAAAMOCKVERIFIEDKEY",
@@ -1100,6 +1210,110 @@ describe("rsync.sync — SSH auth method in transport flag", () => {
     const result = await mod.check(mockSsh, emptyEnv)
     expect(result).toBe("needs-apply")
 
+    expect(mockSpawn).not.toHaveBeenCalled()
+  })
+})
+
+describe("rsync certificate trust", () => {
+  beforeEach(() => {
+    vi.mocked(loadRsyncTrustSnapshot).mockReset().mockResolvedValue([])
+    mockSpawn.mockReset()
+    mockWriteFileSync.mockClear()
+    mockUnlinkSync.mockClear()
+    mockSuccess()
+  })
+  const leaf = Buffer.from("leaf").toString("base64")
+  function session(explicitPins = false, algorithm = "ssh-ed25519") {
+    const ssh = createMockSsh()
+    ssh.getConnectionInfo = () => ({
+      configuredPorts: [2222],
+      host: "example.com",
+      hostVerificationEvidence: {
+        authorityPublicKey: "ssh-rsa AAAACA",
+        explicitPins,
+        host: "example.com",
+        kind: "certificate",
+        port: 2222,
+        publicKey: `${algorithm} ${leaf}`,
+        revocations: [],
+      },
+      port: 2222,
+      user: "root",
+      verifiedHostPublicKey: `${algorithm} ${leaf}`,
+    })
+    return ssh
+  }
+  it("writes only the accepted CA plus all fresh target revocations and rereads before check and apply", async () => {
+    vi.mocked(loadRsyncTrustSnapshot).mockResolvedValue(["ssh-ed25519 AAAAALTERNATIVE"])
+    const module = rsync.sync({ dest: "/remote", src: "/local" })
+    const ssh = session()
+    await module.check(ssh, {})
+    await module.apply(ssh, {})
+    expect(loadRsyncTrustSnapshot).toHaveBeenCalledTimes(2)
+    expect(mockWriteFileSync).toHaveBeenCalledWith(
+      expect.any(String),
+      "@cert-authority [example.com]:2222 ssh-rsa AAAACA\n@revoked [example.com]:2222 ssh-ed25519 AAAAALTERNATIVE\n",
+      { flag: "wx", mode: 0o600 }
+    )
+    expect(getArgs()[getArgs().indexOf("-e") + 1]).toContain(
+      "KnownHostsCommand=none -o VerifyHostKeyDNS=no"
+    )
+    expect(mockUnlinkSync).toHaveBeenCalledTimes(2)
+  })
+  it.each([
+    ["ssh-ed25519", "ssh-ed25519"],
+    ["ecdsa-sha2-nistp384", "ecdsa-sha2-nistp384"],
+    ["ssh-rsa", "rsa-sha2-512,rsa-sha2-256"],
+  ])("preserves a %s pin with only raw host algorithms", async (algorithm, expected) => {
+    const result = await rsync
+      .sync({ dest: "/remote", src: "/local" })
+      .apply(session(true, algorithm), {})
+    expect(result.status).toBe("ok")
+    expect(mockWriteFileSync).toHaveBeenCalledWith(
+      expect.any(String),
+      `[example.com]:2222 ${algorithm} ${leaf}\n`,
+      { flag: "wx", mode: 0o600 }
+    )
+    const command = getArgs()[getArgs().indexOf("-e") + 1]
+    expect(command).toContain(`HostKeyAlgorithms=${expected}`)
+    expect(command).not.toContain("-cert-v01")
+    expect(command).toContain("KnownHostsCommand=none -o VerifyHostKeyDNS=no")
+  })
+  it.each([false, true])(
+    "removes private certificate trust files after an SSH rejection with explicit pins %s",
+    async (pinned) => {
+      mockSpawn.mockImplementationOnce(
+        () =>
+          makeFakeRsyncChild({
+            code: 255,
+            stderr: "Host key verification failed",
+          }) as ChildProcess.ChildProcess
+      )
+      const result = await rsync.sync({ dest: "/remote", src: "/local" }).apply(session(pinned), {})
+      expect(result.status).toBe("failed")
+      expect(mockWriteFileSync).toHaveBeenCalledOnce()
+      const path = mockWriteFileSync.mock.calls[0]?.[0]
+      expect(mockUnlinkSync).toHaveBeenCalledExactlyOnceWith(path)
+      const command = getArgs()[getArgs().indexOf("-e") + 1]
+      expect(command).toContain("StrictHostKeyChecking=yes")
+      expect(command).toContain("GlobalKnownHostsFile=/dev/null")
+      expect(command).toContain("KnownHostsCommand=none -o VerifyHostKeyDNS=no")
+    }
+  )
+  it("does not spawn or create temporary trust on snapshot IO failure", async () => {
+    vi.mocked(loadRsyncTrustSnapshot).mockRejectedValueOnce(new Error("known_hosts read failed"))
+    const result = await rsync.sync({ dest: "/remote", src: "/local" }).apply(session(), {})
+    expect(result.error?.message).toBe("known_hosts read failed")
+    expect(mockSpawn).not.toHaveBeenCalled()
+    expect(mockWriteFileSync).not.toHaveBeenCalled()
+  })
+  it("refuses a verified key without typed session evidence", async () => {
+    const ssh = session()
+    const info = ssh.getConnectionInfo()
+    delete info.hostVerificationEvidence
+    ssh.getConnectionInfo = () => info
+    const result = await rsync.sync({ dest: "/remote", src: "/local" }).apply(ssh, {})
+    expect(result.error?.message).toContain("without a verified host trust anchor")
     expect(mockSpawn).not.toHaveBeenCalled()
   })
 })

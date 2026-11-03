@@ -20,13 +20,65 @@ unsupported. File-certificate authentication keeps the existing key-file restric
 Reconnect reloads both files and stops immediately on local certificate validation failures;
 renew the certificate at the configured path before retrying. Custom consumers of
 `getConnectionInfo()` can use optional `certificatePath` only after successful file-certificate
-authentication; rsync propagates it automatically as `CertificateFile`. Host-certificate trust in
-the Paratix transport is unchanged and remains unsupported. Separately,
-[`ssh.hostCertificate`](./host-certificates.md) can issue certificates for other clients. Target-user OpenSSH trust can be
-managed with
+authentication; rsync propagates it automatically as `CertificateFile`. Host-certificate trust
+uses the separate controller policy below. Separately,
+[`ssh.hostCertificate`](./host-certificates.md) can issue certificates for clients that trust a
+host CA. Target-user OpenSSH trust can be managed separately with
 [`ssh.knownHostsCertAuthority`](../../packages/paratix/llm-guide.md#target-user-host-certificate-trust);
-existing controller host-key pins or `known_hosts` anchors are still required. See the [user-certificate guide](./README.md#authenticate-with-a-user-certificate)
+this does not change controller trust. See the [user-certificate guide](./README.md#authenticate-with-a-user-certificate)
 and [recovery steps](./troubleshooting.md#a-user-certificate-fails).
+
+### Controller host-CA trust and rsync wrappers
+
+**Before:** Matching `@cert-authority` entries were rejected, and
+`getConnectionInfo().verifiedHostPublicKey` alone described the raw anchor used by rsync.
+
+**Now:** With `ssh.strictHostKeyChecking: "yes"` or `"accept-new"`, a matching host CA in the
+controller's `~/.ssh/known_hosts` enables host-certificate negotiation before raw-key algorithms.
+Without a matching CA, raw-key negotiation is unchanged; scanning and `"no"` add no CA trust.
+The native binding validates signature, host type, validity and absence of critical options;
+Paratix also requires a matching principal, CA, no applicable CA/leaf revocation and every
+configured leaf pin. Raw-key servers retain the existing policy, including `"accept-new"`
+after authentication, even with a CA line. Rejected certificates never trigger a raw-key retry
+or TOFU writes; accepted certificates create no TOFU entries either.
+
+**Upgrade:** Existing raw-key configurations require no new option. If you already have matching
+CA lines, review their host/port scope before running: they now authorize certificates. Obtain
+CA keys independently and use the [host-CA guide](./README.md#trust-a-server-through-a-host-ca)
+to add an anchor. Keep `expectedHostPublicKey` and `expectedHostFingerprint` only when you also
+want to pin the certified **raw leaf**; CA trust and all pins must pass. A certificate or CA key
+is not a leaf pin. Matching `@revoked` entries override CA trust and pins; revoking a certificate
+revokes its leaf across renewals. Principal checks use the requested host/IP without its port,
+not an alias or DNS lookup. No KRL, serial-number or key-ID management is added.
+
+A CA-only controller session can reconnect with a different leaf after the new certificate
+passes all trust checks. Successful authentication replaces the verified leaf and evidence;
+failed attempts preserve both. Explicit leaf pins and any raw-key binding established earlier
+in the same connection instance still prevent leaf rotation. A switch to a raw-key handshake
+must match the latest verified leaf and also pass the normal raw-key policy.
+
+Custom consumers must keep `verifiedHostPublicKey` as a raw OpenSSH key: for a certificate session
+it contains the certified leaf, never the CA or certificate. Optional `hostVerificationEvidence`
+separately identifies the accepted path, signer, target, revocations and explicit pins. Each
+successful handshake replaces that evidence; failed attempts leave it unchanged. Built-in rsync
+requires this evidence and reads a fresh, locked Known-Hosts snapshot before each transfer.
+New CA/leaf revocations or read failures reject certificate-based transfers; matching
+alternative-leaf revocations are passed to OpenSSH. There is no monitoring after the snapshot.
+
+For a certificate session without explicit pins, rsync trusts only the accepted CA at that
+host/port, so a new non-revoked leaf under the same CA is allowed. With either explicit pin,
+rsync instead trusts only the verified raw leaf and offers its raw-key algorithm (RSA SHA-2
+aliases only, with no added `ssh-rsa`). This deliberate exception preserves the pin but does
+not check a certificate or current CA validity on the new connection. Certificate-only servers
+and different leaves fail without retry or downgrade. If that limitation is unsuitable, use
+CA-only trust after deliberately removing leaf pins, or do not use rsync for that session.
+
+Both rsync paths enforce `StrictHostKeyChecking=yes`, isolated private Known-Hosts files,
+`KnownHostsCommand=none` and `VerifyHostKeyDNS=no`; inherited command/DNS anchors no longer
+broaden trust. Temporary files are cleaned up on success and failure. Validate your intended
+CA, leaf-rotation and pin behavior against a controlled target before rollout. These checks
+cover the initial key exchange only; [rekey validation (#260)](https://github.com/sebastian-software/paratix/issues/260)
+remains open. Controller platform, Rust and early binding checks above are unchanged.
 
 ### 0.2.0: Node.js 24 or newer
 

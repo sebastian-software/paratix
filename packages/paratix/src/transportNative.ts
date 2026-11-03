@@ -415,15 +415,19 @@ function connectFailure(
 /**
  * Bridge the transport verifier to the binding's verifier.
  *
- * Only a verdict of exactly `true` accepts. Host certificates are rejected
- * until #248/#258 add their verification. A value the verifier throws or
+ * Only a verdict of exactly `true` accepts. Structured certificate metadata
+ * accompanies the certified raw key for controller authorization. A value the verifier throws or
  * rejects with is recorded so `connect()` can pass that very object on; the
  * binding rejects with it for `HOST_KEY_REJECTED`.
  *
  * @param verifyHostKey - The transport verifier, called with the raw key blob.
+ * @param hostCertificates - Whether this handshake permits certificate verification.
  * @returns The binding verifier and the recorded verifier failure.
  */
-function createHostVerifier(verifyHostKey: TransportConnectOptions["verifyHostKey"]): {
+function createHostVerifier(
+  verifyHostKey: TransportConnectOptions["verifyHostKey"],
+  hostCertificates = false
+): {
   failure: () => { error: unknown } | undefined
   verify: (info: HostKeyInfo) => Promise<boolean>
 } {
@@ -431,9 +435,11 @@ function createHostVerifier(verifyHostKey: TransportConnectOptions["verifyHostKe
   return {
     failure: () => failure,
     async verify(info) {
-      if (info.kind !== "key") return false
+      if (info.kind === "certificate" && !hostCertificates) return false
       try {
-        const verdict: unknown = await verifyHostKey(Buffer.from(info.keyBase64, "base64"))
+        const verdict: unknown = await (info.kind === "certificate"
+          ? verifyHostKey(Buffer.from(info.keyBase64, "base64"), info)
+          : verifyHostKey(Buffer.from(info.keyBase64, "base64")))
         return verdict === true
       } catch (error) {
         failure = { error }
@@ -492,6 +498,7 @@ function startNativeConnect(
       readyTimeoutMs: options.readyTimeout,
       user: options.username,
     }
+    if (options.hostCertificates === true) nativeOptions.hostCertificates = true
     if (options.agent != null) nativeOptions.agent = options.agent
     if (options.agentForward === true) nativeOptions.agentForward = true
     if (options.signal !== undefined) nativeOptions.signal = options.signal
@@ -527,7 +534,7 @@ class NativeConnection implements TransportConnection, Transport {
     } catch (error) {
       throw new TransportError("INTERNAL", error)
     }
-    const verifier = createHostVerifier(options.verifyHostKey)
+    const verifier = createHostVerifier(options.verifyHostKey, options.hostCertificates)
     try {
       this.session = await startNativeConnect(binding, options, verifier.verify).pending
     } catch (error) {

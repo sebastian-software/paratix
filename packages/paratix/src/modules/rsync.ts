@@ -1,14 +1,17 @@
-import { randomUUID } from "node:crypto"
-import { unlinkSync, writeFileSync } from "node:fs"
-import { tmpdir } from "node:os"
-import { join } from "node:path"
+import type { HostVerificationEvidence } from "../hostCertificates.js"
 
+import { loadRsyncTrustSnapshot } from "../knownHosts.js"
 import { failed } from "../moduleFailure.js"
 import { shellQuote } from "../ssh.js"
 import { CommandError } from "../sshHelpers.js"
 import { type Module, type ModuleResult, NEEDS_APPLY, type SshConnection } from "../types.js"
 import { assertValidGroupName, assertValidUserName } from "./posixNames.js"
 import { DEFAULT_RSYNC_TIMEOUT_MILLISECONDS, runRsyncProcess } from "./rsyncProcess.js"
+import {
+  cleanupVerifiedKnownHostsFile,
+  createVerifiedKnownHostsFile,
+  hostAlgorithmFlags,
+} from "./rsyncTrust.js"
 import {
   validateRsyncFilterPattern,
   validateRsyncPath,
@@ -32,7 +35,6 @@ function validateRsyncChmod(value: string): void {
 }
 
 type RsyncPhase = "apply" | "check"
-const DEFAULT_SSH_PORT = 22
 
 type SyncOptions = {
   /** Permission mode applied via `--chmod`, e.g. `"Du=rwx,go=rx,Fu=rw,go=r"`. */
@@ -52,11 +54,9 @@ type SyncOptions = {
   /** Local source path (file or directory) to synchronize. */
   src: string
   /**
-   * SSH `StrictHostKeyChecking` option passed to the `-o` flag.
-   *
-   * Defaults to `"yes"`. Use `"accept-new"` for explicit TOFU when first-time
-   * connections must be auto-accepted, or `"no"` to disable checking entirely
-   * (not recommended for production).
+   * Compatibility option; accepted values do not relax transfer verification.
+   * rsync always uses `StrictHostKeyChecking=yes` with isolated trust from the
+   * verified Paratix session. Configure first-use trust on that session instead.
    */
   strictHostKeyChecking?: "accept-new" | "no" | "off" | "yes"
   /** Maximum runtime for a single rsync process in milliseconds. */
@@ -146,10 +146,6 @@ function buildRemoteSpec(
   return `${connectionInfo.user}@${remoteHost}:${remoteDestination}`
 }
 
-function formatKnownHostsLabel(host: string, port: number): string {
-  return port === DEFAULT_SSH_PORT ? host : `[${host}]:${port}`
-}
-
 // R-0000714: thrown when the active Paratix SSH session does not provide a
 // verified host trust anchor that rsync can reuse. Without one, the rsync
 // SSH process would fall back to the system `known_hosts` file (or to
@@ -165,42 +161,6 @@ class RsyncMissingTrustAnchorError extends Error {
         "so rsync can reuse the verified host key instead of falling back to the system known_hosts file"
     )
     this.name = "RsyncMissingTrustAnchorError"
-  }
-}
-
-function createVerifiedKnownHostsFile(connectionInfo: {
-  host: string
-  port: number
-  verifiedHostPublicKey?: string
-}): string {
-  if (connectionInfo.verifiedHostPublicKey == null) {
-    // R-0000714: this is unreachable in normal flow — `executeRsync` checks
-    // for the trust anchor before calling here. The guard remains as
-    // defense-in-depth so a future caller that forgets the pre-check still
-    // fails closed instead of writing an empty trust anchor line.
-    throw new Error(
-      "[rsync.sync] createVerifiedKnownHostsFile invoked without a verified host public key"
-    )
-  }
-
-  const filePath = join(tmpdir(), `paratix-rsync-known-hosts-${randomUUID()}`)
-  const content = `${formatKnownHostsLabel(connectionInfo.host, connectionInfo.port)} ${connectionInfo.verifiedHostPublicKey}\n`
-  // R-0000247: open with `wx` (O_WRONLY | O_CREAT | O_EXCL) so the create
-  // step refuses to follow a pre-existing symlink in /tmp on shared hosts
-  // without sticky bit. Combined with the random UUID in the filename,
-  // this makes a symlink-replacement attack effectively impossible.
-  // eslint-disable-next-line security/detect-non-literal-fs-filename
-  writeFileSync(filePath, content, { flag: "wx", mode: 0o600 })
-  return filePath
-}
-
-function cleanupVerifiedKnownHostsFile(path: null | string): void {
-  if (path == null) return
-  try {
-    // eslint-disable-next-line security/detect-non-literal-fs-filename
-    unlinkSync(path)
-  } catch {
-    // local cleanup is best-effort
   }
 }
 
@@ -258,6 +218,7 @@ function buildIdentityFlags(connectionInfo: {
  * @param parameters.connectionInfo.port - The SSH port number.
  * @param parameters.connectionInfo.privateKeyPath - Absolute path to the SSH private key.
  * @param parameters.connectionInfo.user - The SSH username.
+ * @param parameters.evidence - Accepted session trust and explicit pin policy.
  * @param parameters.dryRun - When `true`, adds `--dry-run` so no files are transferred.
  * @param parameters.verifiedKnownHostsPath - Required temporary known_hosts file containing the verified session host key.
  * @returns The complete list of arguments to pass to the `rsync` binary.
@@ -273,10 +234,11 @@ function buildArguments(parameters: {
     user: string
   }
   dryRun: boolean
+  evidence: HostVerificationEvidence
   options: SyncOptions
   verifiedKnownHostsPath: string
 }): string[] {
-  const { connectionInfo, dryRun, options, verifiedKnownHostsPath } = parameters
+  const { connectionInfo, dryRun, evidence, options, verifiedKnownHostsPath } = parameters
   const result: string[] = ["-az", "--itemize-changes"]
 
   if (dryRun) {
@@ -285,8 +247,10 @@ function buildArguments(parameters: {
 
   const sshFlags = buildIdentityFlags(connectionInfo)
   // R-0000714: rsync is only ever invoked with a pre-built trust-anchor
-  // known_hosts file written from the verified host key of the active
-  // Paratix SSH session. `executeRsync` raises a `RsyncMissingTrustAnchorError`
+  // known_hosts file written from the active session's verified raw key or CA.
+  // Without pins, CA trust permits a new non-revoked leaf under that CA; with
+  // pins, only the verified raw leaf is anchored and certificates are disabled.
+  // `executeRsync` raises a `RsyncMissingTrustAnchorError`
   // before reaching this point if the session never verified a host key, so
   // the fallback to `options.strictHostKeyChecking` / system known_hosts has
   // been removed. StrictHostKeyChecking is always pinned to `yes` so a
@@ -294,7 +258,7 @@ function buildArguments(parameters: {
   const knownHostsFlags = ` -o UserKnownHostsFile=${shellQuote(verifiedKnownHostsPath)} -o GlobalKnownHostsFile=/dev/null`
   result.push(
     "-e",
-    `ssh -p ${connectionInfo.port}${sshFlags}${knownHostsFlags} -o StrictHostKeyChecking=yes`
+    `ssh -p ${connectionInfo.port}${sshFlags}${knownHostsFlags} -o StrictHostKeyChecking=yes -o KnownHostsCommand=none -o VerifyHostKeyDNS=no${hostAlgorithmFlags(evidence)}`
   )
   result.push(...buildFilterArguments(options))
   result.push(...buildOwnershipArguments(options))
@@ -397,7 +361,10 @@ async function executeRsync(parameters: {
   // scheduled this rsync call. Surfacing the misconfiguration here keeps the
   // host-key trust path consistent between the Paratix SSH session and the
   // external rsync SSH process.
-  if (connectionInfo.verifiedHostPublicKey == null) {
+  if (
+    connectionInfo.verifiedHostPublicKey == null ||
+    connectionInfo.hostVerificationEvidence == null
+  ) {
     throw new RsyncMissingTrustAnchorError(phase)
   }
   // R-0000855: open the try/finally directly after `createVerifiedKnownHostsFile`
@@ -406,11 +373,21 @@ async function executeRsync(parameters: {
   // verified `known_hosts` file on disk. Previously the try only began
   // after `buildArguments`, which meant any future helper added between
   // these two points would silently bypass the cleanup.
-  const verifiedKnownHostsPath = createVerifiedKnownHostsFile(connectionInfo)
+  const evidence = connectionInfo.hostVerificationEvidence
+  if (
+    evidence.host !== connectionInfo.host ||
+    evidence.port !== connectionInfo.port ||
+    evidence.publicKey !== connectionInfo.verifiedHostPublicKey
+  ) {
+    throw new RsyncMissingTrustAnchorError(phase)
+  }
+  const revocations = await loadRsyncTrustSnapshot(evidence)
+  const verifiedKnownHostsPath = createVerifiedKnownHostsFile(evidence, revocations)
   try {
     const rsyncArguments = buildArguments({
       connectionInfo,
       dryRun,
+      evidence,
       options,
       verifiedKnownHostsPath,
     })

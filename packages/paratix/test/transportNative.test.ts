@@ -183,6 +183,7 @@ function hostKeyInfo(overrides: Partial<HostKeyInfo> = {}): HostKeyInfo {
   return {
     algorithm: "ssh-ed25519",
     fingerprintSha256: "SHA256:fake",
+    keyAlgorithm: "ssh-ed25519",
     keyBase64: Buffer.from("fake-host-key-blob").toString("base64"),
     kind: "key",
     ...overrides,
@@ -678,6 +679,38 @@ describe("native transport", () => {
           )
         )
       ).toBe("TIMEOUT")
+    })
+
+    it("forwards selected certificate negotiation and structured metadata to the controller", async () => {
+      const info = hostKeyInfo({
+        algorithm: "ssh-ed25519-cert-v01@openssh.com",
+        kind: "certificate",
+      })
+      binding.connect.mockImplementationOnce(verifyingConnect(new FakeNativeSession(), info))
+      const verifyHostKey = vi.fn(() => true)
+      await createNativeTransport().connect({
+        ...baseOptions,
+        hostCertificates: true,
+        verifyHostKey,
+      })
+      expect(binding.connect.mock.calls[0][0].hostCertificates).toBe(true)
+      expect(verifyHostKey).toHaveBeenCalledExactlyOnceWith(
+        Buffer.from(info.keyBase64, "base64"),
+        info
+      )
+    })
+
+    it("preserves a certificate verifier rejection without another native connect", async () => {
+      const info = hostKeyInfo({ kind: "certificate" })
+      binding.connect.mockImplementationOnce(verifyingConnect(new FakeNativeSession(), info))
+      const rejected = new HostKeyVerificationError("certificate rejected")
+      const verifyHostKey = () => {
+        throw rejected
+      }
+      await expect(
+        createNativeTransport().connect({ ...baseOptions, hostCertificates: true, verifyHostKey })
+      ).rejects.toBe(rejected)
+      expect(binding.connect).toHaveBeenCalledOnce()
     })
 
     it("rejects a host certificate without consulting the verifier", async () => {

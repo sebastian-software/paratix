@@ -36,6 +36,7 @@ Port ${userCaPort}
 Port ${rsaCaPort}
 ListenAddress 127.0.0.1
 HostKey ${fixtures.hostKey}
+HostCertificate ${fixtures.hostCertificate}
 PidFile ${join(runDir, "sshd.pid")}
 AuthorizedKeysFile ${fixtures.authorizedKeys}
 StrictModes no

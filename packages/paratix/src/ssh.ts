@@ -1,4 +1,5 @@
 /* eslint-disable max-lines -- SSH transport methods keep callback wiring local */
+import type { HostKeyInfo } from "@paratix/ssh-native"
 import type { Stats } from "node:fs"
 
 import { createHash, timingSafeEqual } from "node:crypto"
@@ -8,6 +9,7 @@ import { homedir } from "node:os"
 import { join, posix } from "node:path"
 import { pipeline } from "node:stream/promises"
 
+import type { HostVerificationEvidence } from "./hostCertificates.js"
 import type { Transport, TransportConnection, TransportExecChannel } from "./transport.js"
 import type { ExecOptions, ExecResult, SshConfig, SshConnection } from "./types.js"
 
@@ -322,9 +324,18 @@ function isPermanentCertificateDetail(cause: unknown): boolean {
   )
 }
 
+/**
+ * Identify CA trust without a configured raw-leaf pin, using verified evidence.
+ * @param evidence - Evidence produced by a successful host verifier.
+ * @returns Whether the certificate CA is the only configured trust anchor.
+ */
+function isCertificateOnlyEvidence(evidence: HostVerificationEvidence | undefined): boolean {
+  return evidence?.kind === "certificate" && !evidence.explicitPins
+}
+
 type HostKeyAttempt = {
   commit: () => void
-  hostVerifier: (key: Buffer) => boolean
+  hostVerifier: (key: Buffer, info?: HostKeyInfo) => boolean
 }
 
 type ClientLifecycleListeners = () => void
@@ -519,6 +530,7 @@ export class SshConnectionImpl implements SshConnection {
    * behavior expected by the reconnect path.
    */
   private readonly hostKeyCache: HostKeyCache = createHostKeyCache()
+  private hostVerificationEvidence: HostVerificationEvidence | undefined
   private lastConnectFailure: ConnectFailure | undefined
   /**
    * Tracks whether the remote host accepts passwordless sudo for the configured
@@ -530,6 +542,7 @@ export class SshConnectionImpl implements SshConnection {
    */
   private passwordlessSudo = false
   private readonly pendingRejects = new Set<(reason: unknown) => void>()
+  // Raw-key and explicit-pin bindings survive later certificate handshakes.
   private pinnedHostKey: Buffer | null = null
   private promptAbortSignal: AbortSignal | undefined
   private readonly runtime: SshRuntimeState
@@ -708,6 +721,13 @@ export class SshConnectionImpl implements SshConnection {
           : undefined,
       configuredPorts: [...this.config.ports],
       host: this.runtime.host,
+      hostVerificationEvidence:
+        this.hostVerificationEvidence == null
+          ? undefined
+          : {
+              ...this.hostVerificationEvidence,
+              revocations: [...this.hostVerificationEvidence.revocations],
+            },
       port: this.connectedPort,
       privateKeyPath:
         this.authMethod === "privateKey" && this.config.privateKey != null
@@ -1060,6 +1080,29 @@ export class SshConnectionImpl implements SshConnection {
     if (resolved !== directory) {
       throw new Error(
         `[ssh.mktemp: ${remotePath}] destination directory ${directory} resolves to ${resolved}; refusing to mktemp because at least one path component is a symbolic link`
+      )
+    }
+  }
+
+  /**
+   * Preserve raw bindings and restrict CA rotation to verified certificate sessions.
+   * @param key - The raw leaf accepted by the current host verifier.
+   * @param certificateOnly - Whether the current handshake has CA-only evidence.
+   */
+  private assertReconnectHostKey(key: Buffer, certificateOnly: boolean): void {
+    const previousCertificateOnly = isCertificateOnlyEvidence(this.hostVerificationEvidence)
+    const reconnectKey =
+      this.pinnedHostKey ??
+      (certificateOnly && previousCertificateOnly ? null : this.verifiedHostKey)
+    if (
+      reconnectKey != null &&
+      (reconnectKey.length !== key.length || !timingSafeEqual(reconnectKey, key))
+    ) {
+      this.clearCachedPassword()
+      throw new HostKeyVerificationError(
+        `HOST KEY CHANGED on reconnect to ${this.runtime.host}: ` +
+          "the remote host key does not match the bound key from a successful connection. " +
+          "This could indicate a man-in-the-middle attack."
       )
     }
   }
@@ -1576,36 +1619,31 @@ sha256sum -- ${shellQuote(remotePath)} 2>/dev/null || printf 'paratix-hash-faile
    * Create a host-key verification attempt that only commits accepted trust
    * state after the SSH handshake succeeds.
    *
-   * @param original - The original verifier from `buildHostVerifier`, if any.
+   * @param verifier - The verifier and pending evidence for this handshake.
    * @returns A verifier and commit callback for host-key pinning.
    */
-  private createHostKeyAttempt(original?: (key: Buffer) => boolean): HostKeyAttempt {
+  private createHostKeyAttempt(verifier: HostVerifierResult): HostKeyAttempt {
     let acceptedPinnedHostKey: Buffer | null = null
     let acceptedVerifiedHostKey: Buffer | null = null
 
     return {
       commit: (): void => {
-        if (acceptedVerifiedHostKey != null) this.verifiedHostKey ??= acceptedVerifiedHostKey
+        this.verifiedHostKey = acceptedVerifiedHostKey
+        this.hostVerificationEvidence = verifier.evidence?.()
         if (acceptedPinnedHostKey != null) this.pinnedHostKey ??= acceptedPinnedHostKey
       },
-      hostVerifier: (key: Buffer): boolean => {
-        if (
-          this.pinnedHostKey != null &&
-          (this.pinnedHostKey.length !== key.length || !timingSafeEqual(this.pinnedHostKey, key))
-        ) {
-          this.clearCachedPassword()
-          throw new HostKeyVerificationError(
-            `HOST KEY CHANGED on reconnect to ${this.runtime.host}: ` +
-              "the remote host key does not match the key from the initial connection. " +
-              "This could indicate a man-in-the-middle attack."
-          )
-        }
-        if (original != null) {
-          const accepted = original(key)
+      hostVerifier: (key: Buffer, info?: HostKeyInfo): boolean => {
+        if (verifier.hostVerifier != null) {
+          const accepted =
+            info == null ? verifier.hostVerifier(key) : verifier.hostVerifier(key, info)
           if (!accepted) return false
           acceptedVerifiedHostKey ??= Buffer.from(key)
         }
-        acceptedPinnedHostKey ??= Buffer.from(key)
+        // Evidence is meaningful only after the actual verifier accepts this key.
+        const evidence = verifier.evidence?.()
+        const certificateOnly = isCertificateOnlyEvidence(evidence)
+        this.assertReconnectHostKey(key, certificateOnly)
+        if (!certificateOnly) acceptedPinnedHostKey ??= Buffer.from(key)
         return true
       },
     }
@@ -2264,7 +2302,7 @@ trap - EXIT
         expectedHostPublicKey: this.config.expectedHostPublicKey,
       }
     )
-    const hostKeyAttempt = this.createHostKeyAttempt(verifier.hostVerifier)
+    const hostKeyAttempt = this.createHostKeyAttempt(verifier)
     // R-0000669: combine the prompt-level abort signal (SIGINT-driven prompt
     // cancellation) with the connection-level abort signal so an in-flight
     // Transport.connect is aborted whenever disconnect() runs — including
@@ -2279,6 +2317,7 @@ trap - EXIT
         agentForward: this.config.agentForward,
         certificate: options.certificate,
         host: this.runtime.host,
+        hostCertificates: verifier.hostCertificates,
         password: options.password,
         port,
         privateKey: options.privateKey,

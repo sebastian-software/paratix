@@ -53,7 +53,7 @@ pub fn scan<'env>(
             timeout_ms,
             &abort,
             "the host key scan timed out",
-            async { tcp_and_handshake(&host, port, handler).await },
+            async { tcp_and_handshake(&host, port, handler, false).await },
         )
         .await;
         shared.kill();
@@ -110,6 +110,7 @@ struct ConnectInput {
     certificate: Option<Buffer>,
     password: Option<Buffer>,
     agent_forward: bool,
+    host_certificates: bool,
 }
 
 /// Connects, verifies the host key through `verify_host` (async JS) and
@@ -130,6 +131,7 @@ pub fn connect<'env>(
     verify_host: Function<'_, sys::napi_value, Promise<bool>>,
     on_disconnect: Function<'_, sys::napi_value, ()>,
     abort: &AbortHandle,
+    host_certificates: Option<bool>,
 ) -> napi::Result<PromiseRaw<'env, NativeSession>> {
     let options = ConnectInput {
         host,
@@ -141,6 +143,7 @@ pub fn connect<'env>(
         certificate,
         password,
         agent_forward,
+        host_certificates: host_certificates.unwrap_or(false),
     };
     let port = port_of(options.port)?;
     if options.certificate.is_some() && (options.private_key.is_none() || options.agent.is_some()) {
@@ -178,6 +181,7 @@ pub fn connect<'env>(
     let on_disconnect = disconnect_listener(&on_disconnect)?;
     let abort: Flag = (**abort).clone();
     let timeout_ms = options.ready_timeout_ms;
+    let host_certificates = options.host_certificates;
     let host = options.host;
     let user = options.user;
     drop(options.private_key);
@@ -207,7 +211,7 @@ pub fn connect<'env>(
             &abort,
             "the SSH handshake timed out",
             async move {
-                let mut handle = tcp_and_handshake(&host, port, handler).await?;
+                let mut handle = tcp_and_handshake(&host, port, handler, host_certificates).await?;
                 if let Some(binding) = handle.agent_session_binding() {
                     let _ = session_shared.binding.set(binding.clone());
                 }

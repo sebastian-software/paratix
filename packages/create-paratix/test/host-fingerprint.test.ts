@@ -48,6 +48,7 @@ function hostKeyInfo(buffer: Buffer): HostKeyInfo {
   return {
     algorithm: "ssh-ed25519",
     fingerprintSha256: computeExpectedFingerprint(buffer),
+    keyAlgorithm: "ssh-ed25519",
     keyBase64: buffer.toString("base64"),
     kind: "key",
   }

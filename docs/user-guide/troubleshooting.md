@@ -86,8 +86,11 @@ not establish trust in the issuing CA. `AuthorizedPrincipalsFile` can authorize 
 different from `ssh.user`; do not assume a username mismatch alone proves the cause.
 
 **Verify:** Rerun against the intended account and port after correcting the files or server
-policy. Retain the verified host-key pin or `known_hosts` entry: user certificates do not add
-host-certificate or host-CA support. See the [certificate configuration](./README.md#authenticate-with-a-user-certificate).
+policy. User authentication and host trust are separate: retain an independently verified
+raw host-key anchor or configure a matching host CA using the
+[controller trust policy](./README.md#trust-a-server-through-a-host-ca). Any configured pins
+still apply to the raw leaf and must pass alongside CA validation. See the
+[user-certificate configuration](./README.md#authenticate-with-a-user-certificate).
 
 ## Agent forwarding or password fallback is rejected
 

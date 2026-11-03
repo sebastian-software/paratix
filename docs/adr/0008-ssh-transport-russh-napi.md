@@ -2,7 +2,8 @@
 
 ## Status
 
-Accepted, amended 2026-10-29 (see "Amendment (2026-10-29, #255)"). All 15 hard proofs of the spike passed in both proof runs, the prebuild matrix built all
+Accepted, amended 2026-10-29 (see "Amendment (2026-10-29, #255)") and 2026-11-03 for controller
+host-certificate trust (#258; see "Host Keys and Host Certificates"). All 15 hard proofs of the spike passed in both proof runs, the prebuild matrix built all
 six targets within the glibc and macOS limits, and the smoke test passed on every target. One soft
 cell (ed25519 PKCS#8 through the agent) could not be tested because OpenSSH's `ssh-add` refuses
 that format; it is documented as an OpenSSH limitation below. The spike also found gaps that work
@@ -13,6 +14,7 @@ package B must close; they are listed under "Known Limitations and Findings for 
 Issue: sebastian-software/paratix#254 (work package A)
 Epic: sebastian-software/paratix#252
 Related: sebastian-software/paratix#248 (user certificates, work package D)
+Related: sebastian-software/paratix#258 (controller host certificates, work package E)
 Blocks: sebastian-software/paratix#255 (work package B)
 Planning basis: `docs/plan/2026-10-29-ssh-transport-auf-russh-umstellen.md` (German,
 authoritative), merged in sebastian-software/paratix#253
@@ -76,8 +78,9 @@ Follow-up work packages, each with its own issue:
   dependencies, `create-paratix` switched to `scan()`.
 - **D (#248):** user certificates (agent certificate identities, `ssh.certificate`, `rsync` with
   `CertificateFile`).
-- **E:** host certificates on the controller (`@cert-authority`, `@revoked` for CA keys,
-  principals check, `rsync` with an `@cert-authority` anchor).
+- **E (#258):** initial host-certificate verification on the controller (`@cert-authority`,
+  CA/leaf revocation, principals and optional leaf pins), with separate CA-only and pinned-leaf
+  trust paths for `rsync`. Rekey remains separate in #260.
 
 ## Alternatives Rejected
 
@@ -334,35 +337,91 @@ does this only for guarded async tasks so far (see limitations).
 
 ## Host Keys and Host Certificates
 
-The trust decision stays in TypeScript. `knownHosts.ts` and `buildHostVerifier` keep TOFU, pins,
-"HOST KEY CHANGED" and R-0000204. The native side calls an async JS callback and fails with
-`HOST_KEY_REJECTED` when it rejects; only a boolean crosses napi. The JS side accepts only `true`
-or `undefined` as a verdict; any other value rejects (fail closed). The TypeScript adapter
-remembers the exact error object the verifier threw for that connection attempt and rethrows it on
-`HOST_KEY_REJECTED`; only when nothing was remembered does it throw a generic
-`HostKeyVerificationError`. The messages survive and reconnects still stop (fail closed). H2
-proved the identity for async rejections, synchronous throws and non-`Error` values, and the
-verdict rule for `true`, `undefined`, `false`, `1`, `"yes"`, `{}` and `null`.
+Work package E (#258) adds the following controller contract. The spike tables above remain
+historical evidence, not a description of the current `scan()` API or verifier verdict rule.
 
-Until E:
+The trust decision stays in TypeScript. `knownHosts.ts` and `buildHostVerifier` keep raw-key
+TOFU, pins and changed-key rejection; matching CA lines now authorize certificates rather than
+causing the earlier blanket rejection. The native async callback accepts only `true`; all other
+verdicts reject with `HOST_KEY_REJECTED`, as amended in B1. Native certificate validation is
+mandatory and cannot be bypassed by returning `true`. The adapter preserves the exact object
+thrown by a verifier; without one, it produces `HostKeyVerificationError`. Reconnect stops on
+host-verification failure. Reasons contain no unfiltered key IDs, principals or certificate
+blobs.
 
-- The binding offers no host-certificate algorithms.
-- `Preferred.key` is pinned to `ssh2`'s order: ed25519 → ecdsa → rsa-sha2-512/256 → ssh-rsa.
-- `verifiedHostPublicKey` stays the raw key in its current format.
+Before the initial handshake, TypeScript selects matching `@cert-authority` entries from the
+existing controller `~/.ssh/known_hosts`, under its shared asynchronous lock. Existing lists,
+wildcards, negation, hashes and host/port normalization apply; nonstandard ports use `[host]:port`,
+including IPv6. No new trust file, `HostKeyAlias` or DNS/reverse-DNS source is introduced.
 
-In E the work is split:
+Only active Known-Hosts trust (`yes`/`accept-new`) plus a matching CA enables the binding's
+per-connection `hostCertificates` option. The supported certificate algorithms precede the
+unchanged raw list: Ed25519, ECDSA P-256/P-384/P-521, RSA-SHA2-512/256. CA and leaf algorithms
+are independent. Otherwise the raw-key offer and order remain unchanged:
+ed25519 → ecdsa → rsa-sha2-512/256 → ssh-rsa. `scan()` offers raw keys only;
+`strictHostKeyChecking: "no"` adds no CA-trust path.
 
-- **Rust** checks the certificate cryptography (CA signature, type `host`, validity) through the
-  `russh::keys` re-export (`ssh_key::Certificate::verify_signature`), not a separate `ssh-key`
-  dependency. This is necessary because russh itself does not verify the CA
-  (`russh-0.65.0/src/client/kex.rs:288-305`), and a presented certificate replaces the raw-key
-  check instead of adding to it (`client/mod.rs:2063-2077`).
-- **TypeScript** checks the principals against the hostname and handles `@cert-authority` and
-  `@revoked`.
+Validation is split across the native and controller boundaries:
 
-`Preferred.host_key_certificates` is empty by default (`negotiation.rs:74-90`), so a server only
-presents a certificate when the binding asks for one. `check_server_key` runs only on the initial
-key exchange; russh does not check that the host key stays the same on rekey (see limitations).
+- **Rust** validates the CA signature, type `host`, exact native-integer validity interval
+  `valid_after <= now < valid_before` and absence of critical options. It uses the
+  `russh::keys` re-export, with no separate `ssh-key` dependency. This is necessary because the
+  pinned russh does not verify the CA itself (`russh-0.65.0/src/client/kex.rs:288-305`) and a
+  certificate replaces its raw-key callback (`client/mod.rs:2063-2077`). Numeric validity fields
+  exposed to JavaScript are informational; the native decision owns integer time checks.
+- **TypeScript** requires consistent structured certificate metadata, a matching trusted CA,
+  a matching nonempty principal list, no applicable revocation and all configured pins.
+  Principals match the requested host/IP without a port, using case-sensitive `*` and `?`
+  patterns. Uncritical extensions establish no trust.
+
+With active Known-Hosts checking, `@revoked` takes precedence over CA entries, cache and pins.
+Both the accepted CA and certified raw leaf are compared. A revoked certificate is normalized
+to its leaf for public-key comparison, so renewal of the same leaf does not clear revocation.
+CA entries are never ordinary host-key anchors. No KRL, serial-number or key-ID management is
+added, and the existing raw-key `strictHostKeyChecking: "no"` contract is not expanded.
+
+`expectedHostPublicKey` and `expectedHostFingerprint` still pin the raw public key, meaning the
+certified leaf on the certificate path. CA validation and **all** pins must pass; certificate
+blobs and CA keys are not pin substitutes. If the server presents a raw key, the normal raw-key
+policy applies, including explicit pins and `accept-new` TOFU even with a matching CA line.
+A CA line alone is not a raw-key mismatch. A certificate failure never triggers another
+raw-key handshake. Accepted or rejected certificates, certified leaves and CAs create no TOFU
+file/cache entry. Raw-key TOFU commits only after successful authentication.
+
+Native, transport and SSH layers carry separate typed raw-key/certificate evidence. A successful
+authenticated handshake replaces the entire evidence, including accepted signer, leaf, target,
+revocations and explicit-pin status; a failed attempt leaves prior evidence unchanged.
+`verifiedHostPublicKey` remains optional and contains only the raw OpenSSH leaf key, with its
+algorithm derived from the leaf blob, never a certificate or CA. The distinct optional
+`hostVerificationEvidence` field carries the path and accepted CA. Unverified or inconsistent
+evidence cannot authorize rsync.
+
+Immediately before **each** rsync invocation, the shared locked loader reads a fresh snapshot
+of the controller Known-Hosts file. Certificate sessions fail closed on read errors and on
+revocation of the session CA or leaf. All matching revocations, including alternative leaves,
+are transferred to the CA path. Changes after the snapshot are not monitored.
+
+- **Certificate without explicit pins:** a private temporary file contains only the accepted CA
+  as a host/port-scoped `@cert-authority` anchor, plus matching revocations. OpenSSH validates
+  its current certificate and may accept another non-revoked leaf under the same CA. This is
+  CA trust, not identity with the earlier leaf.
+- **Certificate plus either explicit pin (owner-approved exception):** the file contains only
+  the verified raw leaf as trust anchor. Only its raw-key algorithm is offered; RSA permits
+  `rsa-sha2-512,rsa-sha2-256`, without adding `ssh-rsa`. The pin survives, but this new raw-key
+  connection checks no certificate or current CA validity. A different leaf and a
+  certificate-only server fail. There is no automatic retry/downgrade or new command verifier.
+  Combining CA and leaf anchors would create an OR condition and would not enforce the pin.
+
+Both paths, and the existing raw-key path, force `StrictHostKeyChecking=yes`, isolated
+user/global Known-Hosts files, `KnownHostsCommand=none` and `VerifyHostKeyDNS=no` so inherited
+command anchors or DNSSEC SSHFP cannot broaden the accepted CA or leaf. Temporary files use
+exclusive creation and mode `0600`; cleanup runs on success and failure. Module options cannot
+weaken this policy. User-authentication `CertificateFile` propagation remains independent.
+
+All these verification guarantees concern the initial key exchange. russh does not re-check
+the host key on rekey; #260 remains open (see limitations). Host-CA issuance (#251), target-side
+Known-Hosts management (#249), platform requirements, binary-free imports/help/version and the
+binding check before secret resolution are outside this change.
 
 ## Secrets and zeroize Limits
 
@@ -455,8 +514,8 @@ tables above stay unchanged as historical findings; this section records what B1
 settled.
 
 - **Verdict:** the host-key verifier accepts only `true`. Every other value (`false`, `undefined`,
-  `1`, `"yes"`, `{}`, `null`) rejects with `HOST_KEY_REJECTED`. This supersedes the "`true` or
-  `undefined`" rule in "Host Keys and Host Certificates" and H2, in line with the C1 planning in
+  `1`, `"yes"`, `{}`, `null`) rejects with `HOST_KEY_REJECTED`. This supersedes the spike's
+  "`true` or `undefined`" rule in H2, in line with the C1 planning in
   sebastian-software/paratix#256. A value the verifier throws or rejects with still reaches the
   caller of `connect()` as the identical object. `index.d.ts` types the verifier as
   `(info: HostKeyInfo) => boolean | Promise<boolean>`.

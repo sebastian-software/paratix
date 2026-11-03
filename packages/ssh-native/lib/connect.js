@@ -145,7 +145,8 @@ class ConnectAttempt {
       options.agentForward === true,
       this.verify,
       this.onDisconnect,
-      /** @type {{ handle: unknown }} */ (this.abort).handle
+      /** @type {{ handle: unknown }} */ (this.abort).handle,
+      options.hostCertificates === true
     )
   }
 }

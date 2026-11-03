@@ -1,3 +1,5 @@
+import type { HostKeyInfo } from "@paratix/ssh-native"
+
 import { createHash, createHmac } from "node:crypto"
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 
@@ -8,11 +10,13 @@ import {
   computeFingerprint,
   extractAlgoFromKey,
   HostKeyVerificationError,
+  loadRsyncTrustSnapshot,
   lookupHostKey,
   parseKnownHosts,
   validateExpectedHostPublicKey,
   waitForKnownHostsWrites,
 } from "../src/knownHosts.js"
+import { renewedHostCertificates } from "./fixtures/hostCertificates.js"
 
 // ---------------------------------------------------------------------------
 // Mocks
@@ -66,6 +70,12 @@ function makeKeyBuffer(algo: string, keyData: Buffer = Buffer.from("fake-key-dat
   const lengthBuf = Buffer.alloc(4)
   lengthBuf.writeUInt32BE(algoBytes.length)
   return Buffer.concat([lengthBuf, algoBytes, keyData])
+}
+
+function wireString(value: Buffer): Buffer {
+  const length = Buffer.alloc(4)
+  length.writeUInt32BE(value.length)
+  return Buffer.concat([length, value])
 }
 
 function makeHashedHostPattern(
@@ -1028,7 +1038,7 @@ describe("buildHostVerifier", () => {
     expect(() => hostVerifier!(ed25519Key)).toThrow("unknownhost.com")
   })
 
-  it("mode 'yes' with @cert-authority entry rejects with a clear error (R-0000204)", async () => {
+  it("mode 'yes' with CA alone still rejects an unknown raw key", async () => {
     readFileSyncMock.mockReturnValue(
       `@cert-authority example.com ssh-ed25519 ${ed25519Key.toString("base64")}\n`
     )
@@ -1036,11 +1046,10 @@ describe("buildHostVerifier", () => {
     const { hostVerifier } = await buildHostVerifier("yes", { host: "example.com", port: 22 })
     expect(hostVerifier).toBeDefined()
 
-    expect(() => hostVerifier!(ed25519Key)).toThrow(/@cert-authority/v)
-    expect(() => hostVerifier!(ed25519Key)).toThrow(/does not validate certificate-authority/v)
+    expect(() => hostVerifier!(ed25519Key)).toThrow(/not found in known_hosts/v)
   })
 
-  it("mode 'accept-new' with @cert-authority entry refuses to persist a raw host key (R-0000204)", async () => {
+  it("mode 'accept-new' with a CA accepts a raw key and defers persistence", async () => {
     readFileSyncMock.mockReturnValue(
       `@cert-authority ca-only.example ssh-ed25519 ${ed25519Key.toString("base64")}\n`
     )
@@ -1051,7 +1060,7 @@ describe("buildHostVerifier", () => {
     })
     expect(hostVerifier).toBeDefined()
 
-    expect(() => hostVerifier!(ed25519Key)).toThrow(/@cert-authority/v)
+    expect(hostVerifier!(ed25519Key)).toBe(true)
     expect(appendFileMock).not.toHaveBeenCalled()
   })
 
@@ -1765,5 +1774,410 @@ describe("buildHostVerifier read serialization (R-0000194)", () => {
     // One read inside the append (duplicate detection) plus one read by
     // the verifier after the lock has been released.
     expect(readFileSyncMock).toHaveBeenCalledTimes(2)
+  })
+})
+
+describe("controller host certificates", () => {
+  const host = "Example.com"
+  const leaf = makeKeyBuffer("ssh-ed25519", Buffer.from("leaf"))
+  const authority = makeKeyBuffer("ssh-rsa", Buffer.from("authority"))
+  const line = `@cert-authority *.com ssh-rsa ${authority.toString("base64")}\n`
+  const info = (overrides: Partial<HostKeyInfo> = {}): HostKeyInfo => ({
+    algorithm: "ssh-ed25519-cert-v01@openssh.com",
+    caAlgorithm: "ssh-rsa",
+    caFingerprintSha256: computeFingerprint(authority),
+    caKeyBase64: authority.toString("base64"),
+    caSignatureValid: true,
+    certificateValidation: { valid: true },
+    certType: "host",
+    fingerprintSha256: computeFingerprint(leaf),
+    keyAlgorithm: "ssh-ed25519",
+    keyBase64: leaf.toString("base64"),
+    kind: "certificate",
+    principals: ["Example.*"],
+    validAfter: 0,
+    validBefore: Number.MAX_VALUE,
+    ...overrides,
+  })
+
+  beforeEach(async () => {
+    const { appendFile } = await import("node:fs/promises")
+    vi.mocked(appendFile).mockClear()
+    synchronousReadFileMock.mockReturnValue(line)
+    clearHostKeyCache()
+  })
+
+  it("accepts CA trust with a distinct leaf type, records raw evidence, and never persists TOFU", async () => {
+    const cache = new Map<string, Buffer>()
+    const verifier = await buildHostVerifier("accept-new", { host, port: 22 }, { cache })
+    expect(verifier.hostCertificates).toBe(true)
+    expect(verifier.hostVerifier?.(leaf, info())).toBe(true)
+    await verifier.commitAcceptedHostKey?.()
+    expect(cache.size).toBe(0)
+    const { appendFile } = await import("node:fs/promises")
+    expect(appendFile).not.toHaveBeenCalled()
+    expect(verifier.evidence?.()).toMatchObject({
+      authorityPublicKey: `ssh-rsa ${authority.toString("base64")}`,
+      explicitPins: false,
+      host,
+      kind: "certificate",
+      port: 22,
+      publicKey: `ssh-ed25519 ${leaf.toString("base64")}`,
+    })
+  })
+
+  it.each([
+    { certificateValidation: undefined },
+    { certificateValidation: { reason: "certificate-expired" as const, valid: false } },
+    { certificateValidation: { reason: "certificate-not-yet-valid" as const, valid: false } },
+    { certificateValidation: { reason: "certificate-critical-options" as const, valid: false } },
+    { caSignatureValid: false },
+    { certType: "user" as const },
+    { principals: [] },
+    { principals: ["example.*"] },
+    { principals: ["foreign.example"] },
+    { caKeyBase64: undefined },
+    { keyAlgorithm: "ssh-rsa" },
+    { caFingerprintSha256: "SHA256:wrong" },
+    { fingerprintSha256: "SHA256:wrong" },
+  ])("fails closed on invalid or incomplete certificate metadata %#", async (overrides) => {
+    const verifier = await buildHostVerifier("accept-new", { host, port: 22 })
+    expect(() => verifier.hostVerifier?.(leaf, info(overrides))).toThrow(HostKeyVerificationError)
+    expect(verifier.evidence?.()).toBeUndefined()
+  })
+
+  it.each([
+    {
+      certificateValidation: { valid: true },
+      expectedError: undefined,
+      expectedKind: "certificate",
+      expectedResult: true,
+    },
+    {
+      certificateValidation: { reason: "certificate-signature-invalid" as const, valid: false },
+      expectedError: expect.any(HostKeyVerificationError),
+      expectedKind: undefined,
+      expectedResult: undefined,
+    },
+  ])(
+    "never writes certificate TOFU or changes existing raw cache entries %#",
+    async ({ certificateValidation, expectedError, expectedKind, expectedResult }) => {
+      const { appendFile, mkdir } = await import("node:fs/promises")
+      const append = vi.mocked(appendFile)
+      const createDirectory = vi.mocked(mkdir)
+      append.mockRejectedValueOnce(Object.assign(new Error("read-only"), { code: "EACCES" }))
+      createDirectory.mockClear()
+      const cached = makeKeyBuffer("ssh-ed25519", Buffer.from("previous-raw-key"))
+      const cache = new Map([[host, cached]])
+      const before = new Map(cache)
+      try {
+        const verifier = await buildHostVerifier("accept-new", { host, port: 22 }, { cache })
+        let result: unknown
+        let failure: unknown
+        try {
+          result = verifier.hostVerifier?.(leaf, info({ certificateValidation }))
+        } catch (error) {
+          failure = error
+        }
+        expect(result).toBe(expectedResult)
+        expect(failure).toStrictEqual(expectedError)
+        await expect(verifier.commitAcceptedHostKey?.()).resolves.toBeUndefined()
+        expect(cache).toStrictEqual(before)
+        expect(append).not.toHaveBeenCalled()
+        expect(createDirectory).not.toHaveBeenCalled()
+        expect(verifier.evidence?.()?.kind).toBe(expectedKind)
+      } finally {
+        append.mockReset().mockResolvedValue(undefined)
+      }
+    }
+  )
+
+  it.each([
+    {
+      expectedHostFingerprint: computeFingerprint(leaf),
+      expectedHostPublicKey: `ssh-rsa ${authority.toString("base64")}`,
+    },
+    {
+      expectedHostFingerprint: computeFingerprint(authority),
+      expectedHostPublicKey: `ssh-ed25519 ${leaf.toString("base64")}`,
+    },
+  ])("rejects contradictory leaf pins in either direction %#", async (pins) => {
+    const verifier = await buildHostVerifier("yes", { host, port: 22 }, pins)
+    expect(() => verifier.hostVerifier?.(leaf, info())).toThrow(/configured trust anchor/v)
+    expect(verifier.evidence?.()).toBeUndefined()
+  })
+
+  it.each(renewedHostCertificates)(
+    "rejects a certificate blob as a pin for its own certified raw leaf %#",
+    async ({ certificates, publicKey }) => {
+      const [algorithm = "", base64 = ""] = publicKey.split(" ")
+      const rawLeaf = Buffer.from(base64, "base64")
+      const verifier = await buildHostVerifier(
+        "yes",
+        { host, port: 22 },
+        {
+          expectedHostFingerprint: computeFingerprint(rawLeaf),
+          expectedHostPublicKey: certificates[0],
+        }
+      )
+      expect(() =>
+        verifier.hostVerifier?.(
+          rawLeaf,
+          info({
+            algorithm: `${algorithm}-cert-v01@openssh.com`,
+            fingerprintSha256: computeFingerprint(rawLeaf),
+            keyAlgorithm: algorithm,
+            keyBase64: base64,
+          })
+        )
+      ).toThrow(/Expected host public key uses unsupported algorithm/v)
+      expect(verifier.evidence?.()).toBeUndefined()
+    }
+  )
+
+  it.each(["yes", "accept-new", "no"] as const)(
+    "keeps certificate negotiation disabled without a matching CA even with pins in %s mode",
+    async (mode) => {
+      synchronousReadFileMock.mockReturnValue("")
+      const verifier = await buildHostVerifier(
+        mode,
+        { host, port: 22 },
+        {
+          expectedHostFingerprint: computeFingerprint(leaf),
+          expectedHostPublicKey: `ssh-ed25519 ${leaf.toString("base64")}`,
+        }
+      )
+      expect(verifier.hostCertificates).toBe(false)
+      expect(verifier.hostVerifier?.(leaf)).toBe(true)
+      expect(() => verifier.hostVerifier?.(leaf, info())).toThrow(
+        /no matching certificate authority/v
+      )
+    }
+  )
+
+  it("selects the signing CA among several anchors while revocation still wins", async () => {
+    const other = makeKeyBuffer("ssh-ed25519", Buffer.from("other-authority"))
+    const anchors = `@cert-authority *.com ssh-ed25519 ${other.toString("base64")}\n${line}`
+    synchronousReadFileMock.mockReturnValue(anchors)
+    const verifier = await buildHostVerifier("yes", { host, port: 22 })
+    expect(verifier.hostVerifier?.(leaf, info())).toBe(true)
+    expect(verifier.evidence?.()).toMatchObject({
+      authorityPublicKey: `ssh-rsa ${authority.toString("base64")}`,
+    })
+    synchronousReadFileMock.mockReturnValue(
+      `${anchors}@revoked *.com ssh-rsa ${authority.toString("base64")}\n`
+    )
+    const revoked = await buildHostVerifier("yes", { host, port: 22 })
+    expect(() => revoked.hostVerifier?.(leaf, info())).toThrow(/revoked/v)
+  })
+
+  it.each([
+    { otherPort: 2222, pattern: "2001:db8::1", port: 22 },
+    { otherPort: 2222, pattern: makeHashedHostPattern("2001:db8::1", 22), port: 22 },
+    { otherPort: 22, pattern: "[2001:db8::1]:2222", port: 2222 },
+    { otherPort: 22, pattern: makeHashedHostPattern("2001:db8::1", 2222), port: 2222 },
+  ])(
+    "matches IPv6 CA patterns %# using a port-free principal",
+    async ({ otherPort, pattern, port }) => {
+      const address = "2001:db8::1"
+      synchronousReadFileMock.mockReturnValue(
+        `@cert-authority ${pattern} ssh-rsa ${authority.toString("base64")}\n`
+      )
+      const verifier = await buildHostVerifier("yes", { host: address, port })
+      expect(verifier.hostCertificates).toBe(true)
+      expect(verifier.hostVerifier?.(leaf, info({ principals: [address] }))).toBe(true)
+      const rejected = await buildHostVerifier("yes", { host: address, port })
+      expect(() =>
+        rejected.hostVerifier?.(leaf, info({ principals: [`[${address}]:${port}`] }))
+      ).toThrow(HostKeyVerificationError)
+      const otherPortVerifier = await buildHostVerifier("yes", { host: address, port: otherPort })
+      expect(otherPortVerifier.hostCertificates).toBe(false)
+    }
+  )
+
+  it.each([{ principals: ["Example.?om"] }, { principals: ["foreign", "Example.*"] }])(
+    "accepts case-sensitive principal wildcards with normalized CA names %#",
+    async ({ principals }) => {
+      synchronousReadFileMock.mockReturnValue(
+        `@cert-authority EXAMPLE.COM,!excluded.com ssh-rsa ${authority.toString("base64")}\n`
+      )
+      const verifier = await buildHostVerifier("yes", { host, port: 22 })
+      expect(verifier.hostVerifier?.(leaf, info({ principals }))).toBe(true)
+    }
+  )
+
+  it.each(["example.*", "!Example.com", "Example.??om"])(
+    "rejects a principal that does not match the requested hostname: %s",
+    async (principal) => {
+      synchronousReadFileMock.mockReturnValue(
+        `@cert-authority EXAMPLE.COM,!excluded.com ssh-rsa ${authority.toString("base64")}\n`
+      )
+      const verifier = await buildHostVerifier("yes", { host, port: 22 })
+      expect(() => verifier.hostVerifier?.(leaf, info({ principals: [principal] }))).toThrow(
+        HostKeyVerificationError
+      )
+    }
+  )
+
+  it("gives a case-insensitive negated CA hostname priority over wildcard inclusion", async () => {
+    synchronousReadFileMock.mockReturnValue(
+      `@cert-authority *.COM,!EXAMPLE.COM ssh-rsa ${authority.toString("base64")}\n`
+    )
+    const verifier = await buildHostVerifier("yes", { host, port: 22 })
+    expect(verifier.hostCertificates).toBe(false)
+  })
+
+  it.each([
+    { caAlgorithm: "ssh-ed25519" },
+    { algorithm: "ecdsa-sha2-nistp256-cert-v01@openssh.com" },
+    { caSignatureValid: undefined },
+    { certificateValidation: { reason: "certificate-signature-invalid" as const, valid: false } },
+  ])("rejects inconsistent metadata with stable redacted diagnostics %#", async (overrides) => {
+    const privateId = "PRIVATE-ID\nforge-log"
+    const privatePrincipal = "PRIVATE-PRINCIPAL\nforge-log"
+    const verifier = await buildHostVerifier("yes", { host, port: 22 })
+    let failure: unknown
+    try {
+      verifier.hostVerifier?.(
+        leaf,
+        info({ keyId: privateId, principals: [host, privatePrincipal], ...overrides })
+      )
+    } catch (error) {
+      failure = error
+    }
+    expect(failure).toBeInstanceOf(HostKeyVerificationError)
+    expect(String(failure)).toContain("HOST KEY VERIFICATION FAILED")
+    for (const secret of [
+      privateId,
+      privatePrincipal,
+      leaf.toString("base64"),
+      authority.toString("base64"),
+    ]) {
+      expect(String(failure)).not.toContain(secret)
+    }
+  })
+
+  it("uses native integer validity rather than imprecise JS timestamps", async () => {
+    const verifier = await buildHostVerifier("yes", { host, port: 22 })
+    expect(
+      verifier.hostVerifier?.(leaf, info({ validAfter: Number.MAX_VALUE, validBefore: 0 }))
+    ).toBe(true)
+  })
+
+  it.each([leaf, authority])(
+    "revocation overrides CA trust, pins and cache %#",
+    async (revoked) => {
+      synchronousReadFileMock.mockReturnValue(
+        `${line}@revoked *.com ${extractAlgoFromKey(revoked)} ${revoked.toString("base64")}\n`
+      )
+      const verifier = await buildHostVerifier(
+        "yes",
+        { host, port: 22 },
+        { expectedHostFingerprint: computeFingerprint(leaf) }
+      )
+      expect(() => verifier.hostVerifier?.(leaf, info())).toThrow(/revoked/v)
+    }
+  )
+
+  it("requires both configured pins on the certified raw leaf", async () => {
+    const options = {
+      expectedHostFingerprint: computeFingerprint(leaf),
+      expectedHostPublicKey: `ssh-ed25519 ${leaf.toString("base64")}`,
+    }
+    const verifier = await buildHostVerifier("yes", { host, port: 22 }, options)
+    expect(verifier.hostVerifier?.(leaf, info())).toBe(true)
+    expect(verifier.evidence?.()?.explicitPins).toBe(true)
+    const mismatch = await buildHostVerifier(
+      "yes",
+      { host, port: 22 },
+      { ...options, expectedHostFingerprint: computeFingerprint(authority) }
+    )
+    expect(() => mismatch.hostVerifier?.(leaf, info())).toThrow(/configured trust anchor/v)
+  })
+
+  it("rejects a foreign CA even when the leaf matches every pin", async () => {
+    synchronousReadFileMock.mockReturnValue(
+      `@cert-authority *.com ssh-ed25519 ${leaf.toString("base64")}\n`
+    )
+    const verifier = await buildHostVerifier(
+      "yes",
+      { host, port: 22 },
+      { expectedHostFingerprint: computeFingerprint(leaf) }
+    )
+    expect(() => verifier.hostVerifier?.(leaf, info())).toThrow(/authority is not trusted/v)
+  })
+
+  it.each(["yes", "accept-new"] as const)(
+    "selects CA entries using hash, list, negation and nonstandard port in %s",
+    async (mode) => {
+      synchronousReadFileMock.mockReturnValue(
+        `@cert-authority ${makeHashedHostPattern(host, 2222)},!excluded.com ssh-rsa ${authority.toString("base64")}\n`
+      )
+      const verifier = await buildHostVerifier(mode, { host, port: 2222 })
+      expect(verifier.hostCertificates).toBe(true)
+      expect(verifier.hostVerifier?.(leaf, info())).toBe(true)
+      const defaultPortVerifier = await buildHostVerifier(mode, { host, port: 22 })
+      expect(defaultPortVerifier.hostCertificates).toBe(false)
+    }
+  )
+
+  it("does not offer certificates in no mode, with only pins or with an excluded host", async () => {
+    const disabledVerifier = await buildHostVerifier("no", { host, port: 22 })
+    expect(disabledVerifier.hostCertificates).toBeUndefined()
+    synchronousReadFileMock.mockReturnValue(
+      `@cert-authority *.com,!Example.com ssh-rsa ${authority.toString("base64")}\n`
+    )
+    const excludedVerifier = await buildHostVerifier(
+      "yes",
+      { host, port: 22 },
+      { expectedHostFingerprint: computeFingerprint(leaf) }
+    )
+    expect(excludedVerifier.hostCertificates).toBe(false)
+  })
+
+  it("reads fresh revocations for session CA, leaf and alternative leaves before every rsync", async () => {
+    const verifier = await buildHostVerifier("yes", { host, port: 22 })
+    verifier.hostVerifier?.(leaf, info())
+    const evidence = verifier.evidence?.()
+    expect(evidence).toBeDefined()
+    const alternative = makeKeyBuffer("ssh-ed25519", Buffer.from("alternative"))
+    synchronousReadFileMock.mockReturnValue(
+      `${line}@revoked *.com ssh-ed25519 ${alternative.toString("base64")}\n`
+    )
+    await expect(loadRsyncTrustSnapshot(evidence!)).resolves.toStrictEqual([
+      `ssh-ed25519 ${alternative.toString("base64")}`,
+    ])
+    synchronousReadFileMock.mockReturnValue(
+      `${line}@revoked *.com ssh-rsa ${authority.toString("base64")}\n`
+    )
+    await expect(loadRsyncTrustSnapshot(evidence!)).rejects.toThrow(HostKeyVerificationError)
+    synchronousReadFileMock.mockImplementationOnce(() => {
+      throw Object.assign(new Error("denied"), { code: "EACCES" })
+    })
+    await expect(loadRsyncTrustSnapshot(evidence!)).rejects.toThrow(/Could not read/v)
+  })
+
+  it("normalizes a revoked certificate to its public leaf across renewals", async () => {
+    const rawPublic = wireString(Buffer.from("ed25519-leaf-material"))
+    const rawLeaf = Buffer.concat([wireString(Buffer.from("ssh-ed25519")), rawPublic])
+    const certificate = Buffer.concat([
+      wireString(Buffer.from("ssh-ed25519-cert-v01@openssh.com")),
+      wireString(Buffer.from("nonce")),
+      rawPublic,
+      Buffer.alloc(32),
+    ])
+    synchronousReadFileMock.mockReturnValue(
+      `${line}@revoked *.com ssh-ed25519-cert-v01@openssh.com ${certificate.toString("base64")}\n`
+    )
+    const verifier = await buildHostVerifier("yes", { host, port: 22 })
+    expect(() =>
+      verifier.hostVerifier?.(
+        rawLeaf,
+        info({
+          fingerprintSha256: computeFingerprint(rawLeaf),
+          keyBase64: rawLeaf.toString("base64"),
+        })
+      )
+    ).toThrow(/revoked/v)
   })
 })

@@ -49,12 +49,37 @@ const SSH2_HOST_KEY_ORDER: &[Algorithm] = &[
     Algorithm::Rsa { hash: None },
 ];
 
-pub fn client_config() -> Arc<client::Config> {
+// Certificates deliberately exclude RSA/SHA-1. CA and subject algorithms
+// are independent, so this list is never filtered by the trusted CA type.
+const HOST_CERTIFICATE_ORDER: &[Algorithm] = &[
+    Algorithm::Ed25519,
+    Algorithm::Ecdsa {
+        curve: EcdsaCurve::NistP256,
+    },
+    Algorithm::Ecdsa {
+        curve: EcdsaCurve::NistP384,
+    },
+    Algorithm::Ecdsa {
+        curve: EcdsaCurve::NistP521,
+    },
+    Algorithm::Rsa {
+        hash: Some(HashAlg::Sha512),
+    },
+    Algorithm::Rsa {
+        hash: Some(HashAlg::Sha256),
+    },
+];
+
+pub fn client_config(host_certificates: bool) -> Arc<client::Config> {
     let preferred = Preferred {
         key: Cow::Borrowed(SSH2_HOST_KEY_ORDER),
-        // No host-certificate algorithms are offered (certificates arrive
-        // with work packages D and E).
-        host_key_certificates: Cow::Borrowed(&[]),
+        // russh advertises these before the unchanged raw-key list. Only
+        // the controller's matching CA trust opts an individual attempt in.
+        host_key_certificates: Cow::Borrowed(if host_certificates {
+            HOST_CERTIFICATE_ORDER
+        } else {
+            &[]
+        }),
         ..Preferred::default()
     };
     Arc::new(client::Config {
@@ -87,6 +112,7 @@ pub async fn tcp_and_handshake(
     host: &str,
     port: u16,
     handler: ClientHandler,
+    host_certificates: bool,
 ) -> BindingResult<Handle<ClientHandler>> {
     let shared = handler.shared.clone();
     let tcp = TcpStream::connect((host, port))
@@ -101,7 +127,7 @@ pub async fn tcp_and_handshake(
         shared.kill();
     }
     let tcp = TcpStream::from_std(std_stream).map_err(|e| connect_failed(&e))?;
-    client::connect_stream(client_config(), tcp, handler)
+    client::connect_stream(client_config(host_certificates), tcp, handler)
         .await
         .map_err(|e| e.into_binding_error())
 }
@@ -128,4 +154,40 @@ pub async fn bounded<T>(
         shared.cancel();
     }
     result
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn certificate_opt_in_preserves_raw_order_and_uses_sha2_rsa_aliases() {
+        let raw = client_config(false);
+        let certificates = client_config(true);
+        assert_eq!(raw.preferred.key, certificates.preferred.key);
+        assert_eq!(raw.preferred.key.as_ref(), SSH2_HOST_KEY_ORDER);
+        assert!(raw.preferred.host_key_certificates.is_empty());
+        let names: Vec<_> = certificates
+            .preferred
+            .host_key_certificates
+            .iter()
+            .map(Algorithm::to_certificate_type)
+            .collect();
+        assert_eq!(
+            names,
+            [
+                "ssh-ed25519-cert-v01@openssh.com",
+                "ecdsa-sha2-nistp256-cert-v01@openssh.com",
+                "ecdsa-sha2-nistp384-cert-v01@openssh.com",
+                "ecdsa-sha2-nistp521-cert-v01@openssh.com",
+                "rsa-sha2-512-cert-v01@openssh.com",
+                "rsa-sha2-256-cert-v01@openssh.com",
+            ]
+        );
+        // Configuration is per attempt, not a global opt-in.
+        assert!(client_config(false)
+            .preferred
+            .host_key_certificates
+            .is_empty());
+    }
 }
