@@ -1,4 +1,4 @@
-import { randomUUID } from "node:crypto"
+import { createHash, randomUUID } from "node:crypto"
 import { posix } from "node:path"
 
 import type { ExecOptions, ExecResult, ModuleResult, SshConnection } from "../types.js"
@@ -104,10 +104,12 @@ function scopedConnection(
     },
     async writeFile(path, content, options) {
       // SFTP may stage bytes but cannot be the active writer: the target process owns
-      // both the lease check and atomic publication while holding the kernel lock.
+      // the lease check, complete-payload verification and atomic publication under the kernel lock.
       const parent = shellQuote(posix.dirname(path))
       const target = shellQuote(path)
       const mode = options?.mode ?? "0600"
+      const expectedBytes = Buffer.byteLength(content, "utf8")
+      const expectedHash = createHash("sha256").update(content, "utf8").digest("hex")
       if (!/^[0-7]{3,4}$/v.test(mode)) throw new Error("Invalid sshd file mode")
       const result = await exec(
         `
@@ -115,6 +117,9 @@ set -e
 paratix_write=$(mktemp -p ${parent} -- .paratix-sshd-write.XXXXXX)
 trap 'rm -f -- "$paratix_write"' EXIT HUP INT TERM
 cat > "$paratix_write"
+paratix_received_hash=$(sha256sum -- "$paratix_write")
+[ "$(stat -c '%s' -- "$paratix_write")" = '${expectedBytes}' ] &&
+[ "\${paratix_received_hash%% *}" = '${expectedHash}' ] || { echo 'sshd guarded file integrity check failed' >&2; exit 76; }
 chmod ${mode} -- "$paratix_write"
 mv -T -- "$paratix_write" ${target}
 `,

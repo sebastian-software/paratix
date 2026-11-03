@@ -242,6 +242,22 @@ function injectForeignHolder(ssh: SshConnectionImpl): void {
   })
 }
 
+function alterGuardedStdin(
+  ssh: SshConnectionImpl,
+  intended: string,
+  received: (content: string) => string
+): { injected: boolean } {
+  const execute = ssh.exec.bind(ssh)
+  const state = { injected: false }
+  vi.spyOn(ssh, "exec").mockImplementation(async (command, options) => {
+    if (!command.includes(".paratix-sshd-write.")) return execute(command, options)
+    expect(options?.input).toBe(intended)
+    state.injected = true
+    return execute(command, { ...options, input: received(intended) })
+  })
+  return state
+}
+
 describe.skipIf(!available)("sshd lease acquisition and contention", { concurrent: false }, () => {
   beforeAll(async () => {
     fixture = await createTrustFixture(resolve(import.meta.dirname, "../.."))
@@ -259,6 +275,80 @@ describe.skipIf(!available)("sshd lease acquisition and contention", { concurren
   })
   afterAll(async () => {
     await fixture.cleanup()
+  })
+
+  it.each([
+    { name: "empty EOF", received: (_content: string) => "" },
+    { name: "prefix EOF", received: (content: string) => content.slice(0, 40) },
+    { name: "extra bytes", received: (content: string) => `${content}# extra\n` },
+    {
+      name: "same-length corruption",
+      received: (content: string) => content.replace("Port", "port"),
+    },
+  ])(
+    "rejects guarded stdin publication after $name without changing active config",
+    async ({ received }) => {
+      const target = "/etc/ssh/sshd_config"
+      const original = await fixture.ssh.readFile(target)
+      const originalMode = await fixture.container(["stat", "-c", "%a", target])
+      const originalIdentity = await fixture.container(["stat", "-c", "%a %i", target])
+      const intended = `${original}# complete UTF-8: β certificate\n`
+      const ssh = await connect()
+      const injection = alterGuardedStdin(ssh, intended, received)
+      try {
+        await expect(
+          withSshdCommitLease(ssh, {
+            name: "guarded stdin integrity",
+            async section(connection) {
+              await connection.writeFile(target, intended, { mode: "0600" })
+              return { status: "changed" }
+            },
+          })
+        ).rejects.toThrow("sshd guarded file integrity check failed")
+        expect(injection.injected).toBe(true)
+        expect(await fixture.ssh.readFile(target)).toBe(original)
+        expect(await fixture.container(["stat", "-c", "%a %i", target])).toBe(originalIdentity)
+        expect(
+          await fixture.container([
+            "find",
+            "/etc/ssh",
+            "-maxdepth",
+            "1",
+            "-name",
+            ".paratix-sshd-write.*",
+            "-print",
+          ])
+        ).toBe("")
+        expect(await fixture.ssh.exists(LEASE)).toBe(false)
+      } finally {
+        await fixture.write(target, original, originalMode)
+      }
+    }
+  )
+
+  it("publishes complete guarded UTF-8 and empty payloads", async () => {
+    const target = "/etc/ssh/sshd_config"
+    const original = await fixture.ssh.readFile(target)
+    const originalMode = await fixture.container(["stat", "-c", "%a", target])
+    const intended = `${original}# complete UTF-8: β certificate\n`
+    try {
+      const result = await withSshdCommitLease(fixture.ssh, {
+        name: "complete guarded stdin",
+        async section(ssh) {
+          await ssh.writeFile(target, intended, { mode: "0640" })
+          await ssh.writeFile("/run/guarded-empty-file", "")
+          return { status: "changed" }
+        },
+      })
+      expect(result.status).toBe("changed")
+      expect(await fixture.ssh.readFile(target)).toBe(intended)
+      expect(await fixture.container(["stat", "-c", "%a", target])).toBe("640")
+      expect(await fixture.ssh.readFile("/run/guarded-empty-file")).toBe("")
+      expect(await fixture.container(["stat", "-c", "%a", "/run/guarded-empty-file"])).toBe("600")
+    } finally {
+      await fixture.write(target, original, originalMode)
+      await fixture.container(["rm", "-f", "/run/guarded-empty-file"])
+    }
   })
 
   it("a healthy contending waiter leaves owner work, automatic heartbeat, refresh and release unblocked", async () => {
