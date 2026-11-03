@@ -64,6 +64,56 @@ function injectCommandFault(command: RegExp, stderr: string): () => boolean {
   return () => injected
 }
 
+async function managedTrustMetadata(): Promise<string> {
+  return target().container([
+    "stat",
+    "-c",
+    "%n %i %a %u %g %z",
+    "/etc/ssh/trusted_user_ca_keys",
+    "/etc/ssh/sshd_config",
+    "/etc/ssh/custom/deploy",
+  ])
+}
+
+function observeCandidatePreflight() {
+  const observations: Array<{
+    firstLogin: number
+    metadata: string
+    revokedKeysExists: boolean
+    secondLogin: number
+    snapshot: string
+  }> = []
+  const validations: Array<{ code: number; command: string; stdout: string }> = []
+  const mutations: string[] = []
+  const originalExec = target().ssh.exec.bind(target().ssh)
+  const writes = vi.spyOn(target().ssh, "writeFile")
+  vi.spyOn(target().ssh, "exec").mockImplementation(async (command, options) => {
+    if (
+      /^(?:mv|cp|rm|mkdir|rmdir|chown|chmod|umask|mktemp -d) /v.test(command) &&
+      command.includes("/etc/ssh")
+    )
+      mutations.push(command)
+    const candidate = /^sshd -[tT] -f /v.test(command)
+    if (candidate) {
+      // Observe the live daemon before forwarding each real candidate check.
+      // A later rollback cannot hide even a temporary trust-file replacement.
+      const first = await target().probe(target().identities.first)
+      const second = await target().probe(target().identities.second)
+      observations.push({
+        firstLogin: first.code,
+        metadata: await managedTrustMetadata(),
+        revokedKeysExists: await target().ssh.exists("/etc/ssh/revoked_keys"),
+        secondLogin: second.code,
+        snapshot: await snapshot(),
+      })
+    }
+    const response = await originalExec(command, options)
+    if (candidate) validations.push({ code: response.code, command, stdout: response.stdout })
+    return response
+  })
+  return { mutations, observations, validations, writes }
+}
+
 async function failure(module: Module, message: RegExp): Promise<void> {
   const before = await snapshot()
   const result = await apply(module, "failed")
@@ -355,6 +405,58 @@ describe.skipIf(!available)("declarative OpenSSH user CA trust", { concurrent: f
     expect(await target().ssh.readFile("/etc/ssh/sshd_config")).toContain(
       "Include /etc/ssh/conf.d/*.conf"
     )
+  })
+
+  it("rejects prospective Include conflicts before exposing a replacement CA or creating revocations", async () => {
+    await principals()
+    await apply(ssh.trustedUserCa({ publicKey: target().ca1 }))
+    await apply(ssh.authorizedPrincipals("deploy", [], { principalsFile: "/etc/ssh/custom/%u" }))
+    await target().container(["mkdir", "/etc/ssh/conf.d"])
+    await target().write(
+      "/etc/ssh/conf.d/first.conf",
+      "AuthorizedPrincipalsFile /etc/ssh/auth_principals/%u\n"
+    )
+    const activeConfig = await target().ssh.readFile("/etc/ssh/sshd_config")
+    await target().write("/etc/ssh/sshd_config", `Include /etc/ssh/conf.d/*.conf\n${activeConfig}`)
+    await target().container(["systemctl", "reload", "ssh"])
+    await certificateLogin(true)
+    await certificateLogin(false, target().identities.second)
+    const before = await snapshot()
+    const beforeMetadata = await managedTrustMetadata()
+    const { mutations, observations, validations, writes } = observeCandidatePreflight()
+    const result = await apply(
+      ssh.trustedUserCa({
+        principalsFile: "/etc/ssh/custom/%u",
+        publicKey: target().ca2,
+        revokedKeys: "/etc/ssh/revoked_keys",
+      }),
+      "failed"
+    )
+    expect(result.error?.message).toMatch(
+      /AuthorizedPrincipalsFile: expected.*custom.*actual.*auth_principals.*Include/v
+    )
+    expect(
+      observations.map(({ firstLogin, secondLogin }) => ({ firstLogin, secondLogin }))
+    ).toStrictEqual([
+      { firstLogin: 0, secondLogin: 255 },
+      { firstLogin: 0, secondLogin: 255 },
+    ])
+    for (const observation of observations) {
+      expect(observation.snapshot).toBe(before)
+      expect(observation.metadata).toBe(beforeMetadata)
+      expect(observation.revokedKeysExists).toBe(false)
+    }
+    expect(validations.map(({ code }) => code)).toStrictEqual([0, 0])
+    expect(validations[0]?.command).toMatch(/^sshd -t -f /v)
+    expect(validations[1]?.command).toMatch(/^sshd -T -f /v)
+    expect(validations[1]?.stdout).toContain("authorizedprincipalsfile /etc/ssh/auth_principals/%u")
+    expect(mutations).toStrictEqual([])
+    expect(writes.mock.calls.map(([path]) => path)).toHaveLength(1)
+    expect(writes.mock.calls[0]?.[0]).toMatch(/^\/tmp\/paratix-sshd-dry-run\./v)
+    expect(await snapshot()).toBe(before)
+    expect(await managedTrustMetadata()).toBe(beforeMetadata)
+    await certificateLogin(true)
+    await certificateLogin(false, target().identities.second)
   })
 
   it.each([

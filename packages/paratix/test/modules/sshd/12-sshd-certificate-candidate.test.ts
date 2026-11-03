@@ -6,7 +6,7 @@ import { createMockSsh } from "../../helpers/mockSsh.js"
 const CANDIDATE_PATH = "/tmp/paratix-sshd-dry-run.ABCDEF"
 const EFFECTIVE_CONFIG = "trustedusercakeys none\nauthorizedprincipalsfile none\n"
 
-function createConvergedSsh() {
+function createConvergedSsh(overrides: Record<string, { code?: number; stdout?: string }> = {}) {
   return createMockSsh(
     {
       "[ -e '/etc/ssh/trusted_user_ca_keys' ]": { code: 1 },
@@ -18,6 +18,7 @@ function createConvergedSsh() {
       "sshd -T": { stdout: EFFECTIVE_CONFIG },
       "stat -c '%a %u %g' -- '/etc/ssh/sshd_config'": { stdout: "644 0 0" },
       "test -d '/run/sshd'": { code: 0 },
+      ...overrides,
     },
     {
       allowFlagLockInternalDefaults: true,
@@ -70,6 +71,37 @@ describe("sshd certificate candidate cleanup", () => {
       expect(ssh.calls.some((command) => command.startsWith("systemctl "))).toBe(false)
     }
   )
+
+  it("finishes both candidate checks before attempting any managed file mutation", async () => {
+    // The blob contains a complete ed25519 key, without needing a real private key.
+    const key = `ssh-ed25519 ${Buffer.concat([
+      Buffer.from("0000000b7373682d6564323535313900000020", "hex"),
+      Buffer.alloc(32, 7),
+    ]).toString("base64")}`
+    const ssh = createConvergedSsh({
+      "[ -e '/etc/ssh/revoked_keys' ]": { code: 1 },
+    })
+    const result = await trustedUserCa({
+      publicKey: key,
+      revokedKeys: "/etc/ssh/revoked_keys",
+    }).apply(ssh, {})
+
+    // Syntax passes, but the same candidate's effective values reject activation.
+    expect(result.status).toBe("failed")
+    expect(result.error?.message).toMatch(/AuthorizedPrincipalsFile: expected.*actual none/v)
+    expect(ssh.calls.filter((command) => /^sshd -[tT] -f /v.test(command))).toStrictEqual([
+      `sshd -t -f '${CANDIDATE_PATH}'`,
+      `sshd -T -f '${CANDIDATE_PATH}'`,
+    ])
+    expect(ssh.writeFileCalls).toHaveLength(1)
+    expect(ssh.writeFileCalls[0]?.remotePath).toBe(CANDIDATE_PATH)
+    expect(
+      ssh.calls.filter((command) =>
+        /^(?:mv|cp|rm|mkdir|rmdir|chown|chmod|umask|mktemp -d) .*\/etc\/ssh/v.test(command)
+      )
+    ).toStrictEqual([])
+    expect(ssh.calls.some((command) => command.startsWith("systemctl "))).toBe(false)
+  })
 
   it("keeps repeated apply and dry-run converged when candidate cleanup succeeds", async () => {
     const ssh = createConvergedSsh()

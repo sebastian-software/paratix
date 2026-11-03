@@ -105,6 +105,45 @@ does not delete principal files belonging to other users or revocation data. `Ma
 directives, unresolved includes, and effective-value conflicts are refused without rewriting
 foreign configuration. Repeating apply or dry-run is idempotent.
 
+### Recover after an interrupted CA trust update
+
+`check` and `ok` cover file contents, safe metadata, and the effective **on-disk** sshd settings
+reported by `sshd -T`. They do not attest to the running daemon's configuration. Handled update
+errors trigger rollback; any rollback failure is reported. Automatic recovery after an abrupt
+controller or target process interruption is outside this bounded transaction contract.
+
+An interruption after publishing configuration but before reloading sshd can leave the desired
+files on disk while the daemon still uses its previous principal or revocation settings. Merely
+rerunning Paratix can then return `ok` without making that pending configuration live.
+
+An administrator must recover deliberately:
+
+1. On the **remote Linux target**, verify that the CA, principal and revocation files, their
+   permissions, and `/etc/ssh/sshd_config` with its includes match the intended policy. Confirm
+   which existing systemd SSH service runs that configuration (`ssh.service` or `sshd.service`).
+2. As root or with sudo on that target, validate the configuration. Stop and correct any error
+   before proceeding:
+
+   ```sh
+   sudo sshd -t -f /etc/ssh/sshd_config
+   ```
+
+3. After validation succeeds, reload the identified service. For a target using `ssh.service`:
+
+   ```sh
+   sudo systemctl reload ssh.service
+   ```
+
+   Substitute `sshd.service` only when it is the service running the intended daemon. Stop on
+   reload failure and resolve it administratively; do not substitute an indiscriminate restart.
+   These commands run on the target, not on a macOS controller.
+
+4. After a successful reload, rerun Paratix from the controller and verify the intended
+   certificate login and rejection policy on the target.
+
+See the upstream [sshd test modes](https://man.openbsd.org/sshd) and
+[systemctl reload reference](https://www.freedesktop.org/software/systemd/man/latest/systemctl.html#reload%20PATTERN%E2%80%A6).
+
 ## Guides
 
 Use these guides alongside the package READMEs:

@@ -244,6 +244,24 @@ files are retained when CA trust is removed. A second apply or dry-run is idempo
 refuse managed directives inside `Match` blocks and unresolved or conflicting `Include` layouts;
 they report effective-value mismatches rather than rewriting foreign drop-ins.
 
+`check` and `ok` describe file contents, safe metadata, and effective **on-disk** sshd settings
+read by `sshd -T`; they do not attest to the running daemon's configuration. Handled update
+errors trigger rollback, and rollback failures are reported. This is a bounded transaction,
+without automatic recovery after an abrupt controller or target process interruption. If an
+interruption occurs after configuration publication but before reload, the daemon may still use
+its previous principal or revocation settings even though the files match. Rerunning Paratix
+alone can return `ok` without making that pending configuration live.
+
+After such an interruption, an administrator must verify that the on-disk CA, principal,
+revocation, and sshd configuration files and their permissions match the intended policy. On
+the **remote Linux target**, as root or with sudo, validate `/etc/ssh/sshd_config` with
+`sudo sshd -t -f /etc/ssh/sshd_config`, then reload the existing SSH service that runs that
+configuration: `sudo systemctl reload ssh.service`, or `sshd.service` when that is the actual
+unit. Stop on syntax or reload failure and resolve it administratively. After a successful
+reload, rerun Paratix from the controller and verify the intended certificate login and
+rejection policy. These administrative commands run on the target, not the macOS controller;
+see the [interrupted-update recovery procedure](https://github.com/sebastian-software/paratix/blob/main/docs/user-guide/README.md).
+
 ## Playbook Structure
 
 A playbook is a TypeScript file with a default export of `server()`:

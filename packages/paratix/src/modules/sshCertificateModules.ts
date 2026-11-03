@@ -159,9 +159,11 @@ async function applyCa(
   const files = new CertificateFilesTransaction(ssh)
   let reloadAttempted = false
   try {
+    // An active daemon reads trust files at login, so reject the complete
+    // candidate before changing even an already-referenced CA or revocation file.
+    await transaction.validate(prepared.config.content, prepared.expected)
     // Referenced files are ready before any live sshd directive points at them.
     await prepareReferencedCaFiles(files, parameters)
-    await transaction.validate(prepared.config.content, prepared.expected)
     if (prepared.configChanged) await files.write(prepared.config)
     await transaction.readEffective(prepared.expected)
     if (prepared.configChanged || state === "absent") {
