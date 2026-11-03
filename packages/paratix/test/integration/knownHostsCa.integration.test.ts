@@ -85,6 +85,30 @@ function publicationReplacement(foreign: string) {
   }
 }
 
+function rawRemovalFailure(mode: "interrupt" | "publication") {
+  const originalExec = target().ssh.exec.bind(target().ssh)
+  let injected = false
+  return {
+    async exec(command: string, options?: ExecOptions) {
+      const backupStep =
+        /(?:mv -T|ln -P) -- '\/root\/\.ssh\/known_hosts' "\$known_hosts_backup" \|\| exit \$\?;/v
+      if (!injected && backupStep.test(command)) {
+        injected = true
+        const faulty =
+          mode === "interrupt"
+            ? command.replace(backupStep, (step) => `${step} kill -KILL $$;`)
+            : command.replace(
+                /mv -T -- '\/root\/\.ssh\/\.paratix-known-hosts\.[^']+' '\/root\/\.ssh\/known_hosts'/v,
+                "(exit 73)"
+              )
+        return originalExec(faulty, options)
+      }
+      return originalExec(command, options)
+    },
+    injected: () => injected,
+  }
+}
+
 // These are mandatory #249 proofs: Docker absence fails setup even outside CI.
 describe("target-system OpenSSH host CA trust", { concurrent: false }, () => {
   beforeAll(async () => {
@@ -263,6 +287,39 @@ describe("target-system OpenSSH host CA trust", { concurrent: false }, () => {
       await target().container(["find", `${CLIENT_HOME}/.ssh`, "-name", ".paratix-known-hosts*"])
     ).toBe("")
   })
+
+  it.each(["interrupt", "publication"] as const)(
+    "retains all trust after a raw removal %s failure and converges on retry",
+    async (mode) => {
+      const path = "/root/.ssh/known_hosts"
+      const rawLine = `[127.0.0.1]:2224 ${target().hostKey}\n`
+      const retained = [
+        "# unrelated trust with trailing spaces  ",
+        `other.example.test ${target().hostKey}`,
+        `@cert-authority elsewhere.example.test ${target().hostCa1}`,
+        `@revoked revoked.example.test ${target().hostCa2}`,
+        "# retained UTF-8: café",
+        "",
+      ].join("\n")
+      const original = `${rawLine}${retained}`
+      await target().write(path, original, "0600")
+      const failure = rawRemovalFailure(mode)
+      vi.spyOn(target().ssh, "exec").mockImplementation(failure.exec)
+      const absent = ssh.knownHosts("127.0.0.1", { port: 2224, state: "absent" })
+      try {
+        const interrupted = await absent.apply(target().ssh, {})
+        expect(failure.injected()).toBe(true)
+        expect(interrupted.status).toBe("failed")
+        expect(await target().ssh.exists(path)).toBe(true)
+        expect(await target().ssh.readFile(path)).toBe(original)
+        await apply(absent)
+        expect(await target().ssh.readFile(path)).toBe(retained)
+        await apply(absent, "ok")
+      } finally {
+        await target().container(["sh", "-c", "rm -f /root/.ssh/known_hosts.paratix-backup.*"])
+      }
+    }
+  )
 
   it("retains both CAs and hashed port-qualified raw pins across parallel writers and replacement", async () => {
     const host = "127.0.0.1"

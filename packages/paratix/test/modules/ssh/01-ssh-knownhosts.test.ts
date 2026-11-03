@@ -949,7 +949,7 @@ describe("ssh.knownHosts", () => {
     expect(String(result.error)).toContain("failed to replace known_hosts")
   })
 
-  it("apply backs up known_hosts before the final replace", async () => {
+  it("apply retains the active known_hosts path while backing it up before the final replace", async () => {
     const mockSsh = createSshApplyMockSsh({
       "[ -e '/home/paratix/.ssh/known_hosts' ]": { code: 0 },
       [`grep -qxF '${scannedLine}' '/home/paratix/.ssh/known_hosts'`]: { code: 1 },
@@ -966,7 +966,7 @@ describe("ssh.knownHosts", () => {
       "known_hosts_backup='/home/paratix/.ssh/known_hosts'.paratix-backup.$$"
     )
     expect(finalReplaceCommand).toContain(
-      `mv -T -- '/home/paratix/.ssh/known_hosts' "$known_hosts_backup"`
+      `ln -P -- '/home/paratix/.ssh/known_hosts' "$known_hosts_backup"`
     )
     expect(finalReplaceCommand).not.toContain("rm -f -- '/home/paratix/.ssh/known_hosts'")
   })
