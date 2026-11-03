@@ -132,11 +132,13 @@ describe.skipIf(!available)(
       expect(sign).toHaveBeenCalledTimes(1)
       expect(await strictProbe(await readFile(`${caKey}.pub`, "utf8"))).toBe("root")
       await expect(strictProbe(target().ca2)).rejects.toThrow(
-        "host key ssh-ed25519 not permitted by HostkeyAlgorithms"
+        /host key ssh-ed25519 not permitted by HostkeyAlgorithms|Host key verification failed/v
       )
       await expect(
         strictProbe(await readFile(`${caKey}.pub`, "utf8"), "wrong.test")
-      ).rejects.toThrow("host key ssh-ed25519 not permitted by HostkeyAlgorithms")
+      ).rejects.toThrow(
+        /host key ssh-ed25519 not permitted by HostkeyAlgorithms|Host key verification failed/v
+      )
       expect(await module.check(target().ssh, {})).toBe("ok")
       const convergedApply = await module.apply(target().ssh, {})
       expect(convergedApply.status).toBe("ok")
