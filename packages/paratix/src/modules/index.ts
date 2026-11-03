@@ -39,6 +39,7 @@ export type {
   HostCertificateOptions,
   HostCertificateRequest,
   HostCertificateSigner,
+  KnownHostsCertAuthorityOptions,
   LocalHostCertificateSignerOptions,
   StepCaHostCertificateSignerOptions,
   TrustedUserCaOptions,

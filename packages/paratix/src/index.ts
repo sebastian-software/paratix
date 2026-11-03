@@ -71,6 +71,7 @@ export type {
   HostCertificateOptions,
   HostCertificateRequest,
   HostCertificateSigner,
+  KnownHostsCertAuthorityOptions,
   LocalHostCertificateSignerOptions,
   ManualSecretProviderOptions,
   SecretHandle,

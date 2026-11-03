@@ -22,7 +22,10 @@ renew the certificate at the configured path before retrying. Custom consumers o
 `getConnectionInfo()` can use optional `certificatePath` only after successful file-certificate
 authentication; rsync propagates it automatically as `CertificateFile`. Host-certificate trust in
 the Paratix transport is unchanged and remains unsupported. Separately,
-[`ssh.hostCertificate`](./host-certificates.md) can issue certificates for other clients. See the [user-certificate guide](./README.md#authenticate-with-a-user-certificate)
+[`ssh.hostCertificate`](./host-certificates.md) can issue certificates for other clients. Target-user OpenSSH trust can be
+managed with
+[`ssh.knownHostsCertAuthority`](../../packages/paratix/llm-guide.md#target-user-host-certificate-trust);
+existing controller host-key pins or `known_hosts` anchors are still required. See the [user-certificate guide](./README.md#authenticate-with-a-user-certificate)
 and [recovery steps](./troubleshooting.md#a-user-certificate-fails).
 
 ### 0.2.0: Node.js 24 or newer
