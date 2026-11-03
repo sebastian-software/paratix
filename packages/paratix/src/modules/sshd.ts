@@ -12,7 +12,8 @@ import {
   NEEDS_APPLY,
   type SshConnection,
 } from "../types.js"
-import { flagLockDisplayPath, withMutexLock } from "./moduleHelpers.js"
+import { flagLockDisplayPath } from "./moduleHelpers.js"
+import { SSHD_LEASE_NAME, withSshdCommitLease } from "./sshdCommitLock.js"
 import {
   applySshdSettingToContent,
   collectEffectiveSshdDirectiveValues,
@@ -40,7 +41,6 @@ const SYSTEMCTL = "systemctl"
 // can stomp on a successful write from a parallel apply (the rollback uses the
 // previously captured `originalConfig`, not the now-current file content). The
 // lock name mirrors `FSTAB_FILE_MUTEX` in `swapFileHelpers.ts`.
-const SSHD_CONFIG_FILE_MUTEX = "etc-ssh-sshd-config-mutex"
 
 // R-0000608: distribution-specific socket-activation units differ in name —
 // Debian/Ubuntu ship `ssh.socket`, while Fedora/RHEL ship `sshd.socket`. The
@@ -1544,13 +1544,10 @@ async function applySshdConfig(
   // Section throws are intentionally propagated via `propagateSectionThrows`
   // so the upstream apply layer can fall back to its reconnect/rollback path
   // when the sshd restart breaks the SSH transport mid-section.
-  const lockResult = await withMutexLock(ssh, {
-    failureMessage: `[${parameters.settingNames}] failed to acquire sshd_config mutex`,
-    lockName: SSHD_CONFIG_FILE_MUTEX,
-    propagateSectionThrows: true,
-    section: async () => applySshdConfigUnderLock(ssh, parameters),
+  return withSshdCommitLease(ssh, {
+    name: `sshd.config: ${parameters.settingNames}`,
+    section: async (scoped) => applySshdConfigUnderLock(scoped, parameters),
   })
-  return lockResult.kind === "ok" ? lockResult.value : lockResult.failure
 }
 
 async function applySshdConfigUnderLock(
@@ -1765,16 +1762,14 @@ async function recoverFromReconnectFailureAfterDisconnect(
     `session before the target port could be verified; reconnect failed: ${reconnectErrorMessage}`
   if (fallbackReconnectError != null) {
     // R-0000619: both the target-port reconnect and the fallback reconnect on
-    // `originalPort` failed. The outer `withMutexLock` finally cannot release
-    // the `/etc/ssh/sshd_config` mutex over the dead transport, so the lock
-    // directory stays in place until the 4h stale-lock detection reclaims it.
-    // Surface the on-host lock path in the operator-facing failure so the
-    // operator can clean it up manually before that window expires — without
-    // this hint the next `sshd.config`/`sshd.port` apply blocks for hours.
+    // `originalPort` failed. The owning target process may still hold the kernel
+    // lock while the failed transport prevents an explicit release. The kernel
+    // releases it when that process exits; lock age is not a safe reclaim signal.
+    // Surface the path and recovery fact without advising unsafe lock-file deletion.
     const staleLockHint =
-      `lock directory likely left behind at ${flagLockDisplayPath(SSHD_CONFIG_FILE_MUTEX)} ` +
-      "on the remote host (release runs over the failed connection); remove it manually " +
-      "before the next sshd apply if you cannot wait for the 4h stale-lock reclaim"
+      `lock path may remain at ${flagLockDisplayPath(SSHD_LEASE_NAME)} ` +
+      "on the remote host while the owning process is alive; the kernel releases it on process " +
+      "exit, so do not delete the lock file manually"
     return failed(
       `${baseMessage}; fallback reconnect on original port ${String(parameters.originalPort)} ` +
         `also failed: ${fallbackReconnectError}; ${staleLockHint}`
@@ -1955,13 +1950,10 @@ async function applySshdPort(ssh: SshConnection, targetPort: number): Promise<Mo
   // R-0000757: `withMutexLock` now returns a structured `MutexLockResult`.
   // Section throws propagate via `propagateSectionThrows` so the upstream
   // apply layer keeps owning reconnect / fallback recovery.
-  const lockResult = await withMutexLock(ssh, {
-    failureMessage: `[sshd.port: ${String(targetPort)}] failed to acquire sshd_config mutex`,
-    lockName: SSHD_CONFIG_FILE_MUTEX,
-    propagateSectionThrows: true,
-    section: async () => applySshdPortUnderLock(ssh, targetPort),
+  return withSshdCommitLease(ssh, {
+    name: `sshd.port: ${String(targetPort)}`,
+    section: async (scoped) => applySshdPortUnderLock(scoped, targetPort),
   })
-  return lockResult.kind === "ok" ? lockResult.value : lockResult.failure
 }
 
 async function applySshdPortUnderLock(
@@ -1997,8 +1989,11 @@ function rejectWhenTargetPortIsNotConfigured(
 
 /** Internal shared controls; callers already own their file snapshot/rollback. */
 export type SshdConfigTransaction = {
+  connection: SshConnection
   readEffective: (settings: Record<string, string>) => Promise<void>
   reload: () => Promise<void>
+  reloadOnly: () => Promise<void>
+  requireReloadOnly: () => Promise<void>
   restoreReload: () => Promise<void>
   validate: (content: string, settings: Record<string, string>) => Promise<void>
 }
@@ -2061,6 +2056,7 @@ async function validateCertificateCandidate(
  * @internal
  * @param ssh - The active SSH connection.
  * @param parameters - Transaction body and dry-run policy.
+ * @param parameters.allowPending - Allow the host-certificate recovery owner to access Pending.
  * @param parameters.dryRun - Execute without acquiring a mutating remote mutex.
  * @param parameters.name - Name used in mutex failure diagnostics.
  * @param parameters.section - Body called with the existing sshd controls.
@@ -2069,56 +2065,94 @@ async function validateCertificateCandidate(
 export async function withSshdConfigTransaction(
   ssh: SshConnection,
   parameters: {
+    allowPending?: boolean
     dryRun: boolean
     name: string
     section: (transaction: SshdConfigTransaction) => Promise<ModuleResult>
   }
 ): Promise<ModuleResult> {
-  let serviceUnit: Promise<SshdServiceUnit> | undefined
-  const resolveUnit = async (): Promise<SshdServiceUnit> => {
-    serviceUnit ??= resolveSshServiceUnit(ssh)
-    return serviceUnit
-  }
-  const transaction: SshdConfigTransaction = {
-    async readEffective(settings) {
-      // A check/dry-run may never create /run/sshd as a side effect.
-      if (!(await privilegeSeparationDirectoryExists(ssh)))
-        throw new Error("/run/sshd is missing; cannot verify sshd -T")
-      const result = await ssh.exec(SSHD_EFFECTIVE_CONFIG_COMMAND, {
-        ignoreExitCode: true,
-        silent: true,
-      })
-      if (result.code !== 0)
-        throw (
-          failedCommand("sshd -T verification failed", result).error ??
-          new Error("sshd -T verification failed")
+  const run = async (connection: SshConnection): Promise<ModuleResult> => {
+    let serviceUnit: Promise<SshdServiceUnit> | undefined
+    const resolveUnit = async (): Promise<SshdServiceUnit> => {
+      serviceUnit ??= resolveSshServiceUnit(connection)
+      return serviceUnit
+    }
+    const transaction: SshdConfigTransaction = {
+      connection,
+      async readEffective(settings) {
+        // A check/dry-run may never create /run/sshd as a side effect.
+        if (!(await privilegeSeparationDirectoryExists(connection)))
+          throw new Error("/run/sshd is missing; cannot verify sshd -T")
+        const result = await connection.exec(SSHD_EFFECTIVE_CONFIG_COMMAND, {
+          ignoreExitCode: true,
+          silent: true,
+        })
+        if (result.code !== 0)
+          throw (
+            failedCommand("sshd -T verification failed", result).error ??
+            new Error("sshd -T verification failed")
+          )
+        assertCertificateEffectiveSettings(result.stdout, settings)
+      },
+      async reload() {
+        const result = await reloadSshd(connection, await resolveUnit())
+        if (result.status === "failed") throw result.error ?? new Error("sshd reload failed")
+      },
+      async reloadOnly() {
+        await transaction.requireReloadOnly()
+        const unit = await resolveUnit()
+        const result = await reloadSshdWithoutRestartFallback(connection, unit)
+        if (result.status === "failed") throw result.error ?? new Error("sshd pure reload failed")
+        const active = await connection.exec(`systemctl is-active --quiet ${unit}`, {
+          ignoreExitCode: true,
+          silent: true,
+        })
+        if (active.code !== 0) throw new Error("sshd service is not active after reload")
+      },
+      async requireReloadOnly() {
+        const unit = await resolveUnit()
+        const capability = await connection.exec(
+          `systemctl show --property=CanReload --value ${unit}`,
+          {
+            ignoreExitCode: true,
+            silent: true,
+          }
         )
-      assertCertificateEffectiveSettings(result.stdout, settings)
-    },
-    async reload() {
-      const result = await reloadSshd(ssh, await resolveUnit())
-      if (result.status === "failed") throw result.error ?? new Error("sshd reload failed")
-    },
-    async restoreReload() {
-      const unit = await resolveUnit()
-      if (!(await sshdUnitDefinesExecReload(ssh, unit))) {
-        throw new Error(`Unit ${unit} has no ExecReload; manual restart required for live rollback`)
-      }
-      const result = await reloadSshdWithoutRestartFallback(ssh, unit)
-      if (result.status === "failed") throw result.error ?? new Error("sshd rollback reload failed")
-    },
-    async validate(content, settings) {
-      await validateCertificateCandidate(ssh, { content, dryRun: parameters.dryRun, settings })
-    },
+        if (capability.code !== 0 || capability.stdout.trim() !== "yes")
+          throw new Error(`Unit ${unit} has no pure reload capability`)
+        const active = await connection.exec(`systemctl is-active --quiet ${unit}`, {
+          ignoreExitCode: true,
+          silent: true,
+        })
+        if (active.code !== 0) throw new Error(`sshd service ${unit} is not active`)
+      },
+      async restoreReload() {
+        const unit = await resolveUnit()
+        if (!(await sshdUnitDefinesExecReload(connection, unit))) {
+          throw new Error(
+            `Unit ${unit} has no ExecReload; manual restart required for live rollback`
+          )
+        }
+        const result = await reloadSshdWithoutRestartFallback(connection, unit)
+        if (result.status === "failed")
+          throw result.error ?? new Error("sshd rollback reload failed")
+      },
+      async validate(content, settings) {
+        await validateCertificateCandidate(connection, {
+          content,
+          dryRun: parameters.dryRun,
+          settings,
+        })
+      },
+    }
+    return parameters.section(transaction)
   }
-  if (parameters.dryRun) return parameters.section(transaction)
-  const lockResult = await withMutexLock(ssh, {
-    failureMessage: `[${parameters.name}] failed to acquire sshd_config mutex`,
-    lockName: SSHD_CONFIG_FILE_MUTEX,
-    propagateSectionThrows: true,
-    section: async () => parameters.section(transaction),
+  if (parameters.dryRun) return run(ssh)
+  return withSshdCommitLease(ssh, {
+    allowPending: parameters.allowPending,
+    name: parameters.name,
+    section: async (scoped) => run(scoped),
   })
-  return lockResult.kind === "ok" ? lockResult.value : lockResult.failure
 }
 
 /**

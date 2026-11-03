@@ -330,9 +330,10 @@ async function neverAnsweringVerifier(): Promise<boolean> {
  * Capture errors the adapter rethrows on `process.nextTick` instead of letting
  * them reach Vitest's uncaught-exception handler; other callbacks run unchanged.
  * @param expected - The errors a test expects to be rethrown.
- * @returns The rethrown errors seen so far.
+ * @returns Resolves after every expected error was caught on the next-tick queue.
  */
-function captureRethrown(expected: readonly unknown[]): unknown[] {
+async function captureRethrown(expected: readonly unknown[]): Promise<unknown[]> {
+  const captured = deferred<unknown[]>()
   const rethrown: unknown[] = []
   const nextTick = process.nextTick.bind(process)
   vi.spyOn(process, "nextTick").mockImplementation((callback, ...parameters) => {
@@ -342,10 +343,11 @@ function captureRethrown(expected: readonly unknown[]): unknown[] {
       } catch (error) {
         if (!expected.includes(error)) throw error
         rethrown.push(error)
+        if (rethrown.length === expected.length) captured.resolve(rethrown)
       }
     })
   })
-  return rethrown
+  return captured.promise
 }
 
 function transportCodeOf(error: unknown): string | undefined {
@@ -798,8 +800,7 @@ describe("native transport", () => {
       transport.onDisconnect(second)
       session.emitDisconnect({ reason: "remote" })
       expect(second).toHaveBeenCalledOnce()
-      await nextTurn()
-      expect(rethrown).toStrictEqual([thrown])
+      expect(await rethrown).toStrictEqual([thrown])
     })
 
     it("carries the event code and maps local teardown events to DISCONNECTED", async () => {
@@ -1037,8 +1038,7 @@ describe("native transport", () => {
       const { exit } = collect(channel)
       native.finish()
       expect(await exit).toStrictEqual({ code: 0, signal: null })
-      await nextTurn()
-      expect(rethrown).toStrictEqual([thrown])
+      expect(await rethrown).toStrictEqual([thrown])
     })
 
     it("closes the native channel and swallows its failure", async () => {

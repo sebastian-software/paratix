@@ -67,12 +67,19 @@ export {
 } from "./modules/index.js"
 export type {
   AuthorizedPrincipalsOptions,
+  DeferredSecretResolver,
+  HostCertificateOptions,
+  HostCertificateRequest,
+  HostCertificateSigner,
   KnownHostsCertAuthorityOptions,
+  LocalHostCertificateSignerOptions,
   ManualSecretProviderOptions,
+  SecretHandle,
   SecretInput,
   SecretProvider,
   SecretResolver,
   SecretTotpInput,
+  StepCaHostCertificateSignerOptions,
   TrustedUserCaOptions,
   UnifiedDiffOptions,
 } from "./modules/index.js"

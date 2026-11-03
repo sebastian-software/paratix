@@ -50,8 +50,9 @@ file-certificate login, `rsync.sync()` passes the same expanded certificate path
 `CertificateFile`. Agent and password sessions do not set that option.
 
 User certificates authenticate you to the server. To verify the server through a host CA, use
-the separate [host-certificate trust policy](#trust-a-server-through-a-host-ca). For OpenSSH
-clients running on a managed target,
+the separate [host-certificate trust policy](#trust-a-server-through-a-host-ca). You can
+[issue host certificates](./host-certificates.md) separately for clients that trust a host CA.
+For OpenSSH clients running on a managed target,
 [`ssh.knownHostsCertAuthority`](../../packages/paratix/llm-guide.md#target-user-host-certificate-trust)
 manages a CA in an explicitly named user's `known_hosts`; it does not change controller trust. See the
 [authentication reference](../../packages/paratix/llm-guide.md#ssh-authentication) and
@@ -182,6 +183,10 @@ does not delete principal files belonging to other users or revocation data. `Ma
 directives, unresolved includes, and effective-value conflicts are refused without rewriting
 foreign configuration. Repeating apply or dry-run is idempotent.
 
+These writers share target-process locking with host-certificate updates and refuse unresolved
+host-certificate Pending state. Run [host-certificate recovery](./host-certificates.md#resume-an-interrupted-update)
+first; the separate user-CA recovery limits below remain unchanged. Linux apply needs `flock`.
+
 ### Recover after an interrupted CA trust update
 
 `check` and `ok` cover file contents, safe metadata, and the effective **on-disk** sshd settings
@@ -225,9 +230,10 @@ See the upstream [sshd test modes](https://man.openbsd.org/sshd) and
 
 Use these guides alongside the package READMEs:
 
-1. [Troubleshooting](./troubleshooting.md) explains common local runtime, certificate, host-key, and reconnect failures.
-2. [Choosing an automation tool](./comparison.md) compares Paratix with Ansible and pyinfra.
-3. [Migration notes](./migration.md) lists upgrades that require action in an existing Paratix project.
+1. [Host certificates](./host-certificates.md) explains controller-side signing, renewal during runs, and recovery after interruption.
+2. [Troubleshooting](./troubleshooting.md) explains common local runtime, certificate, host-key, and reconnect failures.
+3. [Choosing an automation tool](./comparison.md) compares Paratix with Ansible and pyinfra.
+4. [Migration notes](./migration.md) lists upgrades that require action in an existing Paratix project.
 
 For the complete TypeScript API and built-in module reference, see the
 [TypeScript API and Module Reference](../../packages/paratix/llm-guide.md).

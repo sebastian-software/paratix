@@ -105,8 +105,9 @@ async function runPrincipal(
     return await withSshdConfigTransaction(ssh, {
       dryRun: false,
       name: "ssh.authorizedPrincipals",
-      async section() {
-        return applyPrincipal(ssh, parameters, await principalFile(ssh, parameters))
+      async section(transaction) {
+        const scoped = transaction.connection
+        return applyPrincipal(scoped, parameters, await principalFile(scoped, parameters))
       },
     })
   } catch (error) {

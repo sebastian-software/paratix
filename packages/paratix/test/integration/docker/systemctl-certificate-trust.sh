@@ -7,6 +7,11 @@ case "$*" in
   'cat ssh.service'|'cat ssh')
     printf '[Service]\nExecStart=/usr/sbin/sshd -D -E /run/main-sshd.log\nExecReload=/bin/kill -HUP $MAINPID\n'
     exit 0 ;;
+  'show --property=CanReload --value ssh') test ! -f /run/no-reload || { printf 'no\n'; exit 0; }; printf 'yes\n'; exit 0 ;;
+  'is-active --quiet ssh')
+    main_pid=$(cat /run/recorded-main-pid)
+    test "$(cat /run/main-sshd.pid)" = "$main_pid" && kill -0 "$main_pid"
+    exit $? ;;
   'reload ssh') ;;
   *) printf 'Unsupported fixture systemctl command: %s\n' "$*" >&2; exit 64 ;;
 esac
