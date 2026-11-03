@@ -2,10 +2,19 @@
 
 import { describe, expect, it, vi } from "vitest"
 
+import type * as SshdCommitLockModule from "../../../src/modules/sshdCommitLock.js"
+
 import { isSshdPortMetaEntry } from "../../../src/meta.js"
 import { sshd } from "../../../src/modules/sshd.js"
 import { createMockSsh as createBaseMockSsh } from "../../helpers/mockSsh.js"
 import { makeIsVerifiedReleaseCall } from "../../helpers/mockSshFlagLock.js"
+
+// Isolate domain behavior while preserving the real lease and all prior write/rollback assertions.
+vi.mock("../../../src/modules/sshdCommitLock.js", async (importOriginal) => {
+  const original = await importOriginal<typeof SshdCommitLockModule>()
+  const { mockSshdCommitLease } = await import("../../helpers/mockSshdCommitLease.js")
+  return { ...original, withSshdCommitLease: mockSshdCommitLease }
+})
 
 const createMockSsh: typeof createBaseMockSsh = (responses, options) => {
   const ssh = createBaseMockSsh(

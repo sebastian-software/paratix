@@ -71,6 +71,11 @@ import type {
   EnvironmentMetaEntry,
   EnvironmentValue,
   AuthorizedPrincipalsOptions as RootAuthorizedPrincipalsOptions,
+  DeferredSecretResolver as RootDeferredSecretResolver,
+  HostCertificateOptions as RootHostCertificateOptions,
+  HostCertificateRequest as RootHostCertificateRequest,
+  HostCertificateSigner as RootHostCertificateSigner,
+  LocalHostCertificateSignerOptions as RootLocalHostCertificateSignerOptions,
   ExecOptions,
   ExecResult,
   KnownHostsCertAuthorityOptions as RootKnownHostsCertAuthorityOptions,
@@ -81,6 +86,7 @@ import type {
   PodmanLoginOptions as RootPodmanLoginOptions,
   PodmanOptions as RootPodmanOptions,
   ManualSecretProviderOptions as RootManualSecretProviderOptions,
+  SecretHandle as RootSecretHandle,
   SecretInput as RootSecretInput,
   SecretProvider as RootSecretProvider,
   SecretResolver as RootSecretResolver,
@@ -92,6 +98,7 @@ import type {
   SshdPortMetaEntry,
   SystemHostMetaEntry,
   SystemRebootMetaEntry,
+  StepCaHostCertificateSignerOptions as RootStepCaHostCertificateSignerOptions,
   TrustedUserCaOptions as RootTrustedUserCaOptions,
   UnifiedDiffOptions,
 } from "paratix"
@@ -133,17 +140,24 @@ import {
 } from "paratix/modules"
 
 import type {
+  DeferredSecretResolver,
+  HostCertificateOptions,
+  HostCertificateRequest,
+  HostCertificateSigner,
   KnownHostsCertAuthorityOptions,
+  LocalHostCertificateSignerOptions,
   ManualSecretProviderOptions,
   PackageSpec,
   PodmanLoginOptions,
   PodmanOptions,
+  SecretHandle,
   SecretInput,
   SecretProvider,
   SecretResolver,
   SecretTotpInput,
   AuthorizedPrincipalsOptions,
   UnifiedDiffOptions as ModulesUnifiedDiffOptions,
+  StepCaHostCertificateSignerOptions,
   TrustedUserCaOptions,
   UpgradeOptions,
 } from "paratix/modules"
@@ -181,8 +195,9 @@ match, and validity window against the controller clock. Signature validation do
 CA trust: the server's `TrustedUserCAKeys` and principal policy determine authorization. Paratix
 has no local rule requiring `ssh.user` to occur in the certificate principals;
 `AuthorizedPrincipalsFile` can authorize a different principal. RSA user certificates use
-RSA-SHA2 without enabling legacy `ssh-rsa`. The Paratix controller does not support host
-certificates or host-CA trust; keep its verified host-key pin or `known_hosts` trust anchor.
+RSA-SHA2 without enabling legacy `ssh-rsa`. Host-CA trust in Paratix's native transport remains
+unsupported; keep the existing verified raw host-key pin or `known_hosts` trust anchor.
+Separately, [`ssh.hostCertificate`](#sshhostcertificate) issues certificates for other clients.
 For OpenSSH clients running on a managed target, use
 [`ssh.knownHostsCertAuthority`](#target-user-host-certificate-trust).
 
@@ -255,6 +270,11 @@ without automatic recovery after an abrupt controller or target process interrup
 interruption occurs after configuration publication but before reload, the daemon may still use
 its previous principal or revocation settings even though the files match. Rerunning Paratix
 alone can return `ok` without making that pending configuration live.
+
+Applies also share target-process locking with host-certificate writers and require Linux
+`flock`. An unresolved host-certificate Pending blocks these writers until the
+[host-certificate recovery owner](#pending-and-shared-sshd-writers) resolves it. This does not
+replace the separate user-CA recovery procedure below.
 
 After such an interruption, an administrator must verify that the on-disk CA, principal,
 revocation, and sshd configuration files and their permissions match the intended policy. On
@@ -1143,11 +1163,12 @@ certificate.
 Use this local facade to keep the same consumer bindings with manual input or 1Password.
 `secret` and its public types are available from both `paratix/modules` and `paratix`.
 
-| Method            | Signature                                                                                                          | Behavior                                                                                                                           |
-| ----------------- | ------------------------------------------------------------------------------------------------------------------ | ---------------------------------------------------------------------------------------------------------------------------------- |
-| `secret.provider` | `(name: "1password"): SecretResolver` or `(name: "manual", options?: ManualSecretProviderOptions): SecretResolver` | Creates an immutable facade without I/O or a global provider change. A `SecretProvider` variable is also accepted without options. |
-| `secrets.resolve` | `(bindings: Readonly<Record<string, SecretInput>>): Module`                                                        | Creates a local module; `check` always returns `NEEDS_APPLY`, and `apply` emits environment meta.                                  |
-| `secret.totp`     | `(reference: string): SecretTotpInput`                                                                             | Creates a frozen `{ kind: "totp", reference }` descriptor without I/O; requests a current code at actual use.                      |
+| Method             | Signature                                                                                                                          | Behavior                                                                                                                           |
+| ------------------ | ---------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------- |
+| `secret.provider`  | `(name: "1password"): DeferredSecretResolver` or `(name: "manual", options?: ManualSecretProviderOptions): DeferredSecretResolver` | Creates an immutable facade without I/O or a global provider change. A `SecretProvider` variable is also accepted without options. |
+| `secrets.deferred` | `(reference: string): SecretHandle`                                                                                                | Creates an opaque provider-bound signer credential without I/O or environment metadata.                                            |
+| `secrets.resolve`  | `(bindings: Readonly<Record<string, SecretInput>>): Module`                                                                        | Creates a local module; `check` always returns `NEEDS_APPLY`, and `apply` emits environment meta.                                  |
+| `secret.totp`      | `(reference: string): SecretTotpInput`                                                                                             | Creates a frozen `{ kind: "totp", reference }` descriptor without I/O; requests a current code at actual use.                      |
 
 `SecretProvider` is `"1password" | "manual"`. `SecretInput` is `string | SecretTotpInput`.
 `ManualSecretProviderOptions` accepts `labels?: Readonly<Record<string, string>>`.
@@ -1243,6 +1264,27 @@ This facade supplies downstream modules and recipes. It cannot supply initial SS
 or `ssh.sudoPassword`, because `SshConfig` is constructed before prewarm; see
 [Anti-Pattern 16](#dos-and-donts). Existing `op.resolve` consumers remain supported without migration.
 
+#### Deferred signer credentials
+
+`secret.provider(...)` returns `DeferredSecretResolver`, which extends the existing injectable
+`SecretResolver` with `deferred(reference: string): SecretHandle`. Existing implementations of
+`SecretResolver` need only `resolve(...)` and remain valid. A nonempty reference creates a frozen,
+opaque handle bound to that exact provider instance and reference. Neither its creation nor
+import starts provider I/O; no module, environment meta, or `_prewarmSecrets` hook is registered.
+
+Use the handle as `ssh.signer.stepCa`'s password. The host-certificate module resolves it only
+when a real apply reconfirms signing need. Check, dry-run, and a matching certificate use no
+signer credential. Ordinary `.resolve(...)` modules retain their early-secret behavior above.
+Deferred references use ordinary credential semantics, without TOTP suffix conversion or provider
+inference. `secret.provider("manual")` prompts only at actual need with the safe consumer label
+“SSH certificate signer”; it does not display the raw reference or use its ordinary binding labels.
+
+Handles contain no decrypted values or resolution promises. Run-scoped deduplication and masking
+end with that run; the next run cannot reuse a cached credential. Inspect/string output is
+redacted and JSON serialization throws. Copies, forged handles, and reconstructed objects are
+rejected without a raw-string fallback. `SecretHandle` and `DeferredSecretResolver` are exported
+from both public entry points.
+
 ### `service`
 
 | Method             | Signature                | Idempotent                                                |
@@ -1267,15 +1309,162 @@ behavior; they do not satisfy a stopped or disabled target.
 
 ### `ssh`
 
-| Method                        | Signature                                                                                                                              | Idempotent |
-| ----------------------------- | -------------------------------------------------------------------------------------------------------------------------------------- | ---------- |
-| `ssh.authorizedKeys`          | `(user: string, key: string, options?: { state?: "absent" \| "present" }): Module`                                                     | Yes        |
-| `ssh.authorizedPrincipals`    | `(user: string, principals: string[], options?: AuthorizedPrincipalsOptions): Module`                                                  | Yes        |
-| `ssh.knownHosts`              | `(host: string, options?: { expectedFingerprint?: string; port?: number; publicKey?: string; state?: "absent" \| "present" }): Module` | Yes        |
-| `ssh.knownHostsCertAuthority` | `(user: string, options: KnownHostsCertAuthorityOptions): Module`                                                                      | Yes        |
-| `ssh.trustedUserCa`           | `(options: TrustedUserCaOptions): Module`                                                                                              | Yes        |
+| Method                        | Signature                                                                                                                              | Idempotent                      |
+| ----------------------------- | -------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------- |
+| `ssh.authorizedKeys`          | `(user: string, key: string, options?: { state?: "absent" \| "present" }): Module`                                                     | Yes                             |
+| `ssh.authorizedPrincipals`    | `(user: string, principals: string[], options?: AuthorizedPrincipalsOptions): Module`                                                  | Yes                             |
+| `ssh.hostCertificate`         | `(options: HostCertificateOptions): Module`                                                                                            | Yes                             |
+| `ssh.signer.local`            | `(options: LocalHostCertificateSignerOptions): HostCertificateSigner`                                                                  | Descriptor; no construction I/O |
+| `ssh.signer.stepCa`           | `(options: StepCaHostCertificateSignerOptions): HostCertificateSigner`                                                                 | Descriptor; no construction I/O |
+| `ssh.knownHosts`              | `(host: string, options?: { expectedFingerprint?: string; port?: number; publicKey?: string; state?: "absent" \| "present" }): Module` | Yes                             |
+| `ssh.knownHostsCertAuthority` | `(user: string, options: KnownHostsCertAuthorityOptions): Module`                                                                      | Yes                             |
+| `ssh.trustedUserCa`           | `(options: TrustedUserCaOptions): Module`                                                                                              | Yes                             |
 
 **Trust anchor requirement for `ssh.knownHosts` (`state: "present"`):** In the default `present` state, either `expectedFingerprint` or `publicKey` must be set. Without a trust anchor, the module constructor throws immediately because `check` would otherwise treat any existing `known_hosts` entry, including older and potentially compromised TOFU acceptances, as `ok` and skip the anchor comparison. No anchor is required for `state: "absent"`, because that state removes the entry.
+
+#### `ssh.hostCertificate`
+
+A remote module for an existing Linux target host key. Only its derived public key reaches the
+controller; the private host key is never created, rotated, repaired, or exported. Signing is
+controller-side and renewal happens only during Paratix runs. There is no `local: true`, removal
+mode, automatic scheduler, target CA installation, or native-transport trust change.
+
+| `HostCertificateOptions` | Meaning and default                                                                                                                 |
+| ------------------------ | ----------------------------------------------------------------------------------------------------------------------------------- |
+| `signer`                 | Required `HostCertificateSigner` with an independently configured public SSH CA key.                                                |
+| `principals`             | Required nonempty `readonly string[]` of explicit hostnames/IPs; deduplicated, order-independent, no wildcards or extra principals. |
+| `keyType`                | `"ed25519"` (default), `"rsa"`, or `"ecdsa"`; must match the existing private host key.                                             |
+| `hostKeyPath`            | Defaults to `/etc/ssh/ssh_host_<keyType>_key`. Must have exactly one effective `HostKey` mapping.                                   |
+| `certificatePath`        | Defaults to `<hostKeyPath>-cert.pub`; public certificate is installed as `0644 root:root`.                                          |
+| `validity`               | Maximum total signed lifetime, default `"30d"`; positive safe whole seconds or integer `s/m/h/d/w` notation.                        |
+| `renewBefore`            | Renewal threshold, default `"7d"`, using the same duration format; `0 <= renewBefore < validity`.                                   |
+
+Target path overrides must be normalized absolute file paths without spaces, with safe root-owned
+ancestors and no overlap with sshd configuration, keys, other sshd resources, or reserved Paratix
+state. Symlinks, hard-linked keys/certificates, unsafe permissions, missing or encrypted private
+keys, ambiguous certificate mappings, and conflicting effective settings fail closed. The target
+`.pub` file is not a separate source of truth. Unrelated keys, certificates, and includes remain
+in place.
+
+`validity` caps `validBefore - validAfter`, not remaining lifetime. A `30d` certificate with `10d`
+left is renewed immediately after reducing the maximum to `14d`, even with `renewBefore: "7d"`.
+Increasing the maximum alone does not renew an acceptable certificate. Renew when remaining
+lifetime is **less than or equal to** `renewBefore`, or the key, exact principal set, CA, signature,
+host type, or validity no longer matches. CA-shortened output is accepted only with positive total
+lifetime within the maximum, within the requested absolute bounds, valid now, and with remaining
+lifetime strictly above the threshold. Backdating consumes the same total-lifetime budget.
+Controller UTC is checked again after signing and before publication; time advancing during
+signing is acceptable if those conditions still hold. Invalid output fails without an issuance
+loop. Successful completion persists no desired-policy history.
+
+Controller `ssh-keygen` is required; Step additionally needs `step`. Built-in signers perform
+capability preflight only on a confirmed real signing attempt, before reading the configured CA
+private key or resolving a provisioner password. OpenSSH must pass an isolated temporary-CA
+host-signing/derivation proof with exact principals, identity, and absolute UTC seconds, including
+its `-L` listing. Step must report an identifiable `step version` and advertise every required
+SSH certificate option in `step ssh certificate --help`. There is no guessed numeric minimum;
+OpenSSH 10.3p1 and Step CLI 0.31.0 satisfy the respective facility checks. See the linked guide
+for exact flags and the distinction from live CA/TLS proofs. The Linux target needs
+`ssh-keygen`, `sshd -t/-T`, GNU-compatible file utilities, root privileges, and `flock`. Its active
+systemd SSH unit must support pure reload. Full staged configuration and certificate validation
+checks the actual certificate `HostKeyAlgorithms` allowance before publication; a raw-key-only
+allowance fails without rewriting the algorithm policy. Changed certificate/configuration bytes
+reload sshd even when the configuration text itself stays unchanged; metadata-only correction does
+not reload. Host-certificate updates never fall back to restart.
+
+`check` and dry-run inspect state without signing, provider access, recovery writes, or reload.
+A converged apply returns `ok` without those effects or target changes. Pending always requires
+apply. Signer constructors perform public configuration validation only; they do not start tools,
+read CA private keys, or resolve passwords. The
+[host-certificate guide](https://github.com/sebastian-software/paratix/blob/main/docs/user-guide/host-certificates.md)
+contains tool capabilities, deployment prerequisites, and recovery procedures.
+
+#### Controller signers
+
+`ssh.signer.stepCa({ caUrl, provisioner, password, root, caPublicKey })` accepts an explicit HTTPS
+CA URL without credentials/query/fragment, a configured JWK provisioner, a provider-bound
+`SecretHandle`, an absolute controller PEM TLS-root path, and independent public SSH-CA text.
+The TLS root authenticates the CA endpoint; `caPublicKey` authenticates the resulting host
+certificate. Neither is discovered from the other. No bootstrap, personal Step context, token,
+OIDC, or CA administration flow is inferred. Only a confirmed signing need resolves the password.
+
+```typescript
+import { readFileSync } from "node:fs"
+import { secret, ssh } from "paratix/modules"
+
+export function hostCertificateModule(input: {
+  principals: string[]
+  caUrl: string
+  provisioner: string
+  tlsRootPath: string
+  hostCaPublicKeyPath: string
+  provisionerSecretReference: string
+}) {
+  return ssh.hostCertificate({
+    principals: input.principals,
+    signer: ssh.signer.stepCa({
+      caUrl: input.caUrl,
+      provisioner: input.provisioner,
+      root: input.tlsRootPath,
+      caPublicKey: readFileSync(input.hostCaPublicKeyPath, "utf8"),
+      password: secret.provider("1password").deferred(input.provisionerSecretReference),
+    }),
+  })
+}
+```
+
+`ssh.signer.local({ caKey, caPublicKey })` uses an existing unencrypted controller file CA at an
+absolute `caKey` path. Its derived public key must match independent `caPublicKey` text. It does
+not use an agent, hardware token, PKCS#11, or interactive passphrase prompt. Both built-in signers
+use shell-free noninteractive subprocesses, bounded output, a 60-second per-process timeout,
+cancellation, and private per-call temporary state (`0700` directories, `0600` credentials).
+Credentials never enter argv or target state; raw provider/process errors and output do not escape.
+An uncertain request is reported without automatic retry; CA issuance cannot be rolled back.
+
+Custom signers implement the exported structural `HostCertificateSigner`:
+
+```typescript
+import type { HostCertificateRequest, HostCertificateSigner } from "paratix/modules"
+
+export function customHostSigner(input: {
+  caPublicKey: string
+  sign: (request: HostCertificateRequest) => Promise<string>
+}): HostCertificateSigner {
+  return { version: 1, caPublicKey: input.caPublicKey, sign: input.sign }
+}
+```
+
+`HostCertificateRequest` contains `version: 1`, `publicKey`, a readonly exact `principals` array,
+public `requestId`, `signal: AbortSignal`, and `validAfter`/`validBefore` as absolute whole UTC
+seconds. Return exactly one OpenSSH host-certificate line. The module independently verifies
+signature, expected CA, key, host type, principals, time bounds, and absence of critical options;
+RSA CA signatures require RSA-SHA2. Public CA keys support Ed25519, RSA (at least 2048 bits), and
+ECDSA P-256/P-384/P-521. Custom implementations own credential protection and must honor
+cancellation; built-in subprocess controls are not automatically applied to arbitrary callbacks.
+
+#### Pending and shared sshd writers
+
+A protected public manifest at `/var/lib/paratix/host-certificate-pending` and immutable
+certificate/configuration snapshots are published before active changes. Recovery validates
+version, paths, ownership, hashes, host-key identity, and the current public desired policy.
+An unchanged valid candidate resumes without signing. A changed policy or expired candidate
+first restores and reloads the verified old state before a fresh convergence decision. Rollback
+copies rather than consumes snapshots. Completion is recorded atomically before repeatable
+cleanup; a completed cleanup retry tolerates already removed sidecars without signing or
+unnecessary reload. A crash after reload but before completion may repeat that safe reload.
+
+Malformed or unsafe state, missing active snapshots, external edits, or host-key conflicts stop
+automatic recovery with evidence retained. Preserve the manifest, sidecars, and persistent OS-lock
+file; do not delete them to force convergence. Recovery covers controller/process/connection
+interruption, not disk loss or arbitrary administrative edits. `ok` is not continuous live-daemon
+attestation after manual changes.
+
+Host-certificate, configuration, port, user-CA, and principal writes share a lease and bounded
+process-held `flock` checks. Lease changes and active commands check the shared lock; active writes
+also fence stale controller identities. A living paused process keeps its OS lock after lease
+expiry; the lock file is never removed or reclaimed by age. Other sshd writers refuse unresolved
+host-certificate Pending; run host-certificate recovery first. This does not add automatic recovery
+to the existing separate user-CA/principal transaction contract.
 
 `ssh.knownHosts` manages only marker-free raw host-key entries. `@cert-authority` and
 `@revoked` lines do not satisfy its trust-anchor checks and are preserved during replacement
@@ -1382,6 +1571,12 @@ trust or revocation policy and does not require hosts to use certificates.
 | ------------- | -------------------------------------------- | ---------------------------------- |
 | `sshd.config` | `(settings: Record<string, string>): Module` | Yes                                |
 | `sshd.port`   | `(targetPort: number): Module`               | Yes (emits typed `sshd.port` meta) |
+
+Apply requires target `flock` and shares commit locking with the SSH certificate/principal
+modules. An unresolved host-certificate Pending transaction blocks these writers; resolve it
+through [`ssh.hostCertificate`](#pending-and-shared-sshd-writers) first. Existing general
+`sshd.config`/`sshd.port` restart/reconnect behavior is separate from the host-certificate module's
+reload-only policy.
 
 ### `swap`
 

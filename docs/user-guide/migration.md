@@ -21,8 +21,9 @@ Reconnect reloads both files and stops immediately on local certificate validati
 renew the certificate at the configured path before retrying. Custom consumers of
 `getConnectionInfo()` can use optional `certificatePath` only after successful file-certificate
 authentication; rsync propagates it automatically as `CertificateFile`. Host-certificate trust in
-the Paratix controller is unchanged and remains unsupported. Target-user OpenSSH trust can be
-managed separately with
+the Paratix transport is unchanged and remains unsupported. Separately,
+[`ssh.hostCertificate`](./host-certificates.md) can issue certificates for other clients. Target-user OpenSSH trust can be
+managed with
 [`ssh.knownHostsCertAuthority`](../../packages/paratix/llm-guide.md#target-user-host-certificate-trust);
 existing controller host-key pins or `known_hosts` anchors are still required. See the [user-certificate guide](./README.md#authenticate-with-a-user-certificate)
 and [recovery steps](./troubleshooting.md#a-user-certificate-fails).
@@ -178,6 +179,24 @@ and [recovery steps](./troubleshooting.md#a-user-certificate-fails).
 ## Unreleased
 
 The 0.24.0 entries above describe the native-transport migration prepared for the next release.
+
+### Shared sshd writer locking
+
+**Before:** `sshd.config`, `sshd.port`, `ssh.trustedUserCa`, and `ssh.authorizedPrincipals`
+coordinated applies through the sshd lease alone.
+
+**Now:** Their apply paths also require target-process `flock` locking and reject unresolved
+host-certificate Pending state. These checks prevent a stale controller from overwriting a later
+writer. Host-certificate issuance is additive and does not enable host-CA trust for Paratix's
+transport.
+
+**Upgrade:** Ensure `flock` is available on Linux targets before applying these modules. If a
+host-certificate update was interrupted, run its
+[recovery owner](./host-certificates.md#resume-an-interrupted-update) before other sshd writers.
+Keep the Pending manifest, snapshots, and persistent OS-lock file intact; lease expiry is not
+permission to break a living lock. The existing
+[user-CA recovery procedure](./README.md#recover-after-an-interrupted-ca-trust-update) still applies
+to a separate interrupted user-CA update.
 
 ## Toward 1.0
 

@@ -11,6 +11,7 @@ import {
   acquireFlagLock,
   FLAG_LOCK_STALE_SECONDS,
   FLAG_LOCK_WAIT_SECONDS,
+  type FlagLockAcquireResult,
   flagLockDisplayPath,
   releaseFlagLock,
   validateFlagName,
@@ -100,8 +101,21 @@ export type MutexLockWaitFailureContext = {
   waitSeconds: number
 }
 
+/**
+ * Opt-in acquisition coordination for a resource with an additional target-process lock.
+ * Existing mutex users retain the flag-lock acquisition and remote polling defaults.
+ */
+export type MutexLockAcquisition = {
+  /** Observe/reclaim/acquire atomically under the resource's target-process lock. */
+  tryAcquire: () => Promise<FlagLockAcquireResult>
+  /** Wait outside that lock, charging the shared budget; return whether to retry. */
+  waitForRetry: (budget: FlagLockWaitBudget) => Promise<boolean>
+}
+
 /** Parameters of {@link withMutexLock}. */
 export type MutexLockParameters<TValue> = {
+  /** Optional resource-specific atomic acquisition and lock-free waiting. */
+  acquisition?: MutexLockAcquisition
   /**
    * Issue #224: build the reason of a wait failure (appended after
    * `failureMessage: `). When set, the holder diagnostics are read in one
@@ -254,7 +268,10 @@ async function acquireMutex<TValue>(
   parameters: MutexLockParameters<TValue>,
   budget: FlagLockWaitBudget
 ): Promise<MutexAcquireOutcome> {
-  const acquireResult = await acquireFlagLock(ssh, parameters.lockName, parameters.holder)
+  const acquireResult =
+    parameters.acquisition === undefined
+      ? await acquireFlagLock(ssh, parameters.lockName, parameters.holder)
+      : await parameters.acquisition.tryAcquire()
   if (acquireResult.kind === "failed") {
     return {
       failure: prefixModuleFailure(parameters.failureMessage, acquireResult.failure),
@@ -265,11 +282,17 @@ async function acquireMutex<TValue>(
     return { kind: "acquired", token: acquireResult.holderToken }
   }
   const staleSeconds = parameters.staleSeconds ?? FLAG_LOCK_STALE_SECONDS
-  const round = await waitForMutexLockRound(
-    ssh,
-    { lockName: parameters.lockName, staleSeconds },
-    budget
-  )
+  let round: "exhausted" | "released"
+  if (parameters.acquisition === undefined) {
+    round = await waitForMutexLockRound(
+      ssh,
+      { lockName: parameters.lockName, staleSeconds },
+      budget
+    )
+  } else {
+    const retry = await parameters.acquisition.waitForRetry(budget)
+    round = retry ? "released" : "exhausted"
+  }
   // Issue #224: a lost re-acquire race retries within the same budget.
   if (round === "released") return acquireMutex(ssh, parameters, budget)
   return { failure: await buildWaitFailure(ssh, parameters, budget), kind: "failed" }

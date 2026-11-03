@@ -8,6 +8,8 @@ import { assertValidUserName } from "./posixNames.js"
 import { applyAuthorizedKeys, checkAuthorizedKeys } from "./sshAuthorizedKeysHelpers.js"
 import { authorizedPrincipals } from "./sshAuthorizedPrincipals.js"
 import { trustedUserCa } from "./sshCertificateModules.js"
+import { hostCertificate } from "./sshHostCertificate.js"
+import { hostCertificateSigner } from "./sshHostCertificateSigners.js"
 import { knownHostsCertAuthority } from "./sshKnownHostsCertAuthority.js"
 import {
   confirmKnownHostsTarget,
@@ -22,6 +24,13 @@ export type {
   TrustedUserCaOptions,
 } from "./sshCertificateValidation.js"
 
+export type {
+  HostCertificateOptions,
+  HostCertificateRequest,
+  HostCertificateSigner,
+  LocalHostCertificateSignerOptions,
+  StepCaHostCertificateSignerOptions,
+} from "./sshHostCertificateTypes.js"
 export type { KnownHostsCertAuthorityOptions } from "./sshKnownHostsCaValidation.js"
 
 type KnownHostsOptions = {
@@ -978,6 +987,15 @@ export const ssh = {
    */
   authorizedPrincipals,
   /**
+   * Issue or renew an OpenSSH host certificate for an existing host key.
+   *
+   * The signer runs on the controller only. Construction validates the public policy without
+   * starting processes or resolving secrets; check and dry-run inspect public target state only.
+   * Apply signs only when the key, CA, principals, or validity policy requires it, publishes via
+   * reload-only transaction, and leaves a secret-free Pending marker for safe next-run recovery.
+   */
+  hostCertificate,
+  /**
    * Ensure a host is present in (or absent from) the connecting user's `~/.ssh/known_hosts`.
    *
    * When `state` is `"present"` (the default), the host's public keys are fetched
@@ -1044,8 +1062,10 @@ export const ssh = {
       name: `ssh.knownHosts: ${host} (${state})`,
     }
   },
-
   knownHostsCertAuthority,
+
+  /** Controller-only host-certificate signer factories; construction has no process or secret side effects. */
+  signer: hostCertificateSigner,
 
   /**
    * Manage the host-wide SSH user-certificate CA trust configuration.

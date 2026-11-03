@@ -14,6 +14,33 @@ Start with the exact error message. Use `--verbose` when a failed remote command
 
 **Verify:** Rerun the playbook. It should pass the binding check before resolving its secrets.
 
+## A host-certificate update fails or remains Pending
+
+**Symptom:** `ssh.hostCertificate` reports a signing, certificate-policy, reload, or Pending
+recovery failure. Other sshd writers may report that unresolved host-certificate Pending blocks
+writes, or that a living commit process holds the lock.
+
+**Diagnose:** A controller capability-preflight failure occurs before configured CA-key access,
+provisioner-password resolution, CA requests, or certificate/configuration publication. Ensure
+`ssh-keygen` supports the guide's UTC host-signing probe, and that `step version` and
+`step ssh certificate --help` provide the required version/option contract. Preflight diagnostics
+omit raw tool output. Check the existing target key and effective `HostKey` mapping, controller signer
+capabilities, the independent SSH-CA key, and the Step TLS root/JWK configuration. Check that the
+active SSH service supports pure reload and that `HostKeyAlgorithms` permits the certificate
+algorithm. For Pending, preserve the manifest and snapshots and inspect the reported conflict;
+do not print credentials or delete recovery evidence.
+
+**Fix:** For an ordinary interruption, run the host-certificate module in a real apply before
+other sshd writers. It resumes a matching valid candidate, or restores the verified old state
+before evaluating a changed policy. Dry-run reports work but does not recover it. Unsafe state,
+missing active snapshots, external file edits, and changed host keys require administrative
+resolution. A living target process keeps its OS lock even after lease expiry; do not remove the
+lock file or break it by age. A failed or timed-out CA request is not automatically retried.
+
+**Verify:** Rerun until Pending is safely resolved, then verify a strict certificate-only OpenSSH
+connection with the intended host CA and principal. A raw-key login is insufficient. See the
+[host-certificate guide](./host-certificates.md) for prerequisites and recovery limits.
+
 ## A key file fails with `ENCRYPTED_KEY` or `UNSUPPORTED_KEY`
 
 **Symptom:** The error ends with `[ENCRYPTED_KEY]` or `[UNSUPPORTED_KEY]`. Paratix stops after the first attempt without trying further ports; reconnect also stops immediately for these codes.
