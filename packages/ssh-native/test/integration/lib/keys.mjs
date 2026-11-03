@@ -17,6 +17,8 @@ const SSH_KEYGEN = "ssh-keygen"
  * @property {string} dir the fixture directory
  * @property {string} hostKey host key (ed25519) path
  * @property {string} hostKeyBase64 base64 of the host key blob, for the verifier
+ * @property {string} hostCertificate host certificate path, signed by a separate RSA CA
+ * @property {string} hostCaBase64 host CA public key blob
  * @property {string} userCaPublic user CA public key path (TrustedUserCAKeys)
  * @property {string} certKey key with `<certKey>-cert.pub`, never in authorized_keys
  * @property {string} bareCertKey copy of `certKey` without its certificate
@@ -60,9 +62,29 @@ export async function publicKeyBase64(path) {
 async function generateAuthorities(dir) {
   const hostKey = join(dir, "host_ed25519")
   const userCa = join(dir, "user_ca")
+  const hostCa = join(dir, "host_ca_rsa")
   await keygen(hostKey, ["-t", "ed25519", "-N", ""])
   await keygen(userCa, ["-t", "ed25519", "-N", ""])
-  return { hostKey, userCa }
+  await keygen(hostCa, ["-t", "rsa", "-b", "2048", "-N", ""])
+  await runTool(SSH_KEYGEN, [
+    "-q",
+    "-s",
+    hostCa,
+    "-h",
+    "-I",
+    "ssh-native-it-host",
+    "-n",
+    "127.0.0.1,localhost",
+    "-V",
+    "-5m:+1d",
+    `${hostKey}.pub`,
+  ])
+  return {
+    hostCaBase64: await publicKeyBase64(`${hostCa}.pub`),
+    hostCertificate: `${hostKey}-cert.pub`,
+    hostKey,
+    userCa,
+  }
 }
 
 /**
@@ -231,7 +253,7 @@ async function writeDsaKeys(dir) {
  * @returns the fixture paths
  */
 export async function generateFixtures(dir, principal) {
-  const { hostKey, userCa } = await generateAuthorities(dir)
+  const { hostCaBase64, hostCertificate, hostKey, userCa } = await generateAuthorities(dir)
   const cert = await generateCertificateKey(dir, userCa, principal)
   const fileCertificates = await generateFileCertificates(dir, userCa, principal)
   const client = await generateClientKeys(dir)
@@ -249,6 +271,8 @@ export async function generateFixtures(dir, principal) {
     authorizedKeys,
     certPrincipal: principal,
     dir,
+    hostCaBase64,
+    hostCertificate,
     hostKey,
     hostKeyBase64: await publicKeyBase64(`${hostKey}.pub`),
   }

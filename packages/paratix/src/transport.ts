@@ -1,3 +1,4 @@
+import type { HostKeyInfo } from "@paratix/ssh-native"
 import type { Readable, Writable } from "node:stream"
 
 export type TransportErrorCode =
@@ -39,13 +40,14 @@ export type TransportConnectOptions = {
   agentForward?: boolean
   certificate?: Buffer
   host: string
+  hostCertificates?: boolean
   password?: string
   port: number
   privateKey?: Buffer | string
   readyTimeout: number
   signal?: AbortSignal
   username: string
-  verifyHostKey: (key: Buffer) => boolean | Promise<boolean>
+  verifyHostKey: (key: Buffer, info?: HostKeyInfo) => boolean | Promise<boolean>
 }
 
 export type TransportExit = { code: null | number; signal: null | string }

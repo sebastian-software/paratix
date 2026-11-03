@@ -55,6 +55,12 @@ export interface ConnectOptions {
   password?: Buffer
   /** Bridge server-opened `auth-agent@openssh.com` channels to `agent`. */
   agentForward?: boolean
+  /**
+   * Offer host certificates before raw keys for this attempt. Default false.
+   * The caller must have selected matching CA trust; verifyHost still decides
+   * CA, principal and revocation authorization. scan() never offers them.
+   */
+  hostCertificates?: boolean
   /** Aborts TCP, handshake, verification and login with ABORTED. */
   signal?: AbortSignal
 }

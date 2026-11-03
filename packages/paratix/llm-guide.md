@@ -179,8 +179,8 @@ match, and validity window against the controller clock. Signature validation do
 CA trust: the server's `TrustedUserCAKeys` and principal policy determine authorization. Paratix
 has no local rule requiring `ssh.user` to occur in the certificate principals;
 `AuthorizedPrincipalsFile` can authorize a different principal. RSA user certificates use
-RSA-SHA2 without enabling legacy `ssh-rsa`. Host certificates and host-CA trust are unsupported;
-keep the existing verified host-key pin or `known_hosts` trust anchor.
+RSA-SHA2 without enabling legacy `ssh-rsa`. Host identity has its own
+[host-certificate trust policy](#host-certificate-trust), independent of user authentication.
 
 Local certificate failures use `AUTH_FAILED` with native `detail` equal to
 `certificate-invalid`, `certificate-key-mismatch`, `certificate-expired`, or
@@ -190,6 +190,52 @@ a server rejection gives a generic CA/principal hint because the exact server re
 Each reconnect reloads both files, so a renewed certificate is read and an expired one fails
 validation. Private-key and certificate input buffers are zero-filled after use; errors do not
 include certificate contents, key IDs, or principals.
+
+### Host-certificate trust
+
+The controller reads host CA anchors from its existing `~/.ssh/known_hosts`. Add an independently
+verified CA public key as `@cert-authority <host-patterns> <algorithm> <base64-key>`; these are
+placeholders, not a complete key. No new `SshConfig` option is required. `ssh.certificate` is
+only for user authentication, not host trust.
+
+With `strictHostKeyChecking: "yes"` (default) or `"accept-new"`, a matching CA enables supported
+host-certificate algorithms ahead of the unchanged raw-key list: Ed25519, ECDSA P-256/P-384/P-521
+and RSA SHA-2. CA and leaf key algorithms are independent. CA selection happens before the
+initial handshake using existing host/port matching, including lists, wildcards, negation and
+hashed names; nonstandard ports use `[host]:port`, including IPv6. Without a matching CA, the
+algorithm offer and raw-key behavior stay unchanged. `scan()` offers raw keys only, and
+`strictHostKeyChecking: "no"` adds no CA trust.
+
+The native binding validates the signature, type `host`, integer validity interval
+`valid_after <= now < valid_before` against the controller clock, and an empty critical-options
+map. TypeScript requires consistent structured metadata, a matching CA and at least one
+matching principal. Principals use the requested hostname or IP without its port and
+case-sensitive `*`/`?` patterns; an empty list fails. There is no new `HostKeyAlias` or
+DNS/reverse-DNS fallback. Uncritical extensions do not authorize trust.
+
+Under active Known-Hosts checking, matching `@revoked` entries win over CA anchors, cache and
+pins. Both the signing CA and certified raw leaf are checked. A revoked certificate is
+normalized to its raw leaf, so renewing that certificate does not clear the revocation. There
+is no KRL, serial-number or key-ID policy. CA anchors are never ordinary host-key entries.
+
+`expectedHostPublicKey` and `expectedHostFingerprint` always refer to the raw public key; for a
+certificate, that is the certified leaf. A certificate must pass CA validation **and every
+configured pin**. Neither a CA key nor a certificate blob substitutes for a leaf pin. A raw key
+presented by the server still follows the normal pin, `"yes"` or `"accept-new"` policy even if a
+CA line matches; that line alone is not a raw-key mismatch. A rejected certificate causes
+`HostKeyVerificationError` and stops reconnect, with no retry using a raw-key handshake.
+Diagnostics do not include unfiltered key IDs, principals or certificate blobs.
+
+Certificates, certified leaves and CAs never create TOFU file or cache entries, whether accepted
+or rejected. Raw-key `"accept-new"` persists only after successful authentication as before.
+Successful handshakes replace the complete session verification evidence, including the
+accepted CA; failed attempts leave the prior evidence unchanged. See
+[`getConnectionInfo()`](#sshconnection-api) for its raw-leaf and evidence fields, and
+[`rsync.sync()`](#rsync) for external SSH trust boundaries.
+
+These checks apply to the initial key exchange. Rekey host-key validation remains open in
+[#260](https://github.com/sebastian-software/paratix/issues/260); host-certificate issuance and
+target-side Known-Hosts management are outside this controller trust feature.
 
 Native errors include `[CODE]`; after other connection failures, the final message includes
 `; last error on port <p>: <native message> [<CODE>]`. See
@@ -1120,9 +1166,29 @@ It does not expand release/deployment permissions.
 | ------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------- |
 | `rsync.sync` | `(options: { src: string; dest: string; chmod?: string; delete?: boolean; exclude?: string[]; group?: string; include?: string[]; owner?: string; strictHostKeyChecking?: "accept-new" \| "no" \| "off" \| "yes"; timeout?: number }): Module` | Yes        |
 
-When the active Paratix SSH session already verified the host via `ssh.expectedHostFingerprint`
-or `ssh.expectedHostPublicKey`, `rsync.sync()` reuses that verified host key for the external
-rsync SSH process and does not depend on a local `known_hosts` entry.
+`rsync.sync()` requires the active session's verified raw key **and** typed verification evidence;
+it refuses an unverified or inconsistent session. Before each external SSH transfer it reads a
+fresh snapshot of the controller's `~/.ssh/known_hosts` through the same asynchronous, locked
+loader. For certificate sessions, a read failure or newly revoked session leaf/CA fails closed.
+Matching revocations for alternative leaves are also carried into the CA path. This is a
+preflight snapshot, not monitoring of later file changes.
+
+- A raw-key session reuses its verified host key as the sole anchor.
+- A certificate session **without explicit pins** uses only a host/port-scoped
+  `@cert-authority` anchor for the CA accepted by the controller, plus matching revocations.
+  OpenSSH validates its current certificate and may accept a different, non-revoked leaf under
+  that CA. CA trust does not preserve the previous leaf's identity.
+- A certificate session **with either explicit pin** uses only the verified raw leaf as anchor
+  and offers only the corresponding raw-key algorithm. RSA uses `rsa-sha2-512,rsa-sha2-256`,
+  without adding `ssh-rsa`. This preserves the leaf pin but checks no certificate or current CA
+  validity on the new connection. A different leaf or certificate-only server fails. There is
+  no automatic retry, downgrade or combined CA/raw-key anchor.
+
+All paths use a private temporary Known-Hosts file, isolated user/global trust files and fixed
+`StrictHostKeyChecking=yes`, `KnownHostsCommand=none`, `VerifyHostKeyDNS=no`. Inherited command
+anchors and DNS SSHFP cannot replace the chosen anchor; `strictHostKeyChecking` on the module
+cannot weaken the policy. Temporary files are cleaned up after success or failure.
+
 After successful file-key authentication with `ssh.certificate`, rsync also passes the expanded,
 shell-quoted certificate path as `-o CertificateFile=...` alongside the matching private key.
 Agent and password sessions do not set `CertificateFile`, including sessions using an agent-held
@@ -1469,30 +1535,40 @@ The remaining public helpers cover validation, narrowing, and conversion:
 
 Methods available on the `ssh` parameter:
 
-| Method                                            | Return type                                                                                                                   | Description                                                                                            |
-| ------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------ |
-| `ssh.addPort(port)`                               | `boolean`                                                                                                                     | Register a reconnect candidate; return `true` when it was added.                                       |
-| `ssh.disconnect()`                                | `void`                                                                                                                        | Close the SSH connection.                                                                              |
-| `ssh.downloadFile(remotePath, localPath)`         | `Promise<void>`                                                                                                               | Download a remote file.                                                                                |
-| `ssh.exec(command, options?)`                     | `Promise<ExecResult>`                                                                                                         | Run a command and return `{ code, stdout, stderr }`. Throws on non-zero unless `ignoreExitCode: true`. |
-| `ssh.exists(remotePath)`                          | `Promise<boolean>`                                                                                                            | Check whether a remote path exists.                                                                    |
-| `ssh.getConnectionInfo()`                         | `{ agentSocket?, authMethod?, certificatePath?, configuredPorts, host, port, privateKeyPath?, user, verifiedHostPublicKey? }` | Return the active connection and authentication details.                                               |
-| `ssh.lines(command)`                              | `Promise<string[]>`                                                                                                           | Run a command and return stdout split into lines.                                                      |
-| `ssh.output(command)`                             | `Promise<string>`                                                                                                             | Run a command and return trimmed stdout.                                                               |
-| `ssh.probeSudo()`                                 | `Promise<void>`                                                                                                               | Probe and cache sudo access, prompting interactively if needed.                                        |
-| `ssh.readFile(remotePath)`                        | `Promise<string>`                                                                                                             | Read the full contents of a remote file.                                                               |
-| `ssh.reconnect(options?)`                         | `Promise<void>`                                                                                                               | Reconnect; `options.defaultTimeout` supplies a call-specific fallback in milliseconds.                 |
-| `ssh.removePort(port)`                            | `void`                                                                                                                        | Remove a registered reconnect candidate.                                                               |
-| `ssh.sha256(remotePath)`                          | `Promise<string \| null>`                                                                                                     | Return the SHA-256 hex digest, or `null` when the file is not found.                                   |
-| `ssh.test(command)`                               | `Promise<boolean>`                                                                                                            | Run a command and return whether its exit code is zero.                                                |
-| `ssh.updateHost(host)`                            | `void`                                                                                                                        | Update the target host address.                                                                        |
-| `ssh.uploadFile(localPath, remotePath, options?)` | `Promise<void>`                                                                                                               | Upload through SFTP; `options.mode` defaults to `"0600"`.                                              |
-| `ssh.writeFile(remotePath, content, options?)`    | `Promise<void>`                                                                                                               | Create or replace a remote file; `options.mode` defaults to `"0600"`.                                  |
+| Method                                            | Return type                                                                                                                                              | Description                                                                                            |
+| ------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------ |
+| `ssh.addPort(port)`                               | `boolean`                                                                                                                                                | Register a reconnect candidate; return `true` when it was added.                                       |
+| `ssh.disconnect()`                                | `void`                                                                                                                                                   | Close the SSH connection.                                                                              |
+| `ssh.downloadFile(remotePath, localPath)`         | `Promise<void>`                                                                                                                                          | Download a remote file.                                                                                |
+| `ssh.exec(command, options?)`                     | `Promise<ExecResult>`                                                                                                                                    | Run a command and return `{ code, stdout, stderr }`. Throws on non-zero unless `ignoreExitCode: true`. |
+| `ssh.exists(remotePath)`                          | `Promise<boolean>`                                                                                                                                       | Check whether a remote path exists.                                                                    |
+| `ssh.getConnectionInfo()`                         | `{ agentSocket?, authMethod?, certificatePath?, configuredPorts, host, hostVerificationEvidence?, port, privateKeyPath?, user, verifiedHostPublicKey? }` | Return the active connection and authentication details.                                               |
+| `ssh.lines(command)`                              | `Promise<string[]>`                                                                                                                                      | Run a command and return stdout split into lines.                                                      |
+| `ssh.output(command)`                             | `Promise<string>`                                                                                                                                        | Run a command and return trimmed stdout.                                                               |
+| `ssh.probeSudo()`                                 | `Promise<void>`                                                                                                                                          | Probe and cache sudo access, prompting interactively if needed.                                        |
+| `ssh.readFile(remotePath)`                        | `Promise<string>`                                                                                                                                        | Read the full contents of a remote file.                                                               |
+| `ssh.reconnect(options?)`                         | `Promise<void>`                                                                                                                                          | Reconnect; `options.defaultTimeout` supplies a call-specific fallback in milliseconds.                 |
+| `ssh.removePort(port)`                            | `void`                                                                                                                                                   | Remove a registered reconnect candidate.                                                               |
+| `ssh.sha256(remotePath)`                          | `Promise<string \| null>`                                                                                                                                | Return the SHA-256 hex digest, or `null` when the file is not found.                                   |
+| `ssh.test(command)`                               | `Promise<boolean>`                                                                                                                                       | Run a command and return whether its exit code is zero.                                                |
+| `ssh.updateHost(host)`                            | `void`                                                                                                                                                   | Update the target host address.                                                                        |
+| `ssh.uploadFile(localPath, remotePath, options?)` | `Promise<void>`                                                                                                                                          | Upload through SFTP; `options.mode` defaults to `"0600"`.                                              |
+| `ssh.writeFile(remotePath, content, options?)`    | `Promise<void>`                                                                                                                                          | Create or replace a remote file; `options.mode` defaults to `"0600"`.                                  |
 
 `getConnectionInfo().authMethod`, when present, is `"agent"`, `"password"`, or `"privateKey"`.
 `certificatePath` is the expanded configured path only after successful file-key authentication
 with a certificate; it is absent for agent and password authentication. Certificate-based file
 authentication still reports `authMethod: "privateKey"`.
+
+`verifiedHostPublicKey` is optional and always uses the raw OpenSSH public-key format
+`<algorithm> <base64-key>`. For an accepted host certificate it contains the certified leaf,
+never the certificate or CA; its algorithm comes from the raw leaf blob. Optional
+`hostVerificationEvidence` records `kind: "key" | "certificate"`, `host`, `port`, raw `publicKey`,
+`explicitPins` and `revocations`; certificate evidence additionally has `authorityPublicKey` for
+the accepted signer. A successful authenticated handshake replaces all evidence. A failed
+reconnect leaves previous evidence unchanged. Custom rsync wrappers must not infer CA trust
+from `verifiedHostPublicKey` alone.
+
 `reconnect` accepts `options?: { defaultTimeout?: number }`; `uploadFile` and `writeFile` accept
 `options?: { mode?: string }`.
 

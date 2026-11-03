@@ -1,9 +1,16 @@
 /* eslint-disable max-lines -- known_hosts lock, parser, verifier, and persist helpers stay co-located */
+import type { HostKeyInfo } from "@paratix/ssh-native"
+
 import { createHash, timingSafeEqual } from "node:crypto"
 import { appendFile, mkdir, readFile, stat } from "node:fs/promises"
 import { homedir } from "node:os"
 import { join } from "node:path"
 
+import {
+  certificateMetadataValid,
+  type HostVerificationEvidence,
+  normalizeRevokedKey,
+} from "./hostCertificates.js"
 import { describeHostValidationFailure, validateHostLabel } from "./hostValidation.js"
 import { matchesKnownHostPatternList } from "./knownHostPatterns.js"
 import { shellQuote } from "./sshHelpers.js"
@@ -45,7 +52,9 @@ type HostVerifierOptions = {
 
 export type HostVerifierResult = {
   commitAcceptedHostKey?: () => Promise<void>
-  hostVerifier?: (key: Buffer) => boolean
+  evidence?: () => HostVerificationEvidence | undefined
+  hostCertificates?: boolean
+  hostVerifier?: (key: Buffer, info?: HostKeyInfo) => boolean
   pendingPersist?: Promise<void>
 }
 
@@ -103,17 +112,6 @@ const UINT32_SIZE = 4
  * character outside the standard base64 alphabet before decoding.
  */
 const STRICT_BASE64_PATTERN = /^[A-Za-z0-9+\/]+=*$/v
-
-/**
- * R-0000204: human-readable hint surfaced when a `@cert-authority` entry is
- * encountered. paratix does not validate OpenSSH certificates and refuses to
- * silently fall through to accept-new.
- */
-const CERT_AUTHORITY_MESSAGE =
-  "HOST KEY VERIFICATION FAILED — known_hosts contains a @cert-authority entry, " +
-  "but paratix does not validate certificate-authority host keys. " +
-  "Remove the @cert-authority marker or pin the host with ssh.expectedHostFingerprint / " +
-  "ssh.expectedHostPublicKey instead."
 
 /**
  * In-memory cache for accepted host keys that could not be persisted to disk.
@@ -255,8 +253,8 @@ function findRevokedEntry(entries: KnownHostEntry[], key: Buffer): KnownHostEntr
   return entries.find(
     (entry) =>
       entry.marker === "@revoked" &&
-      entry.key.length === key.length &&
-      timingSafeEqual(entry.key, key)
+      normalizeRevokedKey(entry.key).length === key.length &&
+      timingSafeEqual(normalizeRevokedKey(entry.key), key)
   )
 }
 
@@ -292,12 +290,6 @@ function verifyHostKeyAgainstKnownEntries(parameters: {
       `HOST KEY VERIFICATION FAILED for ${host}: remote host key (${describeAlgoForDiagnostics(revokedKey.key)}) is marked as revoked in known_hosts.`
     )
   }
-  // R-0000204: paratix does not implement `@cert-authority` validation.
-  // Refuse rather than silently append a duplicate raw-key entry next to
-  // the CA line via accept-new.
-  if (fileEntries.some((entry) => entry.marker === "@cert-authority"))
-    throw new HostKeyVerificationError(`${host}: ${CERT_AUTHORITY_MESSAGE}`)
-
   const rawHostKeyEntries = fileEntries.filter((entry) => entry.marker == null)
   const matchingEntry = rawHostKeyEntries.find(
     (entry) => entry.key.length === key.length && timingSafeEqual(entry.key, key)
@@ -491,7 +483,8 @@ const KNOWN_HOSTS_FILE_BYTE_LIMIT = KNOWN_HOSTS_FILE_LIMIT_MIB * MEBIBYTE_BYTES
 /**
  * Read and parse `~/.ssh/known_hosts`.
  *
- * A missing file is treated as an empty trust store. Other read failures fail
+ * A missing file is treated as an empty trust store unless `requireExisting`
+ * is set for a certificate session's rsync preflight. Other read failures fail
  * closed so `accept-new` cannot bypass an unreadable existing trust anchor.
  *
  * R-0000845: switched from `readFileSync` to async {@link readFile} and added
@@ -500,9 +493,10 @@ const KNOWN_HOSTS_FILE_BYTE_LIMIT = KNOWN_HOSTS_FILE_LIMIT_MIB * MEBIBYTE_BYTES
  * file, but unbounded on NFS-mounted homes or pathologically large trust
  * stores.
  *
+ * @param requireExisting - Whether a missing trust store must fail closed.
  * @returns The parsed entries.
  */
-async function loadKnownHostEntries(): Promise<KnownHostEntry[]> {
+async function loadKnownHostEntries(requireExisting = false): Promise<KnownHostEntry[]> {
   const filePath = join(homedir(), ".ssh", "known_hosts")
   try {
     // eslint-disable-next-line security/detect-non-literal-fs-filename
@@ -516,7 +510,7 @@ async function loadKnownHostEntries(): Promise<KnownHostEntry[]> {
     return parseKnownHosts(await readFile(filePath, "utf8"))
   } catch (error) {
     if (error instanceof HostKeyVerificationError) throw error
-    if (getFileSystemErrorCode(error) === "ENOENT") {
+    if (!requireExisting && getFileSystemErrorCode(error) === "ENOENT") {
       return []
     }
     throw new HostKeyVerificationError(
@@ -670,16 +664,59 @@ function verifyPinnedHostKey(host: string, key: Buffer, options: HostVerifierOpt
   )
 }
 
+function verifyHostCertificate(parameters: {
+  fileEntries: KnownHostEntry[]
+  host: string
+  info: HostKeyInfo
+  key: Buffer
+  options: HostVerifierOptions
+}): Buffer {
+  const { fileEntries, host, info, key, options } = parameters
+  if (!certificateMetadataValid(info, key, host)) {
+    throw new HostKeyVerificationError(
+      `HOST KEY VERIFICATION FAILED for ${host}: certificate validation or principal failed.`
+    )
+  }
+  const authority = Buffer.from(info.caKeyBase64 ?? "", "base64")
+  if (
+    formatPresentedPublicKey(key) !== `${info.keyAlgorithm} ${info.keyBase64}` ||
+    formatPresentedPublicKey(authority) !== `${info.caAlgorithm} ${info.caKeyBase64}` ||
+    findRevokedEntry(fileEntries, key) != null ||
+    findRevokedEntry(fileEntries, authority) != null
+  ) {
+    throw new HostKeyVerificationError(
+      `HOST KEY VERIFICATION FAILED for ${host}: inconsistent or revoked certificate key.`
+    )
+  }
+  if (
+    !fileEntries.some(
+      (entry) =>
+        entry.marker === "@cert-authority" &&
+        entry.algo === info.caAlgorithm &&
+        entry.key.equals(authority)
+    )
+  ) {
+    throw new HostKeyVerificationError(
+      `HOST KEY VERIFICATION FAILED for ${host}: certificate authority is not trusted.`
+    )
+  }
+  if (hasPinnedHostTrustAnchor(options)) verifyPinnedHostKey(host, key, options)
+  return authority
+}
+
 /**
- * Build the `hostVerifier` callback for an ssh2 `ConnectConfig`.
+ * Build the transport host verifier and per-attempt verification evidence.
  *
  * Behavior by mode:
- * - `"no"` — returns an empty object (no verification, ssh2 default).
- * - `"accept-new"` — accepts unknown keys and appends them to `~/.ssh/known_hosts`;
- *   throws if a known key does not match.
- * - `"yes"` — throws for both unknown keys and mismatched keys.
+ * - `"no"` — skips known_hosts trust unless explicit pins require verification.
+ * - `"accept-new"` — accepts unknown raw keys for persistence after successful login;
+ *   rejects mismatches and revoked keys.
+ * - `"yes"` — rejects unknown raw keys without an explicit pin, and mismatched keys.
+ * Both verifying modes accept valid certificates under a matching CA, requiring
+ * all configured leaf pins and rejecting revoked leaves or CAs. Certificates
+ * never enter TOFU storage; a matching CA does not change raw-key verification.
  *
- * R-0000194: the synchronous read of `~/.ssh/known_hosts` is funneled through
+ * R-0000194: the asynchronous read of `~/.ssh/known_hosts` is funneled through
  * the same in-process mutex as writes, so a verifier built right after a
  * concurrent `appendHostKey` always observes the freshly persisted line and
  * cannot race with a partial write.
@@ -687,9 +724,9 @@ function verifyPinnedHostKey(host: string, key: Buffer, options: HostVerifierOpt
  * @param mode - The host key verification strategy.
  * @param location - The target host and SSH port.
  * @param options - Optional pinned trust anchors and per-connection cache override.
- * @returns An object with `hostVerifier` set (or empty for mode `"no"`).
+ * @returns Verification callbacks and evidence (empty for mode `"no"` without pins).
  * @throws {Error} When a known host key does not match the presented key (all modes except `"no"`).
- * @throws {Error} When no known_hosts entry exists for the host and mode is `"yes"`.
+ * @throws {Error} When no trusted raw key or valid certificate exists in mode `"yes"`.
  */
 export async function buildHostVerifier(
   mode: "accept-new" | "no" | "yes",
@@ -704,21 +741,58 @@ export async function buildHostVerifier(
   const fileEntries = findMatchingEntries(entries, host, port)
   const cachedKey = cache.get(formatHostNeedle(host, port)) ?? null
   let acceptedHostKey: Buffer | null = null
+  let evidence: HostVerificationEvidence | undefined
+  const hostCertificates =
+    mode !== "no" && fileEntries.some((entry) => entry.marker === "@cert-authority")
+  const recordEvidence = (key: Buffer, authority?: Buffer): void => {
+    const publicKey = formatPresentedPublicKey(key)
+    if (publicKey == null) return
+    const common = {
+      explicitPins: hasPinnedHostTrustAnchor(options),
+      host,
+      port,
+      publicKey,
+      revocations: revokedPublicKeys(fileEntries),
+    }
+    evidence =
+      authority == null
+        ? { ...common, kind: "key" }
+        : {
+            ...common,
+            authorityPublicKey: `${extractAlgoFromKey(authority)} ${authority.toString("base64")}`,
+            kind: "certificate",
+          }
+  }
 
-  const result: { hostVerifier: (key: Buffer) => boolean } & HostVerifierResult = {
+  const verifyCertificate = (key: Buffer, info: HostKeyInfo): boolean => {
+    if (!hostCertificates)
+      throw new HostKeyVerificationError(
+        `HOST KEY VERIFICATION FAILED for ${host}: no matching certificate authority.`
+      )
+    const authority = verifyHostCertificate({ fileEntries, host, info, key, options })
+    recordEvidence(key, authority)
+    return true
+  }
+
+  const result: HostVerifierResult = {
     async commitAcceptedHostKey(): Promise<void> {
       if (acceptedHostKey != null) await acceptAndPersistHostKey(location, acceptedHostKey, cache)
     },
-    hostVerifier(key: Buffer): boolean {
+    evidence: () => evidence,
+    hostCertificates,
+    hostVerifier(key: Buffer, info?: HostKeyInfo): boolean {
+      if (info?.kind === "certificate") return verifyCertificate(key, info)
       if (
         mode !== "no" &&
         verifyHostKeyAgainstKnownEntries({ cachedKey, fileEntries, host, key })
       ) {
         if (hasPinnedHostTrustAnchor(options)) verifyPinnedHostKey(host, key, options)
+        recordEvidence(key)
         return true
       }
       if (hasPinnedHostTrustAnchor(options)) {
         verifyPinnedHostKey(host, key, options)
+        recordEvidence(key)
         return true
       }
       if (mode === "yes") {
@@ -729,10 +803,49 @@ export async function buildHostVerifier(
       }
       if (mode === "no") return true
       // mode === "accept-new": accept this key for this handshake, but only
-      // commit TOFU trust after ssh2 reports the connection as ready.
+      // commit TOFU trust after the transport completes authentication.
       acceptedHostKey = Buffer.from(key)
+      recordEvidence(key)
       return true
     },
   }
   return result
+}
+
+function revokedPublicKeys(entries: KnownHostEntry[]): string[] {
+  return [
+    ...new Set(
+      entries
+        .filter((entry) => entry.marker === "@revoked")
+        .flatMap((entry) => {
+          const publicKey = formatPresentedPublicKey(normalizeRevokedKey(entry.key))
+          return publicKey == null ? [] : [publicKey]
+        })
+    ),
+  ]
+}
+
+/**
+ * Fresh, locked snapshot immediately before each external SSH transfer.
+ *
+ * @param evidence - Trust established by the successful controller handshake.
+ * @returns All matching revoked public keys after checking the session anchors.
+ */
+export async function loadRsyncTrustSnapshot(
+  evidence: HostVerificationEvidence
+): Promise<string[]> {
+  const entries = await withKnownHostsLock(async () =>
+    loadKnownHostEntries(evidence.kind === "certificate")
+  )
+  const matching = findMatchingEntries(entries, evidence.host, evidence.port)
+  const revoked = revokedPublicKeys(matching)
+  if (
+    revoked.includes(evidence.publicKey) ||
+    (evidence.kind === "certificate" && revoked.includes(evidence.authorityPublicKey))
+  ) {
+    throw new HostKeyVerificationError(
+      `HOST KEY VERIFICATION FAILED for ${evidence.host}: session trust anchor is revoked in known_hosts.`
+    )
+  }
+  return revoked
 }

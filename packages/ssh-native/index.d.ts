@@ -55,6 +55,12 @@ export interface ConnectOptions {
   password?: Buffer
   /** Bridge server-opened `auth-agent@openssh.com` channels to `agent`. */
   agentForward?: boolean
+  /**
+   * Offer host certificates before raw keys for this attempt. Default false.
+   * The caller must have selected matching CA trust; verifyHost still decides
+   * CA, principal and revocation authorization. scan() never offers them.
+   */
+  hostCertificates?: boolean
   /** Aborts TCP, handshake, verification and login with ABORTED. */
   signal?: AbortSignal
 }
@@ -189,6 +195,13 @@ export interface ChannelStats {
   agentChannelsBridged: number
 }
 
+export interface HostCertificateValidation {
+  /** Signature, host type, validity interval and empty critical options passed. */
+  valid: boolean
+  /** Stable reason only; no certificate-supplied text is included. */
+  reason?: 'certificate-signature-invalid' | 'certificate-type-invalid' | 'certificate-critical-options' | 'certificate-time-unavailable' | 'certificate-not-yet-valid' | 'certificate-expired'
+}
+
 export interface HostKeyInfo {
   /** `key` or `certificate`. */
   kind: 'key' | 'certificate'
@@ -197,12 +210,16 @@ export interface HostKeyInfo {
    * certificate algorithm (`ssh-ed25519-cert-v01@openssh.com`).
    */
   algorithm: string
+  /** Algorithm encoded in the certified/plain leaf blob (never a cert alias). */
+  keyAlgorithm: string
   /** Base64 of the plain public key blob (for certificates: the certified key). */
   keyBase64: string
   /** `SHA256:...` fingerprint of the plain key, as OpenSSH prints it. */
   fingerprintSha256: string
   /** Base64 of the CA key blob (certificates only). */
   caKeyBase64?: string
+  /** Algorithm encoded in the CA public key blob (certificates only). */
+  caAlgorithm?: string
   /** `SHA256:...` fingerprint of the CA key (certificates only). */
   caFingerprintSha256?: string
   /** `host` or `user` (certificates only). */
@@ -217,4 +234,9 @@ export interface HostKeyInfo {
   keyId?: string
   /** Whether the CA signature verifies (certificates only). */
   caSignatureValid?: boolean
+  /**
+   * Native validation result. Mandatory for a certificate trust decision;
+   * its absence never grants certificate trust. No CA authorization implied.
+   */
+  certificateValidation?: HostCertificateValidation
 }

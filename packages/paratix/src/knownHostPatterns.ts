@@ -42,7 +42,7 @@ function matchesHashedHost(pattern: string, needle: string): boolean {
   return actualHash.length === expectedHash.length && timingSafeEqual(actualHash, expectedHash)
 }
 
-function matchesHostPattern(pattern: string, needle: string): boolean {
+export function matchesHostPattern(pattern: string, needle: string): boolean {
   let state = { needleIndex: 0, patternIndex: 0, starIndex: -1, starNeedleIndex: 0 }
 
   while (state.needleIndex < needle.length) {

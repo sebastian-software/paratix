@@ -149,6 +149,7 @@ async function createContainer(resources) {
 async function copyKeys(name, fixtures) {
   const copies = [
     [fixtures.hostKey, `${KEY_DIR}/host_ed25519`],
+    [fixtures.hostCertificate, `${KEY_DIR}/host_ed25519-cert.pub`],
     [fixtures.userCaPublic, `${KEY_DIR}/user_ca.pub`],
     [fixtures.authorizedPrincipals, `${KEY_DIR}/authorized_principals`],
     [fixtures.authorizedKeys, AUTHORIZED_KEYS],

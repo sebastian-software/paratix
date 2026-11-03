@@ -165,7 +165,11 @@ RSA PEM, and PKCS#8 PEM for supported algorithms.
   binary files, and corrupt or unrecognized formats fail with `UNSUPPORTED_KEY`.
 - Agent authentication delegates signing to the agent and can use user certificates. These
   file-format restrictions describe keys passed through `privateKey`, not keys held by the agent.
-  Server host certificates are not supported yet.
+  Server host certificates use the separate per-connection `hostCertificates: true` option on
+  `connect()`; `scan()` stays raw-key-only. Native signature, host-type, integer validity and
+  critical-options checks are mandatory. The controller must additionally authorize the CA,
+  principal, revocations and all leaf pins; see the
+  [controller trust contract](../../docs/user-guide/README.md#trust-a-server-through-a-host-ca).
 
 For file-based user-certificate authentication, pass `certificate: Buffer` containing OpenSSH
 certificate text alongside `privateKey: Buffer`. `certificate` requires `privateKey` without an
@@ -178,7 +182,9 @@ The issuer signature check does not establish CA trust. The server decides autho
 `TrustedUserCAKeys` and its principal policy, including `AuthorizedPrincipalsFile`; no local rule
 requires `user` to match a certificate principal. Agent-held certificate identities keep their
 existing authentication path; an external certificate attached to a raw agent key is unsupported.
-User certificates do not add host-certificate or host-CA support.
+User-certificate authentication does not itself establish host-CA trust; that independent
+policy uses matching controller `@cert-authority` entries with active Known-Hosts checking.
+Host verification covers the initial key exchange; the rekey gap remains open in #260.
 
 The binding selects exactly one authentication method per connection: agent, otherwise private
 key, otherwise password (also used for keyboard-interactive). Paratix connects with a configured

@@ -20,6 +20,7 @@ mod error;
 mod exec;
 mod file_certificate;
 mod handler;
+mod host_certificate;
 mod hostkey;
 mod js;
 mod probe;
@@ -77,7 +78,7 @@ mod tests {
 
     #[test]
     fn the_client_config_uses_the_explicit_flow_control_values() {
-        let config = crate::connect::client_config();
+        let config = crate::connect::client_config(false);
         assert_eq!(config.window_size, WINDOW_SIZE);
         assert_eq!(config.maximum_packet_size, MAXIMUM_PACKET_SIZE);
         assert_eq!(config.channel_buffer_size, CHANNEL_BUFFER_SIZE);

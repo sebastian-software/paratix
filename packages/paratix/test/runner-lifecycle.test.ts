@@ -770,6 +770,9 @@ describe("runPlaybook rsync check error handling", () => {
   })
 
   it("marks the run as failed when rsync apply fails after check returned needs-apply", async () => {
+    vi.doMock("../src/knownHosts.js", () => ({
+      loadRsyncTrustSnapshot: vi.fn().mockResolvedValue([]),
+    }))
     // R-0000484: rsync.sync.check now swallows executeRsync failures and
     // reports needs-apply, so the runner proceeds to apply where the rsync
     // failure surfaces with the apply-error message instead.

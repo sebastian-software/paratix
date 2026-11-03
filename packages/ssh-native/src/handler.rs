@@ -269,6 +269,17 @@ impl ClientHandler {
                     return Ok(false);
                 };
                 let info = describe(server_public_key);
+                // JS sees the sanitized native result so its own verification
+                // error can retain object identity. A true JS verdict still
+                // cannot bypass native certificate checks.
+                let certificate_failure =
+                    info.certificate_validation.as_ref().and_then(|validation| {
+                        if validation.valid {
+                            None
+                        } else {
+                            validation.reason.clone()
+                        }
+                    });
                 let cancel = self.shared.verifier_cancel.clone();
                 let verdict = async move {
                     match verifier.call_async_catch(info).await {
@@ -292,7 +303,17 @@ impl ClientHandler {
                 tokio::select! {
                     biased;
                     () = cancel.fired() => Err(HandlerError::Binding(BindingError::aborted())),
-                    accepted = verdict => Ok(accepted),
+                    accepted = verdict => {
+                        if accepted {
+                            if let Some(reason) = certificate_failure {
+                                return Err(HandlerError::Binding(BindingError::with_detail(
+                                    Code::HostKeyRejected, reason,
+                                    "the host certificate failed native validation",
+                                )));
+                            }
+                        }
+                        Ok(accepted)
+                    },
                 }
             }
             HostCheck::PanicProbe => panic_probe(),

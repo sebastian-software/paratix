@@ -47,6 +47,36 @@ function rejectUnstubbedSshMethod(methodName: string): Error {
   return new Error(`makeMockSshClass: unstubbed SSH method call: ${methodName}`)
 }
 
+function mockHostVerificationEvidence(
+  host: string
+): NonNullable<ReturnType<SshConnection["getConnectionInfo"]>["hostVerificationEvidence"]> {
+  return {
+    explicitPins: true,
+    host,
+    kind: "key",
+    port: 22,
+    publicKey: "ssh-ed25519 AAAAMOCKVERIFIEDKEY",
+    revocations: [],
+  }
+}
+
+function mockConnectionInfo(host: string): ReturnType<SshConnection["getConnectionInfo"]> {
+  return {
+    configuredPorts: DEFAULT_CONFIGURED_PORTS,
+    host,
+    hostVerificationEvidence: mockHostVerificationEvidence(host),
+    port: 22,
+    privateKeyPath: "~/.ssh/id",
+    user: "root",
+    // R-0000714: rsync.sync now refuses to transfer without a verified
+    // host trust anchor. The runner-level lifecycle mocks default to a
+    // pinned key so existing runner tests cover the normal flow; tests
+    // that need the trust-anchor failure path override
+    // `getConnectionInfo` to drop `verifiedHostPublicKey`.
+    verifiedHostPublicKey: "ssh-ed25519 AAAAMOCKVERIFIEDKEY",
+  }
+}
+
 export function makeMockSshClass(
   capturedConfigs: unknown[],
   overrides?: {
@@ -100,20 +130,7 @@ export function makeMockSshClass(
             throw rejectUnstubbedSshMethod("forceDestroy")
           }))
     public getConnectionInfo =
-      overrides?.getConnectionInfo ??
-      vi.fn(() => ({
-        configuredPorts: DEFAULT_CONFIGURED_PORTS,
-        host: this.currentHost,
-        port: 22,
-        privateKeyPath: "~/.ssh/id",
-        user: "root",
-        // R-0000714: rsync.sync now refuses to transfer without a verified
-        // host trust anchor. The runner-level lifecycle mocks default to a
-        // pinned key so existing runner tests cover the normal flow; tests
-        // that need the trust-anchor failure path override
-        // `getConnectionInfo` to drop `verifiedHostPublicKey`.
-        verifiedHostPublicKey: "ssh-ed25519 AAAAMOCKVERIFIEDKEY",
-      }))
+      overrides?.getConnectionInfo ?? vi.fn(() => mockConnectionInfo(this.currentHost))
     public lines = vi.fn().mockRejectedValue(rejectUnstubbedSshMethod("lines"))
     public output =
       overrides?.output ?? vi.fn().mockRejectedValue(rejectUnstubbedSshMethod("output"))

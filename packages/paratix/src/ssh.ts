@@ -1,4 +1,5 @@
 /* eslint-disable max-lines -- SSH transport methods keep callback wiring local */
+import type { HostKeyInfo } from "@paratix/ssh-native"
 import type { Stats } from "node:fs"
 
 import { createHash, timingSafeEqual } from "node:crypto"
@@ -8,6 +9,7 @@ import { homedir } from "node:os"
 import { join, posix } from "node:path"
 import { pipeline } from "node:stream/promises"
 
+import type { HostVerificationEvidence } from "./hostCertificates.js"
 import type { Transport, TransportConnection, TransportExecChannel } from "./transport.js"
 import type { ExecOptions, ExecResult, SshConfig, SshConnection } from "./types.js"
 
@@ -324,7 +326,7 @@ function isPermanentCertificateDetail(cause: unknown): boolean {
 
 type HostKeyAttempt = {
   commit: () => void
-  hostVerifier: (key: Buffer) => boolean
+  hostVerifier: (key: Buffer, info?: HostKeyInfo) => boolean
 }
 
 type ClientLifecycleListeners = () => void
@@ -519,6 +521,7 @@ export class SshConnectionImpl implements SshConnection {
    * behavior expected by the reconnect path.
    */
   private readonly hostKeyCache: HostKeyCache = createHostKeyCache()
+  private hostVerificationEvidence: HostVerificationEvidence | undefined
   private lastConnectFailure: ConnectFailure | undefined
   /**
    * Tracks whether the remote host accepts passwordless sudo for the configured
@@ -708,6 +711,13 @@ export class SshConnectionImpl implements SshConnection {
           : undefined,
       configuredPorts: [...this.config.ports],
       host: this.runtime.host,
+      hostVerificationEvidence:
+        this.hostVerificationEvidence == null
+          ? undefined
+          : {
+              ...this.hostVerificationEvidence,
+              revocations: [...this.hostVerificationEvidence.revocations],
+            },
       port: this.connectedPort,
       privateKeyPath:
         this.authMethod === "privateKey" && this.config.privateKey != null
@@ -1576,19 +1586,20 @@ sha256sum -- ${shellQuote(remotePath)} 2>/dev/null || printf 'paratix-hash-faile
    * Create a host-key verification attempt that only commits accepted trust
    * state after the SSH handshake succeeds.
    *
-   * @param original - The original verifier from `buildHostVerifier`, if any.
+   * @param verifier - The verifier and pending evidence for this handshake.
    * @returns A verifier and commit callback for host-key pinning.
    */
-  private createHostKeyAttempt(original?: (key: Buffer) => boolean): HostKeyAttempt {
+  private createHostKeyAttempt(verifier: HostVerifierResult): HostKeyAttempt {
     let acceptedPinnedHostKey: Buffer | null = null
     let acceptedVerifiedHostKey: Buffer | null = null
 
     return {
       commit: (): void => {
-        if (acceptedVerifiedHostKey != null) this.verifiedHostKey ??= acceptedVerifiedHostKey
+        this.verifiedHostKey = acceptedVerifiedHostKey
+        this.hostVerificationEvidence = verifier.evidence?.()
         if (acceptedPinnedHostKey != null) this.pinnedHostKey ??= acceptedPinnedHostKey
       },
-      hostVerifier: (key: Buffer): boolean => {
+      hostVerifier: (key: Buffer, info?: HostKeyInfo): boolean => {
         if (
           this.pinnedHostKey != null &&
           (this.pinnedHostKey.length !== key.length || !timingSafeEqual(this.pinnedHostKey, key))
@@ -1600,8 +1611,9 @@ sha256sum -- ${shellQuote(remotePath)} 2>/dev/null || printf 'paratix-hash-faile
               "This could indicate a man-in-the-middle attack."
           )
         }
-        if (original != null) {
-          const accepted = original(key)
+        if (verifier.hostVerifier != null) {
+          const accepted =
+            info == null ? verifier.hostVerifier(key) : verifier.hostVerifier(key, info)
           if (!accepted) return false
           acceptedVerifiedHostKey ??= Buffer.from(key)
         }
@@ -2264,7 +2276,7 @@ trap - EXIT
         expectedHostPublicKey: this.config.expectedHostPublicKey,
       }
     )
-    const hostKeyAttempt = this.createHostKeyAttempt(verifier.hostVerifier)
+    const hostKeyAttempt = this.createHostKeyAttempt(verifier)
     // R-0000669: combine the prompt-level abort signal (SIGINT-driven prompt
     // cancellation) with the connection-level abort signal so an in-flight
     // Transport.connect is aborted whenever disconnect() runs — including
@@ -2279,6 +2291,7 @@ trap - EXIT
         agentForward: this.config.agentForward,
         certificate: options.certificate,
         host: this.runtime.host,
+        hostCertificates: verifier.hostCertificates,
         password: options.password,
         port,
         privateKey: options.privateKey,

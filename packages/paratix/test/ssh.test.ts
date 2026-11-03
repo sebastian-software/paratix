@@ -1579,6 +1579,62 @@ describe("SshConnectionImpl", () => {
   })
 
   describe("native authentication policy (#257)", () => {
+    it("replaces complete handshake evidence on reconnect and preserves it after a rejected attempt", async () => {
+      const algorithm = Buffer.from("ssh-ed25519")
+      const length = Buffer.alloc(4)
+      length.writeUInt32BE(algorithm.length)
+      const leaf = Buffer.concat([length, algorithm, Buffer.from("certified-leaf")])
+      const publicKey = `ssh-ed25519 ${leaf.toString("base64")}`
+      const first = {
+        authorityPublicKey: "ssh-rsa first-authority",
+        explicitPins: false,
+        host: "1.2.3.4",
+        kind: "certificate" as const,
+        port: 22,
+        publicKey,
+        revocations: [],
+      }
+      const second = {
+        ...first,
+        authorityPublicKey: "ssh-ed25519 second-authority",
+        explicitPins: true,
+        revocations: ["ssh-rsa revoked-alternative"],
+      }
+      const { buildHostVerifier } = await import("../src/knownHosts.js")
+      vi.mocked(buildHostVerifier)
+        .mockResolvedValueOnce({
+          evidence: () => first,
+          hostCertificates: true,
+          hostVerifier: () => true,
+        })
+        .mockResolvedValueOnce({
+          evidence: () => second,
+          hostCertificates: true,
+          hostVerifier: () => true,
+        })
+      connectTransport.mockImplementation(async (options) => {
+        await options.verifyHostKey(leaf)
+      })
+      const ssh = makeSshInstance({ ports: [22, 2222] })
+      await ssh.connect()
+      expect(ssh.getConnectionInfo().hostVerificationEvidence).toStrictEqual(first)
+      await ssh.reconnect()
+      expect(ssh.getConnectionInfo().hostVerificationEvidence).toStrictEqual(second)
+      expect(ssh.getConnectionInfo().verifiedHostPublicKey).toBe(publicKey)
+      const rejected = new HostKeyVerificationError("certificate rejected")
+      vi.mocked(buildHostVerifier).mockResolvedValue({
+        evidence: () => first,
+        hostVerifier() {
+          throw rejected
+        },
+      })
+      connectTransport.mockClear()
+      await expect(ssh.reconnect()).rejects.toBe(rejected)
+      expect(connectTransport).toHaveBeenCalledOnce()
+      expect(ssh.getConnectionInfo().hostVerificationEvidence).toStrictEqual(second)
+      expect(ssh.getConnectionInfo().verifiedHostPublicKey).toBe(publicKey)
+    })
+
     it.each([
       "certificate-invalid",
       "certificate-key-mismatch",

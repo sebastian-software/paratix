@@ -49,10 +49,78 @@ an expired or otherwise invalid certificate stops the reconnect immediately. Aft
 file-certificate login, `rsync.sync()` passes the same expanded certificate path to OpenSSH as
 `CertificateFile`. Agent and password sessions do not set that option.
 
-User certificates authenticate you to the server. Host certificates and host-CA trust are
-unsupported; retain your verified host-key pin or `known_hosts` entry. See the
+User certificates authenticate you to the server. To verify the server through a host CA, use
+the separate [host-certificate trust policy](#trust-a-server-through-a-host-ca). See the
 [authentication reference](../../packages/paratix/llm-guide.md#ssh-authentication) and
 [certificate troubleshooting](./troubleshooting.md#a-user-certificate-fails).
+
+## Trust a server through a host CA
+
+Obtain the host CA's public key through an independent trusted channel and add an
+`@cert-authority` line to the controller's `~/.ssh/known_hosts`. For example, replace the
+placeholder below with the complete public-key data for your CA:
+
+```text
+@cert-authority app.example.com ssh-ed25519 <CA_PUBLIC_KEY_BASE64>
+```
+
+Use `ssh.strictHostKeyChecking: "yes"` (the default) or `"accept-new"` in your playbook.
+There is no separate host-certificate option. `ssh.certificate` remains a **user** authentication
+option. The server must present a host certificate signed by the trusted CA and containing the
+requested hostname or IP as a principal. No individual host-key entry is required.
+
+CA selection uses the existing Known-Hosts rules: host lists, wildcards, negation and hashed
+names are supported; a nonstandard port uses `[host]:port`, including bracketed IPv6. Principals
+match the requested hostname or IP without the port, with case-sensitive `*` and `?` patterns.
+An empty principal list is rejected. No host alias or DNS/reverse-DNS lookup substitutes a name.
+
+Only a matching CA with active Known-Hosts checking enables certificate algorithms, ahead of
+the unchanged raw-key algorithms. Supported certified keys are Ed25519, ECDSA P-256/P-384/P-521
+and RSA with SHA-2 negotiation; the CA and certified key may use different algorithms.
+Without a matching CA, scanning and the raw-key path stay unchanged. `"no"` enables no CA trust.
+
+The native binding validates the issuer signature, host type, controller-clock validity window
+(`valid_after <= now < valid_before`) and absence of critical options. Paratix then checks the
+principal, matching CA, revocations and **all** configured `expectedHostPublicKey` and
+`expectedHostFingerprint` pins. Pins and fingerprints refer to the certified raw public key
+(the leaf), never the certificate or CA. `@revoked` takes precedence over CA trust and pins:
+revoke a CA to reject its certificates, or a leaf to reject that key even after renewal.
+A revoked certificate entry also revokes its leaf; KRLs, serial numbers and key IDs are not
+managed. Uncritical extensions do not establish trust.
+
+A presented raw key still follows the existing pin, `"yes"` or `"accept-new"` policy, even when
+a CA line matches. A rejected certificate stops with `HostKeyVerificationError`; Paratix does
+not retry with a raw-key handshake. Certificates, certified leaves and CAs never create TOFU
+file or cache entries, including with `"accept-new"`. Raw-key TOFU is committed only after
+successful authentication.
+
+### Host trust for rsync
+
+`rsync.sync()` requires verification evidence from the successful controller connection.
+Immediately before **each** external transfer, Paratix reads a fresh, locked snapshot of the
+controller's Known-Hosts file. A revoked session CA or leaf, or a read failure, stops a
+certificate-based transfer. The CA path also passes every matching revocation to OpenSSH,
+including revoked alternative leaves. Changes after this snapshot are not monitored.
+
+- **Certificate without explicit pins:** rsync receives only the accepted CA, restricted to the
+  actual host and port, plus matching revocations. OpenSSH verifies its current certificate;
+  another non-revoked leaf signed by that CA is allowed.
+- **Certificate with either explicit pin:** rsync receives only the verified raw leaf and offers
+  only its raw-key algorithm (RSA uses SHA-2 aliases, never an added `ssh-rsa` alias). This keeps
+  the leaf pin but the new connection checks no certificate or current CA validity. A different
+  leaf or certificate-only server fails; there is no automatic retry or downgrade.
+
+Both paths use private temporary Known-Hosts files, isolated user/global trust files,
+`StrictHostKeyChecking=yes`, `KnownHostsCommand=none` and `VerifyHostKeyDNS=no`. These fixed
+options prevent inherited command or DNS trust from replacing the chosen anchor. Temporary
+files are cleaned up on success and failure. The module's `strictHostKeyChecking` option cannot
+weaken this policy.
+
+Host-certificate checks cover the initial key exchange only. Rechecking during rekey remains
+open in [#260](https://github.com/sebastian-software/paratix/issues/260). Host-certificate
+issuance and target-side Known-Hosts management are separate features. For connection evidence
+and the complete contract, see the [API reference](../../packages/paratix/llm-guide.md#host-certificate-trust)
+and [ADR 0008](../adr/0008-ssh-transport-russh-napi.md#host-keys-and-host-certificates).
 
 ## Configure server-side user certificates
 

@@ -120,6 +120,9 @@ function checkConnectArguments(options, verifyHost, defaultReadyTimeoutMs) {
   checkSecrets(record)
   checkAgent(record)
   checkSignal(record.signal)
+  if (record.hostCertificates !== undefined && typeof record.hostCertificates !== "boolean") {
+    throw new TypeError("hostCertificates must be a boolean")
+  }
   if (typeof verifyHost !== "function") throw new TypeError("verifyHost must be a function")
 }
 

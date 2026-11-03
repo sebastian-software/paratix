@@ -1552,6 +1552,15 @@ type ExpectedConnectionInfo = {
   certificatePath?: string
   configuredPorts: number[]
   host: string
+  hostVerificationEvidence?: (
+    { authorityPublicKey: string; kind: "certificate" } | { kind: "key" }
+  ) & {
+    explicitPins: boolean
+    host: string
+    port: number
+    publicKey: string
+    revocations: string[]
+  }
   port: number
   privateKeyPath?: string
   user: string
