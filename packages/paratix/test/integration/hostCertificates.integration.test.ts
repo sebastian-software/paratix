@@ -277,6 +277,115 @@ describe.skipIf(!dockerAvailable)(
       )
     })
 
+    it("reconnects with a rotated CA-only leaf and commits its verified evidence", async () => {
+      await configure()
+      await knownHosts()
+      const ssh = await connect()
+      const initial = ssh.getConnectionInfo()
+      await configure({ rotate: true })
+      const rotated = await hostPublicKey()
+      expect(rotated).not.toBe(initial.verifiedHostPublicKey)
+      await ssh.reconnect({ defaultTimeout: 5000 })
+      expect(ssh.getConnectionInfo().verifiedHostPublicKey).toBe(rotated)
+      expect(ssh.getConnectionInfo().hostVerificationEvidence).toStrictEqual({
+        ...initial.hostVerificationEvidence,
+        publicKey: rotated,
+      })
+      expect(await transfer(ssh)).toBeUndefined()
+      await configure({ rotate: true })
+      const next = await hostPublicKey()
+      expect(next).not.toBe(rotated)
+      await ssh.reconnect({ defaultTimeout: 5000 })
+      expect(ssh.getConnectionInfo().verifiedHostPublicKey).toBe(next)
+      expect(ssh.getConnectionInfo().hostVerificationEvidence).toMatchObject({ publicKey: next })
+    })
+
+    it.each([
+      { ca: "/etc/ssh/foreign_ca", label: "foreign CA" },
+      { label: "wrong principal", principal: "foreign.example" },
+      { label: "expired", validity: "-2d:-1d" },
+    ])("rejects a rotated $label leaf without replacing session evidence", async (parameters) => {
+      await configure()
+      await knownHosts()
+      const ssh = await connect()
+      const initial = ssh.getConnectionInfo()
+      await configure({ ...parameters, rotate: true })
+      await expect(ssh.reconnect({ defaultTimeout: 5000 })).rejects.toThrow(
+        /HOST KEY VERIFICATION FAILED/v
+      )
+      expect(ssh.getConnectionInfo().verifiedHostPublicKey).toBe(initial.verifiedHostPublicKey)
+      expect(ssh.getConnectionInfo().hostVerificationEvidence).toStrictEqual(
+        initial.hostVerificationEvidence
+      )
+    })
+
+    it("rejects a revoked rotated leaf without replacing session evidence", async () => {
+      await configure()
+      await knownHosts()
+      const ssh = await connect()
+      const initial = ssh.getConnectionInfo()
+      await configure({ rotate: true })
+      await knownHosts(
+        `@revoked [${fixture().host}]:${fixture().ed25519Port} ${await hostPublicKey()}\n`
+      )
+      await expect(ssh.reconnect({ defaultTimeout: 5000 })).rejects.toThrow(
+        /HOST KEY VERIFICATION FAILED/v
+      )
+      expect(ssh.getConnectionInfo().verifiedHostPublicKey).toBe(initial.verifiedHostPublicKey)
+      expect(ssh.getConnectionInfo().hostVerificationEvidence).toStrictEqual(
+        initial.hostVerificationEvidence
+      )
+    })
+
+    it.each(["explicit pin", "raw TOFU"] as const)(
+      "preserves the %s leaf binding through a certificate handshake",
+      async (policy) => {
+        await configure({ rawOnly: policy === "raw TOFU" })
+        await knownHosts()
+        const pin = { "explicit pin": await hostPublicKey(), "raw TOFU": undefined }[policy]
+        const ssh = await connect(pin, "accept-new")
+        await configure()
+        await ssh.reconnect({ defaultTimeout: 5000 })
+        const initial = ssh.getConnectionInfo()
+        await configure({ rotate: true })
+        await expect(ssh.reconnect({ defaultTimeout: 5000 })).rejects.toThrow(
+          /HOST KEY CHANGED|HOST KEY VERIFICATION FAILED/v
+        )
+        expect(ssh.getConnectionInfo().verifiedHostPublicKey).toBe(initial.verifiedHostPublicKey)
+        expect(ssh.getConnectionInfo().hostVerificationEvidence).toStrictEqual(
+          initial.hostVerificationEvidence
+        )
+      }
+    )
+
+    it("accepts a raw reconnect with the latest successfully certified leaf", async () => {
+      await configure()
+      await knownHosts()
+      const ssh = await connect(undefined, "accept-new")
+      await configure({ rotate: true })
+      await ssh.reconnect({ defaultTimeout: 5000 })
+      const certified = ssh.getConnectionInfo()
+      await configure({ rawOnly: true })
+      await ssh.reconnect({ defaultTimeout: 5000 })
+      expect(ssh.getConnectionInfo().verifiedHostPublicKey).toBe(certified.verifiedHostPublicKey)
+      expect(ssh.getConnectionInfo().hostVerificationEvidence?.kind).toBe("key")
+    })
+
+    it("rejects a raw reconnect with a different leaf after CA rotation", async () => {
+      await configure()
+      await knownHosts()
+      const ssh = await connect(undefined, "accept-new")
+      await configure({ rotate: true })
+      await ssh.reconnect({ defaultTimeout: 5000 })
+      const certified = ssh.getConnectionInfo()
+      await configure({ rawOnly: true, rotate: true })
+      await expect(ssh.reconnect({ defaultTimeout: 5000 })).rejects.toThrow(/HOST KEY CHANGED/v)
+      expect(ssh.getConnectionInfo().verifiedHostPublicKey).toBe(certified.verifiedHostPublicKey)
+      expect(ssh.getConnectionInfo().hostVerificationEvidence).toStrictEqual(
+        certified.hostVerificationEvidence
+      )
+    })
+
     it.each([
       { expected: { kind: "certificate" }, label: "valid", parameters: {} },
       {

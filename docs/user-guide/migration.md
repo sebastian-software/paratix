@@ -49,6 +49,12 @@ is not a leaf pin. Matching `@revoked` entries override CA trust and pins; revok
 revokes its leaf across renewals. Principal checks use the requested host/IP without its port,
 not an alias or DNS lookup. No KRL, serial-number or key-ID management is added.
 
+A CA-only controller session can reconnect with a different leaf after the new certificate
+passes all trust checks. Successful authentication replaces the verified leaf and evidence;
+failed attempts preserve both. Explicit leaf pins and any raw-key binding established earlier
+in the same connection instance still prevent leaf rotation. A switch to a raw-key handshake
+must match the latest verified leaf and also pass the normal raw-key policy.
+
 Custom consumers must keep `verifiedHostPublicKey` as a raw OpenSSH key: for a certificate session
 it contains the certified leaf, never the CA or certificate. Optional `hostVerificationEvidence`
 separately identifies the accepted path, signer, target, revocations and explicit pins. Each

@@ -97,6 +97,12 @@ not retry with a raw-key handshake. Certificates, certified leaves and CAs never
 file or cache entries, including with `"accept-new"`. Raw-key TOFU is committed only after
 successful authentication.
 
+A CA-only controller session can reconnect with a different leaf after the new certificate
+passes all trust checks. Successful authentication replaces the verified leaf and evidence;
+failed attempts preserve both. Explicit leaf pins and any raw-key binding established earlier
+in the same connection instance still prevent leaf rotation. A switch to a raw-key handshake
+must match the latest verified leaf and also pass the normal raw-key policy.
+
 ### Host trust for rsync
 
 `rsync.sync()` requires verification evidence from the successful controller connection.

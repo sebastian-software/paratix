@@ -1635,6 +1635,68 @@ describe("SshConnectionImpl", () => {
       expect(ssh.getConnectionInfo().verifiedHostPublicKey).toBe(publicKey)
     })
 
+    it("commits a rotated CA leaf only after authentication and preserves it after rejection", async () => {
+      const algorithm = Buffer.from("ssh-ed25519")
+      const length = Buffer.alloc(4)
+      length.writeUInt32BE(algorithm.length)
+      const leaf = (value: string): Buffer => Buffer.concat([length, algorithm, Buffer.from(value)])
+      const initialLeaf = leaf("initial")
+      const rotatedLeaf = leaf("rotated")
+      const rejectedLeaf = leaf("rejected")
+      const publicKey = (key: Buffer): string => `${algorithm.toString()} ${key.toString("base64")}`
+      const evidence = (key: Buffer) => ({
+        authorityPublicKey: "ssh-ed25519 authority",
+        explicitPins: false,
+        host: "1.2.3.4",
+        kind: "certificate" as const,
+        port: 22,
+        publicKey: publicKey(key),
+        revocations: [],
+      })
+      const { buildHostVerifier } = await import("../src/knownHosts.js")
+      vi.mocked(buildHostVerifier).mockImplementation(async () => {
+        let accepted: ReturnType<typeof evidence> | undefined
+        await Promise.resolve()
+        return {
+          evidence: () => accepted,
+          hostCertificates: true,
+          hostVerifier(key) {
+            accepted = evidence(key)
+            return true
+          },
+        }
+      })
+      connectTransport.mockImplementation(async (options) => {
+        await options.verifyHostKey(initialLeaf)
+      })
+      const ssh = makeSshInstance({ ports: [22] })
+      await ssh.connect()
+      connectTransport.mockImplementation(async (options) => {
+        await options.verifyHostKey(rotatedLeaf)
+        throw new HostKeyVerificationError("authentication failed after verification")
+      })
+      await expect(ssh.reconnect()).rejects.toThrow("authentication failed after verification")
+      expect(ssh.getConnectionInfo().verifiedHostPublicKey).toBe(publicKey(initialLeaf))
+      expect(ssh.getConnectionInfo().hostVerificationEvidence).toStrictEqual(evidence(initialLeaf))
+      connectTransport.mockImplementation(async (options) => {
+        await options.verifyHostKey(rotatedLeaf)
+      })
+      await ssh.reconnect()
+      expect(ssh.getConnectionInfo().verifiedHostPublicKey).toBe(publicKey(rotatedLeaf))
+      expect(ssh.getConnectionInfo().hostVerificationEvidence).toStrictEqual(evidence(rotatedLeaf))
+      vi.mocked(buildHostVerifier).mockResolvedValue({
+        hostVerifier() {
+          throw new HostKeyVerificationError("certificate rejected")
+        },
+      })
+      connectTransport.mockImplementation(async (options) => {
+        await options.verifyHostKey(rejectedLeaf)
+      })
+      await expect(ssh.reconnect()).rejects.toThrow("certificate rejected")
+      expect(ssh.getConnectionInfo().verifiedHostPublicKey).toBe(publicKey(rotatedLeaf))
+      expect(ssh.getConnectionInfo().hostVerificationEvidence).toStrictEqual(evidence(rotatedLeaf))
+    })
+
     it.each([
       "certificate-invalid",
       "certificate-key-mismatch",

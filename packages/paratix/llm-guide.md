@@ -230,6 +230,12 @@ CA line matches; that line alone is not a raw-key mismatch. A rejected certifica
 `HostKeyVerificationError` and stops reconnect, with no retry using a raw-key handshake.
 Diagnostics do not include unfiltered key IDs, principals or certificate blobs.
 
+A CA-only controller session can reconnect with a different leaf after the new certificate
+passes all trust checks. Successful authentication replaces the verified leaf and evidence;
+failed attempts preserve both. Explicit leaf pins and any raw-key binding established earlier
+in the same connection instance still prevent leaf rotation. A switch to a raw-key handshake
+must match the latest verified leaf and also pass the normal raw-key policy.
+
 Certificates, certified leaves and CAs never create TOFU file or cache entries, whether accepted
 or rejected. Raw-key `"accept-new"` persists only after successful authentication as before.
 Successful handshakes replace the complete session verification evidence, including the
