@@ -6,7 +6,14 @@ import { shellQuote, validateMktempPath } from "../ssh.js"
 import { type Module, type ModuleResult, NEEDS_APPLY, type SshConnection } from "../types.js"
 import { assertValidUserName } from "./posixNames.js"
 import { applyAuthorizedKeys, checkAuthorizedKeys } from "./sshAuthorizedKeysHelpers.js"
+import { authorizedPrincipals } from "./sshAuthorizedPrincipals.js"
+import { trustedUserCa } from "./sshCertificateModules.js"
 import { assertAuthorizedKeyValue } from "./sshPublicKeyValidation.js"
+
+export type {
+  AuthorizedPrincipalsOptions,
+  TrustedUserCaOptions,
+} from "./sshCertificateValidation.js"
 
 type KnownHostsOptions = {
   expectedFingerprint?: string
@@ -940,7 +947,20 @@ export const ssh = {
       name: `ssh.authorizedKeys: ${user} (${state})`,
     }
   },
-
+  /**
+   * Manage the principals file used for SSH user-certificate authorization.
+   *
+   * The fixed global CA path and the `AuthorizedPrincipalsFile` template are
+   * shared with {@link trustedUserCa}; use the same `principalsFile` value in
+   * both calls when overriding the default. Apply principal files before
+   * enabling CA trust, and remove CA trust before removing their files.
+   *
+   * @param user - The existing Unix login user whose expanded principals file is managed.
+   * @param principals - Principal names; duplicates are normalized, and an empty array creates an empty file.
+   * @param options - Optional template and state settings. State defaults to `"present"`.
+   * @returns A module that manages only this user's expanded principals file.
+   */
+  authorizedPrincipals,
   /**
    * Ensure a host is present in (or absent from) the connecting user's `~/.ssh/known_hosts`.
    *
@@ -1000,4 +1020,20 @@ export const ssh = {
       name: `ssh.knownHosts: ${host} (${state})`,
     }
   },
+
+  /**
+   * Manage the host-wide SSH user-certificate CA trust configuration.
+   *
+   * `publicKey` accepts one or more complete OpenSSH public-key lines and is
+   * required for `state: "present"`; `state: "absent"` may omit it. The CA is
+   * always stored at `/etc/ssh/trusted_user_ca_keys`, while the principals
+   * template defaults to `/etc/ssh/auth_principals/%u` and must match the value
+   * used by {@link authorizedPrincipals}. `revokedKeys` is unmanaged when
+   * omitted; when supplied, a missing target is initialized as an empty text
+   * file and existing text/KRL content is preserved.
+   *
+   * @param options - The discriminated CA, principals-template, revocation, and state settings.
+   * @returns A module that manages the CA file and its global sshd directives.
+   */
+  trustedUserCa,
 }
