@@ -4,6 +4,11 @@
   "import": ["@cspell/dict-de-de/cspell-ext.json"],
   "ignorePaths": ["packages/ssh-native/target/**", "packages/ssh-native/npm/**"],
   "words": [
+    "Smallstep",
+    "ASKPASS",
+    "STEPPATH",
+    "SSHCA",
+    "workdir",
     "IMODE",
     "ISREG",
     "TIOCSCTTY",

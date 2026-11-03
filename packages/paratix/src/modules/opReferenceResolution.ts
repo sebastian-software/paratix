@@ -67,15 +67,16 @@ function markedSourceKind(reference: string): "code" | "seed" {
  * Prepare a reference without reading a secret or rewriting the CLI argument.
  * @param name - Logical environment name.
  * @param reference - Unchanged provider reference.
- * @param markedTotp - Whether the caller explicitly requested per-access TOTP.
+ * @param mode - Explicit TOTP mode, or ordinary-only for a deferred credential.
  * @returns A provider request for the shared module lifecycle.
  */
 export function prepareOpRequest(
   name: string,
   reference: string,
-  markedTotp = false
+  mode: "ordinary-only" | boolean = false
 ): SecretRequest {
   validateReferences({ [name]: reference })
+  const markedTotp = mode === true
   if (markedTotp && markedSourceKind(reference) === "code") {
     return {
       name,
@@ -89,7 +90,8 @@ export function prepareOpRequest(
     name,
     reference,
   }
-  if (!markedTotp && !OTP_SUFFIX_PATTERN.test(reference)) return request
+  if (mode === "ordinary-only" || (!markedTotp && !OTP_SUFFIX_PATTERN.test(reference)))
+    return request
   return {
     ...request,
     prepare: (value) => value.trim(),

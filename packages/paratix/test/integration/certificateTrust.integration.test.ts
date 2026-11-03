@@ -5,6 +5,7 @@ import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } 
 
 import { ssh } from "../../src/modules/ssh.js"
 import { type Module, type ModuleResult, NEEDS_APPLY } from "../../src/types.js"
+import { sshdCommitBody } from "../helpers/sshdCommitBody.js"
 import { createTrustFixture, trustCommand, type TrustFixture } from "./certificateTrustHarness.js"
 
 const available = spawnSync("docker", ["info"], { stdio: "ignore", timeout: 30_000 }).status === 0
@@ -55,7 +56,7 @@ function injectCommandFault(command: RegExp, stderr: string): () => boolean {
   const originalExec = target().ssh.exec.bind(target().ssh)
   let injected = false
   vi.spyOn(target().ssh, "exec").mockImplementation(async (value, options) => {
-    if (!injected && command.test(value)) {
+    if (!injected && command.test(sshdCommitBody(value))) {
       injected = true
       return { code: 1, stderr, stdout: "" }
     }
@@ -86,14 +87,18 @@ function observeCandidatePreflight() {
   const validations: Array<{ code: number; command: string; stdout: string }> = []
   const mutations: string[] = []
   const originalExec = target().ssh.exec.bind(target().ssh)
-  const writes = vi.spyOn(target().ssh, "writeFile")
+  const writes: string[] = []
   vi.spyOn(target().ssh, "exec").mockImplementation(async (command, options) => {
+    const body = sshdCommitBody(command)
+    const writePath = /mv -T -- "\$paratix_write" '(?<path>[^']+)'/v.exec(body)?.groups?.path
+    if (writePath !== undefined) writes.push(writePath)
+    if (writePath?.startsWith("/etc/ssh/") === true) mutations.push(body)
     if (
-      /^(?:mv|cp|rm|mkdir|rmdir|chown|chmod|umask|mktemp -d) /v.test(command) &&
+      /^(?:mv|cp|rm|mkdir|rmdir|chown|chmod|umask|mktemp -d) /v.test(body) &&
       command.includes("/etc/ssh")
     )
       mutations.push(command)
-    const candidate = /^sshd -[tT] -f /v.test(command)
+    const candidate = /^sshd -[tT] -f /v.test(body)
     if (candidate) {
       // Observe the live daemon before forwarding each real candidate check.
       // A later rollback cannot hide even a temporary trust-file replacement.
@@ -108,7 +113,7 @@ function observeCandidatePreflight() {
       })
     }
     const response = await originalExec(command, options)
-    if (candidate) validations.push({ code: response.code, command, stdout: response.stdout })
+    if (candidate) validations.push({ code: response.code, command: body, stdout: response.stdout })
     return response
   })
   return { mutations, observations, validations, writes }
@@ -451,8 +456,8 @@ describe.skipIf(!available)("declarative OpenSSH user CA trust", { concurrent: f
     expect(validations[1]?.command).toMatch(/^sshd -T -f /v)
     expect(validations[1]?.stdout).toContain("authorizedprincipalsfile /etc/ssh/auth_principals/%u")
     expect(mutations).toStrictEqual([])
-    expect(writes.mock.calls.map(([path]) => path)).toHaveLength(1)
-    expect(writes.mock.calls[0]?.[0]).toMatch(/^\/tmp\/paratix-sshd-dry-run\./v)
+    expect(writes).toHaveLength(1)
+    expect(writes[0]).toMatch(/^\/tmp\/paratix-sshd-dry-run\./v)
     expect(await snapshot()).toBe(before)
     expect(await managedTrustMetadata()).toBe(beforeMetadata)
     await certificateLogin(true)

@@ -19,7 +19,7 @@ const MAX_INCLUDE_DEPTH = 32
 
 type Scan = { caFiles: string[]; files: string[]; match: boolean; revocations: string[] }
 
-function includePatterns(value: string): string[] {
+export function includePatterns(value: string): string[] {
   const tokens = value.match(/"[^"\r\n]*"|'[^'\r\n]*'|\S+/gv) ?? []
   return tokens.map((token) => {
     const path = token.replaceAll(/^["']|["']$/gv, "")
@@ -34,7 +34,7 @@ function includePatterns(value: string): string[] {
   })
 }
 
-async function expandInclude(ssh: SshConnection, pattern: string): Promise<string[]> {
+export async function expandInclude(ssh: SshConnection, pattern: string): Promise<string[]> {
   // The alphabet was validated above. Quoting individual literal path
   // characters preserves only the glob operators for the remote shell.
   const output = await certificateCommand(

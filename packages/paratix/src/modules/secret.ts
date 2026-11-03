@@ -1,6 +1,7 @@
 import type { Module } from "../types.js"
 
 import { ENVIRONMENT_FORBIDDEN_KEYS } from "../environment.js"
+import { createSecretHandle, type SecretHandle } from "./deferredSecret.js"
 import {
   createManualRequestFactory,
   type ManualSecretProviderOptions,
@@ -8,6 +9,8 @@ import {
 import { opFailurePolicy } from "./opFailureMasking.js"
 import { orderOpRequests, prepareOpRequest } from "./opReferenceResolution.js"
 import { createSecretModule, type SecretRequest } from "./secretResolution.js"
+
+export type { SecretHandle } from "./deferredSecret.js"
 
 export type { ManualSecretProviderOptions } from "./manualSecretProvider.js"
 
@@ -19,6 +22,16 @@ export type SecretProvider = "1password" | "manual"
 /** Provider-independent interface suitable for recipe dependency injection. */
 export type SecretResolver = {
   resolve: (bindings: Readonly<Record<string, SecretInput>>) => Module
+}
+
+/** Additive deferred capability; existing injectable SecretResolver implementations stay valid. */
+export type DeferredSecretResolver = SecretResolver & {
+  /**
+   * Create an opaque, provider-bound handle for a secret used by a controller signer.
+   * Construction performs no provider access, prewarm registration, or environment binding;
+   * resolution occurs only when a real signing operation needs the credential.
+   */
+  deferred: (reference: string) => SecretHandle
 }
 
 type Binding = { markedTotp: boolean; name: string; reference: string }
@@ -71,15 +84,32 @@ function copyLabels(options: unknown): ReadonlyMap<string, string> {
   return labels
 }
 
-function provider(name: "manual", options?: ManualSecretProviderOptions): SecretResolver
-function provider(name: SecretProvider): SecretResolver
-function provider(name: unknown, options?: ManualSecretProviderOptions): SecretResolver {
+function provider(name: "manual", options?: ManualSecretProviderOptions): DeferredSecretResolver
+function provider(name: SecretProvider): DeferredSecretResolver
+function provider(name: unknown, options?: ManualSecretProviderOptions): DeferredSecretResolver {
   if (name !== "manual" && name !== "1password") throw new TypeError("Unknown secret provider")
   if (name === "1password" && options !== undefined) {
     throw new TypeError("1Password secret provider does not accept options")
   }
   const prepareManual = createManualRequestFactory(copyLabels(options))
+  const prepareDeferredManual = createManualRequestFactory(new Map())
+  const deferredKeys = new Map<string, symbol>()
   return Object.freeze({
+    deferred(reference: string): SecretHandle {
+      if (typeof reference !== "string" || reference.length === 0) {
+        throw new TypeError("Deferred secret reference must be a non-empty string")
+      }
+      let key = deferredKeys.get(reference)
+      if (key === undefined) {
+        key = Symbol("provider-bound deferred secret")
+        deferredKeys.set(reference, key)
+      }
+      const request =
+        name === "manual"
+          ? prepareDeferredManual("SSH certificate signer", reference, false)
+          : prepareOpRequest("SSH certificate signer", reference, "ordinary-only")
+      return createSecretHandle(request, key)
+    },
     resolve(bindings: Readonly<Record<string, SecretInput>>): Module {
       const copied = copyBindings(bindings)
       const requests: SecretRequest[] = copied.map(
@@ -100,6 +130,7 @@ function provider(name: unknown, options?: ManualSecretProviderOptions): SecretR
 
 /** Built-in facade for local manual and 1Password secret resolution. */
 export const secret = Object.freeze({
+  /** Select a provider; use its deferred handle only for signer credentials needed at apply time. */
   provider,
   totp(reference: string): SecretTotpInput {
     if (typeof reference !== "string") throw new TypeError("TOTP reference must be a string")

@@ -24,7 +24,9 @@ export { rsync } from "./rsync.js"
 export { script } from "./script.js"
 export { secret } from "./secret.js"
 export type {
+  DeferredSecretResolver,
   ManualSecretProviderOptions,
+  SecretHandle,
   SecretInput,
   SecretProvider,
   SecretResolver,
@@ -32,7 +34,15 @@ export type {
 } from "./secret.js"
 export { service } from "./service.js"
 export { ssh } from "./ssh.js"
-export type { AuthorizedPrincipalsOptions, TrustedUserCaOptions } from "./ssh.js"
+export type {
+  AuthorizedPrincipalsOptions,
+  HostCertificateOptions,
+  HostCertificateRequest,
+  HostCertificateSigner,
+  LocalHostCertificateSignerOptions,
+  StepCaHostCertificateSignerOptions,
+  TrustedUserCaOptions,
+} from "./ssh.js"
 export { sshd } from "./sshd.js"
 export { swap } from "./swap.js"
 export { sysctl } from "./sysctl.js"

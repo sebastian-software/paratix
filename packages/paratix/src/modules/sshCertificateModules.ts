@@ -193,7 +193,8 @@ async function runCa(
       dryRun: mode !== "apply",
       name: "ssh.trustedUserCa",
       async section(transaction) {
-        const prepared = await prepareCa(ssh, parameters)
+        const connection = transaction.connection
+        const prepared = await prepareCa(connection, parameters)
         const converged = caConverged(prepared, parameters.state)
         if (mode === "check") {
           if (!converged) return { status: "changed" }
@@ -205,7 +206,7 @@ async function runCa(
           if (!prepared.configChanged) await transaction.readEffective(prepared.expected)
           return { status: converged ? "ok" : "changed" }
         }
-        return applyCa(ssh, transaction, { prepared, state: parameters.state })
+        return applyCa(connection, transaction, { prepared, state: parameters.state })
       },
     })
   } catch (error) {
