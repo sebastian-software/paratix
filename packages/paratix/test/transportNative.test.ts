@@ -27,6 +27,9 @@ import { loadNativeBinding } from "../src/nativeBinding.js"
 import { TransportError } from "../src/transport.js"
 import { createNativeTransport, nativeErrorCode, toTransportError } from "../src/transportNative.js"
 
+// Capture the native scheduler before Vitest can reuse an existing spy on it.
+const scheduleNextTick = process.nextTick.bind(process)
+
 // Fake of the native module: no test loads the real binary.
 function deferred<T>() {
   let resolve!: (value: T) => void
@@ -335,9 +338,8 @@ async function neverAnsweringVerifier(): Promise<boolean> {
 async function captureRethrown(expected: readonly unknown[]): Promise<unknown[]> {
   const captured = deferred<unknown[]>()
   const rethrown: unknown[] = []
-  const nextTick = process.nextTick.bind(process)
   vi.spyOn(process, "nextTick").mockImplementation((callback, ...parameters) => {
-    nextTick(() => {
+    scheduleNextTick(() => {
       try {
         ;(callback as (...values: unknown[]) => void)(...parameters)
       } catch (error) {
