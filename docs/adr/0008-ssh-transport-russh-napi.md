@@ -35,7 +35,7 @@ password/keyboard-interactive login, opt-in agent forwarding, a host verifier ba
 cleanup, and a host-key scan without login. It does not use keepalive, custom algorithm lists,
 port forwarding, `shell` or exec environment variables.
 
-The Rust crate `russh` (warp-tech/russh, 0.65.0) supports user certificates from file and agent,
+The Rust crate `russh` (warp-tech/russh, 0.65.1) supports user certificates from file and agent,
 host-certificate negotiation, exec, keyboard-interactive and, through `russh-sftp`, SFTP. Several
 points were unverified at planning time (agent forwarding, `russh-sftp` mode and backpressure,
 certificate identities from the agent, interop with `ssh2`'s `Server`, key formats, cross-builds).
@@ -366,8 +366,8 @@ Validation is split across the native and controller boundaries:
 - **Rust** validates the CA signature, type `host`, exact native-integer validity interval
   `valid_after <= now < valid_before` and absence of critical options. It uses the
   `russh::keys` re-export, with no separate `ssh-key` dependency. This is necessary because the
-  pinned russh does not verify the CA itself (`russh-0.65.0/src/client/kex.rs:288-305`) and a
-  certificate replaces its raw-key callback (`client/mod.rs:2063-2077`). Numeric validity fields
+  pinned russh does not verify the CA itself (`russh-0.65.1/src/client/kex.rs:315-332`) and a
+  certificate replaces its raw-key callback (`client/mod.rs:2060-2073`). Numeric validity fields
   exposed to JavaScript are informational; the native decision owns integer time checks.
 - **TypeScript** requires consistent structured certificate metadata, a matching trusted CA,
   a matching nonempty principal list, no applicable revocation and all configured pins.
@@ -434,7 +434,7 @@ and with it sudo stdin, is still a plain `Vec` (see limitations).
 Limits inside russh and ssh-key:
 
 - `decode_secret_key` keeps non-zeroized copies: a base64 `String` and a DER `Vec`
-  (`russh-0.65.0/src/keys/format/mod.rs:51,97`).
+  (`russh-0.65.1/src/keys/format/mod.rs:51,97`).
 - The parsed key lives in an `Arc<PrivateKey>` inside `auth_method`; ssh-key zeroizes it on drop.
 - Password copies are zeroized (`auth.rs:307-313`, `CryptoVec`).
 - Keyboard-interactive answers (`Msg::AuthInfoResponse`, `Vec<String>`) are not zeroized.
