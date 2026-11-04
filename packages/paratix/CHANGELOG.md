@@ -1,5 +1,16 @@
 # Changelog
 
+## [0.25.0](https://github.com/sebastian-software/paratix/compare/paratix-v0.24.0...paratix-v0.25.0) (2026-11-04)
+
+
+### Features
+
+* **ssh:** add host certificate issuance and renewal ([#278](https://github.com/sebastian-software/paratix/issues/278)) ([04adcc5](https://github.com/sebastian-software/paratix/commit/04adcc5afd24dd10df7ef8cf667f8c6fb306307d))
+* **ssh:** manage per-user known-hosts certificate authorities ([#276](https://github.com/sebastian-software/paratix/issues/276)) ([6e45c51](https://github.com/sebastian-software/paratix/commit/6e45c51a5cb69ce51c425c77adf4869d88b8701a))
+* **ssh:** manage server user certificate trust ([d1223c0](https://github.com/sebastian-software/paratix/commit/d1223c008236f501763379bc54d706791902174e))
+* **ssh:** support OpenSSH user certificate files ([1737002](https://github.com/sebastian-software/paratix/commit/1737002a395220b22b083a06f0444f11af486b9e))
+* **ssh:** trust controller host certificates from known_hosts ([718d0de](https://github.com/sebastian-software/paratix/commit/718d0de2a466853da7526c30d673133b245aa87c))
+
 ## [0.24.0](https://github.com/sebastian-software/paratix/compare/paratix-v0.23.1...paratix-v0.24.0) (2026-11-01)
 
 

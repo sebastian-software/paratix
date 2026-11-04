@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.25.0](https://github.com/sebastian-software/paratix/compare/create-paratix-v0.24.0...create-paratix-v0.25.0) (2026-11-04)
+
+
+### Features
+
+* **ssh:** trust controller host certificates from known_hosts ([718d0de](https://github.com/sebastian-software/paratix/commit/718d0de2a466853da7526c30d673133b245aa87c))
+
 ## [0.24.0](https://github.com/sebastian-software/paratix/compare/create-paratix-v0.23.1...create-paratix-v0.24.0) (2026-11-01)
 
 
