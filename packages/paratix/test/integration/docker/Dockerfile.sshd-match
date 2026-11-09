@@ -1,0 +1,34 @@
+FROM debian:bookworm-slim
+
+ARG CLIENT_PUBLIC_KEY
+ARG DEPLOY_PUBLIC_KEY
+
+# root and deploy are Paratix connection users (deploy via passwordless sudo);
+# ops-ro is the restricted login whose key the tests manage; other is an
+# unmatched account for sshd -T -C comparisons. ops groups deploy and ops-ro.
+RUN apt-get update \
+  && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends openssh-client openssh-server sudo \
+  && rm -rf /var/lib/apt/lists/* \
+  && groupadd ops \
+  && useradd --create-home --shell /bin/sh --groups ops deploy \
+  && useradd --create-home --shell /bin/sh --groups ops ops-ro \
+  && useradd --create-home --shell /bin/sh other \
+  && passwd -d root && passwd -d deploy && passwd -d ops-ro && passwd -d other \
+  && echo 'deploy ALL=(ALL) NOPASSWD:ALL' > /etc/sudoers.d/deploy \
+  && chmod 0440 /etc/sudoers.d/deploy \
+  && mkdir -p /root/.ssh /home/deploy/.ssh /run/sshd /etc/ssh/sshd_config.d \
+  && printf '%s\n' "$CLIENT_PUBLIC_KEY" > /root/.ssh/authorized_keys \
+  && printf '%s\n' "$DEPLOY_PUBLIC_KEY" > /home/deploy/.ssh/authorized_keys \
+  && chown -R deploy:deploy /home/deploy/.ssh \
+  && chmod 0700 /root/.ssh /home/deploy/.ssh \
+  && chmod 0600 /root/.ssh/authorized_keys /home/deploy/.ssh/authorized_keys \
+  && rm -f /etc/ssh/ssh_host_* \
+  && ssh-keygen -A
+
+COPY test/integration/docker/entrypoint-sshd-match.sh /usr/local/bin/entrypoint-sshd-match
+COPY test/integration/docker/systemctl-certificate-trust.sh /usr/local/bin/systemctl
+COPY test/integration/docker/ops-ro-shell.sh /usr/local/bin/ops-ro-shell
+RUN chmod 0755 /usr/local/bin/entrypoint-sshd-match /usr/local/bin/systemctl /usr/local/bin/ops-ro-shell
+
+EXPOSE 22
+CMD ["/usr/local/bin/entrypoint-sshd-match"]

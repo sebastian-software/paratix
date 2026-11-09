@@ -22,6 +22,13 @@ import {
   findNonMatchingEffectiveSshdSetting,
   sshdSettingMatchesEverywhere,
 } from "./sshdConfigHelpers.js"
+import { sshdConnectionSpecArgument } from "./sshdIncludeStaging.js"
+import {
+  type SshdMatchCriteria,
+  type SshdMatchDirectives,
+  sshdMatchModule,
+  type SshdMatchOptions,
+} from "./sshdMatch.js"
 import {
   LIVE_PORT_PROBE_HARD_ERROR_KIND,
   liveSshdPortMatches as livePortMatchesProbe,
@@ -1987,10 +1994,22 @@ function rejectWhenTargetPortIsNotConfigured(
   )
 }
 
+export type { SshdMatchCriteria, SshdMatchDirectives, SshdMatchOptions } from "./sshdMatch.js"
+
 /** Internal shared controls; callers already own their file snapshot/rollback. */
 export type SshdConfigTransaction = {
   connection: SshConnection
+  /**
+   * Prepare `/run/sshd` for staged `sshd -t`/`sshd -T` runs. Apply creates a
+   * missing directory; a dry-run never does and reports `false` instead.
+   */
+  preparePrivilegeSeparation: () => Promise<boolean>
   readEffective: (settings: Record<string, string>) => Promise<void>
+  /**
+   * Read the live effective configuration, optionally for one connection user
+   * (`sshd -T -C user=<user>,host=paratix-verify.invalid,addr=192.0.2.1`).
+   */
+  readEffectiveOutput: (user?: string) => Promise<string>
   reload: () => Promise<void>
   reloadOnly: () => Promise<void>
   requireReloadOnly: () => Promise<void>
@@ -2050,6 +2069,23 @@ async function validateCertificateCandidate(
   }
 }
 
+async function readLiveEffectiveSshdConfig(ssh: SshConnection, user?: string): Promise<string> {
+  // A check/dry-run may never create /run/sshd as a side effect.
+  if (!(await privilegeSeparationDirectoryExists(ssh)))
+    throw new Error("/run/sshd is missing; cannot verify sshd -T")
+  const command =
+    user === undefined
+      ? SSHD_EFFECTIVE_CONFIG_COMMAND
+      : `${SSHD_EFFECTIVE_CONFIG_COMMAND} ${sshdConnectionSpecArgument(user)}`
+  const result = await ssh.exec(command, { ignoreExitCode: true, silent: true })
+  if (result.code !== 0)
+    throw (
+      failedCommand("sshd -T verification failed", result).error ??
+      new Error("sshd -T verification failed")
+    )
+  return result.stdout
+}
+
 /**
  * Shares the existing sshd mutex, validation, effective-value and reload mechanics.
  *
@@ -2079,20 +2115,18 @@ export async function withSshdConfigTransaction(
     }
     const transaction: SshdConfigTransaction = {
       connection,
+      async preparePrivilegeSeparation() {
+        if (parameters.dryRun) return privilegeSeparationDirectoryExists(connection)
+        const failure = await ensurePrivilegeSeparationDirectory(connection)
+        if (failure !== null)
+          throw failure.error ?? new Error("sshd privilege separation directory creation failed")
+        return true
+      },
       async readEffective(settings) {
-        // A check/dry-run may never create /run/sshd as a side effect.
-        if (!(await privilegeSeparationDirectoryExists(connection)))
-          throw new Error("/run/sshd is missing; cannot verify sshd -T")
-        const result = await connection.exec(SSHD_EFFECTIVE_CONFIG_COMMAND, {
-          ignoreExitCode: true,
-          silent: true,
-        })
-        if (result.code !== 0)
-          throw (
-            failedCommand("sshd -T verification failed", result).error ??
-            new Error("sshd -T verification failed")
-          )
-        assertCertificateEffectiveSettings(result.stdout, settings)
+        assertCertificateEffectiveSettings(await transaction.readEffectiveOutput(), settings)
+      },
+      async readEffectiveOutput(user) {
+        return readLiveEffectiveSshdConfig(connection, user)
       },
       async reload() {
         const result = await reloadSshd(connection, await resolveUnit())
@@ -2237,6 +2271,50 @@ export const sshd = {
       },
       name: `sshd.config: ${settingNames}`,
     }
+  },
+
+  /**
+   * Manage one declarative `Match` block as the Paratix-owned drop-in
+   * `/etc/ssh/sshd_config.d/<name>.conf` (root:root 0644). The first line is the
+   * marker `# Managed by Paratix sshd.match: <name>`; an existing file without it
+   * is never overwritten or removed. `/etc/ssh/sshd_config` must load
+   * `Include /etc/ssh/sshd_config.d/*.conf` at top level before its first
+   * `Match`; Paratix never adds that Include.
+   *
+   * Criteria are literal names only (`[a-z_][a-z0-9_-]*`, no patterns); sshd
+   * combines `user` and `group` with AND. Directives come from a fixed allowlist
+   * and must use the canonical lowercase value printed by `sshd -T` (e.g. `no`,
+   * not `No`); weakening values are allowed. Directives owned by other modules
+   * (`TrustedUserCAKeys`, `AuthorizedPrincipalsFile`, `RevokedKeys`,
+   * `HostCertificate`, `Port`) are rejected.
+   *
+   * Before any change the module refuses criteria that match the user of the
+   * running Paratix connection unless `allowConnectionUser: true`. `present`
+   * validates the complete staged Include tree with `sshd -t` and checks every
+   * value with `sshd -T -C user=<verifyUser>,host=paratix-verify.invalid,addr=192.0.2.1`
+   * before publishing, checks the live configuration again and then performs a
+   * pure reload (never a restart); any failure restores the previous drop-in.
+   * The effect check covers only the verify user and that placeholder address.
+   * `absent` validates the tree without the drop-in, removes it and reloads.
+   *
+   * @param name - Drop-in name matching `[a-z0-9][a-z0-9_-]{0,63}`.
+   * @param criteria - `{ user?, group? }`, each a name or a list of names.
+   * @param directives - Allowlisted directives (e.g. `{ PermitTTY: "no" }`).
+   * @param options - `state` (default `"present"`), `verifyUser` (defaults to the
+   *   first user; required with `group`, and must be listed in `user` when both
+   *   are given) and `allowConnectionUser` (default `false`).
+   * @returns A Module named `sshd.match: <name> (<state>)`.
+   * @example
+   * sshd.match("ops-ro", { user: "ops-ro" }, { DisableForwarding: "yes", PermitTTY: "no" })
+   */
+  // eslint-disable-next-line max-params -- the public signature mirrors sshd's Match block shape (name, criteria, directives, options)
+  match(
+    name: string,
+    criteria: SshdMatchCriteria,
+    directives: SshdMatchDirectives,
+    options: SshdMatchOptions = {}
+  ): Module {
+    return sshdMatchModule(name, criteria, { directives, options })
   },
 
   /**
