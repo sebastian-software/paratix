@@ -231,9 +231,10 @@ See the upstream [sshd test modes](https://man.openbsd.org/sshd) and
 Use these guides alongside the package READMEs:
 
 1. [Host certificates](./host-certificates.md) explains controller-side signing, renewal during runs, and recovery after interruption.
-2. [Troubleshooting](./troubleshooting.md) explains common local runtime, certificate, host-key, and reconnect failures.
-3. [Choosing an automation tool](./comparison.md) compares Paratix with Ansible and pyinfra.
-4. [Migration notes](./migration.md) lists upgrades that require action in an existing Paratix project.
+2. [Restricted accounts](./restricted-accounts.md) shows how to create a read-only diagnostic login with a forced command, restricted key options, and a managed sshd `Match` block.
+3. [Troubleshooting](./troubleshooting.md) explains common local runtime, certificate, host-key, and reconnect failures.
+4. [Choosing an automation tool](./comparison.md) compares Paratix with Ansible and pyinfra.
+5. [Migration notes](./migration.md) lists upgrades that require action in an existing Paratix project.
 
 For the complete TypeScript API and built-in module reference, see the
 [TypeScript API and Module Reference](../../packages/paratix/llm-guide.md).

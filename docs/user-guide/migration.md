@@ -250,6 +250,14 @@ permission to break a living lock. The existing
 [user-CA recovery procedure](./README.md#recover-after-an-interrupted-ca-trust-update) still applies
 to a separate interrupted user-CA update.
 
+### `ssh.authorizedKeys` identifies keys by blob and supports options
+
+**Before:** `ssh.authorizedKeys` matched the exact line with `grep -xF`. `present` appended the line when that exact text was missing, and `absent` removed only that exact line. A key that existed with a different comment, or with options in front, counted as a different entry.
+
+**Now:** The entry is identified by its key blob (algorithm plus base64 key data). `present` keeps exactly one line per blob: the first existing line is replaced in place, later lines of the same blob are removed, and a changed trailing comment counts as a change. `absent` removes every line of the blob, regardless of its options or comment. Structured `options` (for example `restrict` and `command`) are new and additive. Without `options`, `present` fails when an existing line of the same key carries options, for example a hand-restricted line next to the managed one, instead of stripping them. A line that cannot be parsed but contains the key blob as a token now makes both states fail, because sshd may still honor it. The same blob under another key type also fails. Lines with the `cert-authority` option are never treated as the managed key and stay unchanged in both states. Settings other than `options` and `state` now throw at construction instead of being ignored.
+
+**Upgrade:** Review recipes that declare one key more than once, or that relied on `absent` leaving lines with other options or comments in place. If a recipe now fails with "already contains this key with options", either declare the intended options with `options: { … }`, or pass `options: {}` to remove them deliberately. Fix or remove unparseable lines that mention the key manually, then rerun. See the [restricted-accounts recipe](./restricted-accounts.md) and the [`ssh.authorizedKeys` reference](../../packages/paratix/llm-guide.md#sshauthorizedkeys).
+
 ## Toward 1.0
 
 Confirmed unreleased breaking changes will be collected above. When the actual `paratix` or `create-paratix` package version 1.0.0 is prepared, those entries will move into a short versioned section with concrete upgrade steps. No future changes are assumed here.
