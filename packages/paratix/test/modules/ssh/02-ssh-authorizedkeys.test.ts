@@ -1,5 +1,6 @@
 /* oxlint-disable no-unused-vars -- shared fixtures are duplicated by the mechanical test split */
 
+import { createHash } from "node:crypto"
 import { describe, expect, it } from "vitest"
 
 import { ssh } from "../../../src/modules/ssh.js"
@@ -12,6 +13,12 @@ const createMockSsh: typeof createBaseMockSsh = (responses, options) =>
   createBaseMockSsh(responses, options)
 
 const successfulSshApplyOptions: MockSshOptions = {
+  allowWrites: [
+    {
+      options: { mode: "0600" },
+      remotePath: /^\/tmp\/paratix-authorized-keys-payload\.[^\/]+\/payload\.base64$/v,
+    },
+  ],
   responseStubs: [
     { command: "mkdir -p ~/.ssh && chmod 700 ~/.ssh", result: { code: 0 } },
     { command: /^ssh-keygen -F '[^']+'$/v, result: { code: 1 } },
@@ -25,22 +32,41 @@ const successfulSshApplyOptions: MockSshOptions = {
       // probe now run in a single `set -e` pipeline. The previous two
       // separate stub entries are replaced by the fused pattern below.
       command:
-        /^set -e\n\[ ! -L '[^']+\/\.ssh' \] \|\| \{ echo '\.ssh must not be a symlink' >&2; exit 1; \}\nif \[ -e '[^']+\/\.ssh' \]; then\n {2}\[ -d '[^']+\/\.ssh' \] \|\| \{ echo '\.ssh must be a directory' >&2; exit 1; \}\nelse\n {2}mkdir -p '[^']+\/\.ssh'\nfi\n\[ -d '[^']+\/\.ssh' \] && \[ ! -L '[^']+\/\.ssh' \] \|\| \{ echo '\.ssh must be a real directory' >&2; exit 1; \}\nssh_directory_identity=\$\(stat -c '%d:%i' '[^']+\/\.ssh'\) \|\| exit \$\?\nchmod 700 '[^']+\/\.ssh' && chown '[^']+':'[^']+' '[^']+\/\.ssh'\n\[ ! -L '[^']+\/\.ssh' \] && \[ -d '[^']+\/\.ssh' \] \|\| \{ echo '\.ssh must be a real directory' >&2; exit 1; \}\npost_ssh_directory_identity=\$\(stat -c '%d:%i' '[^']+\/\.ssh'\) \|\| exit \$\?\n\[ "\$post_ssh_directory_identity" = "\$ssh_directory_identity" \] \|\| \{ echo '\.ssh directory changed during metadata update' >&2; exit 1; \}\n\[ ! -L '[^']+\/\.ssh\/authorized_keys' \] \|\| \{ echo 'authorized_keys must not be a symlink' >&2; exit 1; \}$/v,
-      result: { code: 0 },
+        /^set -e\n\[ ! -L '[^']+\/\.ssh' \] \|\| \{ echo '\.ssh must not be a symlink' >&2; exit 1; \}\nif \[ -e '[^']+\/\.ssh' \]; then\n {2}\[ -d '[^']+\/\.ssh' \] \|\| \{ echo '\.ssh must be a directory' >&2; exit 1; \}\nelse\n {2}mkdir -p '[^']+\/\.ssh'\nfi\n\[ -d '[^']+\/\.ssh' \] && \[ ! -L '[^']+\/\.ssh' \] \|\| \{ echo '\.ssh must be a real directory' >&2; exit 1; \}\nssh_directory_identity=\$\(stat -c '%d:%i' '[^']+\/\.ssh'\) \|\| exit \$\?\nchmod 700 '[^']+\/\.ssh' && chown '[^']+':'[^']+' '[^']+\/\.ssh'\n\[ ! -L '[^']+\/\.ssh' \] && \[ -d '[^']+\/\.ssh' \] \|\| \{ echo '\.ssh must be a real directory' >&2; exit 1; \}\npost_ssh_directory_identity=\$\(stat -c '%d:%i' '[^']+\/\.ssh'\) \|\| exit \$\?\n\[ "\$post_ssh_directory_identity" = "\$ssh_directory_identity" \] \|\| \{ echo '\.ssh directory changed during metadata update' >&2; exit 1; \}\n\[ ! -L '[^']+\/\.ssh\/authorized_keys' \] \|\| \{ echo 'authorized_keys must not be a symlink' >&2; exit 1; \}\ncanonical_ssh_directory=\$\(command -p realpath -e -- '[^']+\/\.ssh'\) \|\| exit \$\?\n/v,
+      // The guard prints the canonical `.ssh` path; tests for other homes
+      // stub their exact guard command.
+      result: { code: 0, stdout: "/home/alice/.ssh\n" },
     },
     {
-      command: /^\{ if \[ -e '[^']+\/\.ssh\/authorized_keys' \]; then\n[\s\S]+\nfi; \}$/v,
-      result: { code: 0 },
-    },
-    {
-      command: /^chmod 600 '[^']+\/\.ssh\/\.paratix-authorized-keys\.[^']+' && chown /v,
-      result: { code: 0 },
-    },
-    {
-      // R-0000617: cleanup also removes the sibling `.filter` scratch file
-      // used by the absent-state rewrite.
+      // Blob-based identity: the existing file is read once via a no-follow
+      // `dd` piped through base64. Unless a test stubs the exact command, the
+      // file is reported as missing.
       command:
-        /^rm -f -- '[^']+\/\.ssh\/\.paratix-authorized-keys\.[^']+' '[^']+\/\.ssh\/\.paratix-authorized-keys\.[^']+\.filter'$/v,
+        /^set -e\n\[ ! -L '[^']+\/\.ssh' \] \|\| \{ echo '\.ssh must not be a symlink' >&2; exit 1; \}\n\[ ! -L '[^']+\/\.ssh\/authorized_keys' \] \|\| \{ echo 'authorized_keys must not be a symlink' >&2; exit 1; \}\nif \[ -e /v,
+      result: { stdout: "missing\n" },
+    },
+    {
+      // Decoding of the base64 payload and verification of the staged bytes.
+      command:
+        /^set -e\numask 077\n\[ ! -L '\/tmp\/paratix-authorized-keys-payload\.[^']+\/payload\.base64' \] && \[ -f /v,
+      result: { code: 0 },
+    },
+    {
+      // The final replace re-checks the staged file before its no-follow chown.
+      command: /^\[ ! -L '[^']+\/\.ssh\/\.paratix-authorized-keys\.[^']+' \] && \[ -f /v,
+      result: { code: 0 },
+    },
+    {
+      command: /^rm -f -- '[^']+\/\.ssh\/\.paratix-authorized-keys\.[^']+'$/v,
+      result: { code: 0 },
+    },
+    {
+      // The base64 payload lives in a private directory outside `~/.ssh`.
+      command: /^mktemp -d -p \/tmp -- 'paratix-authorized-keys-payload\.X{6}'$/v,
+      result: { stdout: "/tmp/paratix-authorized-keys-payload.STUB\n" },
+    },
+    {
+      command: /^rm -rf -- '\/tmp\/paratix-authorized-keys-payload\.[^']+'$/v,
       result: { code: 0 },
     },
     {
@@ -59,14 +85,6 @@ function createSshApplyMockSsh(responses: MockSshResponses = {}) {
 }
 
 const emptyEnv = {}
-
-// Helper used by R-0000044 regression: locate the authorized_keys rewrite
-// command (the one that pipes grep into the staging path). Lifted out of
-// the test body so eslint-plugin-jest's `no-conditional-in-test` rule
-// does not flag the predicate.
-function includesGrepRewrite(command: string): boolean {
-  return command.includes(" > '") && command.includes("grep")
-}
 
 function isKnownHostsAppend(command: string): boolean {
   return command.startsWith("printf '%s\\n' ") && command.endsWith(" >> ~/.ssh/known_hosts")
@@ -93,56 +111,121 @@ function makeHostKeyBuffer(algo: string): Buffer {
   return Buffer.concat([sshString(algo), sshString(Buffer.alloc(16, 3))])
 }
 
-function presentAuthorizedKeysRewriteCommand(
-  authorizedKeysPath: string,
-  temporaryPath: string,
-  key: string
-): string {
-  // R-0000617: existing authorized_keys is read via `dd ... iflag=nofollow`
-  // so the open(2) call uses O_NOFOLLOW, collapsing the TOCTOU window where
-  // a symlink could otherwise be swapped in after the `[ ! -L ]` guard.
-  return `{ if [ -e ${authorizedKeysPath} ]; then
-  [ ! -L ${authorizedKeysPath} ] || { echo 'authorized_keys must not be a symlink' >&2; exit 1; }
-  [ -f ${authorizedKeysPath} ] || { echo 'authorized_keys must be a regular file' >&2; exit 1; }
-  dd if=${authorizedKeysPath} iflag=nofollow status=none of='${temporaryPath}' || exit $?
-  grep -qxF -- '${key}' '${temporaryPath}'
-  grep_status=$?
-  if [ "$grep_status" -eq 0 ]; then
-    :
-  elif [ "$grep_status" -eq 1 ]; then
-    printf '%s\\n' '${key}' >> '${temporaryPath}'
-  else
-    exit "$grep_status"
-  fi
-else
-  printf '%s\\n' '${key}' > '${temporaryPath}'
-fi; }`
+function makeOtherEd25519Key(fill: number, comment: string): string {
+  const blob = Buffer.concat([sshString("ssh-ed25519"), sshString(Buffer.alloc(32, fill))])
+  return `ssh-ed25519 ${blob.toString("base64")} ${comment}`
 }
 
-function absentAuthorizedKeysRewriteCommand(
-  authorizedKeysPath: string,
-  temporaryPath: string,
-  key: string
-): string {
-  // R-0000617: stage the existing file via `dd ... iflag=nofollow` and then
-  // filter it in-place via grep -v on the staged copy. This avoids opening
-  // the authorized_keys path itself with grep, which would otherwise follow
-  // a symlink swapped in between the `[ ! -L ]` guard and the read.
-  return `{ if [ -e ${authorizedKeysPath} ]; then
-  [ ! -L ${authorizedKeysPath} ] || { echo 'authorized_keys must not be a symlink' >&2; exit 1; }
+/**
+ * R-0000617: the existing authorized_keys is read via `dd ... iflag=nofollow`
+ * so the open(2) call uses O_NOFOLLOW, collapsing the TOCTOU window where a
+ * symlink could otherwise be swapped in after the `[ ! -L ]` guard. The bytes
+ * travel base64-encoded with a trailing read status. The read also refuses a
+ * symlinked `.ssh` directory.
+ *
+ * @param authorizedKeysPath - The shell-quoted authorized_keys path.
+ * @returns The read command rendered by the module.
+ */
+function authorizedKeysReadCommand(authorizedKeysPath: string): string {
+  const sshDirectoryPath = authorizedKeysPath.replace(/\/authorized_keys'$/v, "'")
+  return `set -e
+[ ! -L ${sshDirectoryPath} ] || { echo '.ssh must not be a symlink' >&2; exit 1; }
+[ ! -L ${authorizedKeysPath} ] || { echo 'authorized_keys must not be a symlink' >&2; exit 1; }
+if [ -e ${authorizedKeysPath} ]; then
   [ -f ${authorizedKeysPath} ] || { echo 'authorized_keys must be a regular file' >&2; exit 1; }
-  dd if=${authorizedKeysPath} iflag=nofollow status=none of='${temporaryPath}' || exit $?
-  grep -vxF -- '${key}' '${temporaryPath}' > '${temporaryPath}.filter'
-  grep_status=$?
-  if [ "$grep_status" -eq 0 ] || [ "$grep_status" -eq 1 ]; then
-    mv -T -- '${temporaryPath}.filter' '${temporaryPath}' || exit $?
-  else
-    rm -f -- '${temporaryPath}.filter'
-    exit "$grep_status"
-  fi
+  printf 'present\\n'
+  { if dd if=${authorizedKeysPath} iflag=nofollow status=none; then printf '\\n0'; else printf '\\n1'; fi; } | base64 -w 0
 else
-  : > '${temporaryPath}'
-fi; }`
+  printf 'missing\\n'
+fi`
+}
+
+function authorizedKeysReadResponse(content: null | string): { stdout: string } {
+  if (content === null) return { stdout: "missing\n" }
+  const encoded = Buffer.from(`${content}\n0`, "latin1").toString("base64")
+  return { stdout: `present\n${encoded}` }
+}
+
+function checkedDigest(content: string): string {
+  return createHash("sha256")
+    .update(Buffer.from(`${content}\n0`, "latin1"))
+    .digest("hex")
+}
+
+// Payload directory the shared `mktemp -d` stub reports.
+const PAYLOAD_DIRECTORY = "/tmp/paratix-authorized-keys-payload.STUB"
+const PAYLOAD_PATH = `${PAYLOAD_DIRECTORY}/payload.base64`
+const PAYLOAD_CLEANUP = `rm -rf -- '${PAYLOAD_DIRECTORY}'`
+
+/**
+ * The guard the decode and the final replace run on the staged file: still a
+ * regular, single-link file owned by the staging uid, and not a symlink.
+ *
+ * @param temporaryPath - The unquoted staging path.
+ * @returns The guard statement rendered by the module.
+ */
+function stagedFileGuard(temporaryPath: string): string {
+  return `[ ! -L '${temporaryPath}' ] && [ -f '${temporaryPath}' ] && [ "$(stat -c '%u %h' -- '${temporaryPath}')" = "$(id -u) 1" ] || { echo 'authorized_keys staging file must be a regular single-link file owned by the staging user' >&2; exit 1; }`
+}
+
+const STAGED_FILE_MODE_REFUSAL =
+  "authorized_keys staging file must have mode 600; a default ACL on ~/.ssh may override the umask"
+
+/**
+ * The mode check the decode and the final replace run on the staged file after
+ * {@link stagedFileGuard}: a default ACL on `~/.ssh` overrides the umask, so
+ * the file must be confirmed as 0600 before anything is published.
+ *
+ * @param temporaryPath - The unquoted staging path.
+ * @returns The mode check statement rendered by the module.
+ */
+function stagedFileModeGuard(temporaryPath: string): string {
+  return `[ "$(stat -c '%a' -- '${temporaryPath}')" = 600 ] || { echo '${STAGED_FILE_MODE_REFUSAL}' >&2; exit 1; }`
+}
+
+/**
+ * The staged bytes travel as base64 text through SFTP into a private payload
+ * directory under `/tmp` and are decoded on the host, so non-UTF-8 bytes
+ * survive unchanged.
+ *
+ * @param parameters - Staged content and staging path.
+ * @param parameters.content - The staged content.
+ * @param parameters.temporaryPath - The unquoted staging path.
+ * @returns The decode and verification command rendered by the module.
+ */
+function authorizedKeysStageDecodeCommand(parameters: {
+  content: string
+  temporaryPath: string
+}): string {
+  const { content, temporaryPath } = parameters
+  const payload = `'${PAYLOAD_PATH}'`
+  return `set -e
+umask 077
+[ ! -L ${payload} ] && [ -f ${payload} ] || { echo 'authorized_keys staging payload must be a regular file' >&2; exit 1; }
+${stagedFileGuard(temporaryPath)}
+rm -f -- '${temporaryPath}'
+dd if=${payload} iflag=nofollow status=none | base64 -d | dd of='${temporaryPath}' oflag=nofollow conv=excl status=none
+rm -f -- ${payload}
+staged_hash=$({ if dd if='${temporaryPath}' iflag=nofollow status=none; then printf '\\n0'; else printf '\\n1'; fi; } | sha256sum | cut -d' ' -f1)
+[ "$staged_hash" = '${checkedDigest(content)}' ] || { echo 'authorized_keys staging file does not match the computed content' >&2; exit 1; }
+${stagedFileModeGuard(temporaryPath)}`
+}
+
+/**
+ * Decode the staged payloads the module wrote through SFTP.
+ *
+ * @param mockSsh - The mock connection.
+ * @param mockSsh.writeFileCalls - The recorded writeFile calls.
+ * @returns The staged contents in write order.
+ */
+function stagedContents(mockSsh: { writeFileCalls: Array<{ content: string }> }): string[] {
+  return mockSsh.writeFileCalls.map((call) =>
+    Buffer.from(call.content, "base64").toString("latin1")
+  )
+}
+
+function isFinalReplace(command: string): boolean {
+  return command.includes("\nchown -h -- ")
 }
 
 function sshDirectoryGuardCommand(parameters: {
@@ -165,25 +248,41 @@ chmod 700 ${sshDirectoryPath} && chown '${user}':'${group}' ${sshDirectoryPath}
 [ ! -L ${sshDirectoryPath} ] && [ -d ${sshDirectoryPath} ] || { echo '.ssh must be a real directory' >&2; exit 1; }
 post_ssh_directory_identity=$(stat -c '%d:%i' ${sshDirectoryPath}) || exit $?
 [ "$post_ssh_directory_identity" = "$ssh_directory_identity" ] || { echo '.ssh directory changed during metadata update' >&2; exit 1; }
-[ ! -L ${authorizedKeysPath} ] || { echo 'authorized_keys must not be a symlink' >&2; exit 1; }`
+[ ! -L ${authorizedKeysPath} ] || { echo 'authorized_keys must not be a symlink' >&2; exit 1; }
+canonical_ssh_directory=$(command -p realpath -e -- ${sshDirectoryPath}) || exit $?
+canonical_ssh_directory_identity=$(stat -c '%d:%i' -- "$canonical_ssh_directory") || exit $?
+[ "$canonical_ssh_directory_identity" = "$post_ssh_directory_identity" ] || { echo '.ssh directory changed during metadata update' >&2; exit 1; }
+printf '%s\\n' "$canonical_ssh_directory"`
 }
 
 function authorizedKeysFinalReplaceCommand(parameters: {
   authorizedKeysPath: string
+  content: string
   expectedSshDirectoryState: string
   group: string
+  original?: null | string
   sshDirectoryPath: string
   temporaryPath: string
   user: string
 }): string {
   const {
     authorizedKeysPath,
+    content,
     expectedSshDirectoryState,
     group,
+    original = null,
     sshDirectoryPath,
     temporaryPath,
     user,
   } = parameters
+  // The live-file comparison runs in the same script directly before the
+  // backup link and the rename.
+  const unchangedGuard =
+    original === null
+      ? `  [ ! -e ${authorizedKeysPath} ] && [ ! -L ${authorizedKeysPath} ] || { echo 'authorized_keys changed during rewrite' >&2; exit 1; }`
+      : `  [ -f ${authorizedKeysPath} ] || { echo 'authorized_keys must be a regular file' >&2; exit 1; }
+  current_authorized_keys_hash=$({ if dd if=${authorizedKeysPath} iflag=nofollow status=none; then printf '\\n0'; else printf '\\n1'; fi; } | sha256sum | cut -d' ' -f1) || exit $?
+  [ "$current_authorized_keys_hash" = '${checkedDigest(original)}' ] || { echo 'authorized_keys changed during rewrite' >&2; exit 1; }`
   // R-0000610: hardlink-backup variant. The pre-existing destination is
   // hardlinked to `<authorized_keys>.paratix-backup` before the atomic
   // rename, so a failing `mv` can restore the original via a second
@@ -194,8 +293,11 @@ function authorizedKeysFinalReplaceCommand(parameters: {
   // `[ ! -L ]` guard is also repeated immediately before the `ln` as
   // defence in depth.
   const backupPath = `${authorizedKeysPath.slice(0, -1)}.paratix-backup'`
-  return `chmod 600 '${temporaryPath}' && chown '${user}':'${group}' '${temporaryPath}' && {
-  expected_authorized_keys_hash=$(sha256sum '${temporaryPath}' | cut -d' ' -f1) || exit $?
+  // The post-replace check compares the live file, read without following
+  // symlinks, with the literal digest of the computed content.
+  return `${stagedFileGuard(temporaryPath)}
+${stagedFileModeGuard(temporaryPath)}
+chown -h -- '${user}':'${group}' '${temporaryPath}' && {
   [ ! -L ${sshDirectoryPath} ] || { echo '.ssh must not be a symlink' >&2; exit 1; }
   [ -d ${sshDirectoryPath} ] || { echo '.ssh must be a directory' >&2; exit 1; }
   ssh_directory_state=$(stat -c '%a %U %G %F' ${sshDirectoryPath}) || exit $?
@@ -203,6 +305,7 @@ function authorizedKeysFinalReplaceCommand(parameters: {
   [ ! -L ${authorizedKeysPath} ] || { echo 'authorized_keys must not be a symlink' >&2; exit 1; }
   rm -f -- ${backupPath}
   backup_created=0
+${unchangedGuard}
   if [ -e ${authorizedKeysPath} ]; then
     [ -f ${authorizedKeysPath} ] || { echo 'authorized_keys must be a regular file' >&2; exit 1; }
     [ ! -L ${authorizedKeysPath} ] || { echo 'authorized_keys must not be a symlink' >&2; exit 1; }
@@ -222,8 +325,8 @@ function authorizedKeysFinalReplaceCommand(parameters: {
   [ -f ${authorizedKeysPath} ] || { rm -f -- ${backupPath}; echo 'authorized_keys must be a regular file' >&2; exit 1; }
   authorized_keys_state=$(stat -c '%a %U %G %F' ${authorizedKeysPath}) || { rm -f -- ${backupPath}; exit 1; }
   [ "$authorized_keys_state" = '600 ${user} ${group} regular file' ] || { rm -f -- ${backupPath}; echo 'authorized_keys metadata changed during replace' >&2; exit 1; }
-  authorized_keys_hash=$(sha256sum ${authorizedKeysPath} | cut -d' ' -f1) || { rm -f -- ${backupPath}; exit 1; }
-  [ "$authorized_keys_hash" = "$expected_authorized_keys_hash" ] || { rm -f -- ${backupPath}; echo 'authorized_keys content changed during replace' >&2; exit 1; }
+  authorized_keys_hash=$({ if dd if=${authorizedKeysPath} iflag=nofollow status=none; then printf '\\n0'; else printf '\\n1'; fi; } | sha256sum | cut -d' ' -f1) || { rm -f -- ${backupPath}; exit 1; }
+  [ "$authorized_keys_hash" = '${checkedDigest(content)}' ] || { rm -f -- ${backupPath}; echo 'authorized_keys content changed during replace' >&2; exit 1; }
   rm -f -- ${backupPath}
 }`
 }
@@ -286,14 +389,24 @@ describe("ssh.authorizedKeys", () => {
     sshDirectoryPath: aliceDir,
     user: "alice",
   })
-  const aliceFinalReplaceCommand = authorizedKeysFinalReplaceCommand({
-    authorizedKeysPath: aliceKeys,
-    expectedSshDirectoryState: "700 alice alice directory",
-    group: "alice",
-    sshDirectoryPath: aliceDir,
-    temporaryPath: tempPath,
-    user: "alice",
-  })
+  const aliceRead = authorizedKeysReadCommand(aliceKeys)
+  const otherKey = makeOtherEd25519Key(7, "other-key")
+  const aliceDecode = (content: string): string =>
+    authorizedKeysStageDecodeCommand({ content, temporaryPath: tempPath })
+  const aliceFinalReplace = (original: null | string, content: string): string =>
+    authorizedKeysFinalReplaceCommand({
+      authorizedKeysPath: aliceKeys,
+      content,
+      expectedSshDirectoryState: "700 alice alice directory",
+      group: "alice",
+      original,
+      sshDirectoryPath: aliceDir,
+      temporaryPath: tempPath,
+      user: "alice",
+    })
+  // The final replace for a file that was missing when it was read.
+  const aliceFinalReplaceCommand = aliceFinalReplace(null, `${testKey}\n`)
+  const aliceCleanup = `rm -f -- '${tempPath}'`
 
   function aliceResponses(
     extra?: Record<string, Partial<{ code: number; stderr: string; stdout: string }>>
@@ -355,7 +468,7 @@ describe("ssh.authorizedKeys", () => {
         "[ -e '/home/alice/.ssh' ]": { code: 0 },
         "[ -e '/home/alice/.ssh/authorized_keys' ]": { code: 0 },
         "[ -L '/home/alice/.ssh/authorized_keys' ]": { code: 1 },
-        [`grep -qxF -- '${testKey}' ${aliceKeys}`]: { code: 0 },
+        [aliceRead]: authorizedKeysReadResponse(`${testKey}\n`),
         "stat -c '%a %U %G %F' '/home/alice/.ssh'": { stdout: "700 alice alice directory" },
         "stat -c '%a %U %G %F' '/home/alice/.ssh/authorized_keys'": {
           stdout: "600 alice alice regular file",
@@ -373,7 +486,7 @@ describe("ssh.authorizedKeys", () => {
         "[ -e '/home/alice/.ssh' ]": { code: 0 },
         "[ -e '/home/alice/.ssh/authorized_keys' ]": { code: 0 },
         "[ -L '/home/alice/.ssh/authorized_keys' ]": { code: 1 },
-        [`grep -qxF -- '${testKey}' ${aliceKeys}`]: { code: 1 },
+        [aliceRead]: authorizedKeysReadResponse(`${otherKey}\n`),
         "stat -c '%a %U %G %F' '/home/alice/.ssh'": { stdout: "700 alice alice directory" },
         "stat -c '%a %U %G %F' '/home/alice/.ssh/authorized_keys'": {
           stdout: "600 alice alice regular file",
@@ -397,7 +510,7 @@ describe("ssh.authorizedKeys", () => {
     const result = await mod.check(mockSsh, emptyEnv)
 
     expect(result).toBe("needs-apply")
-    expect(mockSsh.calls).not.toContain(`grep -qxF -- '${testKey}' ${aliceKeys}`)
+    expect(mockSsh.calls).not.toContain(aliceRead)
     expect(mockSsh.calls).not.toContain("stat -c '%a %U %G %F' '/home/alice/.ssh/authorized_keys'")
   })
 
@@ -451,7 +564,7 @@ describe("ssh.authorizedKeys", () => {
         "[ -e '/home/alice/.ssh' ]": { code: 0 },
         "[ -e '/home/alice/.ssh/authorized_keys' ]": { code: 0 },
         "[ -L '/home/alice/.ssh/authorized_keys' ]": { code: 1 },
-        [`grep -qxF -- '${testKey}' ${aliceKeys}`]: { code: 1 },
+        [aliceRead]: authorizedKeysReadResponse(`${otherKey}\n`),
         "stat -c '%a %U %G %F' '/home/alice/.ssh'": { stdout: "700 alice alice directory" },
         "stat -c '%a %U %G %F' '/home/alice/.ssh/authorized_keys'": {
           stdout: "600 alice alice regular file",
@@ -469,7 +582,7 @@ describe("ssh.authorizedKeys", () => {
         "[ -e '/home/alice/.ssh' ]": { code: 0 },
         "[ -e '/home/alice/.ssh/authorized_keys' ]": { code: 0 },
         "[ -L '/home/alice/.ssh/authorized_keys' ]": { code: 1 },
-        [`grep -qxF -- '${testKey}' ${aliceKeys}`]: { code: 0 },
+        [aliceRead]: authorizedKeysReadResponse(`${testKey}\n`),
         "stat -c '%a %U %G %F' '/home/alice/.ssh'": { stdout: "700 alice alice directory" },
         "stat -c '%a %U %G %F' '/home/alice/.ssh/authorized_keys'": {
           stdout: "600 alice alice regular file",
@@ -487,7 +600,6 @@ describe("ssh.authorizedKeys", () => {
         "[ -e '/home/alice/.ssh' ]": { code: 0 },
         "[ -e '/home/alice/.ssh/authorized_keys' ]": { code: 0 },
         "[ -L '/home/alice/.ssh/authorized_keys' ]": { code: 0 },
-        [`grep -qxF -- '${testKey}' ${aliceKeys}`]: { code: 0 },
       })
     )
     const mod = ssh.authorizedKeys("alice", testKey)
@@ -504,7 +616,6 @@ describe("ssh.authorizedKeys", () => {
         "[ -e '/home/alice/.ssh/authorized_keys' ]": { code: 0 },
         "[ -L '/home/alice/.ssh' ]": { code: 0 },
         "[ -L '/home/alice/.ssh/authorized_keys' ]": { code: 1 },
-        [`grep -qxF -- '${testKey}' ${aliceKeys}`]: { code: 0 },
         "stat -c '%a %U %G %F' '/home/alice/.ssh'": { stdout: "700 alice alice directory" },
         "stat -c '%a %U %G %F' '/home/alice/.ssh/authorized_keys'": {
           stdout: "600 alice alice regular file",
@@ -516,7 +627,7 @@ describe("ssh.authorizedKeys", () => {
     const result = await mod.check(mockSsh, emptyEnv)
 
     expect(result).toBe("needs-apply")
-    expect(mockSsh.calls).not.toContain(`grep -qxF -- '${testKey}' ${aliceKeys}`)
+    expect(mockSsh.calls).not.toContain(aliceRead)
   })
 
   it("check returns needs-apply when .ssh ownership or mode has drifted", async () => {
@@ -525,7 +636,6 @@ describe("ssh.authorizedKeys", () => {
         "[ -e '/home/alice/.ssh' ]": { code: 0 },
         "[ -e '/home/alice/.ssh/authorized_keys' ]": { code: 0 },
         "[ -L '/home/alice/.ssh/authorized_keys' ]": { code: 1 },
-        [`grep -qxF -- '${testKey}' ${aliceKeys}`]: { code: 0 },
         "stat -c '%a %U %G %F' '/home/alice/.ssh'": { stdout: "755 root root directory" },
       })
     )
@@ -542,7 +652,6 @@ describe("ssh.authorizedKeys", () => {
         "[ -e '/home/alice/.ssh' ]": { code: 0 },
         "[ -e '/home/alice/.ssh/authorized_keys' ]": { code: 0 },
         "[ -L '/home/alice/.ssh/authorized_keys' ]": { code: 1 },
-        [`grep -qxF -- '${testKey}' ${aliceKeys}`]: { code: 0 },
         "stat -c '%a %U %G %F' '/home/alice/.ssh'": { stdout: "700 alice alice directory" },
         "stat -c '%a %U %G %F' '/home/alice/.ssh/authorized_keys'": {
           stdout: "644 root root regular file",
@@ -559,7 +668,6 @@ describe("ssh.authorizedKeys", () => {
   it("apply creates directory, adds key with correct permissions (state: present)", async () => {
     const mockSsh = createSshApplyMockSsh(
       aliceResponses({
-        "[ -e '/home/alice/.ssh/authorized_keys' ]": { code: 1 },
         [aliceMktempPattern]: { stdout: tempPath },
       })
     )
@@ -574,21 +682,33 @@ describe("ssh.authorizedKeys", () => {
     expect(aliceSshDirectoryGuard).toContain(
       `[ ! -L ${aliceKeys} ] || { echo 'authorized_keys must not be a symlink' >&2; exit 1; }`
     )
+    expect(mockSsh.calls).toContain(aliceRead)
     expect(mockSsh.calls).toContain(aliceMktempPattern)
-    expect(mockSsh.calls).toContain(
-      presentAuthorizedKeysRewriteCommand(aliceKeys, tempPath, testKey)
+    expect(mockSsh.writeFileCalls).toStrictEqual([
+      {
+        content: Buffer.from(`${testKey}\n`).toString("base64"),
+        options: { mode: "0600" },
+        remotePath: PAYLOAD_PATH,
+      },
+    ])
+    expect(mockSsh.calls).toContain(aliceDecode(`${testKey}\n`))
+    expect(mockSsh.calls.indexOf(PAYLOAD_CLEANUP)).toBe(
+      mockSsh.calls.indexOf(aliceDecode(`${testKey}\n`)) + 1
     )
     expect(mockSsh.calls).not.toContain(`printf '%s\\n' '${testKey}' >> ${aliceKeys}`)
     expect(mockSsh.calls).toContain(aliceFinalReplaceCommand)
-    expect(mockSsh.calls).toContain(`rm -f -- '${tempPath}' '${tempPath}.filter'`)
+    expect(mockSsh.calls).toContain(aliceCleanup)
+    // F8: the read and plan run before the directory is prepared.
+    expect(mockSsh.calls.indexOf(aliceRead)).toBeLessThan(
+      mockSsh.calls.indexOf(aliceSshDirectoryGuard)
+    )
   })
 
   it("apply returns ok without rewriting when present state is already converged", async () => {
     const mockSsh = createSshApplyMockSsh(
       aliceResponses({
-        "[ -e '/home/alice/.ssh/authorized_keys' ]": { code: 0 },
         "[ -L '/home/alice/.ssh/authorized_keys' ]": { code: 1 },
-        [`grep -qxF -- '${testKey}' ${aliceKeys}`]: { code: 0 },
+        [aliceRead]: authorizedKeysReadResponse(`${otherKey}\n${testKey}\n`),
         "stat -c '%a %U %G %F' '/home/alice/.ssh'": { stdout: "700 alice alice directory" },
         "stat -c '%a %U %G %F' '/home/alice/.ssh/authorized_keys'": {
           stdout: "600 alice alice regular file",
@@ -601,10 +721,9 @@ describe("ssh.authorizedKeys", () => {
 
     expect(result.status).toBe("ok")
     expect(mockSsh.calls).not.toContain(aliceMktempPattern)
-    expect(mockSsh.calls).not.toContain(
-      presentAuthorizedKeysRewriteCommand(aliceKeys, tempPath, testKey)
-    )
-    expect(mockSsh.calls).not.toContain(aliceFinalReplaceCommand)
+    expect(mockSsh.calls).not.toContain(aliceSshDirectoryGuard)
+    expect(mockSsh.writeFileCalls).toStrictEqual([])
+    expect(mockSsh.calls.some(isFinalReplace)).toBe(false)
   })
 
   it("regression: apply does not append a duplicate key when only permissions have drifted", async () => {
@@ -613,8 +732,8 @@ describe("ssh.authorizedKeys", () => {
         "[ -e '/home/alice/.ssh' ]": { code: 0 },
         "[ -e '/home/alice/.ssh/authorized_keys' ]": { code: 0 },
         "[ -L '/home/alice/.ssh/authorized_keys' ]": { code: 1 },
-        [`grep -qxF -- '${testKey}' ${aliceKeys}`]: { code: 0 },
         [aliceMktempPattern]: { stdout: tempPath },
+        [aliceRead]: authorizedKeysReadResponse(`${testKey}\n`),
         "stat -c '%a %U %G %F' '/home/alice/.ssh'": { stdout: "700 alice alice directory" },
         "stat -c '%a %U %G %F' '/home/alice/.ssh/authorized_keys'": {
           stdout: "644 alice alice regular file",
@@ -628,35 +747,32 @@ describe("ssh.authorizedKeys", () => {
 
     const applyResult = await mod.apply(mockSsh, emptyEnv)
     expect(applyResult.status).toBe("changed")
-    expect(mockSsh.calls).toContain(
-      presentAuthorizedKeysRewriteCommand(aliceKeys, tempPath, testKey)
-    )
-    expect(mockSsh.calls).not.toContain(
-      `{ if [ -f ${aliceKeys} ]; then cat ${aliceKeys}; fi; printf '%s\\n' '${testKey}'; } > '${tempPath}'`
-    )
+    // The unchanged content is restaged so the atomic replace resets mode
+    // and ownership without appending a second copy of the key.
+    expect(stagedContents(mockSsh)).toStrictEqual([`${testKey}\n`])
+    expect(mockSsh.calls).toContain(aliceDecode(`${testKey}\n`))
+    expect(mockSsh.calls).toContain(aliceFinalReplace(`${testKey}\n`, `${testKey}\n`))
   })
 
   it("regression: present rewrite terminates existing authorized_keys before appending", async () => {
     const mockSsh = createSshApplyMockSsh(
       aliceResponses({
         [aliceMktempPattern]: { stdout: tempPath },
+        [aliceRead]: authorizedKeysReadResponse(otherKey),
       })
     )
     const mod = ssh.authorizedKeys("alice", testKey)
 
     await mod.apply(mockSsh, emptyEnv)
 
-    expect(mockSsh.calls).toContain(
-      presentAuthorizedKeysRewriteCommand(aliceKeys, tempPath, testKey)
-    )
+    expect(stagedContents(mockSsh)).toStrictEqual([`${otherKey}\n${testKey}\n`])
   })
 
   it("regression: present rewrite fails closed when reading authorized_keys fails", async () => {
-    const rewriteCommand = presentAuthorizedKeysRewriteCommand(aliceKeys, tempPath, testKey)
     const mockSsh = createMockSsh(
       aliceResponses({
         [aliceMktempPattern]: { stdout: tempPath },
-        [rewriteCommand]: { code: 2, stderr: "awk: read error" },
+        [aliceRead]: { code: 2, stderr: "dd: read error", stdout: "present\nc2VjcmV0" },
       }),
       { ...successfulSshApplyOptions, rejectNonZeroExit: true }
     )
@@ -666,19 +782,23 @@ describe("ssh.authorizedKeys", () => {
     // ModuleResult instead of an unstructured exception.
     const result = await mod.apply(mockSsh, emptyEnv)
     expect(result.status).toBe("failed")
-    expect(String(result.error)).toContain("awk: read error")
-    expect(mockSsh.calls).toContain(rewriteCommand)
-    expect(mockSsh.calls).not.toContain(aliceFinalReplaceCommand)
+    expect(String(result.error)).toContain("dd: read error")
+    // Partial file content must never be echoed in the failure.
+    expect(String(result.error)).not.toContain("c2VjcmV0")
+    expect(mockSsh.calls).toContain(aliceRead)
+    expect(mockSsh.calls).not.toContain(aliceMktempPattern)
+    expect(mockSsh.calls.some(isFinalReplace)).toBe(false)
   })
 
-  it("regression: present rewrite fails closed when authorized_keys is recreated as a symlink during staging", async () => {
-    const rewriteCommand = presentAuthorizedKeysRewriteCommand(aliceKeys, tempPath, testKey)
+  it("regression: present rewrite fails closed when the staging file is swapped during staging", async () => {
+    const decodeCommand = aliceDecode(`${testKey}\n`)
     const mockSsh = createMockSsh(
       aliceResponses({
         [aliceMktempPattern]: { stdout: tempPath },
-        [rewriteCommand]: {
+        [decodeCommand]: {
           code: 1,
-          stderr: "authorized_keys must not be a symlink",
+          stderr:
+            "authorized_keys staging file must be a regular single-link file owned by the staging user",
         },
       }),
       successfulSshApplyOptions
@@ -688,43 +808,64 @@ describe("ssh.authorizedKeys", () => {
     const result = await mod.apply(mockSsh, emptyEnv)
 
     expect(result.status).toBe("failed")
-    expect(String(result.error)).toContain("authorized_keys must not be a symlink")
-    expect(rewriteCommand).toContain(`[ ! -L ${aliceKeys} ]`)
-    expect(rewriteCommand).toContain(`grep -qxF -- '${testKey}' '${tempPath}'`)
-    expect(rewriteCommand).not.toContain(`grep -qxF -- '${testKey}' ${aliceKeys}`)
-    expect(mockSsh.calls).toContain(rewriteCommand)
-    expect(mockSsh.calls).not.toContain(aliceFinalReplaceCommand)
+    expect(String(result.error)).toContain(
+      "authorized_keys staging file must be a regular single-link file owned by the staging user"
+    )
+    expect(decodeCommand).toContain(`dd of='${tempPath}' oflag=nofollow conv=excl status=none`)
+    expect(mockSsh.calls).toContain(PAYLOAD_CLEANUP)
+    expect(aliceRead).toContain(`dd if=${aliceKeys} iflag=nofollow status=none`)
+    expect(mockSsh.calls).toContain(decodeCommand)
+    expect(mockSsh.calls.some(isFinalReplace)).toBe(false)
+    expect(mockSsh.calls).toContain(aliceCleanup)
   })
 
-  it("apply removes key with grep -vxF and preserves filter errors (state: absent)", async () => {
+  it("regression: present rewrite fails closed when authorized_keys is recreated as a symlink before the replace", async () => {
+    const mockSsh = createMockSsh(
+      aliceResponses({
+        [aliceFinalReplaceCommand]: {
+          code: 1,
+          stderr: "authorized_keys changed during rewrite",
+        },
+        [aliceMktempPattern]: { stdout: tempPath },
+      }),
+      successfulSshApplyOptions
+    )
+    const mod = ssh.authorizedKeys("alice", testKey)
+
+    const result = await mod.apply(mockSsh, emptyEnv)
+
+    expect(result.status).toBe("failed")
+    expect(String(result.error)).toContain("authorized_keys changed during rewrite")
+    expect(aliceFinalReplaceCommand).toContain(
+      `[ ! -e ${aliceKeys} ] && [ ! -L ${aliceKeys} ] || { echo 'authorized_keys changed during rewrite' >&2; exit 1; }`
+    )
+    // The live-file comparison runs directly before the backup link and the rename.
+    expect(aliceFinalReplaceCommand.indexOf("authorized_keys changed during rewrite")).toBeLessThan(
+      aliceFinalReplaceCommand.indexOf("ln -P --")
+    )
+  })
+
+  it("apply removes every line of the key blob (state: absent)", async () => {
+    const original = `${otherKey}\n${testKey}\n`
     const mockSsh = createSshApplyMockSsh(
       aliceResponses({
-        "[ -e '/home/alice/.ssh/authorized_keys' ]": { code: 0 },
-        "[ -L '/home/alice/.ssh/authorized_keys' ]": { code: 1 },
-        [`grep -qxF -- '${testKey}' ${aliceKeys}`]: { code: 0 },
         [aliceMktempPattern]: { stdout: tempPath },
-        "stat -c '%a %U %G %F' '/home/alice/.ssh'": { stdout: "700 alice alice directory" },
-        "stat -c '%a %U %G %F' '/home/alice/.ssh/authorized_keys'": {
-          stdout: "600 alice alice regular file",
-        },
+        [aliceRead]: authorizedKeysReadResponse(original),
       })
     )
     const mod = ssh.authorizedKeys("alice", testKey, { state: "absent" })
     const result = await mod.apply(mockSsh, emptyEnv)
     expect(result.status).toBe("changed")
-    // R-0000044: whole-line match so an entry whose body is a substring of
-    // an unrelated authorized_keys line is not collateral-damage-deleted.
-    expect(mockSsh.calls).toContain(
-      absentAuthorizedKeysRewriteCommand(aliceKeys, tempPath, testKey)
-    )
+    expect(stagedContents(mockSsh)).toStrictEqual([`${otherKey}\n`])
+    expect(mockSsh.calls).toContain(aliceDecode(`${otherKey}\n`))
+    expect(mockSsh.calls).toContain(aliceFinalReplace(original, `${otherKey}\n`))
   })
 
   it("apply returns ok without rewriting when absent state is already converged", async () => {
     const mockSsh = createSshApplyMockSsh(
       aliceResponses({
-        "[ -e '/home/alice/.ssh/authorized_keys' ]": { code: 0 },
         "[ -L '/home/alice/.ssh/authorized_keys' ]": { code: 1 },
-        [`grep -qxF -- '${testKey}' ${aliceKeys}`]: { code: 1 },
+        [aliceRead]: authorizedKeysReadResponse(`${otherKey}\n`),
         "stat -c '%a %U %G %F' '/home/alice/.ssh'": { stdout: "700 alice alice directory" },
         "stat -c '%a %U %G %F' '/home/alice/.ssh/authorized_keys'": {
           stdout: "600 alice alice regular file",
@@ -737,10 +878,8 @@ describe("ssh.authorizedKeys", () => {
 
     expect(result.status).toBe("ok")
     expect(mockSsh.calls).not.toContain(aliceMktempPattern)
-    expect(mockSsh.calls).not.toContain(
-      absentAuthorizedKeysRewriteCommand(aliceKeys, tempPath, testKey)
-    )
-    expect(mockSsh.calls).not.toContain(aliceFinalReplaceCommand)
+    expect(mockSsh.writeFileCalls).toStrictEqual([])
+    expect(mockSsh.calls.some(isFinalReplace)).toBe(false)
   })
 
   it("regression: absent apply returns ok before preparing .ssh when authorized_keys is missing", async () => {
@@ -758,20 +897,15 @@ describe("ssh.authorizedKeys", () => {
     expect(mockSsh.calls).not.toContain(idGroupAlice)
     expect(mockSsh.calls).not.toContain(aliceSshDirectoryGuard)
     expect(mockSsh.calls).not.toContain(aliceMktempPattern)
-    expect(mockSsh.calls).not.toContain(
-      absentAuthorizedKeysRewriteCommand(aliceKeys, tempPath, testKey)
-    )
-    expect(mockSsh.calls).not.toContain(aliceFinalReplaceCommand)
+    expect(mockSsh.calls).not.toContain(aliceRead)
+    expect(mockSsh.calls.some(isFinalReplace)).toBe(false)
   })
 
-  it("regression: absent rewrite fails closed on grep errors and does not replace the target", async () => {
-    const rewriteCommand = absentAuthorizedKeysRewriteCommand(aliceKeys, tempPath, testKey)
+  it("regression: absent rewrite fails closed on read errors and does not replace the target", async () => {
     const mockSsh = createMockSsh(
       aliceResponses({
-        "[ -e '/home/alice/.ssh/authorized_keys' ]": { code: 0 },
-        [`grep -qxF -- '${testKey}' ${aliceKeys}`]: { code: 0 },
         [aliceMktempPattern]: { stdout: tempPath },
-        [rewriteCommand]: { code: 2, stderr: "grep: read error" },
+        [aliceRead]: { code: 2, stderr: "dd: read error" },
       }),
       { ...successfulSshApplyOptions, rejectNonZeroExit: true }
     )
@@ -781,21 +915,20 @@ describe("ssh.authorizedKeys", () => {
     // ModuleResult instead of an unstructured exception.
     const result = await mod.apply(mockSsh, emptyEnv)
     expect(result.status).toBe("failed")
-    expect(String(result.error)).toContain("grep: read error")
-    expect(mockSsh.calls).toContain(rewriteCommand)
-    expect(mockSsh.calls).not.toContain(aliceFinalReplaceCommand)
+    expect(String(result.error)).toContain("dd: read error")
+    expect(mockSsh.calls).toContain(aliceRead)
+    expect(mockSsh.calls.some(isFinalReplace)).toBe(false)
   })
 
-  it("regression: absent rewrite fails closed when authorized_keys is recreated as a symlink during staging", async () => {
-    const rewriteCommand = absentAuthorizedKeysRewriteCommand(aliceKeys, tempPath, testKey)
+  it("regression: absent rewrite fails closed when authorized_keys changes before the replace", async () => {
+    const replaceCommand = aliceFinalReplace(`${testKey}\n`, "")
     const mockSsh = createMockSsh(
       aliceResponses({
-        "[ -e '/home/alice/.ssh/authorized_keys' ]": { code: 0 },
-        [`grep -qxF -- '${testKey}' ${aliceKeys}`]: { code: 0 },
         [aliceMktempPattern]: { stdout: tempPath },
-        [rewriteCommand]: {
+        [aliceRead]: authorizedKeysReadResponse(`${testKey}\n`),
+        [replaceCommand]: {
           code: 1,
-          stderr: "authorized_keys must not be a symlink",
+          stderr: "authorized_keys changed during rewrite",
         },
       }),
       successfulSshApplyOptions
@@ -805,58 +938,52 @@ describe("ssh.authorizedKeys", () => {
     const result = await mod.apply(mockSsh, emptyEnv)
 
     expect(result.status).toBe("failed")
-    expect(String(result.error)).toContain("authorized_keys must not be a symlink")
-    expect(rewriteCommand).toContain(`[ ! -L ${aliceKeys} ]`)
-    expect(mockSsh.calls).toContain(rewriteCommand)
-    expect(mockSsh.calls).not.toContain(aliceFinalReplaceCommand)
+    expect(String(result.error)).toContain("authorized_keys changed during rewrite")
+    expect(replaceCommand).toContain(
+      `current_authorized_keys_hash=$({ if dd if=${aliceKeys} iflag=nofollow status=none;`
+    )
+    expect(replaceCommand).toContain(checkedDigest(`${testKey}\n`))
+    expect(mockSsh.calls).toContain(aliceDecode(""))
+    expect(mockSsh.calls).toContain(replaceCommand)
   })
 
-  // R-0000044: in real life, a `grep -vF -- '<key body>'` filter matches any
-  // line containing the key body as a substring — this is wrong when the same
-  // key body also appears in another entry that has an `options=...` prefix or
-  // a different comment. The fix is `grep -vxF` (whole-line). This regression
-  // test asserts the absent path renders the whole-line filter, never the
-  // substring filter.
-  it("regression: absent apply uses whole-line filter so it cannot delete keys that share a substring", async () => {
-    const exactKeyToRemove = testKey
-    const collateralEntry = `command="/usr/bin/restricted" ${testKey}`
-
-    // Sanity: in the unfixed implementation, `grep -vF -- '<body>' ...` would
-    // also match the collateral entry because it contains `<body>` as a
-    // substring. The fixed implementation uses `grep -vxF` (whole-line),
-    // which only matches the exact `exactKeyToRemove` line.
-    expect(collateralEntry.includes(testKey)).toBe(true)
-    expect(collateralEntry).not.toBe(exactKeyToRemove)
+  // R-0000044 (superseded by blob identity): `state: "absent"` removes every
+  // line whose key blob matches, regardless of options and trailing comment,
+  // because sshd would still accept the key through any of them. Lines that
+  // only mention the key body (a comment line, or another key whose comment
+  // contains the body) are not entries of this key and stay byte-identical.
+  it("regression: absent apply removes every line of the blob but keeps lines that only mention the key body", async () => {
+    const blob = testKey.split(" ")[1]
+    const restrictedEntry = `command="/usr/bin/restricted" ${testKey}`
+    const otherCommentEntry = `ssh-ed25519 ${blob} another-comment`
+    const commentLine = `# rotated: ${testKey}`
+    const unrelatedEntry = makeOtherEd25519Key(9, `mentions-${blob}`)
+    const original = `${commentLine}\n${testKey}\n${restrictedEntry}\n${unrelatedEntry}\n${otherCommentEntry}\n`
 
     const mockSsh = createSshApplyMockSsh(
       aliceResponses({
-        "[ -e '/home/alice/.ssh/authorized_keys' ]": { code: 0 },
-        [`grep -qxF -- '${testKey}' ${aliceKeys}`]: { code: 0 },
         [aliceMktempPattern]: { stdout: tempPath },
+        [aliceRead]: authorizedKeysReadResponse(original),
       })
     )
-    const mod = ssh.authorizedKeys("alice", exactKeyToRemove, { state: "absent" })
+    const mod = ssh.authorizedKeys("alice", testKey, { state: "absent" })
     const result = await mod.apply(mockSsh, emptyEnv)
     expect(result.status).toBe("changed")
-    // The rendered command must use `grep -vxF`, never the broader `grep -vF`.
-    const rewriteCall = mockSsh.calls.find(includesGrepRewrite)
-    expect(rewriteCall).toBeDefined()
-    expect(rewriteCall).toContain("grep -vxF")
-    expect(rewriteCall).not.toMatch(/grep -vF\s/v)
+    expect(stagedContents(mockSsh)).toStrictEqual([`${commentLine}\n${unrelatedEntry}\n`])
   })
 
   it("regression: apply resets ownership and mode after removing a key (state: absent)", async () => {
     const mockSsh = createSshApplyMockSsh(
       aliceResponses({
         "[ -e '/home/alice/.ssh/authorized_keys' ]": { code: 0 },
-        [`grep -qxF -- '${testKey}' ${aliceKeys}`]: { code: 0 },
         [aliceMktempPattern]: { stdout: tempPath },
+        [aliceRead]: authorizedKeysReadResponse(`${testKey}\n`),
       })
     )
     const mod = ssh.authorizedKeys("alice", testKey, { state: "absent" })
     const result = await mod.apply(mockSsh, emptyEnv)
     expect(result.status).toBe("changed")
-    expect(mockSsh.calls).toContain(aliceFinalReplaceCommand)
+    expect(mockSsh.calls).toContain(aliceFinalReplace(`${testKey}\n`, ""))
   })
 
   it("returns failed when authorized_keys is a symlink", async () => {
@@ -925,12 +1052,61 @@ describe("ssh.authorizedKeys", () => {
 
     expect(result.status).toBe("failed")
     expect(String(result.error)).toContain("authorized_keys replace did not consume temporary file")
-    expect(aliceFinalReplaceCommand).toContain(`expected_authorized_keys_hash=$(sha256sum`)
+    const keyLineDigest = checkedDigest(`${testKey}\n`)
+    expect(aliceFinalReplaceCommand).not.toContain("expected_authorized_keys_hash")
+    expect(aliceFinalReplaceCommand).not.toContain(`sha256sum '${tempPath}'`)
     expect(aliceFinalReplaceCommand).toContain(`[ ! -e '${tempPath}' ]`)
     expect(aliceFinalReplaceCommand).toContain(
-      `authorized_keys_hash=$(sha256sum ${aliceKeys} | cut -d' ' -f1)`
+      `authorized_keys_hash=$({ if dd if=${aliceKeys} iflag=nofollow status=none;`
     )
+    expect(aliceFinalReplaceCommand).toContain(`[ "$authorized_keys_hash" = '${keyLineDigest}' ]`)
     expect(mockSsh.calls).toContain(aliceFinalReplaceCommand)
+  })
+
+  it("regression: returns failed before publishing when the staged file does not have mode 600", async () => {
+    const mockSsh = createMockSsh(
+      aliceResponses({
+        [aliceFinalReplaceCommand]: { code: 1, stderr: STAGED_FILE_MODE_REFUSAL },
+        [aliceMktempPattern]: { stdout: tempPath },
+      }),
+      successfulSshApplyOptions
+    )
+    const mod = ssh.authorizedKeys("alice", testKey)
+
+    const result = await mod.apply(mockSsh, emptyEnv)
+
+    expect(result.status).toBe("failed")
+    expect(String(result.error)).toContain(STAGED_FILE_MODE_REFUSAL)
+    // A default ACL on ~/.ssh overrides the umask: the decode and the replace
+    // confirm mode 600 after the staged-file guard and before anything is
+    // published, and neither runs a symlink-following chmod on the staged file.
+    const decodeCommand = aliceDecode(`${testKey}\n`)
+    expect(decodeCommand.split("\n").at(-1)).toBe(stagedFileModeGuard(tempPath))
+    expect(aliceFinalReplaceCommand.split("\n").slice(0, 3)).toStrictEqual([
+      stagedFileGuard(tempPath),
+      stagedFileModeGuard(tempPath),
+      `chown -h -- 'alice':'alice' '${tempPath}' && {`,
+    ])
+    expect(aliceFinalReplaceCommand.indexOf(STAGED_FILE_MODE_REFUSAL)).toBeLessThan(
+      aliceFinalReplaceCommand.indexOf("mv -T --")
+    )
+    expect(`${decodeCommand}\n${aliceFinalReplaceCommand}`).not.toContain("chmod")
+    expect(mockSsh.calls).toContain(decodeCommand)
+    expect(mockSsh.calls).toContain(aliceFinalReplaceCommand)
+    expect(mockSsh.calls).toContain(aliceCleanup)
+  })
+
+  it("verifies the replaced file against the digest of the computed content, not the staging name", () => {
+    const content = `${otherKey}\n${testKey}\n`
+    const replaceCommand = aliceFinalReplace(`${otherKey}\n`, content)
+
+    expect(replaceCommand).toContain(
+      `[ "$authorized_keys_hash" = '${checkedDigest(content)}' ] || { rm -f -- '/home/alice/.ssh/authorized_keys.paratix-backup'; echo 'authorized_keys content changed during replace' >&2; exit 1; }`
+    )
+    expect(replaceCommand).not.toContain(`sha256sum '${tempPath}'`)
+    // Only the digest reaches the command line, never the content itself.
+    expect(replaceCommand).not.toContain(testKey)
+    expect(replaceCommand).not.toContain(otherKey)
   })
 
   it("returns failed when .ssh is a symlink before chmod, chown, mktemp, or rewrite", async () => {
@@ -938,6 +1114,7 @@ describe("ssh.authorizedKeys", () => {
     // ModuleResult instead of an unstructured exception.
     const mockSsh = createMockSsh(
       aliceResponses({
+        [aliceRead]: authorizedKeysReadResponse(null),
         [aliceSshDirectoryGuard]: {
           code: 1,
           stderr: ".ssh must not be a symlink",
@@ -954,10 +1131,70 @@ describe("ssh.authorizedKeys", () => {
       `mkdir -p ${aliceDir} && chmod 700 ${aliceDir} && chown 'alice':'alice' ${aliceDir}`
     )
     expect(mockSsh.calls).not.toContain(aliceMktempPattern)
-    expect(mockSsh.calls).not.toContain(
-      presentAuthorizedKeysRewriteCommand(aliceKeys, tempPath, testKey)
+    expect(mockSsh.calls.some(isFinalReplace)).toBe(false)
+  })
+
+  it("returns failed from the read without preparing .ssh when .ssh is already a symlink", async () => {
+    const mockSsh = createMockSsh(
+      aliceResponses({
+        [aliceRead]: { code: 1, stderr: ".ssh must not be a symlink" },
+      }),
+      successfulSshApplyOptions
     )
-    expect(mockSsh.calls).not.toContain(aliceFinalReplaceCommand)
+    const mod = ssh.authorizedKeys("alice", testKey)
+
+    const result = await mod.apply(mockSsh, emptyEnv)
+
+    expect(result.status).toBe("failed")
+    expect(String(result.error)).toContain(".ssh must not be a symlink")
+    expect(aliceRead).toContain(`[ ! -L ${aliceDir} ]`)
+    expect(mockSsh.calls).not.toContain(aliceSshDirectoryGuard)
+    expect(mockSsh.calls).not.toContain(aliceMktempPattern)
+  })
+
+  it("returns failed when the guard does not print a canonical .ssh path", async () => {
+    const mockSsh = createMockSsh(
+      aliceResponses({
+        [aliceSshDirectoryGuard]: { code: 0, stdout: "/home/alice\n" },
+      }),
+      successfulSshApplyOptions
+    )
+    const mod = ssh.authorizedKeys("alice", testKey)
+
+    const result = await mod.apply(mockSsh, emptyEnv)
+
+    expect(result.status).toBe("failed")
+    expect(String(result.error)).toContain("failed to resolve the canonical .ssh directory")
+    expect(mockSsh.calls).not.toContain(aliceMktempPattern)
+  })
+
+  it("stages and replaces through the canonical .ssh path when a parent directory is a symlink", async () => {
+    const canonicalDirectory = "/data/home/alice/.ssh"
+    const canonicalMktemp = `mktemp -p '${canonicalDirectory}' -- '.paratix-authorized-keys.XXXXXX'`
+    const canonicalTemp = `${canonicalDirectory}/.paratix-authorized-keys.CANON1`
+    const mockSsh = createSshApplyMockSsh(
+      aliceResponses({
+        [aliceSshDirectoryGuard]: { code: 0, stdout: `${canonicalDirectory}\n` },
+        [canonicalMktemp]: { stdout: canonicalTemp },
+      })
+    )
+    const mod = ssh.authorizedKeys("alice", testKey)
+
+    const result = await mod.apply(mockSsh, emptyEnv)
+
+    expect(result.status).toBe("changed")
+    expect(mockSsh.writeFileCalls.map((call) => call.remotePath)).toStrictEqual([PAYLOAD_PATH])
+    expect(mockSsh.calls).toContain(
+      authorizedKeysFinalReplaceCommand({
+        authorizedKeysPath: `'${canonicalDirectory}/authorized_keys'`,
+        content: `${testKey}\n`,
+        expectedSshDirectoryState: "700 alice alice directory",
+        group: "alice",
+        sshDirectoryPath: `'${canonicalDirectory}'`,
+        temporaryPath: canonicalTemp,
+        user: "alice",
+      })
+    )
   })
 
   it("regression: returns failed when .ssh is exchanged during metadata update", async () => {
@@ -987,7 +1224,7 @@ describe("ssh.authorizedKeys", () => {
     )
     expect(mockSsh.calls).toContain(aliceSshDirectoryGuard)
     expect(mockSsh.calls).not.toContain(aliceMktempPattern)
-    expect(mockSsh.calls).not.toContain(aliceFinalReplaceCommand)
+    expect(mockSsh.calls.some(isFinalReplace)).toBe(false)
   })
 
   it("regression: returns failed when .ssh is exchanged before the final authorized_keys replace", async () => {
@@ -1009,11 +1246,9 @@ describe("ssh.authorizedKeys", () => {
     expect(result.status).toBe("failed")
     expect(String(result.error)).toContain(".ssh ownership changed before authorized_keys replace")
     expect(mockSsh.calls).toContain(aliceSshDirectoryGuard)
-    expect(mockSsh.calls).toContain(
-      presentAuthorizedKeysRewriteCommand(aliceKeys, tempPath, testKey)
-    )
+    expect(mockSsh.calls).toContain(aliceDecode(`${testKey}\n`))
     expect(mockSsh.calls).toContain(aliceFinalReplaceCommand)
-    expect(mockSsh.calls).toContain(`rm -f -- '${tempPath}' '${tempPath}.filter'`)
+    expect(mockSsh.calls).toContain(aliceCleanup)
   })
 
   // R-0000181: temp file must live in <home>/.ssh, on the same filesystem
@@ -1022,9 +1257,8 @@ describe("ssh.authorizedKeys", () => {
   it("stages the authorized_keys rewrite inside <home>/.ssh on the destination filesystem", async () => {
     const mockSsh = createSshApplyMockSsh(
       aliceResponses({
-        "[ -e '/home/alice/.ssh/authorized_keys' ]": { code: 0 },
-        [`grep -qxF -- '${testKey}' ${aliceKeys}`]: { code: 1 },
         [aliceMktempPattern]: { stdout: tempPath },
+        [aliceRead]: authorizedKeysReadResponse(`${otherKey}\n`),
       })
     )
     const mod = ssh.authorizedKeys("alice", testKey)
@@ -1033,6 +1267,7 @@ describe("ssh.authorizedKeys", () => {
 
     expect(result.status).toBe("changed")
     expect(mockSsh.calls).toContain(aliceMktempPattern)
+    expect(mockSsh.writeFileCalls.map((call) => call.remotePath)).toStrictEqual([PAYLOAD_PATH])
     expect(tempPath.startsWith(`${aliceHome}/.ssh/.paratix-authorized-keys.`)).toBe(true)
     // The legacy /run/paratix path must not be used any more.
     expect(mockSsh.calls.every((c) => !c.includes("/run/paratix"))).toBe(true)
@@ -1056,12 +1291,11 @@ describe("ssh.authorizedKeys", () => {
 
     expect(result.status).toBe("failed")
     expect(result.error?.message).toContain("Unexpected mktemp output")
-    expect(mockSsh.calls).not.toContain(
-      presentAuthorizedKeysRewriteCommand(aliceKeys, foreignPath, testKey)
-    )
+    expect(mockSsh.writeFileCalls).toStrictEqual([])
     expect(mockSsh.calls).not.toContain(
       authorizedKeysFinalReplaceCommand({
         authorizedKeysPath: aliceKeys,
+        content: `${testKey}\n`,
         expectedSshDirectoryState: "700 alice alice directory",
         group: "alice",
         sshDirectoryPath: aliceDir,
@@ -1069,15 +1303,15 @@ describe("ssh.authorizedKeys", () => {
         user: "alice",
       })
     )
-    expect(mockSsh.calls).not.toContain(`rm -f -- '${foreignPath}' '${foreignPath}.filter'`)
+    expect(mockSsh.calls).not.toContain(`rm -f -- '${foreignPath}'`)
+    expect(mockSsh.calls.some((command) => command.startsWith("mktemp -d "))).toBe(false)
   })
 
   it("stages absent-state rewrites inside <home>/.ssh as well", async () => {
     const mockSsh = createSshApplyMockSsh(
       aliceResponses({
-        "[ -e '/home/alice/.ssh/authorized_keys' ]": { code: 0 },
-        [`grep -qxF -- '${testKey}' ${aliceKeys}`]: { code: 0 },
         [aliceMktempPattern]: { stdout: tempPath },
+        [aliceRead]: authorizedKeysReadResponse(`${testKey}\n`),
       })
     )
     const mod = ssh.authorizedKeys("alice", testKey, { state: "absent" })
@@ -1159,7 +1393,9 @@ describe("ssh.authorizedKeys", () => {
       "[ -e '/root/.ssh/authorized_keys' ]": { code: 0 },
       "[ -L '/root/.ssh' ]": { code: 1 },
       "[ -L '/root/.ssh/authorized_keys' ]": { code: 1 },
-      [`grep -qxF -- '${testKey}' '/root/.ssh/authorized_keys'`]: { code: 0 },
+      [authorizedKeysReadCommand("'/root/.ssh/authorized_keys'")]: authorizedKeysReadResponse(
+        `${testKey}\n`
+      ),
       "getent passwd 'root' | cut -d: -f6": { stdout: "/root" },
       "id -gn 'root'": { stdout: "root" },
       "stat -c '%a %U %G %F' '/root/.ssh'": { stdout: "700 root root directory" },
@@ -1178,7 +1414,8 @@ describe("ssh.authorizedKeys", () => {
       "[ -e '/home/deploy/.ssh/authorized_keys' ]": { code: 0 },
       "[ -L '/home/deploy/.ssh' ]": { code: 1 },
       "[ -L '/home/deploy/.ssh/authorized_keys' ]": { code: 1 },
-      [`grep -qxF -- '${testKey}' '/home/deploy/.ssh/authorized_keys'`]: { code: 0 },
+      [authorizedKeysReadCommand("'/home/deploy/.ssh/authorized_keys'")]:
+        authorizedKeysReadResponse(`${testKey}\n`),
       "getent passwd 'deploy' | cut -d: -f6": { stdout: "/home/deploy" },
       "id -gn 'deploy'": { stdout: "deploy" },
       "stat -c '%a %U %G %F' '/home/deploy/.ssh'": { stdout: "700 deploy deploy directory" },
@@ -1198,7 +1435,8 @@ describe("ssh.authorizedKeys", () => {
       "[ -e '/home/my user/.ssh/authorized_keys' ]": { code: 0 },
       "[ -L '/home/my user/.ssh' ]": { code: 1 },
       "[ -L '/home/my user/.ssh/authorized_keys' ]": { code: 1 },
-      [`grep -qxF -- '${testKey}' '/home/my user/.ssh/authorized_keys'`]: { code: 0 },
+      [authorizedKeysReadCommand("'/home/my user/.ssh/authorized_keys'")]:
+        authorizedKeysReadResponse(`${testKey}\n`),
       "getent passwd 'alice' | cut -d: -f6": { stdout: spaceyHome },
       "id -gn 'alice'": { stdout: "alice" },
       "stat -c '%a %U %G %F' '/home/my user/.ssh'": { stdout: "700 alice alice directory" },
@@ -1211,7 +1449,7 @@ describe("ssh.authorizedKeys", () => {
     expect(result).toBe("ok")
     // Verify that the path containing a space was passed as a quoted argument
     expect(mockSsh.calls).toContain(
-      `grep -qxF -- '${testKey}' '/home/my user/.ssh/authorized_keys'`
+      authorizedKeysReadCommand("'/home/my user/.ssh/authorized_keys'")
     )
   })
 
@@ -1219,9 +1457,16 @@ describe("ssh.authorizedKeys", () => {
     const spaceyHome = "/home/my user"
     const spaceyMktemp = "mktemp -p '/home/my user/.ssh' -- '.paratix-authorized-keys.XXXXXX'"
     const spaceyTemp = "/home/my user/.ssh/.paratix-authorized-keys.SPACEY"
+    const spaceyGuard = sshDirectoryGuardCommand({
+      authorizedKeysPath: "'/home/my user/.ssh/authorized_keys'",
+      group: "alice",
+      sshDirectoryPath: "'/home/my user/.ssh'",
+      user: "alice",
+    })
     const mockSsh = createSshApplyMockSsh({
       "getent passwd 'alice' | cut -d: -f6": { stdout: spaceyHome },
       "id -gn 'alice'": { stdout: "alice" },
+      [spaceyGuard]: { stdout: "/home/my user/.ssh\n" },
       [spaceyMktemp]: { stdout: spaceyTemp },
     })
     const mod = ssh.authorizedKeys("alice", testKey)
@@ -1229,28 +1474,22 @@ describe("ssh.authorizedKeys", () => {
     expect(result.status).toBe("changed")
     // Directory creation must quote the space-containing path.
     // R-0000765: includes the fused authorized_keys symlink probe.
-    expect(mockSsh.calls).toContain(
-      sshDirectoryGuardCommand({
-        authorizedKeysPath: "'/home/my user/.ssh/authorized_keys'",
-        group: "alice",
-        sshDirectoryPath: "'/home/my user/.ssh'",
-        user: "alice",
-      })
-    )
+    expect(mockSsh.calls).toContain(spaceyGuard)
     // R-0000181: mktemp must operate inside <home>/.ssh on the destination filesystem.
     expect(mockSsh.calls).toContain(spaceyMktemp)
-    // Temp rewrite command must quote the space-containing path
+    // The no-follow read and the staging verification must quote the
+    // space-containing path
     expect(mockSsh.calls).toContain(
-      presentAuthorizedKeysRewriteCommand(
-        "'/home/my user/.ssh/authorized_keys'",
-        spaceyTemp,
-        testKey
-      )
+      authorizedKeysReadCommand("'/home/my user/.ssh/authorized_keys'")
+    )
+    expect(mockSsh.calls).toContain(
+      authorizedKeysStageDecodeCommand({ content: `${testKey}\n`, temporaryPath: spaceyTemp })
     )
     // Chmod must quote the space-containing path
     expect(mockSsh.calls).toContain(
       authorizedKeysFinalReplaceCommand({
         authorizedKeysPath: "'/home/my user/.ssh/authorized_keys'",
+        content: `${testKey}\n`,
         expectedSshDirectoryState: "700 alice alice directory",
         group: "alice",
         sshDirectoryPath: "'/home/my user/.ssh'",
@@ -1269,7 +1508,14 @@ describe("ssh.authorizedKeys", () => {
   it("R-0000065: apply uses the user's resolved primary group for chown when it differs from the username", async () => {
     const deployMktemp = "mktemp -p '/home/deploy/.ssh' -- '.paratix-authorized-keys.XXXXXX'"
     const deployTemp = "/home/deploy/.ssh/.paratix-authorized-keys.DEPLOY"
+    const deployGuard = sshDirectoryGuardCommand({
+      authorizedKeysPath: "'/home/deploy/.ssh/authorized_keys'",
+      group: "users",
+      sshDirectoryPath: "'/home/deploy/.ssh'",
+      user: "deploy",
+    })
     const mockSsh = createSshApplyMockSsh({
+      [deployGuard]: { stdout: "/home/deploy/.ssh\n" },
       [deployMktemp]: { stdout: deployTemp },
       "getent passwd 'deploy' | cut -d: -f6": { stdout: "/home/deploy" },
       "id -gn 'deploy'": { stdout: "users" },
@@ -1281,18 +1527,12 @@ describe("ssh.authorizedKeys", () => {
     expect(result.status).toBe("changed")
     // Directory chown uses the resolved primary group, not the username.
     // R-0000765: includes the fused authorized_keys symlink probe.
-    expect(mockSsh.calls).toContain(
-      sshDirectoryGuardCommand({
-        authorizedKeysPath: "'/home/deploy/.ssh/authorized_keys'",
-        group: "users",
-        sshDirectoryPath: "'/home/deploy/.ssh'",
-        user: "deploy",
-      })
-    )
+    expect(mockSsh.calls).toContain(deployGuard)
     // The authorized_keys chown must also use the resolved primary group.
     expect(mockSsh.calls).toContain(
       authorizedKeysFinalReplaceCommand({
         authorizedKeysPath: "'/home/deploy/.ssh/authorized_keys'",
+        content: `${testKey}\n`,
         expectedSshDirectoryState: "700 deploy users directory",
         group: "users",
         sshDirectoryPath: "'/home/deploy/.ssh'",
@@ -1312,7 +1552,8 @@ describe("ssh.authorizedKeys", () => {
       "[ -e '/home/deploy/.ssh/authorized_keys' ]": { code: 0 },
       "[ -L '/home/deploy/.ssh' ]": { code: 1 },
       "[ -L '/home/deploy/.ssh/authorized_keys' ]": { code: 1 },
-      [`grep -qxF -- '${testKey}' '/home/deploy/.ssh/authorized_keys'`]: { code: 0 },
+      [authorizedKeysReadCommand("'/home/deploy/.ssh/authorized_keys'")]:
+        authorizedKeysReadResponse(`${testKey}\n`),
       "getent passwd 'deploy' | cut -d: -f6": { stdout: "/home/deploy" },
       "id -gn 'deploy'": { stdout: "users" },
       "stat -c '%a %U %G %F' '/home/deploy/.ssh'": {

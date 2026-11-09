@@ -35,6 +35,8 @@ export type {
 export { service } from "./service.js"
 export { ssh } from "./ssh.js"
 export type {
+  AuthorizedKeyOptions,
+  AuthorizedKeysOptions,
   AuthorizedPrincipalsOptions,
   HostCertificateOptions,
   HostCertificateRequest,

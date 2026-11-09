@@ -5,7 +5,16 @@ import { isValidTcpPort } from "../serverDefinitionValidation.js"
 import { shellQuote, validateMktempPath } from "../ssh.js"
 import { type Module, type ModuleResult, NEEDS_APPLY, type SshConnection } from "../types.js"
 import { assertValidUserName } from "./posixNames.js"
-import { applyAuthorizedKeys, checkAuthorizedKeys } from "./sshAuthorizedKeysHelpers.js"
+import {
+  type AuthorizedKeyOptions,
+  serializeAuthorizedKeyOptions,
+} from "./sshAuthorizedKeyOptions.js"
+import { type AuthorizedKeysTarget, authorizedKeysTargetLine } from "./sshAuthorizedKeysContent.js"
+import {
+  applyAuthorizedKeys,
+  checkAuthorizedKeys,
+  dryRunAuthorizedKeys,
+} from "./sshAuthorizedKeysHelpers.js"
 import { authorizedPrincipals } from "./sshAuthorizedPrincipals.js"
 import { trustedUserCa } from "./sshCertificateModules.js"
 import { hostCertificate } from "./sshHostCertificate.js"
@@ -17,8 +26,9 @@ import {
   knownHostsTarget,
   withKnownHostsLock,
 } from "./sshKnownHostsFiles.js"
-import { assertAuthorizedKeyValue } from "./sshPublicKeyValidation.js"
+import { assertAuthorizedKeyValue, authorizedKeyIdentity } from "./sshPublicKeyValidation.js"
 
+export type { AuthorizedKeyOptions } from "./sshAuthorizedKeyOptions.js"
 export type {
   AuthorizedPrincipalsOptions,
   TrustedUserCaOptions,
@@ -52,7 +62,16 @@ type KnownHostsLookupParameters = {
 }
 type AuthorizedKeysState = "absent" | "present"
 
-type AuthorizedKeysOptions = {
+/** Settings for `ssh.authorizedKeys`. */
+export type AuthorizedKeysOptions = {
+  /**
+   * Structured key options written in front of the key. When omitted
+   * (`undefined`), the key is written without options, but `present` fails if
+   * an existing line of the same key carries options; `{}` explicitly removes
+   * them.
+   */
+  options?: AuthorizedKeyOptions
+  /** Whether the key should be present or absent. Defaults to `"present"`. */
   state?: AuthorizedKeysState
 }
 
@@ -69,10 +88,55 @@ function assertAuthorizedKeysState(state: unknown): asserts state is AuthorizedK
   throw new Error('ssh.authorizedKeys state must be "present" or "absent"')
 }
 
+const AUTHORIZED_KEYS_SETTINGS = new Set(["options", "state"])
+
+function hasPlainPrototype(value: object): boolean {
+  const prototype: unknown = Object.getPrototypeOf(value)
+  return prototype === Object.prototype || prototype === null
+}
+
+/**
+ * Reject a settings argument that is neither omitted nor a plain object, and
+ * top-level settings other than `options` and `state`, so a misplaced key
+ * option (for example `{ restrict: true }` instead of
+ * `{ options: { restrict: true } }`) or a stray positional value fails at
+ * construction instead of being ignored. Only the setting name is reported,
+ * never its value.
+ *
+ * @param options - The untrusted settings bag.
+ */
+function assertKnownAuthorizedKeysSettings(options: unknown): void {
+  if (options === undefined) return
+  if (typeof options !== "object" || options === null || !hasPlainPrototype(options)) {
+    throw new Error("ssh.authorizedKeys: settings must be a plain object")
+  }
+  for (const setting of Object.keys(options)) {
+    if (!AUTHORIZED_KEYS_SETTINGS.has(setting)) {
+      throw new Error(`ssh.authorizedKeys: unsupported setting ${JSON.stringify(setting)}`)
+    }
+  }
+}
+
 function resolveAuthorizedKeysState(options?: AuthorizedKeysOptions): AuthorizedKeysState {
   const state = options?.state ?? "present"
   assertAuthorizedKeysState(state)
   return state
+}
+
+function resolveAuthorizedKeysTarget(
+  key: string,
+  options?: AuthorizedKeysOptions
+): AuthorizedKeysTarget {
+  assertKnownAuthorizedKeysSettings(options)
+  const state = resolveAuthorizedKeysState(options)
+  const keyOptions = options?.options
+  const optionBlock = keyOptions === undefined ? "" : serializeAuthorizedKeyOptions(keyOptions)
+  return {
+    identity: authorizedKeyIdentity(key),
+    line: authorizedKeysTargetLine(key, optionBlock),
+    optionsProvided: keyOptions !== undefined,
+    state,
+  }
 }
 
 function assertKnownHostsState(state: unknown): asserts state is KnownHostsState {
@@ -947,27 +1011,58 @@ export const ssh = {
   /**
    * Ensure a public key is present in (or absent from) a user's `authorized_keys` file.
    *
-   * When `state` is `"present"` (the default), the key is appended if missing and the
-   * `.ssh` directory and `authorized_keys` file are created with correct ownership
-   * and permissions. When `state` is `"absent"`, the matching line is removed.
+   * Entries are identified by the key blob (algorithm plus base64 key data),
+   * not by the exact line. When `state` is `"present"` (the default), the
+   * target line is `<options> <key>` (or just `<key>` without options), with
+   * `key` written exactly as passed. Exactly one line per key blob is kept:
+   * the first existing line of the blob is replaced in place when its options
+   * or trailing comment differ, later lines of the same blob are removed, and
+   * the line is appended when the blob is missing. The `.ssh` directory
+   * (0700) and the `authorized_keys` file (0600) are created with the user's
+   * primary group. When `state` is `"absent"`, every line of the blob is
+   * removed regardless of options and comment. Comment, blank and unrelated
+   * lines stay byte-identical.
+   *
+   * Options are structured and serialized deterministically (`restrict`
+   * first, then alphabetical by OpenSSH option name); invalid options throw
+   * at construction. If `options` is omitted and an existing line of the same
+   * key carries options, `present` fails (naming only the option names) instead
+   * of silently dropping restrictions; pass `options: {}` to remove them.
+   * A line that cannot be parsed but contains the key blob as a token makes
+   * both states fail, because sshd may still honor it; so does the same blob
+   * under another key type. `cert-authority` lines are left unchanged, even
+   * for the same blob. Settings other than `options` and `state` throw.
+   * Several lines per key with different `from`/`command` options are not
+   * supported, and two calls for the same user and key with different options
+   * overwrite each other on every run. `environment` takes effect only when sshd's
+   * `PermitUserEnvironment` allows it.
    *
    * @param user - The target user whose `authorized_keys` file is managed.
-   * @param key - The full public key string (e.g. `"ssh-ed25519 AAAA... comment"`).
+   * @param key - The full public key string (e.g. `"ssh-ed25519 AAAA... comment"`); an options prefix is rejected.
    * @param options - Optional settings.
+   * @param options.options - Structured key options such as `restrict`, `command` or `from`.
    * @param options.state - Whether the key should be `"present"` or `"absent"`. Defaults to `"present"`.
    * @returns A Module that manages the authorized key entry.
+   * @example
+   * ssh.authorizedKeys("ops-ro", publicKey, {
+   *   options: { command: "/usr/local/bin/ops-ro-shell", from: ["10.0.0.0/8"], restrict: true },
+   * })
    */
   authorizedKeys(user: string, key: string, options?: AuthorizedKeysOptions): Module {
     assertValidUserName(user)
     assertAuthorizedKeyValue(key)
-    const state = resolveAuthorizedKeysState(options)
+    const target = resolveAuthorizedKeysTarget(key, options)
+    const { state } = target
 
     return {
+      async _applyDryRun(conn: null | SshConnection): Promise<ModuleResult> {
+        return dryRunAuthorizedKeys(conn, { target, user })
+      },
       async apply(conn: null | SshConnection): Promise<ModuleResult> {
-        return applyAuthorizedKeys(conn, { key, state, user })
+        return applyAuthorizedKeys(conn, { target, user })
       },
       async check(conn: null | SshConnection): Promise<"needs-apply" | "ok"> {
-        return checkAuthorizedKeys(conn, { key, state, user })
+        return checkAuthorizedKeys(conn, { target, user })
       },
       name: `ssh.authorizedKeys: ${user} (${state})`,
     }

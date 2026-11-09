@@ -66,6 +66,8 @@ export {
   user,
 } from "./modules/index.js"
 export type {
+  AuthorizedKeyOptions,
+  AuthorizedKeysOptions,
   AuthorizedPrincipalsOptions,
   DeferredSecretResolver,
   HostCertificateOptions,
