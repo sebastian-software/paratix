@@ -16,7 +16,7 @@ export type SshdMatchFixture = {
   cleanup: () => Promise<void>
   connectDeploy: () => Promise<SshConnectionImpl>
   container: (args: string[]) => Promise<string>
-  login: (command: string) => Promise<LoginResult>
+  login: (command: string, options?: { pty?: boolean }) => Promise<LoginResult>
   opsPublicKey: string
   reset: () => Promise<void>
   ssh: SshConnectionImpl
@@ -33,7 +33,7 @@ async function readPublicKey(path: string): Promise<string> {
 }
 
 async function loginOpsRo(
-  options: { identity: string; port: string },
+  options: { identity: string; port: string; pty: boolean },
   command: string
 ): Promise<LoginResult> {
   return new Promise((resolve, reject) => {
@@ -44,8 +44,9 @@ async function loginOpsRo(
       [
         "-F",
         "/dev/null",
-        // Request a PTY so the proof can observe that the server refuses it.
-        "-tt",
+        // `ssh -tt` exits 255 when the server refuses the PTY, so one login
+        // observes either the refusal or the forced command, never both.
+        options.pty ? "-tt" : "-T",
         "-p",
         options.port,
         "-i",
@@ -217,8 +218,8 @@ export async function createSshdMatchFixture(packageDirectory: string): Promise<
         return deploy
       },
       container,
-      login: async (command) =>
-        loginOpsRo({ identity: join(directory, "ops-ro"), port: target.port }, command),
+      login: async (command, { pty = false } = {}) =>
+        loginOpsRo({ identity: join(directory, "ops-ro"), port: target.port, pty }, command),
       opsPublicKey: await readPublicKey(join(directory, "ops-ro.pub")),
       async reset() {
         await container(["sh", "-c", RESET_SCRIPT])

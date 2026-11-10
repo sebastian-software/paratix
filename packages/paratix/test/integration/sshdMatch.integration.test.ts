@@ -76,6 +76,13 @@ async function refuses(
   expect(await snapshot()).toBe(before)
 }
 
+// A client that forces a PTY treats the refusal as fatal and exits 255.
+async function expectPtyRefused(command: string): Promise<void> {
+  const login = await target().login(command, { pty: true })
+  expect(login.code).toBe(255)
+  expect(login.stderr).toMatch(/PTY allocation request failed/v)
+}
+
 function restricted(directives: Parameters<typeof sshd.match>[2] = {}): Module {
   return sshd.match(
     "ops-ro",
@@ -163,6 +170,7 @@ describe.skipIf(!available)("sshd.match against OpenSSH", { concurrent: false },
     expect(login.code).toBe(0)
     expect(login.stdout).toContain("forced id via key")
     expect(login.stdout).toContain("no-tty")
+    await expectPtyRefused("id")
 
     await apply(restricted())
     login = await target().login("uptime")
@@ -170,7 +178,7 @@ describe.skipIf(!available)("sshd.match against OpenSSH", { concurrent: false },
     // ForceCommand overrides the key command; PermitTTY no refuses the PTY.
     expect(login.stdout).toContain("forced uptime via match")
     expect(login.stdout).toContain("no-tty")
-    expect(login.stderr).toMatch(/PTY allocation request failed/v)
+    await expectPtyRefused("uptime")
     await apply(key, "ok")
     await converged(restricted())
   })
