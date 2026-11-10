@@ -70,6 +70,7 @@ describe("sshd.match Include check variants", () => {
     ["the Include = form", `Include = ${DROP_IN_DIRECTORY}/*.conf`],
     ["a lower-case keyword", `include ${DROP_IN_DIRECTORY}/*.conf`],
     ["a doubled slash", "Include /etc/ssh//sshd_config.d/*.conf"],
+    ["a trailing comment", `Include ${DROP_IN_DIRECTORY}/*.conf # distro default`],
   ])("accepts %s and publishes the drop-in", async (_label, include) => {
     const fake = host({ mainConfig: `${include}\nPort 22\n` })
     await expect(present().apply(fake.connection, {})).resolves.toMatchObject({

@@ -21,17 +21,79 @@ const MAX_INCLUDE_DEPTH = 32
 // Match line on, until the end of the scanned file.
 type Scan = { caFiles: string[]; files: string[]; match: boolean; revocations: string[] }
 
+function unresolvableDirective(directive: string, value: string): CertificateFileError {
+  return new CertificateFileError(
+    `Cannot safely resolve sshd ${directive} ${value}; correct it manually`
+  )
+}
+
+const ARGUMENT_SEPARATORS = " \t"
+
+// A quote without a closing partner counts as one ordinary character here; the
+// whole-token check in `directiveArguments` then rejects the token.
+function rawArgumentEnd(value: string, start: number): number {
+  let end = start
+  while (end < value.length && !ARGUMENT_SEPARATORS.includes(value.charAt(end))) {
+    const char = value.charAt(end)
+    const close = char === '"' || char === "'" ? value.indexOf(char, end + 1) : -1
+    end = close === -1 ? end + 1 : close + 1
+  }
+  return end
+}
+
+/**
+ * Split a directive value the way OpenSSH 8.7+ `argv_split` does with comment
+ * termination: only unquoted spaces and tabs separate arguments, quoted
+ * sections may contain separators, and a token that starts with an unquoted
+ * `#` ends argument parsing.
+ *
+ * Mid-token quotes and backslash escapes are valid for sshd but not reproduced
+ * here, so such tokens fail closed instead of resolving to a different file
+ * than sshd loads. Text after the comment start is not validated.
+ *
+ * @param directive - The directive name used in error messages.
+ * @param value - The raw directive value, comment included.
+ * @returns The comment text (empty without a comment) and the arguments before
+ *   it, each with its raw spelling and its value after quote removal.
+ * @throws {CertificateFileError} When an argument is neither a bare word nor
+ *   exactly one complete quoted string, or contains a backslash, a control
+ *   character or whitespace other than space and tab.
+ */
+function directiveArguments(
+  directive: string,
+  value: string
+): { comment: string; tokens: Array<{ raw: string; value: string }> } {
+  const tokens: Array<{ raw: string; value: string }> = []
+  let index = 0
+  while (index < value.length) {
+    if (ARGUMENT_SEPARATORS.includes(value.charAt(index))) {
+      index += 1
+      continue
+    }
+    if (value.charAt(index) === "#") return { comment: value.slice(index), tokens }
+    const end = rawArgumentEnd(value, index)
+    const raw = value.slice(index, end)
+    if (/[[\\\s\p{Cc}]--[ \t]]/v.test(raw) || !/^(?:"[^"]*"|'[^']*'|[^"']+)$/v.test(raw))
+      throw unresolvableDirective(directive, raw)
+    tokens.push({ raw, value: raw.replaceAll(/^["']|["']$/gv, "") })
+    index = end
+  }
+  return { comment: "", tokens }
+}
+
 export function includePatterns(value: string): string[] {
-  const tokens = value.match(/"[^"\r\n]*"|'[^'\r\n]*'|\S+/gv) ?? []
-  return tokens.map((token) => {
-    const path = token.replaceAll(/^["']|["']$/gv, "")
+  const { comment, tokens } = directiveArguments("Include", value)
+  // OpenSSH 8.2-8.6 has no trailing comments on Include lines and globs every
+  // word after `#`, so a comment that could name files must not be ignored.
+  if (/[*?\[\/]/v.test(comment)) throw unresolvableDirective("Include", comment)
+  if (tokens.length === 0) throw unresolvableDirective("Include", value)
+  return tokens.map(({ raw, value: path }) => {
     // Keep shell expansion limited to OpenSSH's pathname glob syntax. More
     // elaborate/ambiguous syntax is a manual preflight conflict, never eval'd.
-    if (!/^[\w.\/*?\[\]\-]+$/v.test(path)) {
-      throw new CertificateFileError(
-        `Cannot safely resolve sshd Include ${token}; correct it manually`
-      )
-    }
+    // Under the OpenSSH 8.7+ rule a trailing comment starts only at a token
+    // beginning with an unquoted `#`, so any `#` that reaches this check is
+    // part of a path and rejected.
+    if (!/^[\w.\/*?\[\]\-]+$/v.test(path)) throw unresolvableDirective("Include", raw)
     return posix.isAbsolute(path) ? path : `/etc/ssh/${path}`
   })
 }
@@ -84,9 +146,16 @@ async function scanCertificateIncludes(
   return scan
 }
 
-async function revocationPaths(ssh: SshConnection, value: string): Promise<string[]> {
-  if (value === "none") return []
-  const path = value.replaceAll(/^["']|["']$/gv, "")
+async function revocationPaths(
+  ssh: SshConnection,
+  directive: string,
+  value: string
+): Promise<string[]> {
+  const { tokens } = directiveArguments(directive, value)
+  const path = tokens.at(0)?.value ?? ""
+  // sshd accepts exactly one filename argument for these directives.
+  if (tokens.length !== 1 || path.length === 0) throw unresolvableDirective(directive, value)
+  if (path.toLowerCase() === "none") return []
   const normalized = posix.normalize(posix.isAbsolute(path) ? path : `/etc/ssh/${path}`)
   const paths = [normalized]
   if (await ssh.test(`[ -e ${shellQuote(normalized)} ] || [ -L ${shellQuote(normalized)} ]`)) {
@@ -120,9 +189,9 @@ async function scanCertificateLine(
     )
   }
   if (directive === "revokedkeys")
-    scan.revocations.push(...(await revocationPaths(ssh, parsed.value)))
+    scan.revocations.push(...(await revocationPaths(ssh, "RevokedKeys", parsed.value)))
   if (directive === "trustedusercakeys")
-    scan.caFiles.push(...(await revocationPaths(ssh, parsed.value)))
+    scan.caFiles.push(...(await revocationPaths(ssh, "TrustedUserCAKeys", parsed.value)))
   if (directive === "include")
     return scanCertificateIncludes(ssh, { ...parameters, value: parsed.value }, scan)
   return scan

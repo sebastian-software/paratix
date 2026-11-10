@@ -39,6 +39,16 @@ function stagingSsh(existing: string[], glob = DROP_IN_GLOB) {
   )
 }
 
+async function stagedRootContent(content: string): Promise<string | undefined> {
+  const ssh = stagingSsh(["/etc/ssh/sshd_config.d/a.conf"])
+  await stageSshdConfigTree(ssh, {
+    content,
+    directory: STAGING,
+    rootPath: "/etc/ssh/sshd_config",
+  })
+  return ssh.writeFileCalls.at(-1)?.content
+}
+
 describe("generic sshd Include staging", () => {
   it("matches Include globs with pathname semantics", () => {
     expect(includeGlobMatches(DROP_IN_GLOB, "/etc/ssh/sshd_config.d/ops-ro.conf")).toBe(true)
@@ -71,6 +81,14 @@ describe("generic sshd Include staging", () => {
       "# /etc/ssh/sshd_config.d/c.conf\n",
       `Include ${STAGING}/validation-0 ${STAGING}/validation-1 ${STAGING}/validation-2\nPort 22`,
     ])
+  })
+
+  it("stages an Include with a trailing comment like the comment-free line", async () => {
+    const commented = await stagedRootContent(`Include ${DROP_IN_GLOB} # c\nPort 22`)
+    const plain = await stagedRootContent(`Include ${DROP_IN_GLOB}\nPort 22`)
+    expect(plain).toBeDefined()
+    expect(commented).toBe(plain)
+    expect(commented?.split("\n")[0]).not.toContain("#")
   })
 
   it("normalizes doubled-slash glob results before placing the candidate", async () => {

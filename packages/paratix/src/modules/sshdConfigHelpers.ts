@@ -2,10 +2,13 @@
  * Parse a single sshd_config line into its directive name and value, or
  * `null` when the line is empty / a comment / cannot be split into the
  * `<directive> <value>` shape. Leading whitespace is allowed (Match-block
- * lines are commonly indented). sshd_config only recognises whole-line
- * comments (`#` at the start of the trimmed line), so `#` characters are
- * preserved verbatim inside the value — matching the apply path
- * (`applySshdSettingToContent`) which writes the value as-is.
+ * lines are commonly indented). Only whole-line comments (`#` at the start of
+ * the trimmed line) are recognised here, so `#` characters are preserved
+ * verbatim inside the value — matching the apply path
+ * (`applySshdSettingToContent`) which writes the value as-is. Since OpenSSH
+ * 8.7, sshd also ends argument parsing at a token that starts with an unquoted
+ * `#`; callers interpreting the value as an argument list must handle such
+ * trailing comments themselves.
  *
  * @param rawLine - A single line from sshd_config.
  * @returns The parsed directive and trimmed value, or `null` if the line
