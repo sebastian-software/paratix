@@ -362,6 +362,10 @@
     "permitopen",
     "sshkey",
     "excl",
-    "nlink"
+    "nlink",
+    "setpriv",
+    "runuser",
+    "reuid",
+    "regid"
   ]
 }

@@ -175,6 +175,160 @@ describe.skipIf(!available)("sshd.match against OpenSSH", { concurrent: false },
     await converged(restricted())
   })
 
+  it("refuses a ~/.ssh that the user replaced by a symlink to a foreign directory", async () => {
+    // A root-owned directory outside the home, with a file the key must never reach.
+    await target().container([
+      "sh",
+      "-c",
+      "mkdir -m 0755 /srv/paratix-foreign && printf 'foreign\\n' > /srv/paratix-foreign/authorized_keys && chmod 0644 /srv/paratix-foreign/authorized_keys && ln -s /srv/paratix-foreign /home/ops-ro/.ssh && chown -h ops-ro:ops-ro /home/ops-ro/.ssh",
+    ])
+    const foreign = async (): Promise<string> =>
+      target().container([
+        "sh",
+        "-c",
+        "stat -c '%a %U %G %h' /srv/paratix-foreign /srv/paratix-foreign/*; ls -A /srv/paratix-foreign; sha256sum /srv/paratix-foreign/*",
+      ])
+    const before = await foreign()
+    const key = ssh.authorizedKeys("ops-ro", target().opsPublicKey, {
+      options: { restrict: true },
+    })
+
+    const dryRunResult = await dryRun(key, "failed")
+    expect(dryRunResult.error?.message).toContain(".ssh must not be a symlink")
+    const result = await apply(key, "failed")
+    expect(result.error?.message).toContain(".ssh must not be a symlink")
+    expect(await key.check(target().ssh, {})).toBe("needs-apply")
+    expect(await foreign()).toBe(before)
+    expect(await target().container(["readlink", "/home/ops-ro/.ssh"])).toBe("/srv/paratix-foreign")
+  })
+
+  it("creates ~/.ssh and authorized_keys as the login user", async () => {
+    const key = ssh.authorizedKeys("ops-ro", target().opsPublicKey, {
+      options: { restrict: true },
+    })
+    await apply(key)
+    expect(
+      await target().container([
+        "stat",
+        "-c",
+        "%a %U %G",
+        "/home/ops-ro/.ssh",
+        "/home/ops-ro/.ssh/authorized_keys",
+      ])
+    ).toBe("700 ops-ro ops-ro\n600 ops-ro ops-ro")
+    expect(await key.check(target().ssh, {})).toBe("ok")
+    await dryRun(key, "ok")
+    await apply(key, "ok")
+  })
+
+  it("repairs a root-owned ~/.ssh and authorized_keys for the login user", async () => {
+    // As an earlier root bootstrap would leave them.
+    await target().container([
+      "sh",
+      "-c",
+      "mkdir -m 0700 /home/ops-ro/.ssh && printf '# bootstrap\\n' > /home/ops-ro/.ssh/authorized_keys && chmod 0600 /home/ops-ro/.ssh/authorized_keys",
+    ])
+    const key = ssh.authorizedKeys("ops-ro", target().opsPublicKey, {
+      options: { restrict: true },
+    })
+    expect(await key.check(target().ssh, {})).toBe("needs-apply")
+    await dryRun(key, "changed")
+
+    await apply(key)
+
+    expect(
+      await target().container([
+        "stat",
+        "-c",
+        "%a %U %G",
+        "/home/ops-ro/.ssh",
+        "/home/ops-ro/.ssh/authorized_keys",
+      ])
+    ).toBe("700 ops-ro ops-ro\n600 ops-ro ops-ro")
+    expect(await target().container(["head", "-n", "1", "/home/ops-ro/.ssh/authorized_keys"])).toBe(
+      "# bootstrap"
+    )
+    await converged(key)
+  })
+
+  it("refuses a root-owned ~/.ssh that its group may write and changes nothing", async () => {
+    await target().container([
+      "sh",
+      "-c",
+      "mkdir /home/ops-ro/.ssh && chown root:ops /home/ops-ro/.ssh && chmod 2775 /home/ops-ro/.ssh",
+    ])
+    const state = async (): Promise<string> =>
+      target().container(["stat", "-c", "%a %U %G", "/home/ops-ro/.ssh"])
+    const before = await state()
+    const key = ssh.authorizedKeys("ops-ro", target().opsPublicKey)
+
+    const result = await apply(key, "failed")
+
+    expect(result.error?.message).toContain(
+      "a root-owned .ssh must not be writable by group or others"
+    )
+    expect(await state()).toBe(before)
+    expect(await target().container(["ls", "-A", "/home/ops-ro/.ssh"])).toBe("")
+  })
+
+  it.each([
+    {
+      label: "holding another entry",
+      message: "a root-owned .ssh may only contain authorized_keys and known_hosts",
+      setup:
+        "mkdir -m 0700 /home/ops-ro/.ssh && printf '# bootstrap\\n' > /home/ops-ro/.ssh/authorized_keys && chmod 0600 /home/ops-ro/.ssh/authorized_keys && printf 'x\\n' > /home/ops-ro/.ssh/cache",
+    },
+    {
+      label: "whose authorized_keys has a second hard link",
+      message: "authorized_keys in a root-owned .ssh must be a root-owned single-link regular file",
+      setup:
+        "mkdir -m 0700 /home/ops-ro/.ssh && printf '# bootstrap\\n' > /home/ops-ro/.ssh/authorized_keys && chmod 0600 /home/ops-ro/.ssh/authorized_keys && ln /home/ops-ro/.ssh/authorized_keys /root/paratix-second-link",
+    },
+  ])("refuses a root-owned ~/.ssh $label and changes nothing", async ({ message, setup }) => {
+    await target().container(["sh", "-c", setup])
+    const state = async (): Promise<string> =>
+      target().container([
+        "sh",
+        "-c",
+        "stat -c '%n %a %U %G %h' /home/ops-ro/.ssh /home/ops-ro/.ssh/*; sha256sum /home/ops-ro/.ssh/*",
+      ])
+    const before = await state()
+    const key = ssh.authorizedKeys("ops-ro", target().opsPublicKey)
+
+    const dryRunResult = await dryRun(key, "failed")
+    expect(dryRunResult.error?.message).toContain(message)
+    const result = await apply(key, "failed")
+    expect(result.error?.message).toContain(message)
+    expect(await key.check(target().ssh, {})).toBe("needs-apply")
+    expect(await state()).toBe(before)
+  })
+
+  it("lets a sudo connection user manage its own key with options", async () => {
+    const deploy = await target().connectDeploy()
+    const key = ssh.authorizedKeys("deploy", target().opsPublicKey, {
+      options: { command: `${SHELL} key`, restrict: true },
+    })
+    const removal = ssh.authorizedKeys("deploy", target().opsPublicKey, { state: "absent" })
+    try {
+      await apply(key, "changed", deploy)
+      expect(await key.check(deploy, {})).toBe("ok")
+      await apply(key, "ok", deploy)
+      expect(
+        await target().container([
+          "stat",
+          "-c",
+          "%a %U %G",
+          "/home/deploy/.ssh",
+          "/home/deploy/.ssh/authorized_keys",
+        ])
+      ).toBe("700 deploy deploy\n600 deploy deploy")
+      // The connection's own login key is still there: a new login succeeds.
+      await target().connectDeploy()
+    } finally {
+      await apply(removal, "changed", deploy)
+    }
+  })
+
   it("fails without changes when an earlier drop-in sets the same directive", async () => {
     await target().write(
       "/etc/ssh/sshd_config.d/00-early.conf",

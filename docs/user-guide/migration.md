@@ -258,6 +258,14 @@ to a separate interrupted user-CA update.
 
 **Upgrade:** Review recipes that declare one key more than once, or that relied on `absent` leaving lines with other options or comments in place. If a recipe now fails with "already contains this key with options", either declare the intended options with `options: { … }`, or pass `options: {}` to remove them deliberately. Fix or remove unparseable lines that mention the key manually, then rerun. See the [restricted-accounts recipe](./restricted-accounts.md) and the [`ssh.authorizedKeys` reference](../../packages/paratix/llm-guide.md#sshauthorizedkeys).
 
+### `ssh.authorizedKeys` works inside `~/.ssh` as the target user
+
+**Before:** `ssh.authorizedKeys` read, staged and replaced `authorized_keys` as root through absolute paths, and created a missing `~/.ssh` (and a missing home directory) with `mkdir -p`.
+
+**Now:** Every read and write inside `~/.ssh` runs as the target user through `setpriv`, or `runuser` as a fallback. Each step enters `~/.ssh` by its canonical path and refuses it when the directory was replaced in the meantime. The target user must be able to enter its home directory, and a missing `~/.ssh` is created by the target user, so the home directory must already exist and be writable for that user. A root-owned `~/.ssh` is still repaired for the target user when group and others cannot write it and it holds only `authorized_keys`, `known_hosts` and `known_hosts.old`. Any other root-owned `~/.ssh`, a `~/.ssh` owned by another user, and an `authorized_keys` in the user's `~/.ssh` that another user owns (for example after `sudo tee -a`) now fail without changes instead of being taken over.
+
+**Upgrade:** Make sure `setpriv` or `runuser` is available on targets that manage keys for users other than root; on Debian and Ubuntu, util-linux ships both. Create home directories before `ssh.authorizedKeys` runs, for example with `user.present`, which creates the home. If a recipe now fails with "needs setpriv or runuser", install util-linux on the target. If it fails with ".ssh must be owned by the target user or root", "a root-owned .ssh must not be writable by group or others", "a root-owned .ssh may only contain authorized_keys and known_hosts", or "authorized_keys must be owned by the target user", fix the ownership of that directory and of `authorized_keys` manually, for example with `chown -R <user>: ~<user>/.ssh`. If it fails with "cannot enter the home directory as the target user", make the home searchable for that user.
+
 ## Toward 1.0
 
 Confirmed unreleased breaking changes will be collected above. When the actual `paratix` or `create-paratix` package version 1.0.0 is prepared, those entries will move into a short versioned section with concrete upgrade steps. No future changes are assumed here.

@@ -7,6 +7,7 @@ import {
   parseAuthorizedKeyOptionEntries,
   serializeAuthorizedKeyOptions,
 } from "../../../src/modules/sshAuthorizedKeyOptions.js"
+import { authorizedKeysAccountCommand } from "../../../src/modules/sshAuthorizedKeysAccount.js"
 import {
   type AuthorizedKeysTarget,
   authorizedKeysTargetLine,
@@ -421,9 +422,15 @@ describe("ssh.authorizedKeys options guard", () => {
       [`[ -e '${keysPath}' ]`]: { code: 0 },
       [`[ -L '${keysPath}' ]`]: { code: 1 },
       [`stat -c '%a %U %G %F' '${keysPath}'`]: { stdout: "600 alice alice regular file" },
+      [authorizedKeysAccountCommand({ home: "/home/alice", user: "alice" })]: {
+        stdout: "setpriv 1000 1000\n/home/alice\n/usr/bin/setpriv\n",
+      },
       [authorizedKeysReadCommand({
-        authorizedKeysPath: keysPath,
-        sshDirectoryPath: "/home/alice/.ssh",
+        dropPrefix: "'/usr/bin/setpriv' --reuid=1000 --regid=1000 --init-groups -- ",
+        expectedSshDirectory: "/home/alice/.ssh",
+        gid: "1000",
+        uid: "1000",
+        user: "alice",
       })]: {
         stdout: `present\n${existingReadOutput}`,
       },

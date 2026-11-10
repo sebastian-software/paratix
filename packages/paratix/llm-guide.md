@@ -1473,8 +1473,27 @@ options guard or a conflict leaves `~/.ssh` untouched. Apply stages the new byte
 through SFTP into a private directory under `/tmp`, never into `~/.ssh`, and decodes them on the
 host, so `command` and `environment` values do not appear in command lines or process listings,
 bytes that are not valid UTF-8 survive, and a symlinked parent such as `/home -> /data/home`
-works. The file content still travels as the stdout of a command run through sudo during every
-check, dry-run and apply, so sudo I/O logging (`log_output`) records it. Apply refuses to publish
+works.
+
+Every read and write inside `~/.ssh` runs as the target user, through `setpriv` or, as a
+fallback, `runuser` (both from util-linux). For a target user other than the connection's
+effective user, one of them must be installed; otherwise check reports `needs-apply` and dry-run
+and apply return `failed`, and Paratix never falls back to acting as root. Each step enters
+`~/.ssh` by its canonical path (the resolved home directory plus `/.ssh`), refuses it when its
+physical path or its device, inode and owner changed since the prepare step, and then uses only
+names inside it. The home directory must exist, and the target user must be able to enter it
+and, when `~/.ssh` is missing, write to it; a missing `~/.ssh` is created by the target user
+with mode 0700.
+
+A root-owned `~/.ssh`, for example from an earlier root bootstrap, is repaired only when group
+and others cannot write it and it holds nothing but `authorized_keys`, `known_hosts` and
+`known_hosts.old`, with `authorized_keys` a root-owned single-link regular file. Root then hands
+`authorized_keys` to the target user with mode 0600 and resets mode and owner of the verified
+directory. Any other root-owned `~/.ssh`, a `~/.ssh` owned by another user, and an
+`authorized_keys` in the user's `~/.ssh` that another user owns (for example after
+`sudo tee -a`) make check `needs-apply` and dry-run and apply `failed` without changes; fix the
+ownership manually. The file content still travels as the stdout of a command run through sudo
+during every check, dry-run and apply, so sudo I/O logging (`log_output`) records it. Apply refuses to publish
 when the file changed between the read and the replace. For a complete restricted account, see
 the [restricted-accounts recipe](https://github.com/sebastian-software/paratix/blob/main/docs/user-guide/restricted-accounts.md).
 

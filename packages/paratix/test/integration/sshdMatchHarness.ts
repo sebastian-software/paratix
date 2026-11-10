@@ -174,7 +174,7 @@ async function startTarget(options: {
 }
 
 const RESET_SCRIPT = [
-  "rm -rf /etc/ssh/sshd_config.d/* /etc/ssh/sshd_config.d/.paratix-* /home/ops-ro/.ssh",
+  "rm -rf /etc/ssh/sshd_config.d/* /etc/ssh/sshd_config.d/.paratix-* /home/ops-ro/.ssh /srv/paratix-foreign /root/paratix-second-link",
   "rm -rf /etc/ssh/auth_principals /etc/ssh/trusted_user_ca_keys /run/fail-reload-once",
   "cp /run/initial-sshd-config /etc/ssh/sshd_config",
   "systemctl reload ssh",
