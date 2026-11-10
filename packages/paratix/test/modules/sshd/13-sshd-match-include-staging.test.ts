@@ -2,6 +2,7 @@ import { posix } from "node:path"
 import { describe, expect, it } from "vitest"
 
 import { scanCertificateSshdConfig } from "../../../src/modules/sshCertificateConfig.js"
+import { CertificateFileError } from "../../../src/modules/sshCertificateFiles.js"
 import { includeGlobMatches, stageSshdConfigTree } from "../../../src/modules/sshdIncludeStaging.js"
 import { createMockSsh } from "../../helpers/mockSsh.js"
 
@@ -14,13 +15,18 @@ const STAGING = "/tmp/paratix-sshd-match.ABCDEF"
 const B_CONF = "/etc/ssh/sshd_config.d/b.conf"
 
 // `existing` holds the glob results exactly as the remote shell prints them.
-function stagingSsh(existing: string[], glob = DROP_IN_GLOB) {
+function stagingSsh(
+  existing: string[],
+  glob = DROP_IN_GLOB,
+  overrides: Record<string, { code?: number; stderr?: string; stdout?: string }> = {}
+) {
   return createMockSsh(
     {
       [expandCommand(glob)]: { stdout: existing.map((path) => `${path}\n`).join("") },
       ...Object.fromEntries(
         existing.map((path) => [`cat '${posix.normalize(path)}'`, { stdout: `# ${path}\n` }])
       ),
+      ...overrides,
     },
     {
       allowWrites: [
@@ -34,9 +40,24 @@ function stagingSsh(existing: string[], glob = DROP_IN_GLOB) {
         { command: /^\[ -[edf] /v, result: { code: 0 } },
         { command: /^stat -c '%a %u %g' -- /v, result: { stdout: "755 0 0" } },
         { command: /^sha256sum /v, result: { stdout: "hash  file" } },
+        { command: /^for paratix_include in '/v, result: { stdout: "" } },
       ],
     }
   )
+}
+
+function commentWordCommand(word: string): string {
+  return expandCommand(`'/etc/ssh/${word}'`)
+}
+
+async function stagedRootContent(content: string): Promise<string | undefined> {
+  const ssh = stagingSsh(["/etc/ssh/sshd_config.d/a.conf"])
+  await stageSshdConfigTree(ssh, {
+    content,
+    directory: STAGING,
+    rootPath: "/etc/ssh/sshd_config",
+  })
+  return ssh.writeFileCalls.at(-1)?.content
 }
 
 describe("generic sshd Include staging", () => {
@@ -71,6 +92,76 @@ describe("generic sshd Include staging", () => {
       "# /etc/ssh/sshd_config.d/c.conf\n",
       `Include ${STAGING}/validation-0 ${STAGING}/validation-1 ${STAGING}/validation-2\nPort 22`,
     ])
+  })
+
+  it("stages an Include with a trailing comment like the comment-free line", async () => {
+    const commented = await stagedRootContent(`Include ${DROP_IN_GLOB} # c\nPort 22`)
+    const plain = await stagedRootContent(`Include ${DROP_IN_GLOB}\nPort 22`)
+    expect(plain).toBeDefined()
+    expect(commented).toBe(plain)
+    expect(commented?.split("\n")[0]).not.toContain("#")
+  })
+
+  it.each([
+    ["# alice", "alice"],
+    ["#c d.conf", "#c"],
+    ["#c d.conf", "d.conf"],
+    ["# key=alice", "alice"],
+    ['# "a b"', "a b"],
+  ])("refuses to stage %j when %s names an existing file", async (comment, word) => {
+    const ssh = stagingSsh([], DROP_IN_GLOB, {
+      [commentWordCommand(word)]: { stdout: `/etc/ssh/${word}\n` },
+    })
+    await expect(
+      stageSshdConfigTree(ssh, {
+        content: `Include ${DROP_IN_GLOB} ${comment}`,
+        directory: STAGING,
+        rootPath: "/etc/ssh/sshd_config",
+      })
+    ).rejects.toThrow(`comment word ${word}`)
+    expect(ssh.calls).not.toContain(EXPAND)
+    expect(ssh.writeFileCalls).toStrictEqual([])
+  })
+
+  it("stages an Include whose comment words name no file", async () => {
+    const ssh = stagingSsh(["/etc/ssh/sshd_config.d/a.conf"])
+    await stageSshdConfigTree(ssh, {
+      content: `Include ${DROP_IN_GLOB} # alice key=bob`,
+      directory: STAGING,
+      rootPath: "/etc/ssh/sshd_config",
+    })
+    expect(ssh.calls).toStrictEqual(
+      expect.arrayContaining(["#", "alice", "key", "bob"].map((word) => commentWordCommand(word)))
+    )
+    expect(ssh.writeFileCalls.at(-1)?.content).toBe(`Include ${STAGING}/validation-0`)
+  })
+
+  it("fails closed when the comment word check fails during staging", async () => {
+    const ssh = stagingSsh([], DROP_IN_GLOB, {
+      [commentWordCommand("alice")]: { code: 1, stderr: "sudo: failure" },
+    })
+    await expect(
+      stageSshdConfigTree(ssh, {
+        content: `Include ${DROP_IN_GLOB} # alice`,
+        directory: STAGING,
+        rootPath: "/etc/ssh/sshd_config",
+      })
+    ).rejects.toThrow(CertificateFileError)
+    expect(ssh.writeFileCalls).toStrictEqual([])
+  })
+
+  it("refuses to stage an included file whose comment word names an existing file", async () => {
+    const ssh = stagingSsh(["/etc/ssh/sshd_config.d/a.conf"], DROP_IN_GLOB, {
+      "cat '/etc/ssh/sshd_config.d/a.conf'": { stdout: "Include b.conf # alice\n" },
+      [commentWordCommand("alice")]: { stdout: "/etc/ssh/alice\n" },
+    })
+    await expect(
+      stageSshdConfigTree(ssh, {
+        content: `Include ${DROP_IN_GLOB}`,
+        directory: STAGING,
+        rootPath: "/etc/ssh/sshd_config",
+      })
+    ).rejects.toThrow("comment word alice")
   })
 
   it("normalizes doubled-slash glob results before placing the candidate", async () => {
