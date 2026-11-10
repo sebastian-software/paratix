@@ -287,6 +287,40 @@ describe("scanCertificateSshdConfig trailing comments", () => {
   })
 
   it.each([
+    ["TrustedUserCAKeys", "ca.pub"],
+    ["TrustedUserCAKeys", "~/ca.pub"],
+    ["RevokedKeys", "revoked"],
+    ["RevokedKeys", "~/revoked"],
+  ])("rejects relative %s path %s before probing the remote host", async (directive, path) => {
+    const ssh = scanSsh()
+    await expect(scan(`${directive} ${path}\n`, ssh)).rejects.toBeInstanceOf(CertificateFileError)
+    expect(ssh.calls).toStrictEqual([])
+  })
+
+  it("keeps an absolute quoted path and its physical symlink target", async () => {
+    const path = "/var/lib/paratix/ca.pub"
+    const physicalPath = "/srv/keys/ca.pub"
+    const ssh = scanSsh({
+      [`[ -e '${path}' ] || [ -L '${path}' ]`]: { code: 0 },
+      [`readlink -f -- '${path}'`]: { stdout: `${physicalPath}\n` },
+    })
+    const result = await scan(`TrustedUserCAKeys "${path}"\n`, ssh)
+    expect(result.caFiles).toStrictEqual([path, physicalPath])
+  })
+
+  it.each(["TrustedUserCAKeys", "RevokedKeys"])(
+    "rejects an empty physical target for %s",
+    async (directive) => {
+      const path = "/var/lib/paratix/link"
+      const ssh = scanSsh({
+        [`[ -e '${path}' ] || [ -L '${path}' ]`]: { code: 0 },
+        [`readlink -f -- '${path}'`]: { stdout: "" },
+      })
+      await expect(scan(`${directive} ${path}\n`, ssh)).rejects.toBeInstanceOf(CertificateFileError)
+    }
+  )
+
+  it.each([
     "RevokedKeys none # note",
     'RevokedKeys "none"',
     "RevokedKeys None",
