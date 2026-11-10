@@ -220,7 +220,7 @@ async function revocationPaths(
   // sshd accepts exactly one filename argument for these directives.
   if (tokens.length !== 1 || path.length === 0) throw unresolvableDirective(directive, value)
   if (path.toLowerCase() === "none") return []
-  if (!posix.isAbsolute(path)) throw unresolvableDirective(directive, path)
+  if (!posix.isAbsolute(path)) throw unresolvableDirective(directive, value)
   const normalized = posix.normalize(path)
   const paths = [normalized]
   if (await ssh.test(`[ -e ${shellQuote(normalized)} ] || [ -L ${shellQuote(normalized)} ]`)) {
