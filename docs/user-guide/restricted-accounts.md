@@ -21,6 +21,10 @@ limits what the account can do however it authenticates. The
   accounts; give the account a non-locking placeholder instead, for example
   `user.present(account, { shell: "/bin/sh", password: "*" })`. `*` is no valid hash, so it still
   allows no password login, but it does not mark the account as locked.
+- The target provides `setpriv` or `runuser` (both from util-linux, installed on Debian and
+  Ubuntu). `ssh.authorizedKeys` writes the restricted account's `~/.ssh` as that account and fails
+  without one of them. The account's home directory must exist before the key is managed;
+  `user.present` creates it.
 - The forced-command script exists on the controller, for example `files/ops-ro-shell`. Keep it
   minimal: it runs for every login of that key, and the client's requested command reaches it
   only as the `SSH_ORIGINAL_COMMAND` environment variable.
