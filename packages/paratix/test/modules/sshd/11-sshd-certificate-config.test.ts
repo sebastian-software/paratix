@@ -3,13 +3,19 @@ import { describe, expect, it } from "vitest"
 import {
   buildCertificateConfig,
   includePatterns,
+  parseIncludeValue,
   scanCertificateSshdConfig,
 } from "../../../src/modules/sshCertificateConfig.js"
 import { CertificateFileError } from "../../../src/modules/sshCertificateFiles.js"
+import { shellQuote } from "../../../src/ssh.js"
 import { createMockSsh } from "../../helpers/mockSsh.js"
 
 function expandCommand(glob: string): string {
   return `for paratix_include in ${glob}; do if [ -e "$paratix_include" ] || [ -L "$paratix_include" ]; then printf '%s\\n' "$paratix_include"; fi; done`
+}
+
+function commentWordCommand(word: string): string {
+  return expandCommand(`'/etc/ssh/${word}'`)
 }
 
 describe("sshd certificate configuration", () => {
@@ -143,8 +149,30 @@ describe("includePatterns", () => {
     ["a comment-only value", "# note"],
     ["a hash directly behind a word", "a.conf# c"],
     ["a backslash", String.raw`a\.conf`],
+    ["a backslash in a comment word", String.raw`a.conf # a\lice`],
+    ["a comment word starting with a tilde", "a.conf # ~alice"],
+    ["a quoted comment word starting with a tilde", 'a.conf # "~a b"'],
+    ["a tilde behind an equals sign", "a.conf # key=~alice"],
   ])("rejects %s", (_label, value) => {
     expect(() => includePatterns(value)).toThrow(CertificateFileError)
+  })
+})
+
+describe("parseIncludeValue", () => {
+  it.each([
+    ["a.conf", []],
+    ["a.conf # alice", ["#", "alice"]],
+    ["a.conf #c d.conf", ["#c", "d.conf"]],
+    ["a.conf # key=alice", ["#", "key", "alice"]],
+    ['a.conf # "a b"', ["#", "a", "b", "a b"]],
+    ['a.conf # a"lice"', ["#", "a", "lice", "alice"]],
+    ['a.conf # x"a b"z"c"', ["#", "x", "a", "b", "z", "c", "xa b", "zc"]],
+    ["a.conf # alice alice", ["#", "alice"]],
+  ])("returns the comment words of %j", (value, expected) => {
+    expect(parseIncludeValue(value)).toStrictEqual({
+      commentWords: expected,
+      patterns: ["/etc/ssh/a.conf"],
+    })
   })
 })
 
@@ -152,17 +180,21 @@ describe("scanCertificateSshdConfig trailing comments", () => {
   const ROOT = "/etc/ssh/sshd_config"
   const INCLUDED = "/etc/ssh/conf.d/a.conf"
 
-  function scanSsh() {
+  function scanSsh(
+    overrides: Record<string, { code?: number; stderr?: string; stdout?: string }> = {}
+  ) {
     return createMockSsh(
       {
         [`cat '${INCLUDED}'`]: { stdout: "Port 22\n" },
         [`readlink -f -- '${INCLUDED}'`]: { stdout: `${INCLUDED}\n` },
         [expandCommand("/etc/ssh/conf.d/*.conf")]: { stdout: `${INCLUDED}\n` },
+        ...overrides,
       },
       {
         responseStubs: [
           { command: /^\[ -f /v, result: { code: 0 } },
           { command: /^\[ -e .* \] \|\| \[ -L /v, result: { code: 1 } },
+          { command: /^for paratix_include in '/v, result: { stdout: "" } },
         ],
       }
     )
@@ -180,6 +212,66 @@ describe("scanCertificateSshdConfig trailing comments", () => {
     expect(plain.files).toStrictEqual([ROOT, INCLUDED])
     expect(commented.files).toStrictEqual(plain.files)
     expect(commentSsh.calls).toContain(expandCommand("/etc/ssh/conf.d/*.conf"))
+  })
+
+  it.each([
+    ["a plain word", "# alice", "alice"],
+    ["the hash word", "# alice", "#"],
+    ["a hash-prefixed word", "#c d.conf", "#c"],
+    ["a word behind a hash-prefixed word", "#c d.conf", "d.conf"],
+    ["the key of a key=value word", "# key=alice", "key"],
+    ["the value of a key=value word", "# key=alice", "alice"],
+    ["a quoted span", '# "a b"', "a b"],
+    ["a span joined to its prefix", '# a"lice"', "alice"],
+  ])("rejects a comment naming an existing file through %s", async (_label, comment, word) => {
+    const ssh = scanSsh({ [commentWordCommand(word)]: { stdout: `/etc/ssh/${word}\n` } })
+    const error = await scan(`Include conf.d/*.conf ${comment}\n`, ssh).catch(
+      (error_: unknown) => error_
+    )
+    expect(error).toBeInstanceOf(CertificateFileError)
+    expect((error as Error).message).toContain(`comment word ${word}`)
+    expect(ssh.calls).not.toContain(expandCommand("/etc/ssh/conf.d/*.conf"))
+  })
+
+  it("checks every comment word and accepts a comment that names no file", async () => {
+    const ssh = scanSsh()
+    const result = await scan("Include conf.d/*.conf # alice key=bob\n", ssh)
+    expect(result.files).toStrictEqual([ROOT, INCLUDED])
+    expect(ssh.calls).toStrictEqual(
+      expect.arrayContaining(["#", "alice", "key", "bob"].map((word) => commentWordCommand(word)))
+    )
+  })
+
+  it("shell-quotes a comment word before checking it on the host", async () => {
+    const ssh = scanSsh()
+    await scan("Include conf.d/*.conf # it's $(id)\n", ssh)
+    expect(ssh.calls).toStrictEqual(
+      expect.arrayContaining(
+        ["/etc/ssh/it's", "/etc/ssh/$(id)"].map((path) => expandCommand(shellQuote(path)))
+      )
+    )
+  })
+
+  it("treats a dangling symlink named by a comment word as an existing file", async () => {
+    expect(commentWordCommand("alice")).toContain('[ -L "$paratix_include" ]')
+    const ssh = scanSsh({ [commentWordCommand("alice")]: { stdout: "/etc/ssh/alice\n" } })
+    await expect(scan("Include conf.d/*.conf # alice\n", ssh)).rejects.toThrow(
+      /comment word alice/v
+    )
+  })
+
+  it("fails closed when the comment word check fails", async () => {
+    const ssh = scanSsh({ [commentWordCommand("alice")]: { code: 1, stderr: "sudo: failure" } })
+    await expect(scan("Include conf.d/*.conf # alice\n", ssh)).rejects.toThrow(CertificateFileError)
+    expect(ssh.calls).not.toContain(expandCommand("/etc/ssh/conf.d/*.conf"))
+  })
+
+  it("rejects a comment word in an included file", async () => {
+    const ssh = scanSsh({
+      [`cat '${INCLUDED}'`]: { stdout: "Include b.conf # alice\n" },
+      [commentWordCommand("alice")]: { stdout: "/etc/ssh/alice\n" },
+    })
+    await expect(scan("Include conf.d/*.conf\n", ssh)).rejects.toThrow(/comment word alice/v)
   })
 
   it("reads the CA path before the comment", async () => {

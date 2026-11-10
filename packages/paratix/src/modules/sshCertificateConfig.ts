@@ -81,13 +81,49 @@ function directiveArguments(
   return { comment: "", tokens }
 }
 
-export function includePatterns(value: string): string[] {
+// The words OpenSSH 8.2-8.6 could load from a comment. Its tokenizer splits on
+// whitespace, `=` and `"`, drops the quotes of a double-quoted span and keeps
+// the span joined to the text directly before it. Quotes pair up in sequence,
+// so the odd segments between them are the spans. The result is a superset.
+function legacyCommentWords(comment: string): string[] {
+  const words = comment.split(/[ \t\r\n="]+/v)
+  const segments = comment.split('"')
+  for (let index = 1; index < segments.length - 1; index += 2) {
+    const prefix =
+      segments
+        .at(index - 1)
+        ?.split(/[ \t\r\n=]/v)
+        .at(-1) ?? ""
+    words.push(`${prefix}${segments.at(index) ?? ""}`)
+  }
+  return [...new Set(words.filter((word) => word.length > 0))]
+}
+
+/**
+ * Parse an Include value into its OpenSSH 8.7+ patterns and the comment words
+ * OpenSSH 8.2-8.6 would treat as further Include arguments.
+ *
+ * Those versions have no trailing comments on Include lines. A comment is
+ * therefore accepted only when every word stays a literal name below
+ * `/etc/ssh`; callers that reach the host check those names with
+ * {@link checkedIncludePatterns}.
+ *
+ * @param value - The raw Include value, comment included.
+ * @returns The absolute patterns and the distinct comment words.
+ * @throws {CertificateFileError} When an argument cannot be resolved, there is
+ *   no argument, a comment contains glob syntax, a slash or a backslash, or a
+ *   comment word starts with `~`.
+ */
+export function parseIncludeValue(value: string): { commentWords: string[]; patterns: string[] } {
   const { comment, tokens } = directiveArguments("Include", value)
-  // OpenSSH 8.2-8.6 has no trailing comments on Include lines and globs every
-  // word after `#`, so a comment that could name files must not be ignored.
-  if (/[*?\[\/]/v.test(comment)) throw unresolvableDirective("Include", comment)
+  // glob(3) would expand these in a comment word, and a word with a slash or a
+  // leading `~` does not resolve below /etc/ssh.
+  if (/[*?\[\/\\]/v.test(comment)) throw unresolvableDirective("Include", comment)
+  const commentWords = legacyCommentWords(comment)
+  if (commentWords.some((word) => word.startsWith("~")))
+    throw unresolvableDirective("Include", comment)
   if (tokens.length === 0) throw unresolvableDirective("Include", value)
-  return tokens.map(({ raw, value: path }) => {
+  const patterns = tokens.map(({ raw, value: path }) => {
     // Keep shell expansion limited to OpenSSH's pathname glob syntax. More
     // elaborate/ambiguous syntax is a manual preflight conflict, never eval'd.
     // Under the OpenSSH 8.7+ rule a trailing comment starts only at a token
@@ -96,11 +132,39 @@ export function includePatterns(value: string): string[] {
     if (!/^[\w.\/*?\[\]\-]+$/v.test(path)) throw unresolvableDirective("Include", raw)
     return posix.isAbsolute(path) ? path : `/etc/ssh/${path}`
   })
+  return { commentWords, patterns }
+}
+
+export function includePatterns(value: string): string[] {
+  return parseIncludeValue(value).patterns
+}
+
+/**
+ * Resolve an Include value for callers that follow it on the host, failing
+ * closed when OpenSSH 8.2-8.6 would load a file named by a comment word.
+ *
+ * @param ssh - Connection to the host whose configuration is read.
+ * @param value - The raw Include value, comment included.
+ * @returns The absolute patterns of the Include value.
+ * @throws {CertificateFileError} When the value cannot be parsed, a comment
+ *   word names an existing path or dangling symlink, or the check itself fails.
+ */
+export async function checkedIncludePatterns(ssh: SshConnection, value: string): Promise<string[]> {
+  const { commentWords, patterns } = parseIncludeValue(value)
+  for (const word of commentWords) {
+    const path = `/etc/ssh/${word}`
+    // eslint-disable-next-line no-await-in-loop -- the first match in line order is reported
+    const existing = await expandInclude(ssh, shellQuote(path))
+    if (existing.length > 0)
+      throw unresolvableDirective("Include", `comment word ${word} (${path} exists)`)
+  }
+  return patterns
 }
 
 export async function expandInclude(ssh: SshConnection, pattern: string): Promise<string[]> {
-  // The alphabet was validated above. Quoting individual literal path
-  // characters preserves only the glob operators for the remote shell.
+  // `pattern` is either from the validated alphabet above, where quoting
+  // individual literal path characters preserves only the glob operators for
+  // the remote shell, or one shell-quoted literal path.
   const output = await certificateCommand(
     ssh,
     `for paratix_include in ${pattern}; do if [ -e "$paratix_include" ] || [ -L "$paratix_include" ]; then printf '%s\\n' "$paratix_include"; fi; done`
@@ -122,7 +186,7 @@ async function scanCertificateIncludes(
   parameters: { value: string } & ScanParameters,
   scan: Scan
 ): Promise<Scan> {
-  for (const pattern of includePatterns(parameters.value)) {
+  for (const pattern of await checkedIncludePatterns(ssh, parameters.value)) {
     // eslint-disable-next-line no-await-in-loop -- Include order determines Match scope
     const includes = await expandInclude(ssh, pattern)
     for (const path of includes) {

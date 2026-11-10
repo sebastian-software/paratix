@@ -3,7 +3,7 @@ import { posix } from "node:path"
 import type { SshConnection } from "../types.js"
 
 import { shellQuote } from "../ssh.js"
-import { expandInclude, includePatterns } from "./sshCertificateConfig.js"
+import { checkedIncludePatterns, expandInclude } from "./sshCertificateConfig.js"
 import {
   certificateCommand,
   CertificateFileError,
@@ -137,7 +137,7 @@ async function stageInclude(
   context: StageContext
 ): Promise<string> {
   const includes: string[] = []
-  for (const pattern of includePatterns(value)) {
+  for (const pattern of await checkedIncludePatterns(ssh, value)) {
     // eslint-disable-next-line no-await-in-loop -- Include and Match order must remain unchanged
     const entries = await expandWithOverride(ssh, pattern, context)
     for (const entry of entries) {
