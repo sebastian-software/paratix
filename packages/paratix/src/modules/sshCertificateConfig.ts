@@ -17,6 +17,8 @@ export const CERTIFICATE_DIRECTIVES = [
 ] as const
 const MAX_INCLUDE_DEPTH = 32
 
+// `match` is the Match state after the last scanned line: `true` from the first
+// Match line on, until the end of the scanned file.
 type Scan = { caFiles: string[]; files: string[]; match: boolean; revocations: string[] }
 
 export function includePatterns(value: string): string[] {
@@ -46,6 +48,7 @@ export async function expandInclude(ssh: SshConnection, pattern: string): Promis
 
 type ScanParameters = {
   content: string
+  /** Match state at the start of this file: `true` for a file included from inside a Match block. */
   insideMatch?: boolean
   path: string
   rejectMatch: boolean
@@ -57,25 +60,28 @@ async function scanCertificateIncludes(
   parameters: { value: string } & ScanParameters,
   scan: Scan
 ): Promise<Scan> {
-  let current = scan
   for (const pattern of includePatterns(parameters.value)) {
     // eslint-disable-next-line no-await-in-loop -- Include order determines Match scope
     const includes = await expandInclude(ssh, pattern)
     for (const path of includes) {
-      // eslint-disable-next-line no-await-in-loop -- textual inclusion inherits Match scope
+      // An included file starts in the Match state of its Include line (an
+      // Include inside a Match block is scanned as inside Match). OpenSSH's
+      // server configuration parser restores the including file's Match state
+      // after each included file, so a Match opened inside the included file
+      // ends at that file's end and never leaks into the including file.
+      // eslint-disable-next-line no-await-in-loop -- included files are scanned in Include order
       const nested = await scanIncludedConfig(ssh, {
-        insideMatch: current.match,
+        insideMatch: scan.match,
         path,
         rejectMatch: parameters.rejectMatch,
         stack: [...(parameters.stack ?? []), parameters.path],
       })
-      current.caFiles.push(...nested.caFiles)
-      current.files.push(...nested.files)
-      current.revocations.push(...nested.revocations)
-      current = { ...current, match: nested.match }
+      scan.caFiles.push(...nested.caFiles)
+      scan.files.push(...nested.files)
+      scan.revocations.push(...nested.revocations)
     }
   }
-  return current
+  return scan
 }
 
 async function revocationPaths(ssh: SshConnection, value: string): Promise<string[]> {

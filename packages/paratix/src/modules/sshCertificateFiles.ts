@@ -56,10 +56,40 @@ function safeRootMetadata(metadata: string, rootReadable: boolean): boolean {
   return (bits & WRITE_BITS) === 0 && (!rootReadable || (bits & ROOT_READ_BIT) !== 0)
 }
 
+type FileRefusal = "metadata" | "regular" | "symlink"
+
+// Refusals without a label keep the wording of the certificate modules.
+const DEFAULT_REFUSALS: Record<FileRefusal, string> = {
+  metadata: "Revocation file must be root-owned, root-readable and not group/other-writable",
+  regular: "Regular file required",
+  symlink: "Symlink file rejected",
+}
+const NAMED_REFUSALS: Record<FileRefusal, string> = {
+  metadata: "must be root-owned, root-readable and not group/other-writable",
+  regular: "must be a regular file",
+  symlink: "must not be a symlink",
+}
+
+function fileRefusal(kind: FileRefusal, path: string, label?: string): CertificateFileError {
+  const message = label === undefined ? DEFAULT_REFUSALS[kind] : `${label} ${NAMED_REFUSALS[kind]}`
+  return new CertificateFileError(`${message}: ${path}`)
+}
+
+/**
+ * Inspect one root-managed file and its ancestors.
+ * @param ssh - Target connection.
+ * @param path - Absolute file path.
+ * @param options - Inspection options.
+ * @param options.label - Names the file in refusals; without it the certificate
+ * modules' wording (for example "Revocation file …") is kept.
+ * @param options.preserve - Require root-owned, root-readable metadata without group/other write.
+ * @param options.user - Account that must be able to traverse every parent.
+ * @returns The file state, or `null` when the file does not exist.
+ */
 export async function inspectCertificateFile(
   ssh: SshConnection,
   path: string,
-  options: { preserve?: boolean; user?: string } = {}
+  options: { label?: string; preserve?: boolean; user?: string } = {}
 ): Promise<CertificateFileState> {
   // Every ancestor must be protected before subsequent path operations. The
   // only actors able to replace these directories are already privileged.
@@ -68,18 +98,13 @@ export async function inspectCertificateFile(
     await inspectCertificateParent(ssh, parent, options.user)
   }
   const quoted = shellQuote(path)
-  if (await ssh.test(`[ -L ${quoted} ]`))
-    throw new CertificateFileError(`Symlink file rejected: ${path}`)
+  if (await ssh.test(`[ -L ${quoted} ]`)) throw fileRefusal("symlink", path, options.label)
   if (!(await ssh.test(`[ -e ${quoted} ]`))) return null
-  if (!(await ssh.test(`[ -f ${quoted} ]`)))
-    throw new CertificateFileError(`Regular file required: ${path}`)
+  if (!(await ssh.test(`[ -f ${quoted} ]`))) throw fileRefusal("regular", path, options.label)
   const metadata = await certificateMetadata(ssh, path)
 
-  if (options.preserve && !safeRootMetadata(metadata, true)) {
-    throw new CertificateFileError(
-      `Revocation file must be root-owned, root-readable and not group/other-writable: ${path}`
-    )
-  }
+  if (options.preserve && !safeRootMetadata(metadata, true))
+    throw fileRefusal("metadata", path, options.label)
   const hash = await ssh.sha256(path)
   // eslint-disable-next-line security/detect-possible-timing-attacks -- null denotes a missing file, not a secret comparison
   if (hash === null) throw new CertificateFileError(`File disappeared during preflight: ${path}`)

@@ -355,6 +355,17 @@
     "oidc",
     "preflights",
     "SLSA",
-    "nonblock"
+    "nonblock",
+    "dequote",
+    "dequoted",
+    "permitlisten",
+    "permitopen",
+    "sshkey",
+    "excl",
+    "nlink",
+    "setpriv",
+    "runuser",
+    "reuid",
+    "regid"
   ]
 }

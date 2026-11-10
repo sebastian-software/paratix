@@ -58,7 +58,9 @@ function boundary(certificate: null | string) {
   const connection = createMockSsh({})
   const transaction: SshdConfigTransaction = {
     connection,
+    preparePrivilegeSeparation: vi.fn(),
     readEffective: vi.fn(),
+    readEffectiveOutput: vi.fn(),
     reload: vi.fn(),
     reloadOnly: vi.fn(),
     requireReloadOnly: vi.fn(),

@@ -1384,7 +1384,7 @@ behavior; they do not satisfy a stopped or disabled target.
 
 | Method                        | Signature                                                                                                                              | Idempotent                      |
 | ----------------------------- | -------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------- |
-| `ssh.authorizedKeys`          | `(user: string, key: string, options?: { state?: "absent" \| "present" }): Module`                                                     | Yes                             |
+| `ssh.authorizedKeys`          | `(user: string, key: string, options?: AuthorizedKeysOptions): Module`                                                                 | Yes                             |
 | `ssh.authorizedPrincipals`    | `(user: string, principals: string[], options?: AuthorizedPrincipalsOptions): Module`                                                  | Yes                             |
 | `ssh.hostCertificate`         | `(options: HostCertificateOptions): Module`                                                                                            | Yes                             |
 | `ssh.signer.local`            | `(options: LocalHostCertificateSignerOptions): HostCertificateSigner`                                                                  | Descriptor; no construction I/O |
@@ -1394,6 +1394,108 @@ behavior; they do not satisfy a stopped or disabled target.
 | `ssh.trustedUserCa`           | `(options: TrustedUserCaOptions): Module`                                                                                              | Yes                             |
 
 **Trust anchor requirement for `ssh.knownHosts` (`state: "present"`):** In the default `present` state, either `expectedFingerprint` or `publicKey` must be set. Without a trust anchor, the module constructor throws immediately because `check` would otherwise treat any existing `known_hosts` entry, including older and potentially compromised TOFU acceptances, as `ok` and skip the anchor comparison. No anchor is required for `state: "absent"`, because that state removes the entry.
+
+#### `ssh.authorizedKeys`
+
+`ssh.authorizedKeys(user, key, options?)` manages one public-key line in the target user's
+`~/.ssh/authorized_keys`. `AuthorizedKeysOptions` (`{ options?: AuthorizedKeyOptions; state?:
+"absent" | "present" }`) and `AuthorizedKeyOptions` are exported from both `paratix/modules` and
+`paratix`. `key` is a complete public key; an options prefix in `key` is rejected, so restrictions
+go through `options`. The Unix account must already exist, so place `user.present` earlier in
+`run`.
+
+The entry is identified by its key blob (algorithm plus base64 key data), not by the exact line.
+`present` keeps exactly one line for the blob: the first existing line is replaced in place,
+later lines of the same blob are removed, and a missing blob is appended. A changed options block
+or trailing comment therefore counts as a change. `absent` removes every line of the blob
+regardless of its options or comment. Comment, blank and unrelated lines keep their bytes; a
+missing `.ssh` directory (0700) and `authorized_keys` (0600) are created for the user's primary
+group.
+
+Structured `options` are validated at construction and serialized deterministically: `restrict`
+first, then alphabetical by lowercase OpenSSH option name; repeated options keep input order.
+Only `"` is escaped inside quoted values (`\"`), as OpenSSH does. Values must not contain control
+characters or end with a backslash; error messages name the field, never the value, because
+`command` and `environment` may carry secrets.
+
+| Field                                                                           | OpenSSH option                                                                           | Value                                                                             |
+| ------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------- |
+| `restrict`                                                                      | `restrict`                                                                               | `boolean`; disables forwarding, PTY and `~/.ssh/rc`                               |
+| `agentForwarding`, `portForwarding`, `pty`, `userRc`, `x11Forwarding`           | `agent-forwarding`, `port-forwarding`, `pty`, `user-rc`, `X11-forwarding`                | `boolean`; re-enable one capability after `restrict`                              |
+| `noAgentForwarding`, `noPortForwarding`, `noPty`, `noUserRc`, `noX11Forwarding` | `no-agent-forwarding`, `no-port-forwarding`, `no-pty`, `no-user-rc`, `no-X11-forwarding` | `boolean`; contradicting its positive counterpart throws                          |
+| `command`                                                                       | `command="…"`                                                                            | nonempty `string`; forced command                                                 |
+| `environment`                                                                   | `environment="NAME=value"` per entry                                                     | plain object of `string` values; names match `[A-Za-z_][A-Za-z0-9_]*`             |
+| `expiryTime`                                                                    | `expiry-time="…"`                                                                        | `string` in the format `YYYYMMDD[HHMM[SS]][Z]`, validated as a real date and time |
+| `from`                                                                          | one `from="a,b"`                                                                         | nonempty `string[]`; elements contain no commas or whitespace                     |
+| `permitOpen`, `permitListen`                                                    | one `permitopen="…"` / `permitlisten="…"` per element                                    | nonempty `string[]`; elements contain no commas or whitespace                     |
+
+`environment` only takes effect when sshd's `PermitUserEnvironment` allows it. Unknown fields
+and wrong types are rejected at construction, as is enabling a flag together with its
+contradicting counterpart (for example `pty` and `noPty`); a flag set to `false` emits nothing.
+
+Without `options`, the line equals the key as passed. If an existing line of the same blob
+carries options, `present` returns `failed` (naming only the option names) instead of silently
+dropping restrictions. Pass the intended options to replace them, or `options: {}` to remove them
+deliberately; `options: {}` writes the key without options. A line that cannot be parsed but
+contains the blob as a token makes both states `failed`, because sshd may still honor it; fix or
+remove that line manually. The same applies to the same blob under a different key type. A line
+whose options contain `cert-authority` trusts a certificate authority rather than the plain key,
+so it is kept unchanged in both states, even for the same blob. Settings other than `options`
+and `state` throw at construction.
+
+Not supported: several lines for one key with different options (for example one per `from`
+source), and two calls for the same user and blob in one playbook; they overwrite each other on
+every run. Use one call and combine the options.
+
+```typescript
+import { server } from "paratix"
+import { ssh, user } from "paratix/modules"
+
+const publicKey = "ssh-ed25519 AAAA... ops-ro@example"
+
+export default server({
+  name: "restricted-key",
+  host: "203.0.113.10",
+  ssh: { user: "root", ports: [22], privateKey: "~/.ssh/admin" },
+  run: [
+    user.present("ops-ro", { shell: "/bin/sh" }),
+    ssh.authorizedKeys("ops-ro", publicKey, {
+      options: { restrict: true, command: "/usr/local/bin/ops-ro-shell", from: ["10.0.0.0/8"] },
+    }),
+  ],
+})
+```
+
+Check, dry-run and apply read the file with a no-follow read and compare the parsed lines; a
+symlinked `~/.ssh` or `authorized_keys` makes dry-run and apply `failed` and check `needs-apply`.
+Dry-run reports `changed` when the target user does not exist yet. A `failed` result from the
+options guard or a conflict leaves `~/.ssh` untouched. Apply stages the new bytes as base64 text
+through SFTP into a private directory under `/tmp`, never into `~/.ssh`, and decodes them on the
+host, so `command` and `environment` values do not appear in command lines or process listings,
+bytes that are not valid UTF-8 survive, and a symlinked parent such as `/home -> /data/home`
+works.
+
+Every read and write inside `~/.ssh` runs as the target user, through `setpriv` or, as a
+fallback, `runuser` (both from util-linux). For a target user other than the connection's
+effective user, one of them must be installed; otherwise check reports `needs-apply` and dry-run
+and apply return `failed`, and Paratix never falls back to acting as root. Each step enters
+`~/.ssh` by its canonical path (the resolved home directory plus `/.ssh`), refuses it when its
+physical path or its device, inode and owner changed since the prepare step, and then uses only
+names inside it. The home directory must exist, and the target user must be able to enter it
+and, when `~/.ssh` is missing, write to it; a missing `~/.ssh` is created by the target user
+with mode 0700.
+
+A root-owned `~/.ssh`, for example from an earlier root bootstrap, is repaired only when group
+and others cannot write it and it holds nothing but `authorized_keys`, `known_hosts` and
+`known_hosts.old`, with `authorized_keys` a root-owned single-link regular file. Root then hands
+`authorized_keys` to the target user with mode 0600 and resets mode and owner of the verified
+directory. Any other root-owned `~/.ssh`, a `~/.ssh` owned by another user, and an
+`authorized_keys` in the user's `~/.ssh` that another user owns (for example after
+`sudo tee -a`) make check `needs-apply` and dry-run and apply `failed` without changes; fix the
+ownership manually. The file content still travels as the stdout of a command run through sudo
+during every check, dry-run and apply, so sudo I/O logging (`log_output`) records it. Apply refuses to publish
+when the file changed between the read and the replace. For a complete restricted account, see
+the [restricted-accounts recipe](https://github.com/sebastian-software/paratix/blob/main/docs/user-guide/restricted-accounts.md).
 
 #### `ssh.hostCertificate`
 
@@ -1640,16 +1742,124 @@ trust or revocation policy and does not require hosts to use certificates.
 
 ### `sshd`
 
-| Method        | Signature                                    | Idempotent                         |
-| ------------- | -------------------------------------------- | ---------------------------------- |
-| `sshd.config` | `(settings: Record<string, string>): Module` | Yes                                |
-| `sshd.port`   | `(targetPort: number): Module`               | Yes (emits typed `sshd.port` meta) |
+| Method        | Signature                                                                                                          | Idempotent                         |
+| ------------- | ------------------------------------------------------------------------------------------------------------------ | ---------------------------------- |
+| `sshd.config` | `(settings: Record<string, string>): Module`                                                                       | Yes                                |
+| `sshd.match`  | `(name: string, criteria: SshdMatchCriteria, directives: SshdMatchDirectives, options?: SshdMatchOptions): Module` | Yes                                |
+| `sshd.port`   | `(targetPort: number): Module`                                                                                     | Yes (emits typed `sshd.port` meta) |
 
 Apply requires target `flock` and shares commit locking with the SSH certificate/principal
 modules. An unresolved host-certificate Pending transaction blocks these writers; resolve it
 through [`ssh.hostCertificate`](#pending-and-shared-sshd-writers) first. Existing general
 `sshd.config`/`sshd.port` restart/reconnect behavior is separate from the host-certificate module's
 reload-only policy.
+
+#### `sshd.match`
+
+`sshd.match(name, criteria, directives, options?)` manages one declarative `Match` block as the
+Paratix-owned drop-in `/etc/ssh/sshd_config.d/<name>.conf` (root:root, mode `0644`). `name` matches
+`[a-z0-9][a-z0-9_-]{0,63}`. `SshdMatchCriteria`, `SshdMatchDirectives` and `SshdMatchOptions` are
+exported from both `paratix/modules` and `paratix`. Everything is validated at construction.
+
+```typescript
+sshd.match(
+  "ops-ro",
+  { user: "ops-ro" },
+  { DisableForwarding: "yes", PermitTTY: "no", ForceCommand: "/usr/local/bin/ops-ro-shell" }
+)
+```
+
+- **Criteria:** `user` and/or `group`, each a literal name or a nonempty list without duplicates
+  (`[a-z_][a-z0-9_-]*`). Patterns, negation, commas and other criteria such as `Address` or `Host`
+  are rejected. With both, sshd combines them with AND. At least one criterion is required.
+- **Directives:** a fixed allowlist, written with the canonical lowercase value that `sshd -T`
+  prints: `AllowAgentForwarding`, `AllowStreamLocalForwarding`, `AllowTcpForwarding`,
+  `AuthenticationMethods`, `DisableForwarding`, `ForceCommand`, `PasswordAuthentication`,
+  `PermitTTY`, `PermitUserRC`, `PubkeyAuthentication`, `X11Forwarding`. Yes/no directives take
+  `"yes"` or `"no"`; the two forwarding directives take `yes`, `no`, `local` or `remote` and
+  reject `all` because `sshd -T` prints it as `yes`. `AuthenticationMethods` takes `any` or
+  single-space-separated comma lists of lowercase method names. `ForceCommand` must be nonempty
+  without leading or trailing whitespace. Values with control characters are rejected, and
+  `present` needs at least one directive. Weakening values such as `PasswordAuthentication: "yes"`
+  are allowed. The output order follows the allowlist, not the object key order.
+- **Rejected directives:** `Port`, `HostCertificate`, `TrustedUserCAKeys`, `RevokedKeys` and
+  `AuthorizedPrincipalsFile` belong to `sshd.port`, `ssh.hostCertificate` and `ssh.trustedUserCa`;
+  the error names the owning module.
+- **Options:** `state` (`"present"` by default or `"absent"`), `verifyUser` and
+  `allowConnectionUser` (default `false`). `verifyUser` is the account for the effect check. It
+  defaults to the first `user` criterion, must be listed in `user` when both are given, and is
+  mandatory with a `group` criterion (also for `absent`). With `group`, apply fails unless the
+  verify user is a member of one of the groups; check and dry-run treat a missing membership like
+  a missing verify user (see Write semantics), because the same run may still add it.
+
+**Top-level Include:** `/etc/ssh/sshd_config` must contain `Include /etc/ssh/sshd_config.d/*.conf`
+before its first `Match` line (Debian and Ubuntu ship it first). Paratix never adds it, and
+`present` fails without it because the drop-in would be inert. `absent` does not need the Include.
+
+**Lockout guard:** before any change, the module refuses criteria that match the user of the
+running Paratix connection (`ssh.user`, not the sudo target) and `failed`s with a message naming
+that user. Set `allowConnectionUser: true` to accept this deliberately. With a `group` criterion,
+the module reads that user's groups; if they cannot be determined, it also fails. The guard also
+applies to `absent`: removing a block that was installed with `allowConnectionUser: true` needs
+the flag again. A run that needs no change returns `ok` without this guard.
+
+**Staged validation and effect check:** Paratix copies the complete Include tree to a temporary
+directory, inserts the candidate at its sorted glob position (or omits it for `absent`) and runs
+`sshd -t` on it. For `present` it then runs `sshd -T -C` for the verify user with the placeholder
+connection `host=paratix-verify.invalid,addr=192.0.2.1` and compares every declared directive with
+the printed value. After publishing it repeats the `sshd -T -C` check against the live
+configuration, and only then reloads. If any step fails, the previous drop-in state is restored
+(and the live configuration reloaded again if a reload was attempted).
+
+The effect check proves the declared values for the verify user and that one placeholder
+connection. It does not prove them for:
+
+- `Match Address` or `Match Host` blocks, which the placeholder address and host do not match
+  as a real client would;
+- other accounts matched by the criteria (further `user` entries or `group` members), for
+  example when they have their own earlier `Match` blocks;
+- a directive that an earlier drop-in or `Match` block already set: sshd uses the first value it
+  obtains, so the check fails with a message naming the directive, the expected and the printed
+  value. Rename the drop-in so it sorts first, or adjust the order.
+
+**Write semantics:** `present` and `absent` are transactional. Apply publishes the file with a
+backup and a post-write verification, then performs a pure reload, never a restart. Dry-run runs
+the read-only staged validation, checks that the sshd unit supports a pure reload (read-only
+`systemctl show` and `systemctl is-active`) and reports `changed` without writing or reloading;
+it reports `skipped` with a reason when `/run/sshd` is missing (it does not create it), and
+`changed` with an "effect check pending" detail when the verify user does not exist yet or is not
+yet a member of a criteria group. Apply fails in both cases, so create the user and its group
+membership first. `check` does not stage: it returns `needs-apply` for a missing or drifted
+drop-in, and prints a warning on stderr when a precondition (lockout guard, Include, foreign file,
+live effect check) fails.
+
+**Pending activation:** before it changes the drop-in, apply writes the state file
+`/var/lib/paratix/sshd-match-pending-<name>` (root:root, `0600`) and removes it after a confirmed
+reload. If the run stops in between, or a rollback does not finish, the file stays: because
+`sshd -T` reads the disk and not the running daemon, `check` then reports `needs-apply`, dry-run
+reports `changed`, and the next apply repeats the lockout guard and the staged validation, reloads
+sshd and removes the file, even when the drop-in on disk already matches. A symlink or any other
+unsafe entry at that path fails the module in every mode.
+
+**Foreign file protection:** an existing `<name>.conf` whose first line is not
+`# Managed by Paratix sshd.match: <name>` is never overwritten or removed; the module fails.
+A concurrent modification of the drop-in during the run also fails. A converged `present` needs
+root:root `0644` as well as identical content.
+
+**Interplay:** the module shares the sshd writer lock with `sshd.config`, `sshd.port`,
+`ssh.trustedUserCa` and `ssh.hostCertificate`, and an unresolved host-certificate Pending
+transaction blocks it. `sshd.config` manages global settings in the main file and checks them with
+a plain `sshd -T` that does not evaluate `Match` blocks. In that check only a global directive in
+a drop-in that sshd reads earlier wins against `sshd.config`; a `sshd.match` block is not
+evaluated, so `sshd.config` does not detect its override for the matched accounts. The textual
+guard of `sshd.config` that rejects a contradicting `Match`-block override scans only
+`/etc/ssh/sshd_config`, not drop-ins, so it does not see a `sshd.match` drop-in either. For
+example, `sshd.config({ PasswordAuthentication: "no" })` together with
+`sshd.match("ops", { user: "ops" }, { PasswordAuthentication: "yes" })` reports `ok` for both
+modules, and `ops` may log in with a password. Because `sshd.match` rejects the directives that
+`ssh.trustedUserCa` manages, the two never write the same setting. Example for a complete
+read-only diagnostic account: the
+[restricted-accounts recipe](https://github.com/sebastian-software/paratix/blob/main/docs/user-guide/restricted-accounts.md).
 
 ### `swap`
 

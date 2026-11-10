@@ -16,6 +16,12 @@ const AUTHORIZED_KEY_ALGORITHMS = new Set([
   "ssh-rsa",
 ])
 
+/** Identity of an `authorized_keys` entry: key type plus base64 key blob. */
+export type AuthorizedKeyIdentity = {
+  blob: string
+  keyType: string
+}
+
 type SshStringField = {
   nextOffset: number
   value: Buffer
@@ -97,6 +103,29 @@ function parseAuthorizedKeyParts(value: string): [string, string] {
     )
   }
   return [parts[0], parts[1]]
+}
+
+/**
+ * Check a base64 token with the same strict alphabet used for key validation.
+ *
+ * @param value - The candidate token.
+ * @returns Whether the token is strict base64.
+ */
+export function isStrictBase64(value: string): boolean {
+  return STRICT_BASE64_PATTERN.test(value)
+}
+
+/**
+ * Extract the identity (key type and base64 blob) of a validated public key.
+ * Call {@link assertAuthorizedKeyValue} first; options prefixes are rejected
+ * there, so the first two fields are always the type and the blob.
+ *
+ * @param value - A public key string in the format `<algorithm> <base64> [comment]`.
+ * @returns The key type and base64 blob.
+ */
+export function authorizedKeyIdentity(value: string): AuthorizedKeyIdentity {
+  const [keyType, blob] = parseAuthorizedKeyParts(value)
+  return { blob, keyType }
 }
 
 export function assertAuthorizedKeyValue(value: string): void {

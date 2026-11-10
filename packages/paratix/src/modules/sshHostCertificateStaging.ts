@@ -1,76 +1,9 @@
 import type { SshConnection } from "../types.js"
 import type { HostCertificatePolicy, ParsedHostCertificate } from "./sshHostCertificatePolicy.js"
 
-import { shellQuote } from "../ssh.js"
-import { expandInclude, includePatterns } from "./sshCertificateConfig.js"
-import { certificateCommand, inspectCertificateFile } from "./sshCertificateFiles.js"
-import { parseSshdConfigLine } from "./sshdConfigHelpers.js"
+import { readStagedSshdConfig, stageSshdConfigTree } from "./sshdIncludeStaging.js"
 import { assertHostAlgorithms, HOST_SSHD_CONFIG } from "./sshHostCertificateTarget.js"
 import { HostCertificateError } from "./sshSignerProcess.js"
-
-const MAX_INCLUDE_DEPTH = 16
-
-type StageTree = {
-  certificate: string
-  directory: string
-  next: { value: number }
-  policy: HostCertificatePolicy
-  stack: string[]
-}
-
-async function stageInclude(
-  ssh: SshConnection,
-  value: string,
-  context: StageTree
-): Promise<string> {
-  const includes: string[] = []
-  for (const pattern of includePatterns(value)) {
-    // eslint-disable-next-line no-await-in-loop -- Include and Match order must remain unchanged
-    const paths = await expandInclude(ssh, pattern)
-    for (const path of paths) {
-      // eslint-disable-next-line no-await-in-loop -- stage the complete textual Include tree
-      includes.push(await stageIncludedFile(ssh, path, context))
-    }
-  }
-  return includes.length === 0 ? "# Empty Include" : `Include ${includes.join(" ")}`
-}
-
-async function stageIncludedFile(
-  ssh: SshConnection,
-  path: string,
-  context: StageTree
-): Promise<string> {
-  if (context.stack.includes(path)) throw new HostCertificateError("Cyclic sshd Include")
-  await inspectCertificateFile(ssh, path, { preserve: true })
-  return stageTree(ssh, await ssh.readFile(path), { ...context, stack: [...context.stack, path] })
-}
-
-async function stageLine(ssh: SshConnection, line: string, context: StageTree): Promise<string> {
-  const parsed = parseSshdConfigLine(
-    line.replace(/^(?<keyword>\s*[A-Za-z][A-Za-z0-9]*)\s*=\s*/v, "$<keyword> ")
-  )
-  if (
-    parsed?.directive.toLowerCase() === "hostcertificate" &&
-    parsed.value.replaceAll(/^["']|["']$/gv, "") === context.policy.certificatePath
-  )
-    return `HostCertificate ${context.certificate}`
-  if (parsed?.directive.toLowerCase() === "include") return stageInclude(ssh, parsed.value, context)
-  return line
-}
-
-async function stageTree(ssh: SshConnection, content: string, context: StageTree): Promise<string> {
-  if (context.stack.length > MAX_INCLUDE_DEPTH)
-    throw new HostCertificateError("Unresolvable sshd Include depth")
-  const result: string[] = []
-  for (const line of content.split(/\r?\n/v)) {
-    // eslint-disable-next-line no-await-in-loop -- staging preserves textual Include and Match order
-    result.push(await stageLine(ssh, line, context))
-  }
-  const counter = context.next
-  const path = `${context.directory}/validation-${String(counter.value++)}`
-  await ssh.writeFile(path, result.join("\n"), { mode: "0600" })
-  return path
-}
 
 type StagingInput = {
   certificatePath: string
@@ -79,15 +12,19 @@ type StagingInput = {
   policy: HostCertificatePolicy
 }
 async function validateTree(ssh: SshConnection, input: StagingInput): Promise<string> {
-  const path = await stageTree(ssh, input.content, {
-    certificate: input.certificatePath,
+  const path = await stageSshdConfigTree(ssh, {
+    content: input.content,
+    createError: (message) => new HostCertificateError(message),
     directory: input.directory,
-    next: { value: 0 },
-    policy: input.policy,
-    stack: [HOST_SSHD_CONFIG],
+    // Only the managed HostCertificate assignment points at the staged certificate.
+    rewriteLine: (parsed) =>
+      parsed.directive.toLowerCase() === "hostcertificate" &&
+      parsed.value.replaceAll(/^["']|["']$/gv, "") === input.policy.certificatePath
+        ? `HostCertificate ${input.certificatePath}`
+        : undefined,
+    rootPath: HOST_SSHD_CONFIG,
   })
-  await certificateCommand(ssh, `sshd -t -f ${shellQuote(path)}`)
-  return certificateCommand(ssh, `sshd -T -f ${shellQuote(path)}`)
+  return readStagedSshdConfig(ssh, { path })
 }
 
 export async function validateHostCandidate(

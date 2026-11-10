@@ -250,6 +250,22 @@ permission to break a living lock. The existing
 [user-CA recovery procedure](./README.md#recover-after-an-interrupted-ca-trust-update) still applies
 to a separate interrupted user-CA update.
 
+### `ssh.authorizedKeys` identifies keys by blob and supports options
+
+**Before:** `ssh.authorizedKeys` matched the exact line with `grep -xF`. `present` appended the line when that exact text was missing, and `absent` removed only that exact line. A key that existed with a different comment, or with options in front, counted as a different entry.
+
+**Now:** The entry is identified by its key blob (algorithm plus base64 key data). `present` keeps exactly one line per blob: the first existing line is replaced in place, later lines of the same blob are removed, and a changed trailing comment counts as a change. `absent` removes every line of the blob, regardless of its options or comment. Structured `options` (for example `restrict` and `command`) are new and additive. Without `options`, `present` fails when an existing line of the same key carries options, for example a hand-restricted line next to the managed one, instead of stripping them. A line that cannot be parsed but contains the key blob as a token now makes both states fail, because sshd may still honor it. The same blob under another key type also fails. Lines with the `cert-authority` option are never treated as the managed key and stay unchanged in both states. Settings other than `options` and `state` now throw at construction instead of being ignored.
+
+**Upgrade:** Review recipes that declare one key more than once, or that relied on `absent` leaving lines with other options or comments in place. If a recipe now fails with "already contains this key with options", either declare the intended options with `options: { … }`, or pass `options: {}` to remove them deliberately. Fix or remove unparseable lines that mention the key manually, then rerun. See the [restricted-accounts recipe](./restricted-accounts.md) and the [`ssh.authorizedKeys` reference](../../packages/paratix/llm-guide.md#sshauthorizedkeys).
+
+### `ssh.authorizedKeys` works inside `~/.ssh` as the target user
+
+**Before:** `ssh.authorizedKeys` read, staged and replaced `authorized_keys` as root through absolute paths, and created a missing `~/.ssh` (and a missing home directory) with `mkdir -p`.
+
+**Now:** Every read and write inside `~/.ssh` runs as the target user through `setpriv`, or `runuser` as a fallback. Each step enters `~/.ssh` by its canonical path and refuses it when the directory was replaced in the meantime. The target user must be able to enter its home directory, and a missing `~/.ssh` is created by the target user, so the home directory must already exist and be writable for that user. A root-owned `~/.ssh` is still repaired for the target user when group and others cannot write it and it holds only `authorized_keys`, `known_hosts` and `known_hosts.old`. Any other root-owned `~/.ssh`, a `~/.ssh` owned by another user, and an `authorized_keys` in the user's `~/.ssh` that another user owns (for example after `sudo tee -a`) now fail without changes instead of being taken over.
+
+**Upgrade:** Make sure `setpriv` or `runuser` is available on targets that manage keys for users other than root; on Debian and Ubuntu, util-linux ships both. Create home directories before `ssh.authorizedKeys` runs, for example with `user.present`, which creates the home. If a recipe now fails with "needs setpriv or runuser", install util-linux on the target. If it fails with ".ssh must be owned by the target user or root", "a root-owned .ssh must not be writable by group or others", "a root-owned .ssh may only contain authorized_keys and known_hosts", or "authorized_keys must be owned by the target user", fix the ownership of that directory and of `authorized_keys` manually, for example with `chown -R <user>: ~<user>/.ssh`. If it fails with "cannot enter the home directory as the target user", make the home searchable for that user.
+
 ## Toward 1.0
 
 Confirmed unreleased breaking changes will be collected above. When the actual `paratix` or `create-paratix` package version 1.0.0 is prepared, those entries will move into a short versioned section with concrete upgrade steps. No future changes are assumed here.
