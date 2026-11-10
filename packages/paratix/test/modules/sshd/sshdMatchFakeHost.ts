@@ -24,16 +24,21 @@ export const DROP_IN_DIRECTORY = "/etc/ssh/sshd_config.d"
 export const DEFAULT_MAIN_CONFIG = `Include ${DROP_IN_DIRECTORY}/*.conf\nPort 22\nPasswordAuthentication no\n`
 const REGULAR_METADATA = "644 0 0"
 const DIRECTORY_METADATA = "755 0 0"
+const STATE_DIRECTORY = "/var/lib/paratix"
 const OK: ExecResult = { code: 0, stderr: "", stdout: "" }
 
 type FileEntry = { content: string; metadata: string }
 
 /** Switches a test flips to steer the fake sshd. */
 export type FakeSshdBehavior = {
+  /** Every remote operation rejects while `true`, until a test "reconnects". */
+  connectionLost?: boolean
   /** Returns stderr to make one exec command fail; `undefined` runs it normally. */
   failCommand?: (command: string) => string | undefined
   /** Live `sshd -T [-C user=…]` output; defaults to `desired` while the drop-in exists. */
   liveEffective?: (user: string | undefined) => string
+  /** Sets `connectionLost` at the reload, leaving the daemon and any rollback undone. */
+  loseConnectionAtReload?: boolean
   /** `false` simulates a missing `/run/sshd` (dry-run only) . */
   privilegeSeparation: boolean
   /** Message of a failing `sshd -T` reload; `undefined` reloads successfully. */
@@ -82,6 +87,8 @@ export type FakeSshdHostOptions = {
   marker: string
   /** Paths that `[ -L … ]` reports as symlinks (they also appear in glob results). */
   symlinks?: string[]
+  /** `true` models a host where no run has created `/var/lib/paratix` yet. */
+  withoutStateDirectory?: boolean
 }
 
 function hashOf(content: string): string {
@@ -103,6 +110,7 @@ export function createFakeSshdHost(options: FakeSshdHostOptions): FakeSshdHost {
     "/etc/ssh",
     "/tmp",
     DROP_IN_DIRECTORY,
+    ...(options.withoutStateDirectory === true ? [] : ["/var", "/var/lib", STATE_DIRECTORY]),
     ...(options.liveDirectories ?? []),
   ])
   const symlinks = new Set(options.symlinks ?? [])
@@ -230,7 +238,11 @@ export function createFakeSshdHost(options: FakeSshdHostOptions): FakeSshdHost {
     ],
   ]
 
+  const assertConnected = (): void => {
+    if (behavior.connectionLost === true) throw new Error("SSH connection closed")
+  }
   const exec: SshConnection["exec"] = async (command) => {
+    assertConnected()
     commands.push(command)
     const injected = behavior.failCommand?.(command)
     if (injected !== undefined) return fail(injected)
@@ -245,6 +257,7 @@ export function createFakeSshdHost(options: FakeSshdHostOptions): FakeSshdHost {
     ...base,
     exec,
     async exists(path) {
+      assertConnected()
       return files.has(path) || directories.has(path)
     },
     getConnectionInfo: () => ({
@@ -252,15 +265,18 @@ export function createFakeSshdHost(options: FakeSshdHostOptions): FakeSshdHost {
       user: options.connectionUser ?? "root",
     }),
     async readFile(path) {
+      assertConnected()
       const entry = files.get(path)
       if (entry === undefined) throw new Error(`fake sshd host: no such file ${path}`)
       return entry.content
     },
     async sha256(path) {
+      assertConnected()
       const entry = files.get(path)
       return entry === undefined ? null : hashOf(entry.content)
     },
     async test(command) {
+      assertConnected()
       commands.push(command)
       const match = /^\[ -([Lefd]) '(.*)' \]$/v.exec(command)
       if (match === null) throw new Error(`fake sshd host: unexpected test ${command}`)
@@ -271,6 +287,7 @@ export function createFakeSshdHost(options: FakeSshdHostOptions): FakeSshdHost {
       return files.has(path) || directories.has(path)
     },
     async writeFile(path, content, writeOptions) {
+      assertConnected()
       if (!directories.has(posix.dirname(path)))
         throw new Error(`fake sshd host: no such directory for ${path}`)
       put(path, content, `${(writeOptions?.mode ?? "0644").replace(/^0/v, "")} 0 0`)
@@ -287,6 +304,8 @@ export function createFakeSshdHost(options: FakeSshdHostOptions): FakeSshdHost {
     },
     reload: vi.fn(),
     async reloadOnly() {
+      if (behavior.loseConnectionAtReload === true) behavior.connectionLost = true
+      assertConnected()
       reloads.push("reload")
       if (behavior.reloadError !== undefined) throw new Error(behavior.reloadError)
     },
@@ -296,6 +315,7 @@ export function createFakeSshdHost(options: FakeSshdHostOptions): FakeSshdHost {
         throw new Error(behavior.reloadOnlyUnavailable)
     },
     async restoreReload() {
+      assertConnected()
       reloads.push("restore")
       if (behavior.restoreError !== undefined) throw new Error(behavior.restoreError)
     },

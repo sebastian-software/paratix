@@ -33,6 +33,15 @@ export class SshdMatchError extends Error {
   }
 }
 
+/**
+ * Render an unknown failure for a module result.
+ * @param error - The caught value.
+ * @returns Its message, or its string form when it is not an `Error`.
+ */
+export function errorText(error: unknown): string {
+  return error instanceof Error ? error.message : String(error)
+}
+
 // True when `Include /etc/ssh/sshd_config.d/*.conf` appears before the first Match.
 function hasTopLevelDropInInclude(content: string): boolean {
   for (const line of content.split(/\r?\n/v)) {

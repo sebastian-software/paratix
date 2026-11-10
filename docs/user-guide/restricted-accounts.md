@@ -92,6 +92,11 @@ user=ops-ro,host=paratix-verify.invalid,addr=192.0.2.1` and compares each declar
 the value sshd prints. After publishing it checks again against the live files and only then
 reloads sshd. A failure at any step restores the previous state.
 
+If a run is interrupted after the drop-in changed but before sshd confirmed the reload, the
+`/var/lib/paratix/sshd-match-pending-<name>` state file stays behind. Run the same playbook again:
+`check` reports `needs-apply` until a later apply repeats the safety checks, reloads sshd and removes
+the file. A retry therefore fixes the mismatch even when the drop-in on disk is already correct.
+
 This proves that, for that user and that placeholder connection, the effective values are the
 ones you declared, including when another drop-in would have set the directive first (the check
 fails and names the directive). It does not prove:

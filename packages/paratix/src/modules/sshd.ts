@@ -2296,6 +2296,8 @@ export const sshd = {
    * pure reload (never a restart); any failure restores the previous drop-in.
    * The effect check covers only the verify user and that placeholder address.
    * `absent` validates the tree without the drop-in, removes it and reloads.
+   * `/var/lib/paratix/sshd-match-pending-<name>` records a change without a
+   * confirmed reload; until a later apply reloads sshd, the module is not converged.
    *
    * @param name - Drop-in name matching `[a-z0-9][a-z0-9_-]{0,63}`.
    * @param criteria - `{ user?, group? }`, each a name or a list of names.

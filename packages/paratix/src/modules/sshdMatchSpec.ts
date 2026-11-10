@@ -82,6 +82,8 @@ export type SshdMatchSpec = {
   moduleName: string
   /** Absolute drop-in path below {@link SSHD_MATCH_DROP_IN_DIRECTORY}. */
   path: string
+  /** State file that records a drop-in change sshd has not confirmed loading yet. */
+  pendingPath: string
   /** Directives in allowlist order with their canonical `sshd -T` values. */
   settings: Readonly<Record<string, string>>
   /** Desired drop-in state. */
@@ -94,6 +96,8 @@ export type SshdMatchSpec = {
 
 /** Directory sshd loads through the required `Include /etc/ssh/sshd_config.d/*.conf`. */
 export const SSHD_MATCH_DROP_IN_DIRECTORY = "/etc/ssh/sshd_config.d"
+// The name pattern below keeps this a flat, shell-safe file name in the state directory.
+const SSHD_MATCH_PENDING_PREFIX = "/var/lib/paratix/sshd-match-pending-"
 const NAME_PATTERN = /^[a-z0-9][a-z0-9_\-]{0,63}$/v
 const ACCOUNT_PATTERN = /^[a-z_][a-z0-9_\-]*$/v
 const CONTROL_PATTERN = /[\p{Cc}\p{Zl}\p{Zp}]/v
@@ -322,6 +326,7 @@ export function buildSshdMatchSpec(
     marker,
     moduleName: `sshd.match: ${name} (${state})`,
     path: `${SSHD_MATCH_DROP_IN_DIRECTORY}/${name}.conf`,
+    pendingPath: `${SSHD_MATCH_PENDING_PREFIX}${name}`,
     settings: Object.freeze(settings),
     state,
     users: Object.freeze(accounts.users),

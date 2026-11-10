@@ -8,9 +8,15 @@ import { CertificateFilesTransaction } from "./sshCertificateFileTransaction.js"
 import { withSshdConfigTransaction } from "./sshd.js"
 import { readStagedSshdConfig, stageSshdConfigTree } from "./sshdIncludeStaging.js"
 import {
+  clearActivationPending,
+  readActivationPending,
+  recordActivationPending,
+} from "./sshdMatchActivation.js"
+import {
   assertConnectionUserUnmatched,
   assertEffective,
   type DropIn,
+  errorText,
   inspectDropIn,
   readMainConfig,
   SSHD_CONFIG,
@@ -35,11 +41,9 @@ const PRIVILEGE_SEPARATION_SKIP =
   "privilege-separation directory; not creating it from a dry-run)"
 
 type Mode = "apply" | "check" | "dry-run"
-type Context = { mode: Mode; spec: SshdMatchSpec; transaction: SshdConfigTransaction }
-
-function errorText(error: unknown): string {
-  return error instanceof Error ? error.message : String(error)
-}
+type Target = { mode: Mode; spec: SshdMatchSpec; transaction: SshdConfigTransaction }
+/** `activationPending`: an earlier run changed the drop-in without a confirmed reload. */
+type Context = { activationPending: boolean } & Target
 
 // Returns the cleanup failure instead of throwing, so it never hides a body error.
 async function removeStagingDirectory(
@@ -114,11 +118,22 @@ async function rollback(
       failures.push(`live sshd configuration: ${String(restoreError)}`)
     }
   }
-  const suffix =
+  const { activationPending, spec, transaction } = context
+  // A marker from an earlier run protects an activation whose daemon state is still
+  // unknown; after an incomplete rollback the disk and the daemon may disagree.
+  if (!activationPending && failures.length === 0) {
+    const clearFailure = await clearActivationPending(transaction.connection, spec)
+    if (clearFailure !== undefined) failures.push(`${spec.pendingPath}: ${clearFailure}`)
+  }
+  const restored =
     failures.length === 0
       ? "; previous drop-in state restored"
       : `; rollback also failed: ${failures.join("; ")}`
-  return failed(`[${context.spec.moduleName}] ${errorText(parameters.error)}${suffix}`)
+  const pending =
+    activationPending || failures.length > 0
+      ? `; activation of ${spec.path} stays pending for the next apply`
+      : ""
+  return failed(`[${spec.moduleName}] ${errorText(parameters.error)}${restored}${pending}`)
 }
 
 async function mutate(
@@ -137,9 +152,37 @@ async function mutate(
   }
 }
 
-async function publish(context: Context, dropIn: DropIn): Promise<ModuleResult> {
+function publishedDetail(spec: SshdMatchSpec, dropIn: DropIn): string {
+  // Only a pending activation reaches publish with the file already converged.
+  if (certificateFileMatches(dropIn)) return `activated pending change for ${spec.path}`
+  return spec.state === "present" ? `wrote ${spec.path}` : `removed ${spec.path}`
+}
+
+// Runs only after a confirmed reload, so it reports failures without implying a rollback.
+async function finishPublish(
+  context: Context,
+  files: CertificateFilesTransaction,
+  dropIn: DropIn
+): Promise<ModuleResult> {
   const { spec, transaction } = context
+  const done = publishedDetail(spec, dropIn)
+  const clearFailure = await clearActivationPending(transaction.connection, spec)
+  const cleanup = await files.cleanup()
+  const problems = [
+    ...(clearFailure === undefined
+      ? []
+      : [`${spec.pendingPath} remains and a later run reloads once more: ${clearFailure}`]),
+    ...(cleanup.length > 0 ? [`temporary-file cleanup failed: ${cleanup.join("; ")}`] : []),
+  ]
+  if (problems.length > 0)
+    return failed(`[${spec.moduleName}] ${done} and reloaded sshd; ${problems.join("; ")}`)
+  return { detail: done, status: "changed" }
+}
+
+async function publish(context: Context, dropIn: DropIn): Promise<ModuleResult> {
+  const { activationPending, spec, transaction } = context
   await transaction.requireReloadOnly()
+  if (!activationPending) await recordActivationPending(transaction.connection, spec)
   const files = new CertificateFilesTransaction(transaction.connection)
   let reloadAttempted = false
   try {
@@ -149,15 +192,7 @@ async function publish(context: Context, dropIn: DropIn): Promise<ModuleResult> 
   } catch (error) {
     return rollback(context, files, { error, reloadAttempted })
   }
-  const done = spec.state === "present" ? `wrote ${spec.path}` : `removed ${spec.path}`
-  const cleanup = await files.cleanup()
-  // The change is already published and reloaded; say so instead of implying a rollback.
-  if (cleanup.length > 0) {
-    return failed(
-      `[${spec.moduleName}] ${done} and reloaded sshd; temporary-file cleanup failed: ${cleanup.join("; ")}`
-    )
-  }
-  return { detail: done, status: "changed" }
+  return finishPublish(context, files, dropIn)
 }
 
 type Pending = Exclude<VerifyUserPending, undefined>
@@ -215,22 +250,28 @@ async function converge(
   if (mode === "apply") return publish(context, dropIn)
   // Read-only (systemctl show / is-active): apply would refuse without a pure reload.
   await transaction.requireReloadOnly()
+  const notDone = certificateFileMatches(dropIn)
+    ? "activation pending from an earlier run"
+    : "drop-in not written"
   return {
     _dryRunDetail:
       pending === undefined || pending === "absent"
-        ? "(dry-run, staged sshd -t/-T ok; drop-in not written, reload not executed)"
+        ? `(dry-run, staged sshd -t/-T ok; ${notDone}, reload not executed)`
         : pendingDetail(spec, pending, "dry-run, sshd -t ok"),
     status: "changed",
   }
 }
 
-async function section(context: Context): Promise<ModuleResult> {
-  const ssh = context.transaction.connection
-  const mainContent = await readMainConfig(ssh, context.spec)
-  const dropIn = await inspectDropIn(ssh, context.spec)
-  const converged =
-    context.spec.state === "present" ? certificateFileMatches(dropIn) : dropIn.original === null
-  if (converged) return verifyConverged(context)
+async function section(target: Target): Promise<ModuleResult> {
+  const ssh = target.transaction.connection
+  const mainContent = await readMainConfig(ssh, target.spec)
+  const dropIn = await inspectDropIn(ssh, target.spec)
+  const activationPending = await readActivationPending(ssh, target.spec)
+  const context: Context = { ...target, activationPending }
+  const fileConverged =
+    target.spec.state === "present" ? certificateFileMatches(dropIn) : dropIn.original === null
+  // sshd -T reads the disk, so only a reload can settle a pending activation.
+  if (fileConverged && !activationPending) return verifyConverged(context)
   return converge(context, dropIn, mainContent)
 }
 

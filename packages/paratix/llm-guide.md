@@ -1833,6 +1833,14 @@ membership first. `check` does not stage: it returns `needs-apply` for a missing
 drop-in, and prints a warning on stderr when a precondition (lockout guard, Include, foreign file,
 live effect check) fails.
 
+**Pending activation:** before it changes the drop-in, apply writes the state file
+`/var/lib/paratix/sshd-match-pending-<name>` (root:root, `0600`) and removes it after a confirmed
+reload. If the run stops in between, or a rollback does not finish, the file stays: because
+`sshd -T` reads the disk and not the running daemon, `check` then reports `needs-apply`, dry-run
+reports `changed`, and the next apply repeats the lockout guard and the staged validation, reloads
+sshd and removes the file, even when the drop-in on disk already matches. A symlink or any other
+unsafe entry at that path fails the module in every mode.
+
 **Foreign file protection:** an existing `<name>.conf` whose first line is not
 `# Managed by Paratix sshd.match: <name>` is never overwritten or removed; the module fails.
 A concurrent modification of the drop-in during the run also fails. A converged `present` needs
