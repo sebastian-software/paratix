@@ -10,6 +10,7 @@ import {
   sameState,
 } from "./sshCertificateFiles.js"
 import { collectEffectiveSshdDirectiveValues } from "./sshdConfigHelpers.js"
+import { collectEffectiveHostDirectivePaths } from "./sshHostCertificateConfig.js"
 import { certificateSatisfies, parseHostCertificate } from "./sshHostCertificatePolicy.js"
 import { publicKeyIdentity } from "./sshHostCertificateWire.js"
 import { HostCertificateError } from "./sshSignerProcess.js"
@@ -67,10 +68,6 @@ function assertHostKeyType(publicKey: string, keyType: HostCertificatePolicy["ke
     throw new HostCertificateError("Existing host key does not match selected keyType")
 }
 
-function unquotePath(value: string): string {
-  return value.replaceAll(/^["']|["']$/gv, "")
-}
-
 async function certificateFile(
   ssh: SshConnection,
   path: string
@@ -95,9 +92,7 @@ async function assertCertificateMapping(
   ssh: SshConnection,
   target: { effective: string; policy: HostCertificatePolicy; publicKey: string }
 ): Promise<boolean> {
-  const paths = collectEffectiveSshdDirectiveValues(target.effective, "HostCertificate")
-    .filter((path) => path !== "none")
-    .map((value) => unquotePath(value))
+  const paths = collectEffectiveHostDirectivePaths(target.effective, "HostCertificate")
   if (paths.filter((path) => path === target.policy.certificatePath).length > 1)
     throw new HostCertificateError("Ambiguous active HostCertificate mapping")
   for (const path of paths) {
@@ -126,9 +121,7 @@ function assertHostResourceMapping(
   policy: HostCertificatePolicy,
   protectedFiles: string[]
 ): void {
-  const keys = collectEffectiveSshdDirectiveValues(effective, "HostKey").map((value) =>
-    unquotePath(value)
-  )
+  const keys = collectEffectiveHostDirectivePaths(effective, "HostKey")
   const protectedPaths = [
     ...protectedFiles,
     ...keys,
@@ -207,12 +200,8 @@ export function assertHostAlgorithms(
   input: { policy: HostCertificatePolicy; stagedPath: string }
 ): void {
   const { policy, stagedPath } = input
-  const certificates = collectEffectiveSshdDirectiveValues(effective, "HostCertificate").map(
-    (value) => unquotePath(value)
-  )
-  const keys = collectEffectiveSshdDirectiveValues(effective, "HostKey").map((value) =>
-    unquotePath(value)
-  )
+  const certificates = collectEffectiveHostDirectivePaths(effective, "HostCertificate")
+  const keys = collectEffectiveHostDirectivePaths(effective, "HostKey")
   const algorithms = collectEffectiveSshdDirectiveValues(effective, "HostKeyAlgorithms")
     .join(",")
     .split(",")
