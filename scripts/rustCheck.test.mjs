@@ -161,11 +161,14 @@ describe("isRustInputPath", () => {
 })
 
 function git(directory, ...gitArguments) {
+  const environment = { ...process.env }
+  delete environment.GIT_DIR
+  delete environment.GIT_WORK_TREE
   return execFileSync("git", gitArguments, {
     cwd: directory,
     encoding: "utf8",
     env: {
-      ...process.env,
+      ...environment,
       GIT_AUTHOR_EMAIL: "test@example.invalid",
       GIT_AUTHOR_NAME: "Test",
       GIT_COMMITTER_EMAIL: "test@example.invalid",
@@ -203,6 +206,27 @@ function decideFor(execGit) {
 }
 
 describe("readGitState against a temporary Git repository", () => {
+  it("isolates fixtures from inherited Git directory and worktree overrides", () => {
+    const inherited = {
+      GIT_DIR: process.env.GIT_DIR,
+      GIT_WORK_TREE: process.env.GIT_WORK_TREE,
+    }
+    const root = mkdtempSync(join(tmpdir(), "rust-check-inherited-"))
+    temporaryDirectories.push(root)
+    process.env.GIT_DIR = join(root, "unexpected-git-directory")
+    process.env.GIT_WORK_TREE = join(root, "unexpected-worktree")
+    try {
+      const { execGit } = fixtureRepository()
+      assert.equal(execGit(["rev-parse", "--git-dir"]).trim(), ".git")
+      assert.deepEqual(changedPathsOf(execGit), [])
+    } finally {
+      for (const [key, value] of Object.entries(inherited)) {
+        if (value === undefined) delete process.env[key]
+        else process.env[key] = value
+      }
+    }
+  })
+
   it("reports no Rust changes when the tree matches the merge-base", () => {
     const { execGit } = fixtureRepository()
     const decision = decideFor(execGit)
