@@ -8,17 +8,19 @@ import type { HostCertificatePolicy } from "../../../src/modules/sshHostCertific
 import * as config from "../../../src/modules/sshCertificateConfig.js"
 import { hostCertificate } from "../../../src/modules/sshHostCertificate.js"
 import {
-  collectHostDirectivePaths,
+  collectEffectiveHostDirectivePaths,
   hostDirectivePath,
 } from "../../../src/modules/sshHostCertificateConfig.js"
 import * as pending from "../../../src/modules/sshHostCertificatePending.js"
 import { parseHostCertificate } from "../../../src/modules/sshHostCertificatePolicy.js"
+import { validateHostCandidate } from "../../../src/modules/sshHostCertificateStaging.js"
 import {
   assertHostAlgorithms,
   convergedHostTarget,
   inspectHostTarget,
 } from "../../../src/modules/sshHostCertificateTarget.js"
 import { HostCertificateError } from "../../../src/modules/sshSignerProcess.js"
+import { shellQuote } from "../../../src/ssh.js"
 import {
   CERTIFICATE_NOW,
   DAY,
@@ -33,6 +35,15 @@ const KEY = "/etc/ssh/ssh_host_ed25519_key"
 const CERTIFICATE = `${KEY}-cert.pub`
 const FOREIGN = "/etc/ssh/foreign-cert.pub"
 const ALGORITHMS = "HostKeyAlgorithms ssh-ed25519-cert-v01@openssh.com\n"
+const LITERAL_PATHS = [
+  "/etc/ssh/foreign certificate.pub",
+  "/etc/ssh/foreign #old.pub",
+  "/etc/ssh/foreign#1.pub",
+  '/etc/ssh/foreign "old".pub',
+  "/etc/ssh/foreign 'old'.pub",
+  String.raw`/etc/ssh/foreign\old.pub`,
+  "/etc/ssh/foreign.pub ",
+]
 let directory: string
 let policy: HostCertificatePolicy
 let certificate: string
@@ -43,7 +54,7 @@ function targetSsh(effective: string, overrides: Record<string, { stdout: string
     {
       [`cat '${CERTIFICATE}'`]: { stdout: certificate },
       [`cat '${FOREIGN}'`]: { stdout: certificate },
-      [`cat '${ROOT}'`]: { stdout: effective },
+      [`cat '${ROOT}'`]: { stdout: `HostKey ${KEY}\nHostCertificate ${CERTIFICATE}\n` },
       [`ssh-keygen -y -P '' -f '${KEY}' </dev/null`]: { stdout: publicKey },
       [`stat -c '%a %u %g' -- '${CERTIFICATE}'`]: { stdout: "644 0 0" },
       [`stat -c '%a %u %g' -- '${KEY}'`]: { stdout: "600 0 0" },
@@ -69,12 +80,28 @@ describe("host certificate directive paths", () => {
     "keeps unquoted lowercase %j as the HostCertificate absence sentinel",
     (value) => {
       expect(hostDirectivePath("HostCertificate", value)).toBeNull()
-      expect(
-        collectHostDirectivePaths(`HostCertificate ${value}`, "HostCertificate")
-      ).toStrictEqual([])
       expect(hostDirectivePath("HostKey", value)).toBe("none")
     }
   )
+
+  it.each(LITERAL_PATHS)("preserves the decoded effective filename %j", (path) => {
+    expect(
+      collectEffectiveHostDirectivePaths(`HostCertificate ${path}\n`, "HostCertificate")
+    ).toStrictEqual([path])
+    expect(collectEffectiveHostDirectivePaths(`hostkey ${path}\n`, "HostKey")).toStrictEqual([path])
+  })
+
+  it("only skips the exact effective HostCertificate absence sentinel", () => {
+    expect(
+      collectEffectiveHostDirectivePaths("HostCertificate none\n", "HostCertificate")
+    ).toStrictEqual([])
+    for (const path of ['"none"', "'none'", "None", "NONE", "none # note", "none "]) {
+      expect(
+        collectEffectiveHostDirectivePaths(`HostCertificate ${path}\n`, "HostCertificate")
+      ).toStrictEqual([path])
+    }
+    expect(collectEffectiveHostDirectivePaths("hostkey none\n", "HostKey")).toStrictEqual(["none"])
+  })
 
   it.each(['"none"', "'none'", "None", "NONE"])(
     "does not broaden the absence sentinel for %j",
@@ -88,11 +115,24 @@ describe("host certificate directive paths", () => {
   it.each(["HostCertificate", "HostKey"] as const)(
     "rejects an empty effective %s directive",
     (directive) => {
-      expect(() => collectHostDirectivePaths(`${directive}\n`, directive)).toThrow(
+      expect(() => collectEffectiveHostDirectivePaths(`${directive}\n`, directive)).toThrow(
         HostCertificateError
       )
     }
   )
+
+  describe.each(["HostCertificate", "HostKey"] as const)("%s source parsing", (directive) => {
+    it.each([
+      '/etc/ssh/"key"',
+      String.raw`/etc/ssh/key\name`,
+      '"/etc/ssh/key',
+      '""',
+      "# note",
+      `${CERTIFICATE} /etc/ssh/other`,
+    ])("still fails closed for unresolved source argument %j", (value) => {
+      expect(() => hostDirectivePath(directive, value)).toThrow(HostCertificateError)
+    })
+  })
 
   it("leaves unexpected parser exceptions untouched", () => {
     const unexpected = new Error("unexpected parser failure")
@@ -126,8 +166,10 @@ describe("host certificate inspection and effective algorithms", () => {
   it.each([
     `HostKey ${KEY} # note\nHostCertificate ${CERTIFICATE} # managed`,
     `HostKey "${KEY}" # note\nHostCertificate '${CERTIFICATE}' # managed`.toLowerCase(),
-  ])("recognizes and converges commented mappings %j", async (effective) => {
-    const ssh = targetSsh(effective)
+  ])("recognizes commented source mappings with decoded effective paths %j", async (content) => {
+    const ssh = targetSsh(`hostkey ${KEY}\nHostCertificate ${CERTIFICATE}`, {
+      [`cat '${ROOT}'`]: { stdout: content },
+    })
     const target = await inspectHostTarget(ssh, policy)
     expect(target.desiredConfig).toBe(target.configContent)
     expect(convergedHostTarget(target, policy, CERTIFICATE_NOW)).toBe(true)
@@ -137,13 +179,13 @@ describe("host certificate inspection and effective algorithms", () => {
   it.each([
     ["HostKey", KEY, "one unambiguous effective HostKey mapping"],
     ["HostCertificate", CERTIFICATE, "Ambiguous active HostCertificate mapping"],
-  ])("rejects duplicate commented and plain %s mappings", async (directive, path, message) => {
-    const effective = `HostKey ${KEY}\nHostCertificate ${CERTIFICATE}\n${directive} ${path} # duplicate`
+  ])("rejects duplicate effective %s mappings", async (directive, path, message) => {
+    const effective = `HostKey ${KEY}\nHostCertificate ${CERTIFICATE}\n${directive} ${path}`
     await expect(inspectHostTarget(targetSsh(effective), policy)).rejects.toThrow(message)
   })
 
-  it("checks a foreign commented certificate at its filename and rejects a competing mapping", async () => {
-    const ssh = targetSsh(`HostKey ${KEY}\nHostCertificate ${FOREIGN} # foreign`)
+  it("checks a foreign certificate at its filename and rejects a competing mapping", async () => {
+    const ssh = targetSsh(`HostKey ${KEY}\nHostCertificate ${FOREIGN}`)
     await expect(inspectHostTarget(ssh, policy)).rejects.toThrow(
       "Another active certificate already maps to the selected host key"
     )
@@ -151,63 +193,108 @@ describe("host certificate inspection and effective algorithms", () => {
     expect(ssh.calls.some((command) => command.includes("#"))).toBe(false)
   })
 
-  it("checks a literal mid-token hash as part of the foreign filename", async () => {
-    const path = "/etc/ssh/foreign#1.pub"
-    const ssh = targetSsh(`HostKey ${KEY}\nHostCertificate ${path} # foreign`, {
-      [`cat '${path}'`]: { stdout: certificate },
-    })
-    await expect(inspectHostTarget(ssh, policy)).rejects.toThrow(
-      "Another active certificate already maps to the selected host key"
-    )
-    expect(ssh.calls).toContain(`cat '${path}'`)
-  })
+  it.each(LITERAL_PATHS)(
+    "rejects a competing certificate at the exact literal filename %j",
+    async (path) => {
+      const ssh = targetSsh(`hostkey ${KEY}\nHostCertificate ${path}`, {
+        [`cat ${shellQuote(path)}`]: { stdout: certificate },
+      })
+      await expect(inspectHostTarget(ssh, policy)).rejects.toThrow(
+        "Another active certificate already maps to the selected host key"
+      )
+      expect(ssh.calls).toContain(`cat ${shellQuote(path)}`)
+    }
+  )
 
-  it("rejects a commented HostKey overlapping the certificate destination", async () => {
-    const effective = `HostKey ${KEY}\nHostKey ${CERTIFICATE} # overlap`
+  it("rejects an effective HostKey overlapping the certificate destination", async () => {
+    const effective = `HostKey ${KEY}\nHostKey ${CERTIFICATE}`
     await expect(inspectHostTarget(targetSsh(effective), policy)).rejects.toThrow(
       "Certificate destination overlaps another sshd resource"
     )
   })
 
-  describe.each(["HostCertificate", "HostKey"] as const)("%s parsing", (directive) => {
-    it.each([
-      '/etc/ssh/"key"',
-      String.raw`/etc/ssh/key\name`,
-      '"/etc/ssh/key',
-      '""',
-      "# note",
-      `${CERTIFICATE} /etc/ssh/other`,
-    ])("fails closed before reading unresolved filename %j", async (value) => {
-      const ssh = targetSsh(`HostKey ${KEY}\n${directive} ${value}`)
-      await expect(inspectHostTarget(ssh, policy)).rejects.toThrow(HostCertificateError)
-      expect(ssh.calls.filter((command) => command.startsWith("cat "))).toStrictEqual([
-        `cat '${ROOT}'`,
-      ])
-    })
-  })
+  it.each(LITERAL_PATHS)(
+    "inspects unrelated literal key and certificate filenames %j",
+    async (path) => {
+      const ssh = targetSsh(
+        `hostkey ${KEY}\nhostkey ${path}\nHostCertificate ${CERTIFICATE}\nHostCertificate ${path}`,
+        {
+          [`cat ${shellQuote(path)}`]: { stdout: "unrelated certificate" },
+        }
+      )
+      const target = await inspectHostTarget(ssh, policy)
+      expect(target.desiredConfig).toBe(target.configContent)
+      expect(convergedHostTarget(target, policy, CERTIFICATE_NOW)).toBe(true)
+      expect(ssh.calls).toContain(`cat ${shellQuote(path)}`)
+    }
+  )
 
-  it.each(["HostCertificate", "HostKey"] as const)(
-    "validates %s paths in the effective algorithm check",
-    (directive) => {
-      const effective = `HostKey ${KEY} # note\nHostCertificate ${CERTIFICATE} # managed\n${ALGORITHMS}`
+  it.each(LITERAL_PATHS)(
+    "accepts unrelated literal paths in the effective algorithm check: %j",
+    (path) => {
+      const effective = `hostkey ${KEY}\nHostCertificate ${CERTIFICATE}\nhostkey ${path}\nHostCertificate ${path}\n${ALGORITHMS}`
       expect(() => {
         assertHostAlgorithms(effective, parseHostCertificate(certificate), {
           policy,
           stagedPath: CERTIFICATE,
         })
       }).not.toThrow()
+    }
+  )
+
+  it.each([
+    `hostkey ${KEY} #old\nHostCertificate ${CERTIFICATE}\n${ALGORITHMS}`,
+    `hostkey ${KEY}\nHostCertificate ${CERTIFICATE} #old\n${ALGORITHMS}`,
+  ])(
+    "does not mistake a literal suffix for a source comment in a required mapping: %j",
+    (effective) => {
       expect(() => {
-        assertHostAlgorithms(
-          `${effective}${directive} /etc/ssh/"ambiguous"\n`,
-          parseHostCertificate(certificate),
-          { policy, stagedPath: CERTIFICATE }
-        )
-      }).toThrow(HostCertificateError)
+        assertHostAlgorithms(effective, parseHostCertificate(certificate), {
+          policy,
+          stagedPath: CERTIFICATE,
+        })
+      }).toThrow(
+        "Effective HostKey, HostCertificate or certificate HostKeyAlgorithms policy conflicts"
+      )
+    }
+  )
+
+  it.each(["/etc/ssh/foreign certificate.pub", "/etc/ssh/foreign #old.pub"])(
+    "stages commented source mappings and validates literal effective filenames: %j",
+    async (path) => {
+      const stagedPath = "/run/paratix/candidate.pub"
+      const stagedConfig = "/run/paratix/validation-0"
+      const foreignSource = `HostKey "${path}" # key\nHostCertificate "${path}" # certificate\nHostCertificate none # absent\n`
+      const ssh = createMockSsh(
+        {
+          [`sshd -t -f '${stagedConfig}'`]: { code: 0 },
+          [`sshd -T -f '${stagedConfig}'`]: {
+            stdout: `hostkey ${KEY}\nhostkey ${path}\nHostCertificate ${stagedPath}\nHostCertificate ${path}\n${ALGORITHMS}`,
+          },
+        },
+        {
+          allowWrites: [{ options: { mode: "0600" }, remotePath: stagedConfig }],
+        }
+      )
+      await expect(
+        validateHostCandidate(ssh, {
+          certificate: parseHostCertificate(certificate),
+          certificatePath: stagedPath,
+          content: `HostKey '${KEY}' # selected\nHostCertificate "${CERTIFICATE}" # managed\n${foreignSource}`,
+          directory: "/run/paratix",
+          policy,
+        })
+      ).resolves.toBeUndefined()
+      expect(ssh.writeFileCalls).toContainEqual({
+        content: `HostKey '${KEY}' # selected\nHostCertificate ${stagedPath}\n${foreignSource}`,
+        options: { mode: "0600" },
+        remotePath: stagedConfig,
+      })
     }
   )
 
   it.each(["HostCertificate", "HostKey"] as const)(
-    "reports expected %s parse failures through public dry-run and apply without signing",
+    "reports empty effective %s through public dry-run and apply without signing",
     async (directive) => {
       vi.spyOn(pending, "hostPendingExists").mockResolvedValue(false)
       const sign = vi.fn()
@@ -215,7 +302,7 @@ describe("host certificate inspection and effective algorithms", () => {
         principals: policy.principals,
         signer: { caPublicKey: policy.caPublicKey, sign, version: 1 },
       })
-      const ssh = targetSsh(`HostKey ${KEY}\n${directive} /etc/ssh/"ambiguous"`)
+      const ssh = targetSsh(`HostKey ${KEY}\n${directive}`)
       const expected = {
         error: {
           message: expect.stringContaining(`Cannot safely resolve sshd ${directive}`),
@@ -238,7 +325,10 @@ describe("host certificate inspection and effective algorithms", () => {
       principals: policy.principals,
       signer: { caPublicKey: policy.caPublicKey, sign: vi.fn(), version: 1 },
     })
-    await expect(module._applyDryRun?.(targetSsh(`HostKey ${KEY}`), {})).resolves.toMatchObject({
+    const ssh = targetSsh(`HostKey ${KEY}`, {
+      [`cat '${ROOT}'`]: { stdout: "TrustedUserCAKeys /etc/ssh/ca.pub\n" },
+    })
+    await expect(module._applyDryRun?.(ssh, {})).resolves.toMatchObject({
       error: { message: "[ssh.hostCertificate] Public state inspection failed" },
       status: "failed",
     })

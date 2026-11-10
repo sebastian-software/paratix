@@ -300,7 +300,7 @@ describe("host certificate staging with trailing comments", () => {
     validBefore: 1,
   }
   const stagedCertificate = `${STAGING}/certificate.pub`
-  const effective = `HostKey ${policy.hostKeyPath} # note\nHostCertificate ${stagedCertificate} # managed\nHostKeyAlgorithms ${certificate.algorithm}\n`
+  const effective = `HostKey ${policy.hostKeyPath}\nHostCertificate ${stagedCertificate}\nHostKeyAlgorithms ${certificate.algorithm}\n`
 
   describe.each([
     ["candidate", validateHostCandidate],

@@ -10,7 +10,7 @@ import {
   sameState,
 } from "./sshCertificateFiles.js"
 import { collectEffectiveSshdDirectiveValues } from "./sshdConfigHelpers.js"
-import { collectHostDirectivePaths } from "./sshHostCertificateConfig.js"
+import { collectEffectiveHostDirectivePaths } from "./sshHostCertificateConfig.js"
 import { certificateSatisfies, parseHostCertificate } from "./sshHostCertificatePolicy.js"
 import { publicKeyIdentity } from "./sshHostCertificateWire.js"
 import { HostCertificateError } from "./sshSignerProcess.js"
@@ -92,7 +92,7 @@ async function assertCertificateMapping(
   ssh: SshConnection,
   target: { effective: string; policy: HostCertificatePolicy; publicKey: string }
 ): Promise<boolean> {
-  const paths = collectHostDirectivePaths(target.effective, "HostCertificate")
+  const paths = collectEffectiveHostDirectivePaths(target.effective, "HostCertificate")
   if (paths.filter((path) => path === target.policy.certificatePath).length > 1)
     throw new HostCertificateError("Ambiguous active HostCertificate mapping")
   for (const path of paths) {
@@ -121,7 +121,7 @@ function assertHostResourceMapping(
   policy: HostCertificatePolicy,
   protectedFiles: string[]
 ): void {
-  const keys = collectHostDirectivePaths(effective, "HostKey")
+  const keys = collectEffectiveHostDirectivePaths(effective, "HostKey")
   const protectedPaths = [
     ...protectedFiles,
     ...keys,
@@ -200,8 +200,8 @@ export function assertHostAlgorithms(
   input: { policy: HostCertificatePolicy; stagedPath: string }
 ): void {
   const { policy, stagedPath } = input
-  const certificates = collectHostDirectivePaths(effective, "HostCertificate")
-  const keys = collectHostDirectivePaths(effective, "HostKey")
+  const certificates = collectEffectiveHostDirectivePaths(effective, "HostCertificate")
+  const keys = collectEffectiveHostDirectivePaths(effective, "HostKey")
   const algorithms = collectEffectiveSshdDirectiveValues(effective, "HostKeyAlgorithms")
     .join(",")
     .split(",")

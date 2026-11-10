@@ -1,6 +1,5 @@
 import { parseCertificateFileArgument } from "./sshCertificateConfig.js"
 import { CertificateFileError } from "./sshCertificateFiles.js"
-import { parseSshdConfigLine } from "./sshdConfigHelpers.js"
 import { HostCertificateError } from "./sshSignerProcess.js"
 
 type HostDirective = "HostCertificate" | "HostKey"
@@ -15,14 +14,19 @@ export function hostDirectivePath(directive: HostDirective, value: string): null
   }
 }
 
-export function collectHostDirectivePaths(content: string, directive: HostDirective): string[] {
+export function collectEffectiveHostDirectivePaths(
+  content: string,
+  directive: HostDirective
+): string[] {
   const paths: string[] = []
   for (const line of content.split(/\r?\n/v)) {
-    const parsed = parseSshdConfigLine(line)
-    const keyword = parsed?.directive ?? line.trim()
+    const separator = line.search(/[ \t]|$/v)
+    const keyword = line.slice(0, separator)
     if (keyword.toLowerCase() !== directive.toLowerCase()) continue
-    const path = hostDirectivePath(directive, parsed?.value ?? "")
-    if (path !== null) paths.push(path)
+    const path = line.slice(separator + 1)
+    if (path.length === 0)
+      throw new HostCertificateError(`Cannot safely resolve sshd ${directive}; correct it manually`)
+    if (directive !== "HostCertificate" || path !== "none") paths.push(path)
   }
   return paths
 }
