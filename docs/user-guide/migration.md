@@ -250,6 +250,21 @@ permission to break a living lock. The existing
 [user-CA recovery procedure](./README.md#recover-after-an-interrupted-ca-trust-update) still applies
 to a separate interrupted user-CA update.
 
+### Relative `TrustedUserCAKeys` and `RevokedKeys` paths are rejected
+
+**Before:** The sshd configuration scanner accepted relative values for
+`TrustedUserCAKeys` and `RevokedKeys` and guessed a path below `/etc/ssh`.
+
+**Now:** The scanner rejects relative values with `CertificateFileError` because
+sshd resolves them from its working directory, which Paratix cannot determine
+safely. Absolute paths, including quoted paths, continue to work. `none` remains
+accepted in any letter case and with or without quotes.
+
+**Upgrade:** Change every relative `TrustedUserCAKeys` or `RevokedKeys` value to
+the absolute path of the file that sshd actually loads, based on the target's
+configuration and runtime rather than assuming `/etc/ssh` or a user's home
+directory. Leave `none` unchanged when no file is intended.
+
 ### `ssh.authorizedKeys` identifies keys by blob and supports options
 
 **Before:** `ssh.authorizedKeys` matched the exact line with `grep -xF`. `present` appended the line when that exact text was missing, and `absent` removed only that exact line. A key that existed with a different comment, or with options in front, counted as a different entry.

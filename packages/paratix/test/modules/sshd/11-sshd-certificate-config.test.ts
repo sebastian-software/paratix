@@ -324,6 +324,38 @@ describe("scanCertificateSshdConfig trailing comments", () => {
     await expect(scan("Include conf.d/*.conf\n", ssh)).rejects.toThrow(/comment word alice/v)
   })
 
+  it.each([
+    ["# ssh_host_ed25519_key-cert.pub", "/etc/ssh/ssh_host_ed25519_key-cert.pub"],
+    ["# trusted_user_ca_keys", "/etc/ssh/trusted_user_ca_keys"],
+    ["# key=revoked_keys", "/etc/ssh/./revoked_keys"],
+    ['# "host cert.pub"', "/etc/ssh/host cert.pub"],
+  ])("rejects absent planned writes named by %j", async (comment, path) => {
+    const ssh = scanSsh()
+    await expect(
+      scanCertificateSshdConfig(ssh, {
+        content: `Include conf.d/*.conf ${comment}\n`,
+        path: ROOT,
+        plannedWrites: [path],
+        rejectMatch: true,
+      })
+    ).rejects.toThrow(/comment word .*planned write/v)
+    expect(ssh.calls).not.toContain(expandCommand("/etc/ssh/conf.d/*.conf"))
+  })
+
+  it("propagates planned writes through included files", async () => {
+    const ssh = scanSsh({
+      [`cat '${INCLUDED}'`]: { stdout: "Include empty.conf # trusted_user_ca_keys\n" },
+    })
+    await expect(
+      scanCertificateSshdConfig(ssh, {
+        content: "Include conf.d/*.conf\n",
+        path: ROOT,
+        plannedWrites: ["/etc/ssh/trusted_user_ca_keys"],
+        rejectMatch: true,
+      })
+    ).rejects.toThrow(/comment word trusted_user_ca_keys.*planned write/v)
+  })
+
   it("reads the CA path before the comment", async () => {
     const result = await scan("TrustedUserCAKeys /etc/ssh/ca.pub # note\n")
     expect(result.caFiles).toContain("/etc/ssh/ca.pub")
@@ -337,14 +369,74 @@ describe("scanCertificateSshdConfig trailing comments", () => {
   })
 
   it.each([
-    "RevokedKeys none # note",
-    'RevokedKeys "none"',
-    "RevokedKeys None",
-    "RevokedKeys NONE # note",
-  ])("reports no revocation path for %j", async (line) => {
-    const result = await scan(`${line}\n`)
-    expect(result.revocations).toStrictEqual([])
+    ["TrustedUserCAKeys", "ca.pub"],
+    ["TrustedUserCAKeys", '"ca.pub"'],
+    ["RevokedKeys", "revoked"],
+    ["RevokedKeys", "'revoked'"],
+    ["TrustedUserCAKeys", "~/ca.pub"],
+    ["RevokedKeys", "~/revoked"],
+  ])("rejects relative %s path %s before probing the remote host", async (directive, path) => {
+    const ssh = scanSsh()
+    const error = await scan(`${directive} ${path}\n`, ssh).catch((error_: unknown) => error_)
+    expect(error).toBeInstanceOf(CertificateFileError)
+    expect((error as Error).message).toContain(directive)
+    expect((error as Error).message).toContain(path)
+    expect(ssh.calls).toStrictEqual([])
   })
+
+  it("keeps an absolute quoted TrustedUserCAKeys path and its physical symlink target", async () => {
+    const path = "/var/lib/paratix/ca.pub"
+    const physicalPath = "/srv/keys/ca.pub"
+    const ssh = scanSsh({
+      [`[ -e '${path}' ] || [ -L '${path}' ]`]: { code: 0 },
+      [`readlink -f -- '${path}'`]: { stdout: `${physicalPath}\n` },
+    })
+    const result = await scan(`TrustedUserCAKeys "${path}"\n`, ssh)
+    expect(result.caFiles).toStrictEqual([path, physicalPath])
+  })
+
+  it("keeps an absolute quoted RevokedKeys path and its physical symlink target", async () => {
+    const path = "/var/lib/paratix/ca.pub"
+    const physicalPath = "/srv/keys/ca.pub"
+    const ssh = scanSsh({
+      [`[ -e '${path}' ] || [ -L '${path}' ]`]: { code: 0 },
+      [`readlink -f -- '${path}'`]: { stdout: `${physicalPath}\n` },
+    })
+    const result = await scan(`RevokedKeys "${path}"\n`, ssh)
+    expect(result.revocations).toStrictEqual([path, physicalPath])
+  })
+
+  it.each(["TrustedUserCAKeys", "RevokedKeys"])(
+    "rejects an empty physical target for %s",
+    async (directive) => {
+      const path = "/var/lib/paratix/link"
+      const ssh = scanSsh({
+        [`[ -e '${path}' ] || [ -L '${path}' ]`]: { code: 0 },
+        [`readlink -f -- '${path}'`]: { stdout: "" },
+      })
+      await expect(scan(`${directive} ${path}\n`, ssh)).rejects.toBeInstanceOf(CertificateFileError)
+    }
+  )
+
+  it.each(["none", '"none"', "None", "NONE # note"])(
+    "reports no TrustedUserCAKeys path for %s",
+    async (value) => {
+      const ssh = scanSsh()
+      const result = await scan(`TrustedUserCAKeys ${value}\n`, ssh)
+      expect(result.caFiles).toStrictEqual([])
+      expect(ssh.calls).toStrictEqual([])
+    }
+  )
+
+  it.each(["none", '"none"', "None", "NONE # note"])(
+    "reports no RevokedKeys path for %s",
+    async (value) => {
+      const ssh = scanSsh()
+      const result = await scan(`RevokedKeys ${value}\n`, ssh)
+      expect(result.revocations).toStrictEqual([])
+      expect(ssh.calls).toStrictEqual([])
+    }
+  )
 
   it("keeps a quoted hash inside the CA path", async () => {
     const result = await scan('TrustedUserCAKeys "/etc/ssh/ca#1.pub"\n')

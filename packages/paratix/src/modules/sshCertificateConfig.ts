@@ -163,14 +163,24 @@ export function includePatterns(value: string): string[] {
  *
  * @param ssh - Connection to the host whose configuration is read.
  * @param value - The raw Include value, comment included.
+ * @param fileChanges - File existence after the planned publication or restoration.
  * @returns The absolute patterns of the Include value.
  * @throws {CertificateFileError} When the value cannot be parsed, a comment
- *   word names an existing path or dangling symlink, or the check itself fails.
+ *   word names a planned write, an existing path or dangling symlink not being
+ *   removed, or the check itself fails.
  */
-export async function checkedIncludePatterns(ssh: SshConnection, value: string): Promise<string[]> {
+export async function checkedIncludePatterns(
+  ssh: SshConnection,
+  value: string,
+  fileChanges: ReadonlyArray<{ exists: boolean; path: string }> = []
+): Promise<string[]> {
   const { commentWords, patterns } = parseIncludeValue(value)
   for (const word of commentWords) {
     const path = `/etc/ssh/${word}`
+    const changed = fileChanges.find((file) => posix.normalize(file.path) === path)
+    if (changed?.exists === true)
+      throw unresolvableDirective("Include", `comment word ${word} (${path} is a planned write)`)
+    if (changed?.exists === false) continue
     // eslint-disable-next-line no-await-in-loop -- the first match in line order is reported
     const existing = await expandInclude(ssh, shellQuote(path))
     if (existing.length > 0)
@@ -195,6 +205,7 @@ type ScanParameters = {
   /** Match state at the start of this file: `true` for a file included from inside a Match block. */
   insideMatch?: boolean
   path: string
+  plannedWrites?: readonly string[]
   rejectMatch: boolean
   stack?: readonly string[]
 }
@@ -204,7 +215,11 @@ async function scanCertificateIncludes(
   parameters: { value: string } & ScanParameters,
   scan: Scan
 ): Promise<Scan> {
-  for (const pattern of await checkedIncludePatterns(ssh, parameters.value)) {
+  for (const pattern of await checkedIncludePatterns(
+    ssh,
+    parameters.value,
+    parameters.plannedWrites?.map((path) => ({ exists: true, path }))
+  )) {
     // eslint-disable-next-line no-await-in-loop -- Include order determines Match scope
     const includes = await expandInclude(ssh, pattern)
     for (const path of includes) {
@@ -217,6 +232,7 @@ async function scanCertificateIncludes(
       const nested = await scanIncludedConfig(ssh, {
         insideMatch: scan.match,
         path,
+        plannedWrites: parameters.plannedWrites,
         rejectMatch: parameters.rejectMatch,
         stack: [...(parameters.stack ?? []), parameters.path],
       })
@@ -238,10 +254,16 @@ async function revocationPaths(
   // sshd accepts exactly one filename argument for these directives.
   if (tokens.length !== 1 || path.length === 0) throw unresolvableDirective(directive, value)
   if (path.toLowerCase() === "none") return []
-  const normalized = posix.normalize(posix.isAbsolute(path) ? path : `/etc/ssh/${path}`)
+  if (!posix.isAbsolute(path)) throw unresolvableDirective(directive, value)
+  const normalized = posix.normalize(path)
   const paths = [normalized]
   if (await ssh.test(`[ -e ${shellQuote(normalized)} ] || [ -L ${shellQuote(normalized)} ]`)) {
-    paths.push(await certificateCommand(ssh, `readlink -f -- ${shellQuote(normalized)}`))
+    const physicalPath = await certificateCommand(ssh, `readlink -f -- ${shellQuote(normalized)}`)
+    if (physicalPath.length === 0)
+      throw new CertificateFileError(
+        `Cannot resolve sshd ${directive} ${normalized}; correct it manually`
+      )
+    paths.push(physicalPath)
   }
   return paths
 }
@@ -309,7 +331,13 @@ export async function scanCertificateSshdConfig(
 
 async function scanIncludedConfig(
   ssh: SshConnection,
-  parameters: { insideMatch: boolean; path: string; rejectMatch: boolean; stack: readonly string[] }
+  parameters: {
+    insideMatch: boolean
+    path: string
+    plannedWrites?: readonly string[]
+    rejectMatch: boolean
+    stack: readonly string[]
+  }
 ): Promise<Scan> {
   if (
     !(await ssh.test(

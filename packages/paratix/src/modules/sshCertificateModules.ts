@@ -38,7 +38,7 @@ export type CertificateRunMode = "apply" | "check" | "dry-run"
 export async function activeCertificateConfig(
   ssh: SshConnection,
   targets: string[],
-  rejectMatch: boolean
+  options: { plannedWrites: readonly string[]; rejectMatch: boolean } | boolean
 ): Promise<{ caFiles: string[]; config: CertificateFile; content: string; revocations: string[] }> {
   const original = await inspectCertificateFile(ssh, CERTIFICATE_SSHD_CONFIG_PATH)
   if (original === null) throw new CertificateFileError("Active /etc/ssh/sshd_config is missing")
@@ -46,7 +46,7 @@ export async function activeCertificateConfig(
   const scan = await scanCertificateSshdConfig(ssh, {
     content,
     path: CERTIFICATE_SSHD_CONFIG_PATH,
-    rejectMatch,
+    ...(typeof options === "boolean" ? { rejectMatch: options } : options),
   })
   assertDistinctCertificatePaths([...targets, ...scan.files])
   return {
@@ -73,7 +73,16 @@ async function prepareCa(ssh: SshConnection, parameters: CaParameters): Promise<
       parameters.principalsFile,
       ...(parameters.revokedKeys === undefined ? [] : [parameters.revokedKeys]),
     ],
-    true
+    {
+      plannedWrites:
+        parameters.state === "present"
+          ? [
+              TRUSTED_USER_CA_PATH,
+              ...(parameters.revokedKeys === undefined ? [] : [parameters.revokedKeys]),
+            ]
+          : [],
+      rejectMatch: true,
+    }
   )
   if (parameters.revokedKeys === undefined) {
     assertDistinctCertificatePaths([

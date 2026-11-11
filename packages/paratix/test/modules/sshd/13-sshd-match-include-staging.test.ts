@@ -146,6 +146,71 @@ describe("generic sshd Include staging", () => {
     expect(ssh.writeFileCalls.at(-1)?.content).toBe(`Include ${STAGING}/validation-0`)
   })
 
+  it.each(["ssh_host_ed25519_key-cert.pub", "trusted_user_ca_keys"])(
+    "rejects an absent planned %s publication before staging",
+    async (word) => {
+      const ssh = stagingSsh([])
+      await expect(
+        stageSshdConfigTree(ssh, {
+          content: `Include ${DROP_IN_GLOB} # ${word}`,
+          directory: STAGING,
+          plannedWrites: [`/etc/ssh/./${word}`],
+          rootPath: "/etc/ssh/sshd_config",
+        })
+      ).rejects.toThrow(`comment word ${word}`)
+      expect(ssh.calls).not.toContain(EXPAND)
+      expect(ssh.writeFileCalls).toStrictEqual([])
+    }
+  )
+
+  it("rejects a comment naming an absent Include override that will be created", async () => {
+    const ssh = stagingSsh([])
+    await expect(
+      stageSshdConfigTree(ssh, {
+        content: `Include ${DROP_IN_GLOB} # alice`,
+        directory: STAGING,
+        includeOverride: { content: "Port 22\n", path: "/etc/ssh/alice" },
+        rootPath: "/etc/ssh/sshd_config",
+      })
+    ).rejects.toThrow("comment word alice")
+    expect(ssh.writeFileCalls).toStrictEqual([])
+  })
+
+  it("propagates planned writes while staging nested Includes", async () => {
+    const ssh = stagingSsh(["/etc/ssh/sshd_config.d/a.conf"], DROP_IN_GLOB, {
+      "cat '/etc/ssh/sshd_config.d/a.conf'": { stdout: "Include missing.conf # host-cert.pub\n" },
+    })
+    await expect(
+      stageSshdConfigTree(ssh, {
+        content: `Include ${DROP_IN_GLOB}`,
+        directory: STAGING,
+        plannedWrites: ["/etc/ssh/host-cert.pub"],
+        rootPath: "/etc/ssh/sshd_config",
+      })
+    ).rejects.toThrow("comment word host-cert.pub")
+    expect(ssh.writeFileCalls).toStrictEqual([])
+  })
+
+  it("validates a removed comment target without allowing unrelated live targets", async () => {
+    const ssh = stagingSsh([], DROP_IN_GLOB, {
+      [commentWordCommand("alice")]: { stdout: "/etc/ssh/alice\n" },
+      [commentWordCommand("bob")]: { stdout: "/etc/ssh/bob\n" },
+    })
+    const input = {
+      directory: STAGING,
+      includeOverride: { content: null, path: "/etc/ssh/alice" },
+      rootPath: "/etc/ssh/sshd_config",
+    }
+    await expect(
+      stageSshdConfigTree(ssh, { ...input, content: `Include ${DROP_IN_GLOB} # alice` })
+    ).resolves.toBe(`${STAGING}/validation-0`)
+    await expect(
+      stageSshdConfigTree(ssh, { ...input, content: `Include ${DROP_IN_GLOB} # alice bob` })
+    ).rejects.toThrow("comment word bob")
+    expect(ssh.calls).not.toContain(commentWordCommand("alice"))
+    expect(ssh.writeFileCalls).toHaveLength(1)
+  })
+
   it("fails closed when the comment word check fails during staging", async () => {
     const ssh = stagingSsh([], DROP_IN_GLOB, {
       [commentWordCommand("alice")]: { code: 1, stderr: "sudo: failure" },
@@ -316,6 +381,7 @@ describe("host certificate staging with trailing comments", () => {
         })
         await validate(ssh, {
           certificate,
+          certificateContent: "old certificate\n",
           certificatePath: stagedCertificate,
           content: `HostKey ${policy.hostKeyPath} # note\nHostCertificate ${path} # managed\nPort 22\n`,
           directory: STAGING,
@@ -341,6 +407,7 @@ describe("host certificate staging with trailing comments", () => {
       })
       await validate(ssh, {
         certificate,
+        certificateContent: "old certificate\n",
         certificatePath: stagedCertificate,
         content: `HostKey ${policy.hostKeyPath}\nInclude ${DROP_IN_GLOB}\n`,
         directory: STAGING,
@@ -364,6 +431,7 @@ describe("host certificate staging with trailing comments", () => {
       await expect(
         validate(ssh, {
           certificate,
+          certificateContent: "old certificate\n",
           certificatePath: stagedCertificate,
           content: `HostCertificate ${value}\n`,
           directory: STAGING,
@@ -386,6 +454,7 @@ describe("host certificate staging with trailing comments", () => {
       await expect(
         validate(ssh, {
           certificate,
+          certificateContent: "old certificate\n",
           certificatePath: stagedCertificate,
           content: `HostKey ${value}\nHostCertificate ${policy.certificatePath}\n`,
           directory: STAGING,

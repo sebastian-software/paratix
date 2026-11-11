@@ -36,6 +36,7 @@ function createConvergedSsh(overrides: Record<string, { code?: number; stdout?: 
         { command: /^\[ -L /v, result: { code: 1 } },
         { command: /^\[ -[edf] /v, result: { code: 0 } },
         { command: /^stat -c '%a %u %g' -- /v, result: { stdout: "755 0 0" } },
+        { command: /^for paratix_include in /v, result: { stdout: "" } },
         {
           command: /^printf '%s@%s %s\\n' "\$\$" '' "\$\(date \+%s\)" > \S+\/holder$/v,
           result: { code: 0 },
@@ -63,6 +64,28 @@ function failFirstCandidateCleanup(ssh: ReturnType<typeof createConvergedSsh>): 
 }
 
 describe("sshd certificate candidate cleanup", () => {
+  it.each(["trusted_user_ca_keys", "revoked_keys"])(
+    "rejects absent %s comment targets before publishing CA files",
+    async (word) => {
+      const key = `ssh-ed25519 ${Buffer.concat([
+        Buffer.from("0000000b7373682d6564323535313900000020", "hex"),
+        Buffer.alloc(32, 7),
+      ]).toString("base64")}`
+      const ssh = createConvergedSsh({
+        "cat '/etc/ssh/sshd_config'": { stdout: `Include missing.conf # ${word}\n` },
+      })
+      const result = await trustedUserCa({
+        publicKey: key,
+        revokedKeys: "/etc/ssh/revoked_keys",
+      }).apply(ssh, {})
+
+      expect(result.status).toBe("failed")
+      expect(result.error?.message).toContain(`comment word ${word}`)
+      expect(ssh.writeFileCalls).toStrictEqual([])
+      expect(ssh.calls.some((command) => command.startsWith("systemctl "))).toBe(false)
+    }
+  )
+
   it.each(["apply", "_applyDryRun"] as const)(
     "fails when the first candidate cleanup fails (%s)",
     async (method) => {

@@ -146,6 +146,7 @@ export async function inspectHostTarget(
   const scan = await scanCertificateSshdConfig(ssh, {
     content: configContent,
     path: HOST_SSHD_CONFIG,
+    plannedWrites: [policy.certificatePath],
     rejectMatch: false,
   })
   if (scan.files.includes(policy.certificatePath) || scan.files.includes(policy.hostKeyPath))
