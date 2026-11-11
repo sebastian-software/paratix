@@ -6,6 +6,7 @@ import {
   type SshdStagingIncludeOverride,
   stageSshdConfigTree,
 } from "./sshdIncludeStaging.js"
+import { hostDirectivePath } from "./sshHostCertificateConfig.js"
 import { assertHostAlgorithms, HOST_SSHD_CONFIG } from "./sshHostCertificateTarget.js"
 import { HostCertificateError } from "./sshSignerProcess.js"
 
@@ -27,11 +28,13 @@ async function validateTree(
     includeOverride,
     plannedWrites: includeOverride === undefined ? [input.policy.certificatePath] : [],
     // Only the managed HostCertificate assignment points at the staged certificate.
-    rewriteLine: (parsed) =>
-      parsed.directive.toLowerCase() === "hostcertificate" &&
-      parsed.value.replaceAll(/^["']|["']$/gv, "") === input.policy.certificatePath
+    rewriteLine(parsed) {
+      if (parsed.directive.toLowerCase() === "hostkey") hostDirectivePath("HostKey", parsed.value)
+      return parsed.directive.toLowerCase() === "hostcertificate" &&
+        hostDirectivePath("HostCertificate", parsed.value) === input.policy.certificatePath
         ? `HostCertificate ${input.certificatePath}`
-        : undefined,
+        : undefined
+    },
     rootPath: HOST_SSHD_CONFIG,
   })
   return readStagedSshdConfig(ssh, { path })

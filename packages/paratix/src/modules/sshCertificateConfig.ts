@@ -81,6 +81,24 @@ function directiveArguments(
   return { comment: "", tokens }
 }
 
+/**
+ * Resolve exactly one nonempty filename without normalization or sentinel policy.
+ * @param directive - The directive name used in error messages.
+ * @param value - The raw directive value, including any trailing comment.
+ * @returns The filename's raw spelling and unquoted value.
+ * @throws {CertificateFileError} When the value cannot safely name one file.
+ */
+export function parseCertificateFileArgument(
+  directive: string,
+  value: string
+): { raw: string; value: string } {
+  const { tokens } = directiveArguments(directive, value)
+  const token = tokens.at(0)
+  if (tokens.length !== 1 || token === undefined || token.value.length === 0)
+    throw unresolvableDirective(directive, value)
+  return token
+}
+
 // The words OpenSSH 8.2-8.6 could load from a comment. Its tokenizer splits on
 // whitespace, `=` and `"`, drops the quotes of a double-quoted span and keeps
 // the span joined to the text directly before it. Quotes pair up in sequence,

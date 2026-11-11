@@ -3,10 +3,15 @@ import { describe, expect, it } from "vitest"
 import {
   buildCertificateConfig,
   includePatterns,
+  parseCertificateFileArgument,
   parseIncludeValue,
   scanCertificateSshdConfig,
 } from "../../../src/modules/sshCertificateConfig.js"
 import { CertificateFileError } from "../../../src/modules/sshCertificateFiles.js"
+import {
+  applySshdSettingToContent,
+  parseSshdConfigLine,
+} from "../../../src/modules/sshdConfigHelpers.js"
 import { shellQuote } from "../../../src/ssh.js"
 import { createMockSsh } from "../../helpers/mockSsh.js"
 
@@ -18,7 +23,52 @@ function commentWordCommand(word: string): string {
   return expandCommand(`'/etc/ssh/${word}'`)
 }
 
+describe("single certificate filename argument", () => {
+  it.each([
+    ["/etc/ssh/key # managed", "/etc/ssh/key"],
+    ['"/etc/ssh/key"\t# note', "/etc/ssh/key"],
+    ["'/etc/ssh/key' # note", "/etc/ssh/key"],
+    ["/etc/ssh/key#1 # note", "/etc/ssh/key#1"],
+    ['"/etc/ssh/key#1" # note', "/etc/ssh/key#1"],
+    ['"/etc/ssh/key with spaces" # note', "/etc/ssh/key with spaces"],
+    [String.raw`/etc/ssh/key # ignored " '\escape`, "/etc/ssh/key"],
+  ])("resolves %j without the trailing comment", (value, expected) => {
+    expect(parseCertificateFileArgument("HostCertificate", value).value).toBe(expected)
+  })
+
+  it.each([
+    "",
+    "# note",
+    '"" # note',
+    "''",
+    "/etc/ssh/key /etc/ssh/other # note",
+    '/etc/ssh/"key" # note',
+    '"/etc/ssh/key"suffix',
+    '"/etc/ssh/key',
+    "'/etc/ssh/key",
+    String.raw`/etc/ssh/key\name # note`,
+    String.raw`"/etc/ssh/key\name"`,
+    '"/etc/ssh/key"#note',
+    "/etc/ssh/key\u0000",
+  ])("rejects unresolved filename %j", (value) => {
+    expect(() => parseCertificateFileArgument("HostCertificate", value)).toThrow(
+      CertificateFileError
+    )
+  })
+})
+
 describe("sshd certificate configuration", () => {
+  it("keeps trailing comments verbatim in generic parsing and settings apply", () => {
+    const line = "HostCertificate /etc/ssh/host-cert.pub # managed"
+    expect(parseSshdConfigLine(line)).toStrictEqual({
+      directive: "HostCertificate",
+      value: "/etc/ssh/host-cert.pub # managed",
+    })
+    expect(applySshdSettingToContent(`${line}\n`, "HostCertificate", "/new/path # retained")).toBe(
+      "HostCertificate /new/path # retained\n"
+    )
+  })
+
   it("updates only managed global directives and preserves unrelated settings", () => {
     const input = [
       "Port 22",
