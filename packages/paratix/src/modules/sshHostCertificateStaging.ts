@@ -1,7 +1,11 @@
 import type { SshConnection } from "../types.js"
 import type { HostCertificatePolicy, ParsedHostCertificate } from "./sshHostCertificatePolicy.js"
 
-import { readStagedSshdConfig, stageSshdConfigTree } from "./sshdIncludeStaging.js"
+import {
+  readStagedSshdConfig,
+  type SshdStagingIncludeOverride,
+  stageSshdConfigTree,
+} from "./sshdIncludeStaging.js"
 import { assertHostAlgorithms, HOST_SSHD_CONFIG } from "./sshHostCertificateTarget.js"
 import { HostCertificateError } from "./sshSignerProcess.js"
 
@@ -11,11 +15,17 @@ type StagingInput = {
   directory: string
   policy: HostCertificatePolicy
 }
-async function validateTree(ssh: SshConnection, input: StagingInput): Promise<string> {
+async function validateTree(
+  ssh: SshConnection,
+  input: StagingInput,
+  includeOverride?: SshdStagingIncludeOverride
+): Promise<string> {
   const path = await stageSshdConfigTree(ssh, {
     content: input.content,
     createError: (message) => new HostCertificateError(message),
     directory: input.directory,
+    includeOverride,
+    plannedWrites: includeOverride === undefined ? [input.policy.certificatePath] : [],
     // Only the managed HostCertificate assignment points at the staged certificate.
     rewriteLine: (parsed) =>
       parsed.directive.toLowerCase() === "hostcertificate" &&
@@ -43,6 +53,12 @@ export async function validateHostCandidate(
  * @param ssh - Connection scoped to the current fenced commit.
  * @param input - Original configuration, immutable certificate and staging directory.
  */
-export async function validateHostRollback(ssh: SshConnection, input: StagingInput): Promise<void> {
-  await validateTree(ssh, input)
+export async function validateHostRollback(
+  ssh: SshConnection,
+  input: { certificateContent: null | string } & StagingInput
+): Promise<void> {
+  await validateTree(ssh, input, {
+    content: input.certificateContent,
+    path: input.policy.certificatePath,
+  })
 }

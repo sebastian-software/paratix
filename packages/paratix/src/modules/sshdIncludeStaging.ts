@@ -43,6 +43,8 @@ export type SshdStagingInput = {
   directory: string
   /** Inserts or omits one candidate file wherever an Include glob matches it. */
   includeOverride?: SshdStagingIncludeOverride
+  /** Files that will exist after publication, even when currently absent. */
+  plannedWrites?: readonly string[]
   /** Rewrites individual directive lines (never Include lines). */
   rewriteLine?: SshdStagingLineRewrite
   /** Absolute path of the root configuration, used for cycle detection. */
@@ -52,7 +54,7 @@ export type SshdStagingInput = {
 type StageContext = {
   next: { value: number }
   stack: string[]
-} & Pick<SshdStagingInput, "includeOverride" | "rewriteLine"> &
+} & Pick<SshdStagingInput, "includeOverride" | "plannedWrites" | "rewriteLine"> &
   Required<Pick<SshdStagingInput, "createError" | "directory">>
 
 function escapeRegExp(text: string): string {
@@ -137,7 +139,12 @@ async function stageInclude(
   context: StageContext
 ): Promise<string> {
   const includes: string[] = []
-  for (const pattern of await checkedIncludePatterns(ssh, value)) {
+  const override = context.includeOverride
+  const fileChanges = [
+    ...(context.plannedWrites ?? []).map((path) => ({ exists: true, path })),
+    ...(override === undefined ? [] : [{ exists: override.content !== null, path: override.path }]),
+  ]
+  for (const pattern of await checkedIncludePatterns(ssh, value, fileChanges)) {
     // eslint-disable-next-line no-await-in-loop -- Include and Match order must remain unchanged
     const entries = await expandWithOverride(ssh, pattern, context)
     for (const entry of entries) {
@@ -207,6 +214,7 @@ export async function stageSshdConfigTree(
     directory: input.directory,
     includeOverride: input.includeOverride,
     next: { value: 0 },
+    plannedWrites: input.plannedWrites,
     rewriteLine: input.rewriteLine,
     stack: [input.rootPath],
   })

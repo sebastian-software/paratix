@@ -56,6 +56,10 @@ async function validateRestore(
   const certificate = pending.manifest.files[0]
   const originalConfig = await ssh.readFile(pendingSidecar(pending.manifest, "config", "original"))
   await validateHostRollback(ssh, {
+    certificateContent:
+      certificate.original === null
+        ? null
+        : await ssh.readFile(pendingSidecar(pending.manifest, "certificate", "original")),
     certificatePath:
       certificate.original === null
         ? pending.manifest.policy.certificatePath

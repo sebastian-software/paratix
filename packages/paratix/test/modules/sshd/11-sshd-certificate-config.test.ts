@@ -274,6 +274,38 @@ describe("scanCertificateSshdConfig trailing comments", () => {
     await expect(scan("Include conf.d/*.conf\n", ssh)).rejects.toThrow(/comment word alice/v)
   })
 
+  it.each([
+    ["# ssh_host_ed25519_key-cert.pub", "/etc/ssh/ssh_host_ed25519_key-cert.pub"],
+    ["# trusted_user_ca_keys", "/etc/ssh/trusted_user_ca_keys"],
+    ["# key=revoked_keys", "/etc/ssh/./revoked_keys"],
+    ['# "host cert.pub"', "/etc/ssh/host cert.pub"],
+  ])("rejects absent planned writes named by %j", async (comment, path) => {
+    const ssh = scanSsh()
+    await expect(
+      scanCertificateSshdConfig(ssh, {
+        content: `Include conf.d/*.conf ${comment}\n`,
+        path: ROOT,
+        plannedWrites: [path],
+        rejectMatch: true,
+      })
+    ).rejects.toThrow(/comment word .*planned write/v)
+    expect(ssh.calls).not.toContain(expandCommand("/etc/ssh/conf.d/*.conf"))
+  })
+
+  it("propagates planned writes through included files", async () => {
+    const ssh = scanSsh({
+      [`cat '${INCLUDED}'`]: { stdout: "Include empty.conf # trusted_user_ca_keys\n" },
+    })
+    await expect(
+      scanCertificateSshdConfig(ssh, {
+        content: "Include conf.d/*.conf\n",
+        path: ROOT,
+        plannedWrites: ["/etc/ssh/trusted_user_ca_keys"],
+        rejectMatch: true,
+      })
+    ).rejects.toThrow(/comment word trusted_user_ca_keys.*planned write/v)
+  })
+
   it("reads the CA path before the comment", async () => {
     const result = await scan("TrustedUserCAKeys /etc/ssh/ca.pub # note\n")
     expect(result.caFiles).toContain("/etc/ssh/ca.pub")
