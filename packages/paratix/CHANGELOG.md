@@ -1,5 +1,19 @@
 # Changelog
 
+## [0.26.0](https://github.com/sebastian-software/paratix/compare/paratix-v0.25.0...paratix-v0.26.0) (2026-11-11)
+
+
+### Features
+
+* **ssh:** restricted SSH accounts with authorized key options and sshd.match ([#288](https://github.com/sebastian-software/paratix/issues/288)) ([68cb56c](https://github.com/sebastian-software/paratix/commit/68cb56c30309be314876cb5483c9db0b36a8b20f))
+
+
+### Bug Fixes
+
+* **ssh:** handle trailing comments in host certificate directives ([a7d655c](https://github.com/sebastian-software/paratix/commit/a7d655c2748f08a9e0b22b6ab289b61a93f0f883))
+* **ssh:** honor trailing comments in sshd Include and key file directives ([#292](https://github.com/sebastian-software/paratix/issues/292)) ([8c501bd](https://github.com/sebastian-software/paratix/commit/8c501bd2d5452dfc6a0795003228b407175bddae))
+* **ssh:** reject relative sshd certificate paths ([#296](https://github.com/sebastian-software/paratix/issues/296)) ([dba22bd](https://github.com/sebastian-software/paratix/commit/dba22bd69347e2f05b87818630c958c5b048bae6))
+
 ## [0.25.0](https://github.com/sebastian-software/paratix/compare/paratix-v0.24.0...paratix-v0.25.0) (2026-11-04)
 
 

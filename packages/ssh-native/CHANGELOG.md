@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.26.0](https://github.com/sebastian-software/paratix/compare/ssh-native-v0.25.0...ssh-native-v0.26.0) (2026-11-11)
+
+
+### Miscellaneous Chores
+
+* **ssh-native:** Synchronize paratix workspace packages versions
+
 ## [0.25.0](https://github.com/sebastian-software/paratix/compare/ssh-native-v0.24.0...ssh-native-v0.25.0) (2026-11-04)
 
 
