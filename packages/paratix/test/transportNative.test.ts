@@ -12,7 +12,7 @@ import type {
 } from "@paratix/ssh-native"
 
 import { Readable, Writable } from "node:stream"
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
+import { afterEach, beforeEach, describe, expect, it, onTestFinished, vi } from "vitest"
 
 import type { NativeBinding } from "../src/nativeBinding.js"
 import type {
@@ -26,9 +26,6 @@ import { HostKeyVerificationError } from "../src/knownHosts.js"
 import { loadNativeBinding } from "../src/nativeBinding.js"
 import { TransportError } from "../src/transport.js"
 import { createNativeTransport, nativeErrorCode, toTransportError } from "../src/transportNative.js"
-
-// Capture the native scheduler before Vitest can reuse an existing spy on it.
-const scheduleNextTick = process.nextTick.bind(process)
 
 // Fake of the native module: no test loads the real binary.
 function deferred<T>() {
@@ -330,24 +327,25 @@ async function neverAnsweringVerifier(): Promise<boolean> {
 }
 
 /**
- * Capture errors the adapter rethrows on `process.nextTick` instead of letting
- * them reach Vitest's uncaught-exception handler; other callbacks run unchanged.
+ * Capture errors the adapter rethrows on `process.nextTick` with a test-scoped
+ * `uncaughtException` listener. While another listener exists, Vitest treats
+ * uncaught exceptions as handled and does not report them. A spy on
+ * `process.nextTick` is unreliable: Vitest swaps and restores it around worker
+ * RPC calls and can overwrite the spy mid-test.
  * @param expected - The errors a test expects to be rethrown.
- * @returns Resolves after every expected error was caught on the next-tick queue.
+ * @returns Resolves with every uncaught exception once as many as expected arrived,
+ * so an unexpected one fails the caller's assertion.
  */
 async function captureRethrown(expected: readonly unknown[]): Promise<unknown[]> {
   const captured = deferred<unknown[]>()
   const rethrown: unknown[] = []
-  vi.spyOn(process, "nextTick").mockImplementation((callback, ...parameters) => {
-    scheduleNextTick(() => {
-      try {
-        ;(callback as (...values: unknown[]) => void)(...parameters)
-      } catch (error) {
-        if (!expected.includes(error)) throw error
-        rethrown.push(error)
-        if (rethrown.length === expected.length) captured.resolve(rethrown)
-      }
-    })
+  const listener = (error: Error): void => {
+    rethrown.push(error)
+    if (rethrown.length === expected.length) captured.resolve(rethrown)
+  }
+  process.on("uncaughtException", listener)
+  onTestFinished(() => {
+    process.off("uncaughtException", listener)
   })
   return captured.promise
 }
